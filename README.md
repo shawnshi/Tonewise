@@ -1,6 +1,6 @@
 <p align="center"><img src="fastlane/metadata/android/en-US/images/icon.png" width="150"></p>
-<h1 align="center"><b>Auxio</b></h1>
-<h4 align="center">A simple, rational music player for Android.</h4>
+<h1 align="center"><b>Tonewise</b></h1>
+<h4 align="center">Structured for works. Built for scenes. Bit-perfect to the ear.</h4>
 <p align="center">
     <a href="https://github.com/oxygencobalt/Auxio/releases/tag/v4.1.5">
         <img alt="Latest Version" src="https://img.shields.io/static/v1?label=tag&message=v4.1.5&color=64B5F6&style=flat">
