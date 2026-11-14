@@ -1,35 +1,9 @@
-<p align="center"><img src="fastlane/metadata/android/en-US/images/icon.png" width="150"></p>
-<h1 align="center"><b>Tonewise</b></h1>
-<h4 align="center">Structured for works. Built for scenes. Bit-perfect to the ear.</h4>
-<p align="center">
-    <a href="https://github.com/oxygencobalt/Auxio/releases/tag/v4.1.5">
-        <img alt="Latest Version" src="https://img.shields.io/static/v1?label=tag&message=v4.1.5&color=64B5F6&style=flat">
-    </a>
-    <a href="https://github.com/oxygencobalt/Auxio/releases/">
-        <img alt="Releases" src="https://img.shields.io/github/downloads/OxygenCobalt/Auxio/total.svg?color=4B95DE&style=flat">
-    </a>
-    <a href="https://www.gnu.org/licenses/gpl-3.0">
-        <img src="https://img.shields.io/badge/license-GPL%20v3-2B6DBE.svg?style=flat">
-    </a>
-    <img alt="Minimum SDK Version" src="https://img.shields.io/badge/API-24%2B-1450A8?style=flat">
-</p>
-<h4 align="center"><a href="/CHANGELOG.md">Changelog</a> | <a href="https://github.com/OxygenCobalt/Auxio/wiki">Wiki</a> | <a href="https://github.com/OxygenCobalt/Auxio#Donate">Donate</a></h4>
-<p align="center">
-    <a href="https://f-droid.org/app/org.oxycblt.auxio"><img src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png" width="250"></a>
-    <a href="https://accrescent.app/app/org.oxycblt.auxio">
-        <img alt="Get it on Accrescent" src="https://accrescent.app/badges/get-it-on.png" width="250">
-    </a>
-</p>
-<p align="center">
-    <a href="https://hosted.weblate.org/engage/auxio/"><img height=64 src="https://hosted.weblate.org/widgets/auxio/-/strings/287x66-grey.png" alt="Translation status" /></a>
-</p>
+<p align="center"><img src="1794696313082.jpg" width="150"></p>
+<h1 align="center"><b>Tonewise 知律</b></h1>
+<h4 align="center">懂作品的章法，亦懂入景的直觉。Structured for works. Built for scenes. Bit-perfect to the ear.</h4>
 
 ## About
-Tonewise 知律 
-​
-懂作品的章法，亦懂入景的直觉。
-Structured for works. Built for scenes. Bit-perfect to the ear.
-
+ 
 流媒体时代不缺音乐入口，缺的是一套真正尊重专辑叙事与录音本貌的本地听音器物。通用播放器往往按流行单曲逻辑设计：交响曲的完整乐章被随机打碎，爵士三重奏里的伴奏名家无处检索，精心抓轨的数百张无损专辑最终困在繁琐的目录层级里吃灰。
 ​Tonewise（知律） 是一款专为古典、爵士与摇滚本地无损曲库打造的开源 Android 音乐播放器（GPL-3.0）。它在底层构建独立的 TagLib 图谱引擎，支持将古典曲目按“作曲家—作品编号—乐章”四元衬线排版呈现，聚合同一作品的不同指挥与独奏录音版本，并完整保留爵士伴奏乐手网络、原盘数字小册子（Booklet PDF）与摇滚首版编年。面对选歌疲劳，Tonewise 将本地 .m3u8 歌单与情绪规则封装为全幅场景横幅与多会话持久队列——点按横幅即刻入景起播，上拉底部悬浮胶囊即可在深夜古典、通勤爵士与现场摇滚多条断点队列间毫秒级切换。
 ​在声音还原上，Tonewise 坚持全链路透明：内置 150 点静态包络波形进度条让长篇乐章的高潮与弱音一目了然，打通 32-bit 浮点防截断管线与 Android 原生 USB DAC 无损直通，并通过实时信号路径面板如实展示每一级采样率与增益状态，按输出设备自动协同外置参量均衡。零联网追踪、零推荐干扰、零花哨动效；横置桌面接入解码耳放时，它只是一方安静显示时间与原画封套的听音伴侣。
@@ -79,29 +53,6 @@ precise/original dates, sort tags, and more
 - Services (`FOREGROUND_SERVICE`, `WAKE_LOCK`) to keep the music playing in the background
 - Notifications (`POST_NOTIFICATION`) to indicate ongoing playback and music loading
 
-## Donate
-
-You can support Auxio's development through [my Github Sponsors page](https://github.com/sponsors/OxygenCobalt). Get the ability to prioritize features and have your profile added to the README, Release Changelogs, and even the app itself!
-
-<h3 align="center">Legendary supporters:</h3>
-<p align="center">
-    <a href="https://github.com/bkkellyh"><img src="https://avatars.githubusercontent.com/u/248118457?v=4" width=250 /></a> 
-    <a href="ttps://github.com/gruntstumper"><img src="https://avatars.githubusercontent.com/u/308816080?v=4" width=125 /></a> 
-</p>
-<h3 align="center">
-    <a href="https://github.com/bkkellyh">@bkkellyh</a> - <i>$500!</i>, <a href="https://github.com/gruntstumper">@gruntstumper</a> - $100
-</h3>
-
-<hr />
-
-<p align="center"><b>$8/month supporters:</b></p>
-
-<p align="center">
-    <a href="https://github.com/uku3lig"><img src="https://avatars.githubusercontent.com/u/61147779?v=4" width=50 /></a>
-</p>
-<p align="center">
-    And **1** Private Sponsor!
-</p>
 
 ## Building
 
@@ -174,14 +125,6 @@ You can move files from your pc to your device / emulator to test the music usin
 cd ~/Android/Sdk/platform-tools
 ./adb push ~Music/ /sdcard/Music
 ```
-
-## Contributing
-
-Auxio accepts most contributions as long as they follow the [Contribution Guidelines](/.github/CONTRIBUTING.md).
-
-However, feature additions and major UI changes are less likely to be accepted. See
-[Why Are These Features Missing?](https://github.com/OxygenCobalt/Auxio/wiki/Why-Are-These-Features-Missing%3F)
-for more information.
 
 
 
