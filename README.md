@@ -25,8 +25,15 @@
 </p>
 
 ## About
+Tonewise 知律 
+​
+懂作品的章法，亦懂入景的直觉。
+Structured for works. Built for scenes. Bit-perfect to the ear.
 
-Auxio is a local music player with a fast, reliable UI/UX without the many useless features present in other music players. Built off of modern media playback libraries, Auxio has superior library support and listening quality compared to other apps that use outdated Android functionality. In short, **It plays music.**
+流媒体时代不缺音乐入口，缺的是一套真正尊重专辑叙事与录音本貌的本地听音器物。通用播放器往往按流行单曲逻辑设计：交响曲的完整乐章被随机打碎，爵士三重奏里的伴奏名家无处检索，精心抓轨的数百张无损专辑最终困在繁琐的目录层级里吃灰。
+​Tonewise（知律） 是一款专为古典、爵士与摇滚本地无损曲库打造的开源 Android 音乐播放器（GPL-3.0）。它在底层构建独立的 TagLib 图谱引擎，支持将古典曲目按“作曲家—作品编号—乐章”四元衬线排版呈现，聚合同一作品的不同指挥与独奏录音版本，并完整保留爵士伴奏乐手网络、原盘数字小册子（Booklet PDF）与摇滚首版编年。面对选歌疲劳，Tonewise 将本地 .m3u8 歌单与情绪规则封装为全幅场景横幅与多会话持久队列——点按横幅即刻入景起播，上拉底部悬浮胶囊即可在深夜古典、通勤爵士与现场摇滚多条断点队列间毫秒级切换。
+​在声音还原上，Tonewise 坚持全链路透明：内置 150 点静态包络波形进度条让长篇乐章的高潮与弱音一目了然，打通 32-bit 浮点防截断管线与 Android 原生 USB DAC 无损直通，并通过实时信号路径面板如实展示每一级采样率与增益状态，按输出设备自动协同外置参量均衡。零联网追踪、零推荐干扰、零花哨动效；横置桌面接入解码耳放时，它只是一方安静显示时间与原画封套的听音伴侣。
+
 
 **The default branch is the development version of the repository. For a stable version, see the master branch.**
 
