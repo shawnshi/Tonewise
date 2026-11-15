@@ -1,15 +1,14 @@
-<p align="center"><img src="1794696313082.jpg" width="150"></p>
+<p align="center"><img src="1794696297432.jpg" width="150"></p>
 <h1 align="center"><b>Tonewise 知律</b></h1>
 <h4 align="center">懂作品的章法，亦懂入景的直觉。Structured for works. Built for scenes. Bit-perfect to the ear.</h4>
 
 ## About
- 
+
 流媒体时代不缺音乐入口，缺的是一套真正尊重专辑叙事与录音本貌的本地听音器物。通用播放器往往按流行单曲逻辑设计：交响曲的完整乐章被随机打碎，爵士三重奏里的伴奏名家无处检索，精心抓轨的数百张无损专辑最终困在繁琐的目录层级里吃灰。
 ​Tonewise（知律） 是一款专为古典、爵士与摇滚本地无损曲库打造的开源 Android 音乐播放器（GPL-3.0）。它在底层构建独立的 TagLib 图谱引擎，支持将古典曲目按“作曲家—作品编号—乐章”四元衬线排版呈现，聚合同一作品的不同指挥与独奏录音版本，并完整保留爵士伴奏乐手网络、原盘数字小册子（Booklet PDF）与摇滚首版编年。面对选歌疲劳，Tonewise 将本地 .m3u8 歌单与情绪规则封装为全幅场景横幅与多会话持久队列——点按横幅即刻入景起播，上拉底部悬浮胶囊即可在深夜古典、通勤爵士与现场摇滚多条断点队列间毫秒级切换。
 ​在声音还原上，Tonewise 坚持全链路透明：内置 150 点静态包络波形进度条让长篇乐章的高潮与弱音一目了然，打通 32-bit 浮点防截断管线与 Android 原生 USB DAC 无损直通，并通过实时信号路径面板如实展示每一级采样率与增益状态，按输出设备自动协同外置参量均衡。零联网追踪、零推荐干扰、零花哨动效；横置桌面接入解码耳放时，它只是一方安静显示时间与原画封套的听音伴侣。
 
 
-**The default branch is the development version of the repository. For a stable version, see the master branch.**
 
 ## Screenshots
 
@@ -23,119 +22,140 @@
 </p>
 
 
+
 ## Features
 
-- Playback based on [Media3 ExoPlayer](https://developer.android.com/guide/topics/media/exoplayer)
-- Snappy UI derived from the latest Material Design guidelines
-- Opinionated UX that prioritizes ease of use over edge cases
-- Customizable behavior
-- Support for disc numbers, multiple artists, release types,
+* Playback based on [Media3 ExoPlayer](https://developer.android.com/guide/topics/media/exoplayer)
+* Snappy UI derived from the latest Material Design guidelines
+* Opinionated UX that prioritizes ease of use over edge cases
+* Customizable behavior
+* Support for disc numbers, multiple artists, release types,
 precise/original dates, sort tags, and more
-- Advanced artist system that unifies artists and album artists
-- SD Card-aware folder management
-- Reliable playlisting functionality
-- Playback state persistence
-- Android Auto support
-- Automatic gapless playback
-- Full ReplayGain support (On MP3, FLAC, OGG, OPUS, and MP4 files)
-- External equalizer support (ex. Wavelet)
-- Edge-to-edge
-- Embedded covers support
-- Search functionality
-- Headset autoplay
-- Stylish widgets that automatically adapt to their size
-- Completely private and offline
-- No rounded album covers (if you want them)
+* Advanced artist system that unifies artists and album artists
+* SD Card-aware folder management
+* Reliable playlisting functionality
+* Playback state persistence
+* Android Auto support
+* Automatic gapless playback
+* Full ReplayGain support (On MP3, FLAC, OGG, OPUS, and MP4 files)
+* External equalizer support (ex. Wavelet)
+* Edge-to-edge
+* Embedded covers support
+* Search functionality
+* Headset autoplay
+* Stylish widgets that automatically adapt to their size
+* Completely private and offline
+* No rounded album covers (if you want them)
 
 ## Permissions
 
-- Storage (`READ_MEDIA_AUDIO`, `READ_EXTERNAL_STORAGE`) to read and play your music files
-- Services (`FOREGROUND_SERVICE`, `WAKE_LOCK`) to keep the music playing in the background
-- Notifications (`POST_NOTIFICATION`) to indicate ongoing playback and music loading
+* Storage (`READ\_MEDIA\_AUDIO`, `READ\_EXTERNAL\_STORAGE`) to read and play your music files
+* Services (`FOREGROUND\_SERVICE`, `WAKE\_LOCK`) to keep the music playing in the background
+* Notifications (`POST\_NOTIFICATION`) to indicate ongoing playback and music loading
+
 
 
 ## Building
 
-Auxio relies on a patched version of Media3 that enables some extra playback features, alongside taglib for metadata
-parsing. This adds some caveats to the build process:
-1. `cmake` and `ninja-build` must be installed before building the project.
-2. The project uses submodules, so when cloning initially, use `git clone --recurse-submodules` to properly
-download the external code.
-3. You are **unable** to build this project on windows, as the custom Media3 build runs shell scripts that
-will only work on unix-based systems.
+Tonewise relies on a patched version of Media3 that enables some extra playback features, alongside TagLib for metadata
+parsing. The Android app can be developed on Windows 11 with PowerShell 7 and Android Studio. Install JDK 21, CMake
+3.22.1 or newer, Ninja, and Android NDK 28.2.13676358 through the Android SDK Manager.
+Daily development, TagLib builds, and CI use Windows; MSYS2 is only needed for the Android FFmpeg cross-build, so WSL
+or a Linux installation is not required.
 
-### Set up Android Studio
+The project uses submodules. Clone it with:
 
-#### Install Android Studio.
-
-```bash
-pkg -S android-studio
+```powershell
+git -c core.autocrlf=false -c core.symlinks=true -c core.longpaths=true clone --recurse-submodules <repository-url>
 ```
 
-#### Configuring Android Studio:
+Musikr builds TagLib for all four Android ABIs with CMake on Windows; `assembleDebug` invokes the PowerShell build
+script automatically when the packaged libraries are missing. The patched Media3 build also needs FFmpeg static
+libraries. As described in the Windows build plan, prepare those once in an MSYS2 UCRT64 environment with the
+Windows-hosted Android NDK before building Media3:
 
-- Be sure to have NDK tools, version 28.2.13676358. You can search it on Languages & Frameworks > Android SDK.
-- Install Java-21 with your system package manager
+```bash
+pacman -Syu
+pacman -S --needed base-devel diffutils nasm perl mingw-w64-ucrt-x86_64-gcc
 
-    ```bash
-    sudo pkg -S jdk21-openjdk
-    ```
-    Additionally: Set java version to jdk21-openjdk
+module="$(cygpath -u "$PWD/media/libraries/decoder_ffmpeg/src/main")"
+sdk="$(cygpath -u "${ANDROID_HOME:-$LOCALAPPDATA/Android/Sdk}")"
+ndk="$sdk/ndk/28.2.13676358"
+bash "$module/jni/build_ffmpeg.sh" "$module" "$ndk" windows-x86_64 21 flac alac
+```
 
-- Run ./gradlew assembleDebug
+The script produces FFmpeg archives for all four Android ABIs. Routine app builds can then use the Gradle wrapper:
+
+```powershell
+.\gradlew.bat assembleDebug
+```
+
+For Android Studio, open the repository root and select the installed JDK 21. The first build requires the Media3
+submodule and its prepared FFmpeg libraries; later builds reuse the generated native artifacts.
+
+### Set up Android Studio on Windows
+
+1. Install Android Studio and PowerShell 7.
+2. In Android Studio's SDK Manager, install Android SDK Platform 37, Android SDK Build-Tools, NDK
+28.2.13676358, and CMake 3.22.1. Install Ninja and ensure CMake and Ninja are available on `PATH`.
+3. Configure the Gradle JDK as JDK 21.
+4. Open the repository root in Android Studio or build from PowerShell:
+
+```powershell
+   .\gradlew.bat assembleDebug
+   ```
 
 #### Connecting to your Android Device
 
-You can connect your Mobile Phone through USB to run the app. 
+You can connect your Mobile Phone through USB to run the app.
 
 1. **Enable Developer Options on your phone**
-   - Go to **Settings > About phone**  
-   - Tap **Build number** 7 times until you see *"You are now a developer!"*
 
+   * Go to **Settings > About phone**
+   * Tap **Build number** 7 times until you see *"You are now a developer!"*
 2. **Enable USB debugging**
-   - Go to **Settings > Developer options**  
-   - Turn on **USB debugging**
 
+   * Go to **Settings > Developer options**
+   * Turn on **USB debugging**
 3. **Connect your phone to the computer**
-   - Use a USB cable  
-   - On your phone, accept the *Allow USB debugging?* prompt
 
+   * Use a USB cable
+   * On your phone, accept the *Allow USB debugging?* prompt
 4. **Verify that your device is detected**
-   ```bash
-   cd ~/Android/Sdk/platform-tools
-   ./adb devices
+
+   ```powershell
+   adb devices
    ```
 
 Android Studio also offers virtual devices that come with this pre-configured.
 
 #### Install the app on the Android Phone
+
 To install the app on your physical device or emulator, run this command:
 
-```bash
-./gradlew installDebug
+```powershell
+.\gradlew.bat installDebug
 ```
 
-Auxio should now appear in the list of Apps
+Tonewise should now appear in the list of Apps
 
-#### Load music to Auxio (Optional)
+#### Load music to Tonewise (Optional)
 
 You can move files from your pc to your device / emulator to test the music using this command:
 
-```bash
-cd ~/Android/Sdk/platform-tools
-./adb push ~Music/ /sdcard/Music
+```powershell
+adb push .\Music\ /sdcard/Music
 ```
 
 
 
 ## License
 
-[![GNU GPLv3 Image](https://www.gnu.org/graphics/gplv3-127x51.png)](http://www.gnu.org/licenses/gpl-3.0.en.html)
+[!\[GNU GPLv3 Image](https://www.gnu.org/graphics/gplv3-127x51.png)](http://www.gnu.org/licenses/gpl-3.0.en.html)
 
-Auxio is Free Software: You can use, study share and improve it at your
+Tonewise is Free Software: You can use, study share and improve it at your
 will. Specifically you can redistribute and/or modify it under the terms of the
 [GNU General Public License](https://www.gnu.org/licenses/gpl.html) as
 published by the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
 
-More information can be found [here](https://github.com/OxygenCobalt/Auxio/wiki/Licenses).
