@@ -27,7 +27,7 @@
 * **安装包**：[releases/tonewise-android-release.apk](releases/tonewise-android-release.apk)
 * **版本与包名**：`com.shawnshi.tonewise` · `v4.1.5` (`versionCode 75`)
 * **文件大小**：`15,461,338` bytes (~14.75 MiB)
-* **SHA-256**：`6c497c99a620e7bcd92c0f8e29be344131318a52b0b26c168c9d2c788370b92c`
+* **SHA-256**：`6761757f62ad9b7e7d199478a1e0b194f8b7f9140fcd0daac4a6c7edc74151ca`
 * **签名说明**：已通过 `zipalign` 4 字节对齐与 `apksigner` v2/v3 签名校验（当前使用开发者本机调试签名密钥 `CN=Android Debug, O=Android, C=US` 封装，可直接侧载安装体验；正式商店分发请替换为独立发布密钥签章）。
 
 ## Screenshots

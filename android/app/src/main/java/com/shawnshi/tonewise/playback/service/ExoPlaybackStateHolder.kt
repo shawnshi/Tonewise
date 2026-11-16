@@ -21,6 +21,8 @@ package com.shawnshi.tonewise.playback.service
 import android.content.Context
 import android.content.Intent
 import android.media.audiofx.AudioEffect
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.annotation.OptIn
@@ -94,6 +96,7 @@ class ExoPlaybackStateHolder(
     private val saveJob = Job()
     private val saveScope = CoroutineScope(Dispatchers.IO + saveJob)
     private val restoreScope = CoroutineScope(Dispatchers.IO + saveJob)
+    private val mainScope = CoroutineScope(Dispatchers.Main.immediate + saveJob)
     private var currentSaveJob: Job? = null
     private var openAudioEffectSession = false
     private var activePlaySong: Song? = null
@@ -135,7 +138,7 @@ class ExoPlaybackStateHolder(
             replayGainProcessor.setBypassed(bitPerfect)
             reconcileAudioEffectSession(bitPerfect)
         }
-        saveScope.launch {
+        mainScope.launch {
             dspRepository.config.collect {
                 audioOutputManager.refreshRoute()
             }
@@ -601,6 +604,10 @@ class ExoPlaybackStateHolder(
     }
 
     private fun reconcileAudioEffectSession(bitPerfect: Boolean) {
+        if (Looper.myLooper() != player.applicationLooper) {
+            Handler(player.applicationLooper).post { reconcileAudioEffectSession(bitPerfect) }
+            return
+        }
         val shouldOpen =
             player.playWhenReady && !bitPerfect && dspRepository.config.value.externalBridgeMode
         if (shouldOpen && !openAudioEffectSession) {

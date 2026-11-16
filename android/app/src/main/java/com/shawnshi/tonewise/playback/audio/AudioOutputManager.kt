@@ -245,7 +245,14 @@ constructor(
                     isBitPerfectActive && !dspRepository.usbBitPerfectConfirmed.value,
             )
 
-        routeListener?.invoke(isBitPerfectActive)
+        val listener = routeListener
+        if (listener != null) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                listener.invoke(isBitPerfectActive)
+            } else {
+                mainHandler.post { listener.invoke(isBitPerfectActive) }
+            }
+        }
         return isBitPerfectActive
     }
 
