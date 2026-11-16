@@ -805,8 +805,10 @@ name = "tonewise-ffi"
 version = "0.1.0"
 dependencies = [
  "jni",
+ "lofty",
  "serde",
  "serde_json",
+ "tonewise-dsp-core",
  "tonewise-metadata",
  "tonewise-rules",
  "tonewise-sync",

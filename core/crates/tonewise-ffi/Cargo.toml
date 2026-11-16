@@ -15,3 +15,7 @@ serde_json.workspace = true
 tonewise-metadata = { path = "../tonewise-metadata" }
 tonewise-rules = { path = "../tonewise-rules" }
 tonewise-sync = { path = "../tonewise-sync" }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+lofty.workspace = true
+tonewise-dsp-core = { path = "../tonewise-dsp-core" }

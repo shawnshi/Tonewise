@@ -1,4 +1,5 @@
 using NAudio.CoreAudioApi;
+using NAudio.Wave;
 
 namespace Tonewise.Audio;
 
@@ -6,11 +7,14 @@ public sealed record AudioOutputEndpoint(
     string Id,
     string FriendlyName,
     bool IsUsbDevice,
-    bool IsDefault
+    bool IsDefault,
+    bool IsAsio = false
 );
 
 public static class AudioDeviceRouter
 {
+    public const string AsioIdPrefix = "asio:";
+
     public static IReadOnlyList<AudioOutputEndpoint> EnumerateRenderEndpoints()
     {
         var list = new List<AudioOutputEndpoint>();
@@ -37,7 +41,7 @@ public static class AudioDeviceRouter
                         name.Contains("USB", StringComparison.OrdinalIgnoreCase)
                         || name.Contains("DAC", StringComparison.OrdinalIgnoreCase)
                         || dev.DeviceFriendlyName.Contains("USB", StringComparison.OrdinalIgnoreCase);
-                    list.Add(new AudioOutputEndpoint(dev.ID, name, isUsb, dev.ID == defaultId));
+                    list.Add(new AudioOutputEndpoint(dev.ID, name, isUsb, dev.ID == defaultId, IsAsio: false));
                 }
             }
         }
@@ -45,6 +49,26 @@ public static class AudioDeviceRouter
         {
             // Headless/sandboxed environment without WASAPI audio service
         }
+
+        try
+        {
+            foreach (string driver in AsioOut.GetDriverNames())
+            {
+                if (string.IsNullOrWhiteSpace(driver)) continue;
+                list.Add(new AudioOutputEndpoint(
+                    Id: AsioIdPrefix + driver,
+                    FriendlyName: $"ASIO: {driver}",
+                    IsUsbDevice: true,
+                    IsDefault: false,
+                    IsAsio: true
+                ));
+            }
+        }
+        catch
+        {
+            // No ASIO drivers registered on host
+        }
+
         return list;
     }
 

@@ -13,7 +13,11 @@
 ### 当前实现状态（`com.shawnshi.tonewise` v4.1.5 · `versionCode 75`）
 
 * **Rust 同源内核 (`core/`)**：完成 `tonewise-metadata`、`tonewise-rules`、`tonewise-dsp-core`、`tonewise-sync`、`tonewise-ffi`、`tonewise-cli` 六大 crate 构建与双端 JNI/FFI 对齐（`build-core-android.ps1` / `build-core-desktop.ps1`）。
-* **Windows 11 桌面端 (`desktop/`)**：完成 `Tonewise.Desktop`、`Tonewise.Audio`、`Tonewise.Interop`、`Tonewise.SyncHost` 与 `Tonewise.Desktop.Tests`，覆盖 64-bit Biquad PEQ / EqualizerAPO 解析、150 点 Blake3 RMS 包络提取与 mDNS (`_tonewise._tcp`) 局域网同步宿主。
+* **Windows 11 桌面端 (`desktop/`)**：完成 P1–P4 与 R1–R8 全量闭环：
+  * **母带级 64-bit 声学引擎 (`Tonewise.Audio`)**：Event-Driven WASAPI Exclusive / `AsioOut` 输出、`.dsf`/`.dff` 原生 DSD→`352.8 kHz / 64-bit DXD` 抽取解调、Stereo Linked & L/R 独立 64 段 EqualizerAPO 解析与按设备声学档案匹配、ISO 226 动态等响度、零延迟分区 FFT FIR 卷积（支持 REW `.wav` 与 `.sofa` 双耳脉冲）、沙盒化共享内存 VST3 宿主桥、`±1 LSB` TPDF 抖动与 Shared 模式 Equalizer APO 注册表冲突锁；
+  * **音乐信息维护与防毁库审校台 (`Tonewise.SyncHost/Curation`)**：贯彻“只补空缺”与“暂存对比台先审后写”双铁律，`StagingDiffStore` 支持 `lofty` 物理音频文件头事务回写（保持纯音频 `audio_frame_blake3` 不变）与按批次一键回滚；内置 Cover Art Archive → iTunes → Last.fm 三级封面瀑布（目录级 `cover.jpg` 质量门禁）、MusicBrainz→Wikidata→Wikipedia/Last.fm 独立传记库（`/Music/.tonewise/encyclopedia.db`）、`symphonia` 声学五维推理 + 确定性 `DJ_SCENE` 矩阵与 AcoustID 原盘消歧；
+  * **Last.fm 非对称高水位账本与双端同步 (`Tonewise.SyncHost`)**：集成 `LastFmWebApiClient` 与 `effective_play_count = max(legacy, lastfm_pulled) + local_unsynced_expired` 账本，提供 `_tonewise._tcp` mDNS + HTTP/2 `SyncHostServer`（含 `/api/v1/encyclopedia`、Header-Only `/api/v1/patch/{trackUid}`、5 槽位 `handoff` 与手机端 `history.jsonl` 归并）及 BOM-free 相对路径车载 U 盘 `.m3u8` 导出器；
+  * **曜石黑工作台与微挂件 (`Tonewise.Desktop`)**：`#131720` + `#D9B372` 高密度三栏工作台、五维正交与 `NOT vocal` 反选筛选、缺失标签放行横幅、首次打开目录自动建库、古典四级衬线排版 + 同曲多录音 A/B 切换 + 原生 `PdfDocument` 分屏画册、Windows SMTC + Win32 全局热键（`Ctrl+Alt+P/C/M`）及防烧屏副屏 OLED 微挂件。
 * **Android 客户端四阶段演进 (`android/` S1–S4)**：
   * **S1 — 64-bit 浮点调音引擎与双模直通链路**：`TonewiseDspEngine` 5 级 `Double` 串联管线（Preamp → 10 段 RBJ Biquad PEQ / EqualizerAPO 导入 → Bauer 双耳 Crossfeed → 声道平衡/相位/单声道折叠 → `-0.2 dBFS` 3ms 前瞻软限幅）、按设备声学存档（`DspRepository`）、等响度 A/B 盲听对比、Android 14+ USB DAC `BIT_PERFECT` 硬件直通与采样率切换重武装、外置 `AudioSession`（Wavelet / RootlessJamesDSP）互斥以及 HyperOS/Dolby 系统音效冲突提示。
   * **S2 — 古典多版本作品索引与原子洗牌**：`:musikr` 新增 `WORK` / `MOVEMENTNAME` / `MOVEMENTNUMBER` / `MUSICBRAINZ_WORKID` / `MOOD` 标签解析（缓存库升至 v73）、`ClassicalWork` 同作品多演绎版本聚合、屏幕 C 演绎版本对比（`WorkRecordingsDialog` 同步切歌至对应乐章与播放进度）以及整部作品不拆散的原子随机排序（`WorkShuffleOrder`）。
@@ -22,13 +26,15 @@
 
 ## Release Download / 发行包下载
 
-仓库已随附最新构建并对齐签名的 Android Release 安装包：
+仓库已随附最新构建并校验的双端 Release 发行包：
 
-* **安装包**：[releases/tonewise-android-release.apk](releases/tonewise-android-release.apk)
-* **版本与包名**：`com.shawnshi.tonewise` · `v4.1.5` (`versionCode 75`)
-* **文件大小**：`15,531,021` bytes (~14.81 MiB)
-* **SHA-256**：`a30fb4f8b2a8bef00c9d5b1f62c83a31c4b91491cfc4a43e2e1c00d18d6a0e14`
-* **签名说明**：已通过 `zipalign` 4 字节对齐与 `apksigner` v2/v3 签名校验（当前使用开发者本机调试签名密钥 `CN=Android Debug, O=Android, C=US` 封装，可直接侧载安装体验；正式商店分发请替换为独立发布密钥签章）。
+| 平台 | 安装包 / 发行归档 | 版本与运行环境 | 文件大小 | SHA-256 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v4.1.5` (`versionCode 75`) | `15,531,021` bytes (~14.81 MiB) | `a30fb4f8b2a8bef00c9d5b1f62c83a31c4b91491cfc4a43e2e1c00d18d6a0e14` |
+| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | WinUI 3 (`net9.0-windows10.0.26100.0` + 含 `tonewise_core.dll` & `tonewise-cli.exe`) | `48,109,530` bytes (~45.88 MiB) | `a20d3e8d15374a823c99ff06b853cc70ce8a164a89b6d2bce8dc6f8e120e44dc` |
+
+* **Android 签名说明**：已通过 `zipalign` 4 字节对齐与 `apksigner` v2/v3 签名校验（当前使用开发者本机调试签名密钥 `CN=Android Debug, O=Android, C=US` 封装，可直接侧载安装体验；正式商店分发请替换为独立发布密钥签章）。
+* **Windows x64 运行说明**：解压 `tonewise-windows-x64-release.zip` 后直接运行 `Tonewise.Desktop.exe`（需安装 .NET 9 Desktop Runtime；Windows App SDK 1.7 与 Rust `tonewise_core.dll` / `tonewise-cli.exe` 已随压缩包自包含打包）。
 
 ## Screenshots
 
@@ -65,7 +71,7 @@ Tonewise/
 ├── core/       # Rust tonewise-core 双端同源内核与离线回填 CLI
 ├── desktop/    # Windows 11 原生桌面端 (.NET / C# / WinUI 3) 与 SyncHost
 ├── protocol/   # .tonewise/ 双端同步协议 Schema、字典与回归夹具
-├── releases/   # 已构建校验的 Android Release APK 归档
+├── releases/   # 已构建校验的 Android APK 与 Windows x64 ZIP 归档
 ├── scripts/    # 跨端构建脚本 (apply-media-patch, build-core-android, build-core-desktop)
 └── docs/       # 设计方案 (specs/)、声学调研 (research/) 与视觉资产 (assets/)
 ```
@@ -114,6 +120,15 @@ Set-Location android
 .\gradlew.bat installDebug
 # Or sideload the release package from repo root:
 adb install -r ..\releases\tonewise-android-release.apk
+```
+
+### 5. Build & test Windows Desktop (`desktop/`)
+
+```powershell
+cargo test --manifest-path core\Cargo.toml --workspace
+.\scripts\build-core-desktop.ps1
+dotnet build desktop\Tonewise.sln -c Release -p:Platform=x64
+dotnet test desktop\Tonewise.sln
 ```
 
 ## License

@@ -30,6 +30,10 @@ pub fn compute_audio_frame_fingerprint<R: Read + Seek>(
         reader.seek(SeekFrom::Start(0))?;
         hash_exact_len(reader, &mut header_hasher, span.start)?;
     }
+    if span.end < file_size {
+        reader.seek(SeekFrom::Start(span.end))?;
+        hash_exact_len(reader, &mut header_hasher, file_size - span.end)?;
+    }
 
     let mut audio_hasher = blake3::Hasher::new();
     if span.end > span.start {
@@ -93,12 +97,14 @@ fn detect_audio_span<R: Read + Seek>(reader: &mut R, file_size: u64) -> io::Resu
         }
     }
 
-    // Check MP4/M4A top-level `ftyp` + `mdat` atom span when starting at 0
-    if offset == 0
-        && file_size >= 8
-        && let Some(mdat_span) = find_mp4_mdat_span(reader, file_size)?
-    {
-        return Ok(mdat_span);
+    // Check MP4/M4A top-level `ftyp` + `mdat` atom span or RIFF WAVE `data` chunk when starting at 0
+    if offset == 0 && file_size >= 12 {
+        if let Some(wave_span) = find_riff_wave_data_span(reader, file_size)? {
+            return Ok(wave_span);
+        }
+        if let Some(mdat_span) = find_mp4_mdat_span(reader, file_size)? {
+            return Ok(mdat_span);
+        }
     }
 
     offset = offset.min(file_size);
@@ -218,6 +224,36 @@ fn find_mp4_mdat_span<R: Read + Seek>(
             }));
         }
         pos = end;
+    }
+    Ok(None)
+}
+
+fn find_riff_wave_data_span<R: Read + Seek>(
+    reader: &mut R,
+    file_size: u64,
+) -> io::Result<Option<AudioSpan>> {
+    reader.seek(SeekFrom::Start(0))?;
+    let mut riff = [0u8; 12];
+    if reader.read_exact(&mut riff).is_err() || &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
+        return Ok(None);
+    }
+
+    let mut pos = 12u64;
+    while pos + 8 <= file_size {
+        reader.seek(SeekFrom::Start(pos))?;
+        let mut hdr = [0u8; 8];
+        reader.read_exact(&mut hdr)?;
+        let chunk_len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+        let data_start = pos + 8;
+        let data_end = (data_start + chunk_len).min(file_size);
+        if &hdr[0..4] == b"data" {
+            return Ok(Some(AudioSpan {
+                start: data_start,
+                end: data_end,
+            }));
+        }
+        let padded = chunk_len + (chunk_len & 1);
+        pos = data_start.saturating_add(padded);
     }
     Ok(None)
 }

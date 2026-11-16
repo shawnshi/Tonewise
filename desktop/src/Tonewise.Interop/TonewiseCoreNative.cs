@@ -48,6 +48,12 @@ internal static class TonewiseCoreNative
         nuint newHeaderLen
     );
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tonewise_analyze_audio_path(IntPtr pathUtf8);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tonewise_write_audio_tags_json(IntPtr requestJson);
+
     internal static IntPtr AllocUtf8(string value)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(value);

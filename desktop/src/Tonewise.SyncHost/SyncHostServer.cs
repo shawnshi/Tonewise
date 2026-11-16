@@ -8,9 +8,12 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Tonewise.Interop;
+using Tonewise.SyncHost.Curation;
+using Tonewise.SyncHost.Ledger;
 
 namespace Tonewise.SyncHost;
 
@@ -90,14 +93,102 @@ public sealed class SyncHostServer : IAsyncDisposable
         {
             string wfPath = Path.Combine(_tonewiseDir, "waveforms.bin");
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
+            string encPath = Path.Combine(_tonewiseDir, "encyclopedia.db");
             return Results.Json(new
             {
                 schema_version = 1,
                 device_id = _deviceId,
                 has_manifest = File.Exists(dbPath),
                 has_waveforms = File.Exists(wfPath),
+                has_encyclopedia = File.Exists(encPath),
                 waveforms_bytes = File.Exists(wfPath) ? new FileInfo(wfPath).Length : 0L,
                 manifest_sha256 = File.Exists(dbPath) ? ComputeSha256Hex(dbPath) : null,
+            });
+        });
+
+        app.MapGet("/api/v1/encyclopedia", (string? entityType, string? q) =>
+        {
+            string encPath = Path.Combine(_tonewiseDir, "encyclopedia.db");
+            if (!File.Exists(encPath))
+            {
+                return Results.Json(new { items = Array.Empty<EntityBiographyEntry>() });
+            }
+            var svc = new EncyclopediaService(encPath);
+            var items = svc.GetAllBiographies(entityType, q);
+            return Results.Json(new { items });
+        });
+
+        app.MapGet("/api/v1/patch/{trackUid}", (string trackUid) =>
+        {
+            string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
+            if (!File.Exists(dbPath) || string.IsNullOrWhiteSpace(trackUid))
+            {
+                return Results.NotFound();
+            }
+
+            string? relPath = null;
+            long headerSize = 0;
+            byte[]? headerHash = null;
+            byte[]? audioHash = null;
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT rel_path, header_size, header_blake3, audio_frame_blake3
+                    FROM tracks
+                    WHERE track_uid = $uid;
+                    """;
+                cmd.Parameters.AddWithValue("$uid", trackUid);
+                using var reader = cmd.ExecuteReader();
+                if (!reader.Read())
+                {
+                    return Results.NotFound();
+                }
+                relPath = reader.GetString(0);
+                headerSize = reader.IsDBNull(1) ? 0 : reader.GetInt64(1);
+                headerHash = reader.IsDBNull(2) ? null : (byte[])reader[2];
+                audioHash = reader.IsDBNull(3) ? null : (byte[])reader[3];
+            }
+
+            if (string.IsNullOrWhiteSpace(relPath) || headerSize <= 0)
+            {
+                return Results.NotFound();
+            }
+
+            string rootFull = Path.GetFullPath(_musicRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string audioFull = Path.GetFullPath(Path.Combine(_musicRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!audioFull.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) || !File.Exists(audioFull))
+            {
+                return Results.NotFound();
+            }
+
+            int bytesToRead = (int)Math.Min(headerSize, 2 * 1024 * 1024L);
+            byte[] headerBytes = new byte[bytesToRead];
+            int totalRead = 0;
+            using (var fs = File.OpenRead(audioFull))
+            {
+                while (totalRead < bytesToRead)
+                {
+                    int n = fs.Read(headerBytes, totalRead, bytesToRead - totalRead);
+                    if (n == 0) break;
+                    totalRead += n;
+                }
+            }
+
+            if (totalRead < headerBytes.Length)
+            {
+                Array.Resize(ref headerBytes, totalRead);
+            }
+
+            return Results.Json(new
+            {
+                track_uid = trackUid,
+                audio_frame_blake3_hex = audioHash is not null ? Convert.ToHexStringLower(audioHash) : null,
+                header_blake3_hex = headerHash is not null ? Convert.ToHexStringLower(headerHash) : null,
+                header_size = totalRead,
+                header_base64 = Convert.ToBase64String(headerBytes),
             });
         });
 
@@ -156,11 +247,18 @@ public sealed class SyncHostServer : IAsyncDisposable
             string safeDevice = SanitizeId(body.DeviceId);
             string histPath = Path.Combine(_tonewiseDir, $"history.{safeDevice}.jsonl");
             var lines = body.Events.Select(e => e.GetRawText()).ToList();
+            int mergedTracks = 0;
+            string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
+
             lock (_fileLock)
             {
                 File.AppendAllLines(histPath, lines, new UTF8Encoding(false));
+                if (File.Exists(dbPath))
+                {
+                    mergedTracks = LastFmLedgerService.MergeIncomingHistoryEvents(dbPath, body.Events);
+                }
             }
-            return Results.Json(new { accepted = lines.Count });
+            return Results.Json(new { accepted = lines.Count, merged_tracks = mergedTracks });
         });
 
         app.MapPost("/api/v1/mutations/push", async (HttpRequest request) =>

@@ -2,6 +2,7 @@ use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jint, jstring};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
 use std::fs::{File, OpenOptions};
 use tonewise_rules::{RuleTrack, SceneCard, evaluate_scene};
@@ -30,6 +31,12 @@ struct LwwApplyRequest {
 struct SessionMergeRequest {
     local: Vec<SessionSlot>,
     remote: Vec<SessionSlot>,
+}
+
+#[derive(Deserialize)]
+struct TagWriteRequest {
+    path: String,
+    updates: HashMap<String, Option<String>>,
 }
 
 fn split_artists_json_impl(raw: &str) -> String {
@@ -198,6 +205,158 @@ fn json_error(msg: &str) -> String {
     serde_json::json!({ "error": msg }).to_string()
 }
 
+#[cfg(not(target_os = "android"))]
+fn analyze_audio_path_impl(path: &str) -> String {
+    match tonewise_dsp_core::analyze_audio_file(std::path::Path::new(path)) {
+        Ok(res) => serde_json::to_string(&res).unwrap_or_else(|e| json_error(&e.to_string())),
+        Err(e) => json_error(&format!("analyze failed: {e}")),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn analyze_audio_path_impl(_path: &str) -> String {
+    json_error("analyze_audio_path is not enabled in Android slim build")
+}
+
+#[cfg(not(target_os = "android"))]
+fn write_audio_tags_json_impl(request_json: &str) -> String {
+    use lofty::config::WriteOptions;
+    use lofty::file::{AudioFile, TaggedFileExt};
+    use lofty::probe::Probe;
+    use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagItem};
+
+    let req: TagWriteRequest = match serde_json::from_str(request_json) {
+        Ok(r) => r,
+        Err(e) => return json_error(&format!("invalid tag write request json: {e}")),
+    };
+
+    let path = std::path::Path::new(&req.path);
+    let mut tagged = match Probe::open(path).and_then(|p| p.read()) {
+        Ok(t) => t,
+        Err(e) => return json_error(&format!("lofty read failed: {e}")),
+    };
+
+    let tag_type = tagged.primary_tag_type();
+    if tagged.primary_tag_mut().is_none() {
+        tagged.insert_tag(Tag::new(tag_type));
+    }
+
+    if let Some(tag) = tagged.primary_tag_mut() {
+        for (raw_field, raw_opt) in &req.updates {
+            let field = raw_field.trim().to_ascii_lowercase();
+            let clean_val = raw_opt
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && *v != "[]");
+
+            match field.as_str() {
+                "album" => match clean_val {
+                    Some(v) => tag.set_album(v.to_string()),
+                    None => tag.remove_album(),
+                },
+                "genre" => match clean_val {
+                    Some(v) => tag.set_genre(v.to_string()),
+                    None => tag.remove_genre(),
+                },
+                "year" => match clean_val.and_then(|v| v.parse::<u32>().ok()) {
+                    Some(y) => {
+                        tag.set_year(y);
+                        tag.insert_text(ItemKey::RecordingDate, y.to_string());
+                    }
+                    None => {
+                        tag.remove_year();
+                        tag.remove_key(&ItemKey::RecordingDate);
+                    }
+                },
+                "publisher" => match clean_val {
+                    Some(v) => {
+                        tag.insert_text(ItemKey::Publisher, v.to_string());
+                    }
+                    None => {
+                        tag.remove_key(&ItemKey::Publisher);
+                        tag.remove_key(&ItemKey::Label);
+                    }
+                },
+                "tempo_bpm" => match clean_val.and_then(|v| v.parse::<f32>().ok()) {
+                    Some(bpm) if bpm.is_finite() && bpm > 0.0 => {
+                        tag.insert_text(ItemKey::Bpm, format!("{bpm:.1}"));
+                        tag.insert_text(ItemKey::IntegerBpm, format!("{}", bpm.round() as u32));
+                    }
+                    _ => {
+                        tag.remove_key(&ItemKey::Bpm);
+                        tag.remove_key(&ItemKey::IntegerBpm);
+                    }
+                },
+                "mood" | "mood_json" => {
+                    tag.remove_key(&ItemKey::Mood);
+                    if let Some(v) = clean_val {
+                        let items: Vec<String> = if v.starts_with('[') {
+                            serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
+                        } else {
+                            v.split([';', ','])
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        };
+                        for m in items {
+                            tag.push(TagItem::new(ItemKey::Mood, ItemValue::Text(m)));
+                        }
+                    }
+                }
+                "dj_scene" | "dj_scene_json" => {
+                    tag.retain(|it| !matches!(it.key(), ItemKey::Unknown(k) if k.eq_ignore_ascii_case("DJ_SCENE")));
+                    if let Some(v) = clean_val {
+                        let items: Vec<String> = if v.starts_with('[') {
+                            serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
+                        } else {
+                            v.split([';', ','])
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        };
+                        if !items.is_empty() {
+                            tag.push_unchecked(TagItem::new(
+                                ItemKey::Unknown("DJ_SCENE".to_string()),
+                                ItemValue::Text(items.join("; ")),
+                            ));
+                        }
+                    }
+                }
+                "dj_vocals" => {
+                    tag.retain(|it| !matches!(it.key(), ItemKey::Unknown(k) if k.eq_ignore_ascii_case("DJ_VOCALS")));
+                    if let Some(v) = clean_val {
+                        tag.push_unchecked(TagItem::new(
+                            ItemKey::Unknown("DJ_VOCALS".to_string()),
+                            ItemValue::Text(v.to_string()),
+                        ));
+                    }
+                }
+                "dj_energy" => {
+                    tag.retain(|it| !matches!(it.key(), ItemKey::Unknown(k) if k.eq_ignore_ascii_case("DJ_ENERGY")));
+                    if let Some(v) = clean_val {
+                        tag.push_unchecked(TagItem::new(
+                            ItemKey::Unknown("DJ_ENERGY".to_string()),
+                            ItemValue::Text(v.to_string()),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Err(e) = tagged.save_to_path(path, WriteOptions::default()) {
+        return json_error(&format!("lofty save failed: {e}"));
+    }
+
+    fingerprint_path_impl(&req.path)
+}
+
+#[cfg(target_os = "android")]
+fn write_audio_tags_json_impl(_request_json: &str) -> String {
+    json_error("write_audio_tags is not enabled in Android slim build")
+}
+
 // -----------------------------------------------------------------------------
 // C-FFI exports for Windows Desktop (.NET P/Invoke via tonewise_core.dll)
 // -----------------------------------------------------------------------------
@@ -338,6 +497,26 @@ pub unsafe extern "C" fn tonewise_apply_header_patch_path(
         unsafe { std::slice::from_raw_parts(new_header_ptr, new_header_len) }
     };
     into_c_string(apply_header_patch_path_impl(path, old_hex, bytes))
+}
+
+/// # Safety
+/// `path_utf8` must be a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tonewise_analyze_audio_path(path_utf8: *const c_char) -> *mut c_char {
+    let Some(path) = (unsafe { read_c_str(path_utf8) }) else {
+        return into_c_string(json_error("null or invalid utf-8 input"));
+    };
+    into_c_string(analyze_audio_path_impl(path))
+}
+
+/// # Safety
+/// `request_json` must be a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tonewise_write_audio_tags_json(request_json: *const c_char) -> *mut c_char {
+    let Some(req) = (unsafe { read_c_str(request_json) }) else {
+        return into_c_string(json_error("null or invalid utf-8 input"));
+    };
+    into_c_string(write_audio_tags_json_impl(req))
 }
 
 // -----------------------------------------------------------------------------

@@ -11,17 +11,49 @@ public enum BiquadKind
     HighPass,
 }
 
-public sealed record BiquadSpec(BiquadKind Kind, double FrequencyHz, double GainDb, double Q);
-
-public sealed record EqualizerApoProfile(double PreampDb, IReadOnlyList<BiquadSpec> Filters)
+public enum BiquadChannelScope
 {
+    All = 0,
+    Left = 1,
+    Right = 2,
+}
+
+public sealed record BiquadSpec(
+    BiquadKind Kind,
+    double FrequencyHz,
+    double GainDb,
+    double Q,
+    BiquadChannelScope Channel = BiquadChannelScope.All
+);
+
+public sealed record EqualizerApoProfile(
+    double PreampDb,
+    IReadOnlyList<BiquadSpec> Filters,
+    string? BoundDeviceName = null,
+    string? FirImpulsePath = null,
+    bool EnableIso226 = false,
+    double ReferenceSplDb = 80.0
+)
+{
+    public const int MaxBandsPerChannel = 64;
+
     public double ComputeEffectivePreampDb(double replayGainDb)
     {
-        double maxBoost = 0.0;
+        double maxBoostL = 0.0;
+        double maxBoostR = 0.0;
         foreach (var f in Filters)
         {
-            if (f.GainDb > maxBoost) maxBoost = f.GainDb;
+            if (f.GainDb <= 0.0) continue;
+            if (f.Channel is BiquadChannelScope.All or BiquadChannelScope.Left && f.GainDb > maxBoostL)
+            {
+                maxBoostL = f.GainDb;
+            }
+            if (f.Channel is BiquadChannelScope.All or BiquadChannelScope.Right && f.GainDb > maxBoostR)
+            {
+                maxBoostR = f.GainDb;
+            }
         }
+        double maxBoost = Math.Max(maxBoostL, maxBoostR);
         double rgEnvelope = replayGainDb - maxBoost;
         return Math.Min(rgEnvelope, PreampDb + replayGainDb);
     }
@@ -30,13 +62,45 @@ public sealed record EqualizerApoProfile(double PreampDb, IReadOnlyList<BiquadSp
     {
         double preampDb = 0.0;
         var filters = new List<BiquadSpec>();
+        var currentScope = BiquadChannelScope.All;
+        int leftCount = 0;
+        int rightCount = 0;
+        string? boundDevice = null;
+        string? firPath = null;
+        bool enableIso226 = false;
+        double refSpl = 80.0;
 
         foreach (string rawLine in text.Split('\n'))
         {
             string line = rawLine.Trim().TrimStart('\uFEFF');
-            if (string.IsNullOrEmpty(line) || line.StartsWith('#')) continue;
+            if (string.IsNullOrEmpty(line)) continue;
 
-            if (line.StartsWith("Preamp:", StringComparison.OrdinalIgnoreCase))
+            if (line.StartsWith('#'))
+            {
+                if (line.StartsWith("# Tonewise-Meta:", StringComparison.OrdinalIgnoreCase))
+                {
+                    ParseMetaHeader(
+                        line["# Tonewise-Meta:".Length..],
+                        ref boundDevice,
+                        ref firPath,
+                        ref enableIso226,
+                        ref refSpl
+                    );
+                }
+                continue;
+            }
+
+            if (line.StartsWith("Channel:", StringComparison.OrdinalIgnoreCase))
+            {
+                string chan = line["Channel:".Length..].Trim().ToUpperInvariant();
+                currentScope = chan switch
+                {
+                    "L" or "1" or "LEFT" => BiquadChannelScope.Left,
+                    "R" or "2" or "RIGHT" => BiquadChannelScope.Right,
+                    _ => BiquadChannelScope.All,
+                };
+            }
+            else if (line.StartsWith("Preamp:", StringComparison.OrdinalIgnoreCase))
             {
                 string num = line["Preamp:".Length..].Replace("dB", "", StringComparison.OrdinalIgnoreCase).Trim();
                 if (double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out double db))
@@ -80,12 +144,56 @@ public sealed record EqualizerApoProfile(double PreampDb, IReadOnlyList<BiquadSp
                 }
                 if (fc is > 0)
                 {
-                    filters.Add(new BiquadSpec(kind.Value, fc.Value, gain, Math.Max(q, 0.05)));
+                    bool allow = currentScope switch
+                    {
+                        BiquadChannelScope.Left => leftCount < MaxBandsPerChannel,
+                        BiquadChannelScope.Right => rightCount < MaxBandsPerChannel,
+                        _ => leftCount < MaxBandsPerChannel && rightCount < MaxBandsPerChannel,
+                    };
+                    if (!allow) continue;
+
+                    if (currentScope is BiquadChannelScope.All or BiquadChannelScope.Left) leftCount++;
+                    if (currentScope is BiquadChannelScope.All or BiquadChannelScope.Right) rightCount++;
+
+                    filters.Add(new BiquadSpec(kind.Value, fc.Value, gain, Math.Max(q, 0.05), currentScope));
                 }
             }
         }
 
-        return new EqualizerApoProfile(preampDb, filters);
+        return new EqualizerApoProfile(preampDb, filters, boundDevice, firPath, enableIso226, refSpl);
+    }
+
+    private static void ParseMetaHeader(
+        string metaBody,
+        ref string? boundDevice,
+        ref string? firPath,
+        ref bool enableIso226,
+        ref double refSpl)
+    {
+        foreach (string part in metaBody.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int eqIdx = part.IndexOf('=');
+            if (eqIdx <= 0) continue;
+            string key = part[..eqIdx].Trim();
+            string val = part[(eqIdx + 1)..].Trim();
+            if (key.Equals("Device", StringComparison.OrdinalIgnoreCase))
+            {
+                boundDevice = string.IsNullOrWhiteSpace(val) ? null : val;
+            }
+            else if (key.Equals("FirPath", StringComparison.OrdinalIgnoreCase))
+            {
+                firPath = string.IsNullOrWhiteSpace(val) ? null : val;
+            }
+            else if (key.Equals("Iso226", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool iso))
+            {
+                enableIso226 = iso;
+            }
+            else if (key.Equals("RefSpl", StringComparison.OrdinalIgnoreCase) &&
+                     double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out double spl))
+            {
+                refSpl = Math.Clamp(spl, 70.0, 90.0);
+            }
+        }
     }
 }
 
@@ -98,8 +206,11 @@ public sealed class BiquadFilter64
     private readonly double[] _z1;
     private readonly double[] _z2;
 
+    public BiquadChannelScope ChannelScope { get; }
+
     public BiquadFilter64(BiquadSpec spec, int sampleRateHz, int channels)
     {
+        ChannelScope = spec.Channel;
         _z1 = new double[Math.Max(channels, 1)];
         _z2 = new double[Math.Max(channels, 1)];
 
@@ -184,5 +295,70 @@ public sealed class BiquadFilter64
     {
         Array.Clear(_z1);
         Array.Clear(_z2);
+    }
+}
+
+/// <summary>
+/// Dual-channel 64-bit PEQ bank supporting stereo-linked (`All`) and independent `L`/`R` bands.
+/// </summary>
+public sealed class DualChannelBiquadNode
+{
+    private readonly List<BiquadFilter64> _leftChain = [];
+    private readonly List<BiquadFilter64> _rightChain = [];
+    private readonly List<BiquadFilter64> _extraChain = [];
+
+    public int TotalSpecCount { get; private set; }
+    public int LeftBandCount => _leftChain.Count;
+    public int RightBandCount => _rightChain.Count;
+
+    public void Configure(EqualizerApoProfile? profile, int sampleRateHz, int channels)
+    {
+        _leftChain.Clear();
+        _rightChain.Clear();
+        _extraChain.Clear();
+        TotalSpecCount = 0;
+
+        if (profile is null) return;
+
+        foreach (var spec in profile.Filters)
+        {
+            TotalSpecCount++;
+            if (spec.Channel is BiquadChannelScope.All or BiquadChannelScope.Left)
+            {
+                _leftChain.Add(new BiquadFilter64(spec, sampleRateHz, channels));
+            }
+            if (spec.Channel is BiquadChannelScope.All or BiquadChannelScope.Right)
+            {
+                _rightChain.Add(new BiquadFilter64(spec, sampleRateHz, channels));
+            }
+            if (channels > 2 && spec.Channel == BiquadChannelScope.All)
+            {
+                _extraChain.Add(new BiquadFilter64(spec, sampleRateHz, channels));
+            }
+        }
+    }
+
+    public double ProcessSample(double x, int channel)
+    {
+        List<BiquadFilter64> chain = channel switch
+        {
+            0 => _leftChain,
+            1 => _rightChain,
+            _ => _extraChain,
+        };
+
+        double sample = x;
+        for (int i = 0; i < chain.Count; i++)
+        {
+            sample = chain[i].ProcessSample(sample, channel);
+        }
+        return sample;
+    }
+
+    public void Reset()
+    {
+        foreach (var f in _leftChain) f.Reset();
+        foreach (var f in _rightChain) f.Reset();
+        foreach (var f in _extraChain) f.Reset();
     }
 }
