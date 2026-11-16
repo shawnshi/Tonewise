@@ -57,6 +57,7 @@ abstract class DetailListAdapter(
             is PlainDivider -> DividerViewHolder.VIEW_TYPE
             is BasicHeader -> BasicHeaderViewHolder.VIEW_TYPE
             is SortHeader -> SortHeaderViewHolder.VIEW_TYPE
+            is BioItem -> BioViewHolder.VIEW_TYPE
             else -> super.getItemViewType(position)
         }
 
@@ -65,6 +66,7 @@ abstract class DetailListAdapter(
             DividerViewHolder.VIEW_TYPE -> DividerViewHolder.from(parent)
             BasicHeaderViewHolder.VIEW_TYPE -> BasicHeaderViewHolder.from(parent)
             SortHeaderViewHolder.VIEW_TYPE -> SortHeaderViewHolder.from(parent)
+            BioViewHolder.VIEW_TYPE -> BioViewHolder.from(parent)
             else -> error("Invalid item type $viewType")
         }
 
@@ -72,6 +74,7 @@ abstract class DetailListAdapter(
         when (val item = getItem(position)) {
             is BasicHeader -> (holder as BasicHeaderViewHolder).bind(item)
             is SortHeader -> (holder as SortHeaderViewHolder).bind(item, listener)
+            is BioItem -> (holder as BioViewHolder).bind(item)
         }
     }
 
@@ -98,6 +101,9 @@ abstract class DetailListAdapter(
 
                         is SortHeader if newItem is SortHeader ->
                             SortHeaderViewHolder.DIFF_CALLBACK.areContentsTheSame(oldItem, newItem)
+
+                        is BioItem if newItem is BioItem ->
+                            BioViewHolder.DIFF_CALLBACK.areContentsTheSame(oldItem, newItem)
 
                         else -> false
                     }

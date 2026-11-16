@@ -130,11 +130,17 @@
 
     <string name="lbl_artist_details">Go to artist</string>
     <string name="lbl_album_details">Go to album</string>
+    <string name="lbl_genre_details">Go to genre</string>
+    <string name="lbl_composer_details">Go to composer</string>
+    <string name="lbl_conductor_details">Go to conductor</string>
     <string name="lbl_song_detail">View properties</string>
     <string name="lbl_parent_detail">View</string>
     <string name="lbl_share">Share</string>
 
     <string name="lbl_props">Song properties</string>
+    <string name="lbl_play_count">Play count</string>
+    <string name="lbl_composer">Composer</string>
+    <string name="lbl_conductor">Conductor</string>
     <string name="lbl_path">Path</string>
     <!-- As in audio format -->
     <string name="lbl_format">Format</string>
@@ -497,4 +503,88 @@
         <item quantity="one">%d second</item>
         <item quantity="other">%d seconds</item>
     </plurals>
+
+    <string name="set_audio_output">Audio output</string>
+    <string name="set_float_output">32-bit float audio pipeline</string>
+    <string name="set_float_output_desc">Preserve 32-bit floating-point precision in Media3 AudioSink (restart playback to apply)</string>
+    <string name="set_usb_bit_perfect">USB DAC Bit-Perfect output</string>
+    <string name="set_usb_bit_perfect_desc">Request hardware bit-perfect routing on Android 14+ USB DACs and bypass ReplayGain</string>
+
+    <string name="lbl_signal_path">Signal path</string>
+    <string name="lbl_signal_stage_source">Source container</string>
+    <string name="lbl_signal_stage_dsp">Decoder &amp; DSP pipeline</string>
+    <string name="lbl_signal_stage_mixer">System audio mixer</string>
+    <string name="lbl_signal_stage_output">Physical output</string>
+    <string name="lbl_signal_dsp_bypassed">DSP &amp; ReplayGain bypassed (bit-perfect)</string>
+    <string name="lbl_signal_mixer_direct">Direct hardware clock bypass</string>
+    <string name="lbl_signal_mixer_system">Android shared audio mixer</string>
+    <string name="lbl_route_bluetooth">Bluetooth audio</string>
+    <string name="lbl_route_wired">Wired output</string>
+    <string name="lbl_route_speaker">Built-in speaker</string>
+    <string name="lbl_route_unknown">System audio device</string>
+
+    <string name="lbl_scenes_and_sync">Scenes &amp; LAN Sync</string>
+    <string name="lbl_scenes_5d_feed">5D Scene Banners</string>
+    <string name="lbl_handoff_slots">Persistent Queue Slots (Handoff)</string>
+    <string name="lbl_save_slot_1">Save queue to Slot 1</string>
+    <string name="lbl_lan_sync">PC LAN SyncHost</string>
+    <string name="lbl_sync_host_url">Host URL</string>
+    <string name="lbl_sync_now">Sync now</string>
+    <string name="lbl_scene_no_matches">No matching local tracks</string>
+    <string name="lbl_slot_empty_queue">Queue is empty</string>
+    <string name="lbl_album_bio">Album introduction</string>
+    <string name="lbl_artist_bio">Artist introduction</string>
+    <string name="lbl_composer_bio">Composer introduction</string>
+    <string name="lbl_conductor_bio">Conductor introduction</string>
+    <string name="lbl_bio_expand">Read more</string>
+    <string name="lbl_bio_collapse">Show less</string>
+    <string name="fmt_play_count">%d plays</string>
+    <string name="lbl_dj_filter">DJ Tag Matrix Filter</string>
+    <string name="lbl_dj_scene">DJ Scene</string>
+    <string name="lbl_dj_vocals">DJ Vocals</string>
+    <string name="lbl_dj_energy">DJ Energy</string>
+    <string name="lbl_dj_all">All</string>
+    <string name="fmt_dj_play_matches">Play %d matched tracks</string>
+    <string name="lbl_dsp_title">64-bit DSP &amp; Acoustic Engine</string>
+    <string name="fmt_dsp_device_profile">Active profile: %s</string>
+    <string name="lbl_dsp_usb_bypass_notice">USB BIT-PERFECT active: software DSP and external AudioSession effects are automatically bypassed.</string>
+    <string name="lbl_dsp_mode_internal">Internal 64-bit DSP</string>
+    <string name="lbl_dsp_mode_external">External AudioSession</string>
+    <string name="lbl_dsp_external_desc">Internal PEQ, Crossfeed, and Balance are bypassed. Tonewise broadcasts open/close AudioSession intents for RootlessJamesDSP or Wavelet.</string>
+    <string name="lbl_dsp_open_external_eq">Open external AudioSession equalizer</string>
+    <string name="lbl_dsp_master_enable">Enable 64-bit DSP pipeline</string>
+    <string name="lbl_dsp_gain_matched_ab">Gain-matched A/B bypass compare</string>
+    <string name="lbl_dsp_preset_flat">Flat</string>
+    <string name="lbl_dsp_preset_open_ear">Open-Ear BT (+4.5dB)</string>
+    <string name="lbl_dsp_preset_focus">Focus Night</string>
+    <string name="lbl_dsp_preset_crossfeed">Bauer Crossfeed</string>
+    <string name="lbl_dsp_preamp">Preamp</string>
+    <string name="lbl_dsp_peq_title">64-bit Biquad Parametric EQ</string>
+    <string name="lbl_dsp_import_apo">Import APO</string>
+    <string name="lbl_dsp_apply_apo">Apply EqualizerAPO preset</string>
+    <string name="fmt_dsp_apo_imported">Applied EqualizerAPO filter bank</string>
+    <string name="lbl_dsp_crossfeed">Bauer stereo-to-binaural Crossfeed</string>
+    <string name="lbl_dsp_balance">L/R Channel Balance</string>
+    <string name="lbl_dsp_limiter">Lookahead soft limiter (-0.2 dBFS)</string>
+    <string name="lbl_dsp_open_console">Open 64-bit DSP &amp; EQ Console</string>
+    <string name="lbl_usb_ear_protection">USB BIT-PERFECT uses hardware DAC direct mode: dongles without physical volume buttons may output full scale. Verify volume before wearing earphones.</string>
+    <string name="lbl_usb_ear_confirm">I verified DAC volume</string>
+    <string name="lbl_work_none">Current track has no classical WORK metadata</string>
+    <string name="fmt_work_recordings_count">%d local recordings · tap any version to A/B switch at this movement</string>
+    <string name="lbl_work_now_playing">Playing</string>
+    <string name="lbl_work_credits">Work composers &amp; conductors</string>
+    <string name="lbl_work_recordings">Work recordings</string>
+    <string name="fmt_classical_recordings_pill">%d recordings ▸</string>
+    <string name="lbl_booklet_pdf">Digital booklet</string>
+    <string name="lbl_booklet_empty">No booklet.pdf found in this album folder or .tonewise/booklets</string>
+    <string name="lbl_booklet_prev">Previous page</string>
+    <string name="lbl_booklet_next">Next page</string>
+    <string name="fmt_booklet_page">Page %1$d / %2$d</string>
+    <string name="lbl_desk_clock">OLED Desk Clock</string>
+    <string name="lbl_open_desk_clock">Open OLED Desk Clock</string>
+    <string name="lbl_clock_close">Exit Desk Clock</string>
+    <string name="lbl_clock_keep_screen_on">OLED pixel-shift protection active (60s cycle)</string>
+    <string name="lbl_scene_pill_default">Default Queue</string>
+    <string name="fmt_scene_pill">▲ %1$s · Slot #%2$d (%3$d)</string>
+    <string name="fmt_scene_switched_slot">Switched to Slot #%1$d: %2$s</string>
 </resources>

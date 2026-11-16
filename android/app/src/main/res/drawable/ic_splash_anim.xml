@@ -7,157 +7,117 @@
             android:height="432dp"
             android:viewportWidth="432"
             android:viewportHeight="432">
-            <group
-                android:name="bg"
-                android:pivotX="56"
-                android:pivotY="56">
+
+            <!-- Obsidian medallion within Android 12+ 288dp splash safe circle -->
+            <group android:name="badge">
                 <path
-                    android:fillColor="#00000000"
-                    android:strokeColor="#00000000"
-                    android:pathData="M 408,216
-A 192,192 0 0 1 216,408 192,192 0 0 1 24,216 192,192 0 0 1 216,24 192,192 0 0 1 408,216
-Z" />
+                    android:fillColor="#151922"
+                    android:strokeWidth="3"
+                    android:strokeColor="#2E3646"
+                    android:pathData="M 352,216 A 136,136 0 1 1 80,216 A 136,136 0 1 1 352,216 Z" />
             </group>
 
             <group
-                android:scaleX="8.5"
-                android:scaleY="8.5"
-                android:translateX="114"
-                android:translateY="114">
-                <path
-                    android:fillColor="@android:color/transparent"
-                    android:pathData="M13 4l4 4m-4-4v13m0 0l-3 3-3-3 3-3"
-                    android:strokeWidth="2"
-                    android:strokeColor="#80808080"
-                    android:strokeLineCap="round"
-                    android:strokeLineJoin="round" />
-            </group>
+                android:translateX="102"
+                android:translateY="102"
+                android:scaleX="9.5"
+                android:scaleY="9.5">
 
-            <group
-                android:scaleX="8.5"
-                android:scaleY="8.5"
-                android:translateX="114"
-                android:translateY="114">
-                <path
-                    android:name="base"
-                    android:fillColor="@android:color/transparent"
-                    android:pathData="m 13,17 -3,3 -3,-3 3,-3"
-                    android:strokeWidth="0"
-                    android:strokeColor="#004894"
-                    android:strokeLineCap="round"
-                    android:strokeLineJoin="round" />
-            </group>
+                <!-- Platinum silver-grey symmetrical waveform bars -->
+                <group
+                    android:name="waves"
+                    android:pivotX="12"
+                    android:pivotY="12"
+                    android:scaleX="0.86"
+                    android:scaleY="0.72">
+                    <path
+                        android:fillColor="#CBD5E1"
+                        android:pathData="M 4.05,10.375 A 0.575,0.575 0 0 1 5.20,10.375 V 13.625 A 0.575,0.575 0 0 1 4.05,13.625 Z" />
+                    <path
+                        android:fillColor="#CBD5E1"
+                        android:pathData="M 6.10,7.075 A 0.575,0.575 0 0 1 7.25,7.075 V 15.025 A 0.575,0.575 0 0 1 6.10,15.025 Z" />
+                    <path
+                        android:fillColor="#CBD5E1"
+                        android:pathData="M 8.15,8.375 A 0.575,0.575 0 0 1 9.30,8.375 V 16.925 A 0.575,0.575 0 0 1 8.15,16.925 Z" />
+                    <path
+                        android:fillColor="#CBD5E1"
+                        android:pathData="M 14.70,8.375 A 0.575,0.575 0 0 1 15.85,8.375 V 16.925 A 0.575,0.575 0 0 1 14.70,16.925 Z" />
+                    <path
+                        android:fillColor="#CBD5E1"
+                        android:pathData="M 16.75,7.075 A 0.575,0.575 0 0 1 17.90,7.075 V 15.025 A 0.575,0.575 0 0 1 16.75,15.025 Z" />
+                    <path
+                        android:fillColor="#CBD5E1"
+                        android:pathData="M 18.80,10.375 A 0.575,0.575 0 0 1 19.95,10.375 V 13.625 A 0.575,0.575 0 0 1 18.80,13.625 Z" />
+                </group>
 
-            <group
-                android:scaleX="8.5"
-                android:scaleY="8.5"
-                android:translateX="114"
-                android:translateY="114">
-
-                <path
-                    android:name="lower_stem"
-                    android:fillColor="@android:color/transparent"
-                    android:pathData="M 13,10.5 V 17"
-                    android:strokeWidth="0"
-                    android:strokeColor="#1a61ae"
-                    android:strokeLineCap="round"
-                    android:strokeLineJoin="round" />
-            </group>
-
-            <group
-                android:scaleX="8.5"
-                android:scaleY="8.5"
-                android:translateX="114"
-                android:translateY="114">
-
-                <path
-                    android:name="upper_stem"
-                    android:fillColor="@android:color/transparent"
-                    android:pathData="m 13,4v 6.5"
-                    android:strokeWidth="0"
-                    android:strokeColor="#357ac9"
-                    android:strokeLineCap="round"
-                    android:strokeLineJoin="round" />
-            </group>
-
-            <group
-                android:scaleX="8.5"
-                android:scaleY="8.5"
-                android:translateX="114"
-                android:translateY="114">
-
-                <path
-                    android:name="tail"
-                    android:fillColor="@android:color/transparent"
-                    android:pathData="m 13,4 4,4"
-                    android:strokeWidth="0"
-                    android:strokeColor="#5093e4"
-                    android:strokeLineCap="round"
-                    android:strokeLineJoin="round" />
+                <!-- Champagne gold T-shaped tuning fork -->
+                <group
+                    android:name="fork"
+                    android:pivotX="12"
+                    android:pivotY="12"
+                    android:scaleX="0.88"
+                    android:scaleY="0.88">
+                    <path
+                        android:fillColor="#D9B372"
+                        android:pathData="M 8.5,4.8 H 15.5 V 6.35 H 8.5 Z" />
+                    <path
+                        android:fillColor="#D9B372"
+                        android:pathData="M 10.20,6.25 V 13.4 C 10.20,14.85 11.35,15.25 11.35,15.95 V 19.2 H 12.65 V 15.95 C 12.65,15.25 13.80,14.85 13.80,13.4 V 6.25 H 12.55 V 13.3 C 12.55,14.0 11.45,14.0 11.45,13.3 V 6.25 Z" />
+                </group>
             </group>
         </vector>
     </aapt:attr>
-    <target android:name="bg">
+
+    <target android:name="badge">
         <aapt:attr name="android:animation">
             <set />
         </aapt:attr>
     </target>
-    <target android:name="tail">
+
+    <target android:name="waves">
         <aapt:attr name="android:animation">
-            <set>
+            <set android:ordering="together">
                 <objectAnimator
-                    android:duration="850"
+                    android:duration="650"
                     android:interpolator="@interpolator/m3_sys_motion_easing_emphasized_decelerate"
-                    android:propertyName="strokeWidth"
-                    android:startOffset="150"
-                    android:valueFrom="0"
-                    android:valueTo="2"
+                    android:propertyName="scaleX"
+                    android:startOffset="100"
+                    android:valueFrom="0.86"
+                    android:valueTo="1.0"
                     android:valueType="floatType"
                     tools:ignore="PrivateResource" />
-            </set>
-        </aapt:attr>
-    </target>
-    <target android:name="upper_stem">
-        <aapt:attr name="android:animation">
-            <set>
                 <objectAnimator
-                    android:duration="850"
+                    android:duration="650"
                     android:interpolator="@interpolator/m3_sys_motion_easing_emphasized_decelerate"
-                    android:propertyName="strokeWidth"
-                    android:startOffset="150"
-                    android:valueFrom="0"
-                    android:valueTo="2"
+                    android:propertyName="scaleY"
+                    android:startOffset="100"
+                    android:valueFrom="0.72"
+                    android:valueTo="1.0"
                     android:valueType="floatType"
                     tools:ignore="PrivateResource" />
             </set>
         </aapt:attr>
     </target>
 
-    <target android:name="lower_stem">
+    <target android:name="fork">
         <aapt:attr name="android:animation">
-            <set>
+            <set android:ordering="together">
                 <objectAnimator
-                    android:duration="850"
+                    android:duration="650"
                     android:interpolator="@interpolator/m3_sys_motion_easing_emphasized_decelerate"
-                    android:propertyName="strokeWidth"
-                    android:startOffset="150"
-                    android:valueFrom="0"
-                    android:valueTo="2"
+                    android:propertyName="scaleX"
+                    android:startOffset="50"
+                    android:valueFrom="0.88"
+                    android:valueTo="1.0"
                     android:valueType="floatType"
                     tools:ignore="PrivateResource" />
-            </set>
-        </aapt:attr>
-    </target>
-    <target android:name="base">
-        <aapt:attr name="android:animation">
-            <set>
                 <objectAnimator
-                    android:duration="850"
+                    android:duration="650"
                     android:interpolator="@interpolator/m3_sys_motion_easing_emphasized_decelerate"
-                    android:propertyName="strokeWidth"
-                    android:startOffset="150"
-                    android:valueFrom="0"
-                    android:valueTo="2"
+                    android:propertyName="scaleY"
+                    android:startOffset="50"
+                    android:valueFrom="0.88"
+                    android:valueTo="1.0"
                     android:valueType="floatType"
                     tools:ignore="PrivateResource" />
             </set>

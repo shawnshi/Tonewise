@@ -321,6 +321,42 @@ class TagFieldsTest {
         assertEquals(listOf("Classical", "Ambient"), metadata.genreNames())
     }
 
+    @Test
+    fun metadata_composerAndConductorNames() {
+        var metadata =
+            createTestMetadata(
+                id3v2Tags =
+                    mapOf(
+                        "TCOM" to listOf("Ludwig van Beethoven"),
+                        "TPE3" to listOf("Carlos Kleiber"),
+                    )
+            )
+        assertEquals(listOf("Ludwig van Beethoven"), metadata.composerNames())
+        assertEquals(listOf("Carlos Kleiber"), metadata.conductorNames())
+
+        metadata =
+            createTestMetadata(
+                xiphTags =
+                    mapOf(
+                        "COMPOSER" to listOf("Johann Sebastian Bach"),
+                        "CONDUCTOR" to listOf("John Eliot Gardiner"),
+                    )
+            )
+        assertEquals(listOf("Johann Sebastian Bach"), metadata.composerNames())
+        assertEquals(listOf("John Eliot Gardiner"), metadata.conductorNames())
+
+        metadata =
+            createTestMetadata(
+                mp4Tags =
+                    mapOf(
+                        "©wrt" to listOf("Wolfgang Amadeus Mozart"),
+                        "----:COM.APPLE.ITUNES:CONDUCTOR" to listOf("Claudio Abbado"),
+                    )
+            )
+        assertEquals(listOf("Wolfgang Amadeus Mozart"), metadata.composerNames())
+        assertEquals(listOf("Claudio Abbado"), metadata.conductorNames())
+    }
+
     private fun createTestMetadata(
         id3v2Tags: Map<String, List<String>> = emptyMap(),
         xiphTags: Map<String, List<String>> = emptyMap(),

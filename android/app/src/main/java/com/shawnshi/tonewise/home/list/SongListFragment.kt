@@ -18,6 +18,7 @@
  
 package com.shawnshi.tonewise.home.list
 
+import android.annotation.SuppressLint
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.ViewGroup
@@ -26,6 +27,7 @@ import androidx.core.view.isVisible
 import androidx.fragment.app.activityViewModels
 import dagger.hilt.android.AndroidEntryPoint
 import java.util.Calendar
+import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentHomeListBinding
 import com.shawnshi.tonewise.home.HomeViewModel
@@ -40,6 +42,7 @@ import com.shawnshi.tonewise.music.IndexingState
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.formatDurationMsPopup
+import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.util.collectImmediately
 import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.MusicParent
@@ -59,6 +62,7 @@ class SongListFragment :
     override val listModel: ListViewModel by activityViewModels()
     override val musicModel: MusicViewModel by activityViewModels()
     override val playbackModel: PlaybackViewModel by activityViewModels()
+    @Inject lateinit var playCountRepository: PlayCountRepository
     private val songAdapter = SongAdapter(this)
 
     override fun onCreateBinding(inflater: LayoutInflater) =
@@ -83,6 +87,7 @@ class SongListFragment :
         binding.homeNoMusicAction.setOnClickListener { homeModel.startChooseMusicLocations() }
 
         collectImmediately(homeModel.songList, ::updateSongs)
+        collectImmediately(playCountRepository.updates, ::updatePlayCounts)
         collectImmediately(homeModel.empty, musicModel.indexingState, ::updateNoMusicIndicator)
         collectImmediately(listModel.selected, ::updateSelection)
         collectImmediately(
@@ -91,6 +96,13 @@ class SongListFragment :
             playbackModel.isPlaying,
             ::updatePlayback,
         )
+    }
+
+    @SuppressLint("NotifyDataSetChanged")
+    private fun updatePlayCounts(version: Long) {
+        if (version > 0L) {
+            songAdapter.notifyDataSetChanged()
+        }
     }
 
     override fun onDestroyBinding(binding: FragmentHomeListBinding) {

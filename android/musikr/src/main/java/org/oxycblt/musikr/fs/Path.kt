@@ -167,7 +167,7 @@ value class Components private constructor(val components: List<String>) {
          * @return The [Components] instance.
          */
         fun parseUnix(path: String) =
-            Components(path.trimSlashes().split(File.separatorChar).filter { it.isNotEmpty() })
+            Components(path.trim('/').split('/').filter { it.isNotEmpty() })
 
         /**
          * Parses a path string into a [Components] instance by the windows path separator.
@@ -176,10 +176,10 @@ value class Components private constructor(val components: List<String>) {
          * @return The [Components] instance.
          */
         fun parseWindows(path: String) =
-            Components(path.trimSlashes().split('\\').filter { it.isNotEmpty() })
+            Components(path.trim('\\').split('\\').filter { it.isNotEmpty() })
 
         fun root() = Components(emptyList())
 
-        private fun String.trimSlashes() = trimStart(File.separatorChar).trimEnd(File.separatorChar)
+        private fun String.trimSlashes() = trim('/', '\\')
     }
 }

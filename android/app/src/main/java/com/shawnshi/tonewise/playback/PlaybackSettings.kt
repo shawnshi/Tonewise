@@ -60,6 +60,10 @@ interface PlaybackSettings : Settings<PlaybackSettings.Listener> {
     val rememberPause: Boolean
     /** Whether to always exit when task is removed, even if playing. */
     val exitOnTaskRemoval: Boolean
+    /** Whether to enable 32-bit float PCM output pipeline in Media3 AudioSink. */
+    val floatOutput: Boolean
+    /** Whether to request Android 14+ MIXER_BEHAVIOR_BIT_PERFECT when a USB DAC is attached. */
+    val usbBitPerfect: Boolean
 
     interface Listener {
         /** Called when one of the ReplayGain configurations have changed. */
@@ -70,6 +74,9 @@ interface PlaybackSettings : Settings<PlaybackSettings.Listener> {
 
         /** Called when [pauseOnRepeat] has changed. */
         fun onPauseOnRepeatChanged() {}
+
+        /** Called when audio output preferences ([floatOutput] / [usbBitPerfect]) have changed. */
+        fun onAudioOutputSettingsChanged() {}
     }
 }
 
@@ -137,6 +144,12 @@ class PlaybackSettingsImpl @Inject constructor(@ApplicationContext context: Cont
     override val exitOnTaskRemoval: Boolean
         get() = sharedPreferences.getBoolean(getString(R.string.set_key_task_exit), false)
 
+    override val floatOutput: Boolean
+        get() = sharedPreferences.getBoolean(getString(R.string.set_key_float_output), true)
+
+    override val usbBitPerfect: Boolean
+        get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_bit_perfect), true)
+
     override fun migrate() {
         // MusicMode was converted to PlaySong in 3.2.0
         fun Int.migrateMusicMode() =
@@ -200,6 +213,11 @@ class PlaybackSettingsImpl @Inject constructor(@ApplicationContext context: Cont
             getString(R.string.set_key_repeat_pause) -> {
                 L.d("Dispatching pause on repeat change")
                 listener.onPauseOnRepeatChanged()
+            }
+            getString(R.string.set_key_float_output),
+            getString(R.string.set_key_usb_bit_perfect) -> {
+                L.d("Dispatching audio output setting change")
+                listener.onAudioOutputSettingsChanged()
             }
         }
     }

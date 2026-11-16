@@ -100,9 +100,39 @@ tasks.register("assembleTaglib", Exec, {
     }
 })
 
+tasks.register("assembleTonewiseCore", Exec, {
+    def repoRoot = rootDir.parentFile
+    def jniLibsDir = "$projectDir/src/main/jniLibs"
+    def abis = ["x86", "x86_64", "armeabi-v7a", "arm64-v8a"]
+    def libs = abis.collect { abi -> new File("$jniLibsDir/$abi/libtonewise_core.so") }
+    def ndkDir = androidComponents.sdkComponents.ndkDirectory.get().asFile
+
+    onlyIf {
+        !libs.every { it.isFile() } &&
+                System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows")
+    }
+
+    commandLine "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", "${repoRoot}/scripts/build-core-android.ps1", "$repoRoot", "$ndkDir"
+})
+
+tasks.register("assembleTonewiseCoreDesktop", Exec, {
+    def repoRoot = rootDir.parentFile
+    def dll = new File("${repoRoot}/core/target/release/tonewise_core.dll")
+
+    onlyIf {
+        !dll.isFile() &&
+                System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows")
+    }
+
+    commandLine "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", "${repoRoot}/scripts/build-core-desktop.ps1", "$repoRoot"
+})
+
 afterEvaluate {
-    preDebugBuild.dependsOn assembleTaglib
-    preReleaseBuild.dependsOn assembleTaglib
+    preDebugBuild.dependsOn assembleTaglib, assembleTonewiseCore
+    preReleaseBuild.dependsOn assembleTaglib, assembleTonewiseCore
+    preDebugUnitTestBuild.dependsOn assembleTonewiseCoreDesktop
 }
 
 clean {

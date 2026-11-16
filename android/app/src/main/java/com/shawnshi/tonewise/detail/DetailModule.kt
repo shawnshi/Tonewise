@@ -27,4 +27,6 @@ import dagger.hilt.components.SingletonComponent
 @InstallIn(SingletonComponent::class)
 interface DetailModule {
     @Binds fun detailGeneratorFactory(factory: DetailGeneratorFactoryImpl): DetailGenerator.Factory
+
+    @Binds fun musicBioRepository(impl: MusicBioRepositoryImpl): MusicBioRepository
 }

@@ -31,7 +31,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.list.ListSettings
 import com.shawnshi.tonewise.list.adapter.UpdateInstructions
+import com.shawnshi.tonewise.playback.audio.AudioOutputManager
+import com.shawnshi.tonewise.playback.audio.SignalPathState
+import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.playback.state.DeferredPlayback
+import com.shawnshi.tonewise.playback.ui.WaveformRepository
 import com.shawnshi.tonewise.playback.state.PlaybackCommand
 import com.shawnshi.tonewise.playback.state.PlaybackStateManager
 import com.shawnshi.tonewise.playback.state.Progression
@@ -63,12 +67,25 @@ constructor(
     private val playbackSettings: PlaybackSettings,
     private val commandFactory: PlaybackCommand.Factory,
     private val listSettings: ListSettings,
+    private val waveformRepository: WaveformRepository,
+    private val playCountRepository: PlayCountRepository,
+    audioOutputManager: AudioOutputManager,
 ) : ViewModel(), PlaybackStateManager.Listener, PlaybackSettings.Listener {
     private var lastPositionJob: Job? = null
+    private var waveformJob: Job? = null
+
+    val signalPath: StateFlow<SignalPathState> = audioOutputManager.signalPath
+
+    val waveformEnvelope: StateFlow<FloatArray?>
+        field = MutableStateFlow<FloatArray?>(null)
 
     /** The currently playing song. */
     val song: StateFlow<Song?>
         field = MutableStateFlow<Song?>(null)
+
+    /** The play count of the currently playing song. */
+    val currentPlayCount: StateFlow<Int>
+        field = MutableStateFlow(0)
 
     private val _parent = MutableStateFlow<MusicParent?>(null)
     /** The [MusicParent] currently being played. Null if playback is occurring from all songs. */
@@ -125,9 +142,15 @@ constructor(
     init {
         playbackManager.addListener(this)
         playbackSettings.registerListener(this)
+        viewModelScope.launch {
+            playCountRepository.updates.collect {
+                refreshPlayCount(song.value)
+            }
+        }
     }
 
     override fun onCleared() {
+        waveformJob?.cancel()
         playbackManager.removeListener(this)
         playbackSettings.unregisterListener(this)
     }
@@ -135,7 +158,10 @@ constructor(
     override fun onIndexMoved(index: Int) {
         L.d("Index moved, updating current song")
         positionDs.value = playbackManager.progression.calculateElapsedPositionMs().msToDs()
-        song.value = playbackManager.currentSong
+        val current = playbackManager.currentSong
+        song.value = current
+        refreshPlayCount(current)
+        refreshWaveform(current)
 
         pagerCommand.put(PagerCommand(update = null, scroll = index))
         _pagerQueue.value = _pagerQueue.value.copy(index = index)
@@ -145,7 +171,10 @@ constructor(
         // Other types of queue changes preserve the current song.
         if (change.type == QueueChange.Type.SONG) {
             L.d("Queue changed, updating current song")
-            song.value = playbackManager.currentSong
+            val current = playbackManager.currentSong
+            song.value = current
+            refreshPlayCount(current)
+            refreshWaveform(current)
         }
 
         pagerCommand.put(
@@ -172,7 +201,10 @@ constructor(
         isShuffled: Boolean,
     ) {
         L.d("New playback started, updating playback information")
-        song.value = playbackManager.currentSong
+        val current = playbackManager.currentSong
+        song.value = current
+        refreshPlayCount(current)
+        refreshWaveform(current)
         _parent.value = parent
         this.isShuffled.value = isShuffled
 
@@ -412,6 +444,18 @@ constructor(
         playImpl(commandFactory.songs(songs, ShuffleMode.OFF))
     }
 
+    fun restoreSessionQueue(songs: List<Song>, index: Int, positionMs: Long) {
+        if (songs.isEmpty()) return
+        val safeIndex = index.coerceIn(0, songs.lastIndex)
+        playImpl(commandFactory.songs(songs, ShuffleMode.OFF))
+        if (safeIndex > 0) {
+            playbackManager.goto(safeIndex)
+        }
+        if (positionMs > 0L) {
+            playbackManager.seekTo(positionMs)
+        }
+    }
+
     /**
      * Shuffle a list of [Song]s.
      *
@@ -648,6 +692,22 @@ constructor(
             return
         }
         openPanel.put(panel)
+    }
+
+    private fun refreshPlayCount(currentSong: Song?) {
+        currentPlayCount.value = currentSong?.let(playCountRepository::getPlayCount) ?: 0
+    }
+
+    private fun refreshWaveform(currentSong: Song?) {
+        waveformJob?.cancel()
+        if (currentSong == null) {
+            waveformEnvelope.value = null
+            return
+        }
+        waveformJob =
+            viewModelScope.launch {
+                waveformEnvelope.value = waveformRepository.getEnvelope(currentSong)
+            }
     }
 
     private companion object {

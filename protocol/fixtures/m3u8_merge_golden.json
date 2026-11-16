@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "pc_append_and_mobile_delete_zero_conflict",
+      "base": [
+        "../Bach/BWV1007/01_Prelude.flac",
+        "../Bach/BWV1007/02_Allemande.flac",
+        "../Bach/BWV1007/03_Courante.flac"
+      ],
+      "ours": [
+        "../Bach/BWV1007/01_Prelude.flac",
+        "../Bach/BWV1007/02_Allemande.flac",
+        "../Bach/BWV1007/03_Courante.flac",
+        "../Bach/BWV1007/04_Sarabande.flac"
+      ],
+      "theirs": [
+        "../Bach/BWV1007/01_Prelude.flac",
+        "../Bach/BWV1007/03_Courante.flac"
+      ],
+      "expected_merged": [
+        "../Bach/BWV1007/01_Prelude.flac",
+        "../Bach/BWV1007/03_Courante.flac",
+        "../Bach/BWV1007/04_Sarabande.flac"
+      ],
+      "expected_conflict_count": 0
+    },
+    {
+      "name": "both_sides_append_same_track_deduplicated",
+      "base": [
+        "../Jazz/KindOfBlue/01_SoWhat.flac"
+      ],
+      "ours": [
+        "../Jazz/KindOfBlue/01_SoWhat.flac",
+        "../Jazz/KindOfBlue/02_FreddieFreeloader.flac"
+      ],
+      "theirs": [
+        "../Jazz/KindOfBlue/01_SoWhat.flac",
+        "../Jazz/KindOfBlue/02_FreddieFreeloader.flac"
+      ],
+      "expected_merged": [
+        "../Jazz/KindOfBlue/01_SoWhat.flac",
+        "../Jazz/KindOfBlue/02_FreddieFreeloader.flac"
+      ],
+      "expected_conflict_count": 0
+    },
+    {
+      "name": "both_sides_append_different_tracks_at_tail_reports_conflict_and_keeps_ours_then_theirs",
+      "base": [
+        "../Rock/DarkSide/01_SpeakToMe.flac"
+      ],
+      "ours": [
+        "../Rock/DarkSide/01_SpeakToMe.flac",
+        "../Rock/DarkSide/02_Breathe.flac"
+      ],
+      "theirs": [
+        "../Rock/DarkSide/01_SpeakToMe.flac",
+        "../Rock/DarkSide/03_OnTheRun.flac"
+      ],
+      "expected_merged": [
+        "../Rock/DarkSide/01_SpeakToMe.flac",
+        "../Rock/DarkSide/02_Breathe.flac",
+        "../Rock/DarkSide/03_OnTheRun.flac"
+      ],
+      "expected_conflict_count": 1
+    }
+  ]
+}

@@ -8,10 +8,13 @@ release/
 .cxx/
 .kotlin/
 *.apk
+!releases/
+!releases/*.apk
 *.aab
 android/musikr/.Rhistory
 android/musikr/src/main/cpp/taglib/build/
 android/musikr/src/main/cpp/taglib/pkg/
+android/musikr/src/main/jniLibs/**/libtonewise_core.so
 
 # Rust (core/)
 core/target/

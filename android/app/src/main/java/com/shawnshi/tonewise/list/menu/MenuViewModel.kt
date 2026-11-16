@@ -82,7 +82,7 @@ class MenuViewModel @Inject constructor(private val musicRepository: MusicReposi
     }
 
     private fun unpackArtistParcel(parcel: Menu.ForArtist.Parcel): Menu.ForArtist? {
-        val artist = musicRepository.library?.findArtist(parcel.artistUid) ?: return null
+        val artist = musicRepository.findArtist(parcel.artistUid) ?: return null
         return Menu.ForArtist(parcel.res, artist)
     }
 

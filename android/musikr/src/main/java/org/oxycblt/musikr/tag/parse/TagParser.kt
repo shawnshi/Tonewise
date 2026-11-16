@@ -73,7 +73,17 @@ private data object TagParserImpl : TagParser {
                     ?: listOf("Various Artists").takeIf { compilation }
                     ?: listOf(),
             albumArtistSortNames = metadata.albumArtistSortNames() ?: listOf(),
+            composerNames = metadata.composerNames() ?: listOf(),
+            conductorNames = metadata.conductorNames() ?: listOf(),
             genreNames = metadata.genreNames() ?: listOf(),
+            djVocals = metadata.djVocals(),
+            djEnergy = metadata.djEnergy(),
+            djScenes = metadata.djScenes(),
+            workName = metadata.workName(),
+            movementName = metadata.movementName(),
+            movementNumber = metadata.movementNumber(),
+            musicBrainzWorkId = metadata.musicBrainzWorkId(),
+            moods = metadata.moods(),
         )
     }
 }

@@ -137,7 +137,13 @@ class ArtistDetailFragment : DetailFragment<Artist, Music>() {
         binding.detailNormalToolbar.title = name
 
         binding.detailCover.bind(artist)
-        binding.detailType.text = context.getString(R.string.lbl_artist)
+        val typeRes =
+            when ((artist as? org.oxycblt.musikr.PersonArtist)?.role) {
+                org.oxycblt.musikr.PersonRole.COMPOSER -> R.string.lbl_composer
+                org.oxycblt.musikr.PersonRole.CONDUCTOR -> R.string.lbl_conductor
+                else -> R.string.lbl_artist
+            }
+        binding.detailType.text = context.getString(typeRes)
         binding.detailName.text = name
 
         // Song and album counts map to the info
@@ -241,7 +247,16 @@ class ArtistDetailFragment : DetailFragment<Artist, Music>() {
                 findNavController()
                     .navigateSafe(ArtistDetailFragmentDirections.showArtistChoices(show.album.uid))
             }
-            is Show.GenreDetails,
+            is Show.GenreDetails -> {
+                L.d("Navigating to ${show.genre}")
+                findNavController()
+                    .navigateSafe(ArtistDetailFragmentDirections.showGenre(show.genre.uid))
+            }
+            is Show.SearchQuery -> {
+                L.d("Navigating to search for ${show.query}")
+                findNavController()
+                    .navigateSafe(ArtistDetailFragmentDirections.search(show.query))
+            }
             is Show.PlaylistDetails -> {
                 error("Unexpected show command $show")
             }

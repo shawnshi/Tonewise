@@ -50,6 +50,8 @@ internal data object NotAudio : Explored.Known, Extracted.Valid
 
 internal data class RawPlaylist(val file: PlaylistFile) : Explored.Known, Extracted.Valid
 
+internal data class DiscoveredPlaylistItem(val file: File) : Explored.Known, Extracted.Valid
+
 internal data class RawSong(
     val file: File,
     val properties: Properties,

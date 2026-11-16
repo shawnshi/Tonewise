@@ -30,6 +30,7 @@ import androidx.core.widget.addTextChangedListener
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import androidx.navigation.fragment.findNavController
+import androidx.navigation.fragment.navArgs
 import androidx.recyclerview.widget.GridLayoutManager
 import com.google.android.material.transition.MaterialSharedAxis
 import dagger.hilt.android.AndroidEntryPoint
@@ -81,6 +82,7 @@ class SearchFragment : ListFragment<Music, FragmentSearchBinding>() {
     override val listModel: ListViewModel by activityViewModels()
     override val playbackModel: PlaybackViewModel by activityViewModels()
     override val musicModel: MusicViewModel by activityViewModels()
+    private val args: SearchFragmentArgs by navArgs()
     private val searchAdapter = SearchAdapter(this)
     private var getContentLauncher: ActivityResultLauncher<String>? = null
     private var pendingImportTarget: Playlist? = null
@@ -139,7 +141,13 @@ class SearchFragment : ListFragment<Music, FragmentSearchBinding>() {
                 searchModel.search(text?.toString()?.trim())
             }
 
-            if (!launchedKeyboard) {
+            val initialQuery = args.query
+            if (!initialQuery.isNullOrBlank()) {
+                if (text.isNullOrEmpty()) {
+                    setText(initialQuery)
+                }
+                launchedKeyboard = true
+            } else if (!launchedKeyboard) {
                 // Auto-open the keyboard when this view is shown
                 L.d("Keyboard is not shown yet")
                 showKeyboard(this)
@@ -282,6 +290,11 @@ class SearchFragment : ListFragment<Music, FragmentSearchBinding>() {
                 L.d("Navigating to ${show.playlist}")
                 findNavController()
                     .navigateSafe(SearchFragmentDirections.showPlaylist(show.playlist.uid))
+            }
+            is Show.SearchQuery -> {
+                L.d("Updating search query to ${show.query}")
+                requireBinding().searchEditText.setText(show.query)
+                detailModel.toShow.consume()
             }
             null -> {}
         }

@@ -31,6 +31,8 @@ import com.shawnshi.tonewise.image.covers.SettingCovers
 import com.shawnshi.tonewise.music.MusicRepository.IndexingWorker
 import com.shawnshi.tonewise.music.locations.LocationMode
 import com.shawnshi.tonewise.music.shim.WriteOnlyMutableCache
+import org.oxycblt.musikr.Album
+import org.oxycblt.musikr.Artist
 import org.oxycblt.musikr.Config
 import org.oxycblt.musikr.IndexingProgress
 import org.oxycblt.musikr.Interpretation
@@ -38,13 +40,17 @@ import org.oxycblt.musikr.Library
 import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.Musikr
 import org.oxycblt.musikr.MutableLibrary
+import org.oxycblt.musikr.PersonArtist
+import org.oxycblt.musikr.PersonRole
 import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.Storage
 import org.oxycblt.musikr.cache.MutableCache
+import org.oxycblt.musikr.covers.CoverCollection
 import org.oxycblt.musikr.fs.mediastore.MediaStore
 import org.oxycblt.musikr.fs.saf.SAF
 import org.oxycblt.musikr.playlist.db.StoredPlaylists
+import org.oxycblt.musikr.tag.Name
 import org.oxycblt.musikr.tag.interpret.Naming
 import org.oxycblt.musikr.tag.interpret.Separators
 import timber.log.Timber as L
@@ -60,6 +66,24 @@ import timber.log.Timber as L
  * TODO: Switch listeners to set when you can confirm there are no order-dependent listener
  *   configurations
  */
+data class WorkRecording(
+    val album: Album,
+    val conductorLabel: String,
+    val ensembleLabel: String,
+    val year: Int?,
+    val movements: List<Song>,
+) {
+    val totalDurationMs: Long
+        get() = movements.sumOf { it.durationMs }
+}
+
+data class ClassicalWork(
+    val key: String,
+    val workTitle: String,
+    val composerName: String,
+    val recordings: List<WorkRecording>,
+)
+
 interface MusicRepository {
     /** The current library */
     val library: Library?
@@ -122,6 +146,18 @@ interface MusicRepository {
      * @return The expected [Music] information, or null if it could not be found.
      */
     fun find(uid: Music.UID): Music?
+
+    /** Look up an [Artist] by [uid], including synthesized [PersonArtist] composer/conductor entries. */
+    fun findArtist(uid: Music.UID): Artist?
+
+    /** Look up a [PersonArtist] aggregated for the given composer name. */
+    fun findComposer(name: String): PersonArtist?
+
+    /** Look up a [PersonArtist] aggregated for the given conductor name. */
+    fun findConductor(name: String): PersonArtist?
+
+    /** Look up an aggregated [ClassicalWork] (and all local recordings) for the given [song]. */
+    fun findWorkForSong(song: Song): ClassicalWork?
 
     /**
      * Create a new [Playlist] of the given [Song]s.
@@ -245,12 +281,17 @@ constructor(
     private val storedPlaylists: StoredPlaylists,
     private val settingCovers: SettingCovers,
     private val musicSettings: MusicSettings,
+    private val autoPlaylistImporter: AutoPlaylistImporter,
 ) : MusicRepository {
     private val updateListeners = mutableListOf<MusicRepository.UpdateListener>()
     private val indexingListeners = mutableListOf<MusicRepository.IndexingListener>()
     @Volatile private var indexingWorker: IndexingWorker? = null
 
     @Volatile override var library: MutableLibrary? = null
+    @Volatile private var composerMap: Map<String, PersonArtist> = emptyMap()
+    @Volatile private var conductorMap: Map<String, PersonArtist> = emptyMap()
+    @Volatile private var personUidMap: Map<Music.UID, PersonArtist> = emptyMap()
+    @Volatile private var workBySongUid: Map<Music.UID, ClassicalWork> = emptyMap()
     @Volatile private var previousCompletedState: IndexingState.Completed? = null
     @Volatile private var currentIndexingState: IndexingState? = null
     override val indexingState: IndexingState?
@@ -315,7 +356,22 @@ constructor(
                 ?: findArtist(uid)
                 ?: findGenre(uid)
                 ?: findPlaylist(uid)
-        })
+        }) ?: personUidMap[uid]
+
+    @Synchronized
+    override fun findArtist(uid: Music.UID): Artist? =
+        library?.findArtist(uid) ?: personUidMap[uid]
+
+    @Synchronized
+    override fun findComposer(name: String): PersonArtist? =
+        composerMap[name.trim().lowercase()]
+
+    @Synchronized
+    override fun findConductor(name: String): PersonArtist? =
+        conductorMap[name.trim().lowercase()]
+
+    @Synchronized
+    override fun findWorkForSong(song: Song): ClassicalWork? = workBySongUid[song.uid]
 
     override suspend fun createPlaylist(name: String, songs: List<Song>) {
         val library = synchronized(this) { library ?: return }
@@ -411,6 +467,7 @@ constructor(
         val start = System.currentTimeMillis()
         val result = Musikr.new(context, config).run(::emitIndexingProgress)
         L.d("Index finished in ${System.currentTimeMillis() - start}ms")
+        val finalLibrary = autoPlaylistImporter.sync(result.library, result.discoveredPlaylists)
         // Music loading completed, update the revision right now so we re-use this work
         // later.
         L.d("Revisioning from $currentRevision -> $newRevision")
@@ -419,7 +476,7 @@ constructor(
         // This will more or less block until all required item translation and
         // cleanup finishes.
         L.d("Emitting new library")
-        emitLibrary(result.library)
+        emitLibrary(finalLibrary)
         // Clean up old data that is now impossible for the app to be using.
         L.d("Cleanup")
         result.cleanup()
@@ -462,6 +519,9 @@ constructor(
             }
 
             this.library = newLibrary
+            if (deviceLibraryChanged) {
+                rebuildPersonIndices(newLibrary)
+            }
         }
 
         // Consumers expect their updates to be on the main thread (notably PlaybackService),
@@ -491,4 +551,134 @@ constructor(
             listener.onMusicChanges(changes)
         }
     }
+
+    private fun rebuildPersonIndices(lib: Library) {
+        val composerSongs = linkedMapOf<String, MutableSet<Song>>()
+        val composerDisplayNames = mutableMapOf<String, String>()
+        val conductorSongs = linkedMapOf<String, MutableSet<Song>>()
+        val conductorDisplayNames = mutableMapOf<String, String>()
+
+        for (song in lib.songs) {
+            for (raw in song.composers) {
+                val trimmed = raw.trim()
+                if (trimmed.isEmpty()) continue
+                val key = trimmed.lowercase()
+                composerDisplayNames.putIfAbsent(key, trimmed)
+                composerSongs.getOrPut(key) { linkedSetOf() }.add(song)
+            }
+            for (raw in song.conductors) {
+                val trimmed = raw.trim()
+                if (trimmed.isEmpty()) continue
+                val key = trimmed.lowercase()
+                conductorDisplayNames.putIfAbsent(key, trimmed)
+                conductorSongs.getOrPut(key) { linkedSetOf() }.add(song)
+            }
+        }
+
+        val composers = mutableMapOf<String, PersonArtist>()
+        val conductors = mutableMapOf<String, PersonArtist>()
+        val byUid = mutableMapOf<Music.UID, PersonArtist>()
+
+        for ((key, songs) in composerSongs) {
+            val person =
+                buildPersonArtist(PersonRole.COMPOSER, composerDisplayNames.getValue(key), songs)
+            composers[key] = person
+            byUid[person.uid] = person
+        }
+        for ((key, songs) in conductorSongs) {
+            val person =
+                buildPersonArtist(PersonRole.CONDUCTOR, conductorDisplayNames.getValue(key), songs)
+            conductors[key] = person
+            byUid[person.uid] = person
+        }
+
+        composerMap = composers
+        conductorMap = conductors
+        personUidMap = byUid
+        workBySongUid = buildClassicalWorkIndex(lib)
+    }
+
+    private fun buildClassicalWorkIndex(lib: Library): Map<Music.UID, ClassicalWork> {
+        val songsByWorkKey = linkedMapOf<String, MutableList<Song>>()
+        val titleByWorkKey = mutableMapOf<String, String>()
+        val composerByWorkKey = mutableMapOf<String, String>()
+
+        for (song in lib.songs) {
+            val rawWork = song.workName?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            val composer =
+                song.composers.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: (song.album.artists.firstOrNull()?.name as? Name.Known)?.raw
+                    ?: (song.artists.firstOrNull()?.name as? Name.Known)?.raw
+                    ?: "Unknown"
+            val workKey =
+                song.musicBrainzWorkId?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+                    ?: "${composer.lowercase()}::${rawWork.lowercase()}"
+            titleByWorkKey.putIfAbsent(workKey, rawWork)
+            composerByWorkKey.putIfAbsent(workKey, composer)
+            songsByWorkKey.getOrPut(workKey) { mutableListOf() }.add(song)
+        }
+
+        val index = mutableMapOf<Music.UID, ClassicalWork>()
+        for ((workKey, workSongs) in songsByWorkKey) {
+            val recordings =
+                workSongs
+                    .groupBy { it.album.uid }
+                    .values
+                    .map { albumSongs ->
+                        val orderedMovements =
+                            albumSongs.sortedWith(
+                                compareBy<Song>(
+                                    { it.disc?.number ?: 0 },
+                                    { it.movementNumber ?: it.track ?: Int.MAX_VALUE },
+                                    { it.name },
+                                )
+                            )
+                        val first = orderedMovements.first()
+                        val conductors =
+                            orderedMovements.flatMap { it.conductors }.distinct().joinToString(", ")
+                        val artists =
+                            orderedMovements
+                                .flatMap { it.artists }
+                                .mapNotNull { (it.name as? Name.Known)?.raw }
+                                .distinct()
+                                .joinToString(", ")
+                        val year = orderedMovements.mapNotNull { it.date?.year }.minOrNull()
+                        WorkRecording(
+                            album = first.album,
+                            conductorLabel = conductors,
+                            ensembleLabel = artists,
+                            year = year,
+                            movements = orderedMovements,
+                        )
+                    }
+                    .sortedWith(compareBy<WorkRecording>({ it.year ?: Int.MAX_VALUE }, { it.album.name }))
+
+            val classicalWork =
+                ClassicalWork(
+                    key = workKey,
+                    workTitle = titleByWorkKey.getValue(workKey),
+                    composerName = composerByWorkKey.getValue(workKey),
+                    recordings = recordings,
+                )
+            for (song in workSongs) {
+                index[song.uid] = classicalWork
+            }
+        }
+        return index
+    }
+
+    private fun buildPersonArtist(
+        role: PersonRole,
+        rawName: String,
+        songs: Set<Song>,
+    ): PersonArtist =
+        PersonArtist(
+            role = role,
+            rawName = rawName,
+            songs = songs,
+            explicitAlbums = songs.mapTo(linkedSetOf()) { it.album },
+            implicitAlbums = emptySet(),
+            genres = songs.flatMap { it.genres }.distinct(),
+            covers = CoverCollection.from(songs.mapNotNull { it.cover }),
+        )
 }

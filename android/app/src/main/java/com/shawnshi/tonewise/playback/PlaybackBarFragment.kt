@@ -20,16 +20,24 @@ package com.shawnshi.tonewise.playback
 
 import android.os.Bundle
 import android.view.LayoutInflater
+import android.view.View
+import android.widget.Toast
+import androidx.core.view.doOnLayout
 import androidx.fragment.app.activityViewModels
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentPlaybackBarBinding
 import com.shawnshi.tonewise.detail.DetailViewModel
+import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.state.RepeatMode
+import com.shawnshi.tonewise.sync.ScenesAndSyncDialog
+import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.ViewBindingFragment
 import com.shawnshi.tonewise.util.collectImmediately
+import com.shawnshi.tonewise.util.showToast
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L
 
@@ -40,6 +48,8 @@ import timber.log.Timber as L
  */
 @AndroidEntryPoint
 class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
+    @Inject lateinit var sessionSlotStore: SessionSlotStore
+    @Inject lateinit var musicRepository: MusicRepository
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
 
@@ -64,6 +74,17 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
         // Set up marquee on song information
         binding.playbackSong.isSelected = true
         binding.playbackInfo.isSelected = true
+        binding.playbackScenePill.apply {
+            isSelected = true
+            setOnClickListener {
+                ScenesAndSyncDialog.newInstance().show(parentFragmentManager, ScenesAndSyncDialog.TAG)
+            }
+            setOnLongClickListener {
+                hotSwitchNextSlot()
+                true
+            }
+        }
+        binding.root.doOnLayout { (binding.root.parent as? View)?.requestApplyInsets() }
 
         // Set up actions
         binding.playbackPlayPause.setOnClickListener { playbackModel.togglePlaying() }
@@ -72,6 +93,12 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
         collectImmediately(playbackModel.song, ::updateSong)
         collectImmediately(playbackModel.isPlaying, ::updatePlaying)
         collectImmediately(playbackModel.positionDs, ::updatePosition)
+        collectImmediately(
+            sessionSlotStore.activeSceneLabel,
+            sessionSlotStore.activeSlotIndex,
+            playbackModel.pagerQueue,
+            ::updateScenePill,
+        )
         collectImmediately(
             playbackModel.currentBarAction,
             playbackModel.repeatMode,
@@ -86,6 +113,43 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
         // Marquee elements leak if they are not disabled when the views are destroyed.
         binding.playbackSong.isSelected = false
         binding.playbackInfo.isSelected = false
+    }
+
+    private fun updateScenePill(sceneLabel: String, slotIndex: Int, queue: PagerQueue) {
+        val pill = binding?.playbackScenePill ?: return
+        val label =
+            if (sceneLabel.equals("Default", ignoreCase = true)) {
+                getString(R.string.lbl_scene_pill_default)
+            } else {
+                sceneLabel
+            }
+        pill.text = getString(R.string.fmt_scene_pill, label, slotIndex, queue.queue.size)
+    }
+
+    private fun hotSwitchNextSlot() {
+        val next = sessionSlotStore.cycleNextPopulatedSlot()
+        if (next == null) {
+            requireContext().showToast(R.string.lbl_slot_empty_queue)
+            return
+        }
+        val allSongs =
+            musicRepository.library?.songs?.associateBy { it.uid.toString() } ?: emptyMap()
+        val resolved = next.queueTrackUids.mapNotNull { allSongs[it] }
+        if (resolved.isEmpty()) {
+            requireContext().showToast(R.string.lbl_scene_no_matches)
+            return
+        }
+        playbackModel.restoreSessionQueue(
+            songs = resolved,
+            index = next.currentIndex.coerceIn(0, resolved.lastIndex),
+            positionMs = next.positionMs,
+        )
+        Toast.makeText(
+                requireContext().applicationContext,
+                getString(R.string.fmt_scene_switched_slot, next.slotIndex, next.name),
+                Toast.LENGTH_SHORT,
+            )
+            .show()
     }
 
     private fun updateSong(song: Song?) {

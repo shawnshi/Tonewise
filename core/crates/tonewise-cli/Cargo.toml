@@ -1,0 +1,17 @@
+[package]
+name = "tonewise-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lofty.workspace = true
+rayon.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tonewise-dsp-core = { path = "../tonewise-dsp-core" }
+tonewise-metadata = { path = "../tonewise-metadata" }
+tonewise-rules = { path = "../tonewise-rules" }
+tonewise-sync = { path = "../tonewise-sync" }
+walkdir.workspace = true

@@ -24,6 +24,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.activityViewModels
 import androidx.navigation.fragment.findNavController
 import androidx.navigation.fragment.navArgs
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dagger.hilt.android.AndroidEntryPoint
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.DialogSongDetailBinding
@@ -46,7 +47,7 @@ class SongDetailDialog : ViewBindingMaterialDialogFragment<DialogSongDetailBindi
     // Information about what song to display is initially within the navigation arguments
     // as a UID, as that is the only safe way to parcel an song.
     private val args: SongDetailDialogArgs by navArgs()
-    private val detailAdapter = SongPropertyAdapter()
+    private val detailAdapter = SongPropertyAdapter(::onPropertyAction)
 
     override fun onCreateBinding(inflater: LayoutInflater) =
         DialogSongDetailBinding.inflate(inflater)
@@ -76,5 +77,46 @@ class SongDetailDialog : ViewBindingMaterialDialogFragment<DialogSongDetailBindi
 
     private fun updateSongProperties(songProperties: List<SongProperty>) {
         detailAdapter.update(songProperties, UpdateInstructions.Replace(0))
+    }
+
+    private fun onPropertyAction(action: SongProperty.Action) {
+        when (val type = action.type) {
+            is SongProperty.ActionType.GoToAlbum -> {
+                dismiss()
+                detailModel.showAlbum(type.album)
+            }
+            is SongProperty.ActionType.GoToArtist -> {
+                dismiss()
+                detailModel.showArtist(type.song)
+            }
+            is SongProperty.ActionType.GoToGenre -> {
+                dismiss()
+                detailModel.showGenre(type.genre)
+            }
+            is SongProperty.ActionType.GoToComposer,
+            is SongProperty.ActionType.GoToConductor -> {
+                val (names, navigate) =
+                    when (type) {
+                        is SongProperty.ActionType.GoToComposer ->
+                            type.names to detailModel::showComposer
+                        is SongProperty.ActionType.GoToConductor ->
+                            type.names to detailModel::showConductor
+                    }
+                if (names.size == 1) {
+                    dismiss()
+                    navigate(names.first())
+                } else if (names.size > 1) {
+                    val items = names.toTypedArray()
+                    MaterialAlertDialogBuilder(requireContext())
+                        .setTitle(action.label)
+                        .setItems(items) { _, which ->
+                            dismiss()
+                            navigate(items[which])
+                        }
+                        .setNegativeButton(R.string.lbl_cancel, null)
+                        .show()
+                }
+            }
+        }
     }
 }

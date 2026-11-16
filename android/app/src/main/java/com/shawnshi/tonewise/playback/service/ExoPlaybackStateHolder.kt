@@ -21,6 +21,7 @@ package com.shawnshi.tonewise.playback.service
 import android.content.Context
 import android.content.Intent
 import android.media.audiofx.AudioEffect
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
@@ -33,6 +34,7 @@ import androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer
 import androidx.media3.exoplayer.BaseRenderer
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.RenderersFactory
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
@@ -51,7 +53,10 @@ import kotlinx.coroutines.yield
 import com.shawnshi.tonewise.image.ImageSettings
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.PlaybackSettings
+import com.shawnshi.tonewise.playback.audio.AudioOutputManager
+import com.shawnshi.tonewise.playback.dsp.DspRepository
 import com.shawnshi.tonewise.playback.persist.PersistenceRepository
+import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
 import com.shawnshi.tonewise.playback.state.DeferredPlayback
 import com.shawnshi.tonewise.playback.state.PlaybackCommand
@@ -72,9 +77,12 @@ class ExoPlaybackStateHolder(
     private val player: ExoPlayer,
     private val playbackManager: PlaybackStateManager,
     private val persistenceRepository: PersistenceRepository,
+    private val playCountRepository: PlayCountRepository,
     private val playbackSettings: PlaybackSettings,
     private val commandFactory: PlaybackCommand.Factory,
     private val replayGainProcessor: ReplayGainAudioProcessor,
+    private val audioOutputManager: AudioOutputManager,
+    private val dspRepository: DspRepository,
     private val musicRepository: MusicRepository,
     private val imageSettings: ImageSettings,
 ) :
@@ -88,6 +96,31 @@ class ExoPlaybackStateHolder(
     private val restoreScope = CoroutineScope(Dispatchers.IO + saveJob)
     private var currentSaveJob: Job? = null
     private var openAudioEffectSession = false
+    private var activePlaySong: Song? = null
+    private var accumulatedPlayMs = 0L
+    private var playStartElapsedMs: Long? = null
+    private var countedCurrentPlay = false
+    private var currentDecoderName: String? = null
+    private val analyticsListener =
+        object : AnalyticsListener {
+            override fun onAudioDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long,
+            ) {
+                currentDecoderName = decoderName
+                syncSignalPath(player.currentMediaItem?.song)
+            }
+
+            override fun onAudioInputFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                format: androidx.media3.common.Format,
+                decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+            ) {
+                syncSignalPath(player.currentMediaItem?.song)
+            }
+        }
 
     var sessionOngoing = false
         private set
@@ -96,16 +129,30 @@ class ExoPlaybackStateHolder(
         playbackManager.registerStateHolder(this)
         musicRepository.addUpdateListener(this)
         player.addListener(this)
+        player.addAnalyticsListener(analyticsListener)
         replayGainProcessor.attach()
+        audioOutputManager.start { bitPerfect ->
+            replayGainProcessor.setBypassed(bitPerfect)
+            reconcileAudioEffectSession(bitPerfect)
+        }
+        saveScope.launch {
+            dspRepository.config.collect {
+                audioOutputManager.refreshRoute()
+            }
+        }
         playbackSettings.registerListener(this)
         imageSettings.registerListener(this)
     }
 
     fun release() {
+        flushActivePlayTime()
+        commitPlayCountIfQualified(completedNaturally = false)
         saveJob.cancel()
         playbackManager.unregisterStateHolder(this)
         musicRepository.removeUpdateListener(this)
         player.removeListener(this)
+        player.removeAnalyticsListener(analyticsListener)
+        audioOutputManager.stop()
         replayGainProcessor.release()
         imageSettings.unregisterListener(this)
         playbackSettings.unregisterListener(this)
@@ -255,7 +302,9 @@ class ExoPlaybackStateHolder(
                 ?.let { command.queue.indexOf(it) }
                 .also { check(it != -1) { "Start song not in queue" } }
         if (command.shuffled) {
-            player.setShuffleOrder(BetterShuffleOrder(command.queue.size, startIndex ?: -1))
+            player.setShuffleOrder(
+                WorkShuffleOrder.fromSongs(command.queue, startIndex ?: -1)
+            )
         }
         val target = startIndex ?: player.currentTimeline.getFirstWindowIndex(command.shuffled)
         player.seekTo(target, C.TIME_UNSET)
@@ -269,9 +318,14 @@ class ExoPlaybackStateHolder(
         player.setShuffleModeEnabled(shuffled)
         if (player.shuffleModeEnabled) {
             // Have to manually refresh the shuffle seed and anchor it to the new current songs
-            player.setShuffleOrder(
-                BetterShuffleOrder(player.mediaItemCount, player.currentMediaItemIndex)
-            )
+            val queueSongs = (0 until player.mediaItemCount).mapNotNull { player.getMediaItemAt(it).song }
+            val order =
+                if (queueSongs.size == player.mediaItemCount) {
+                    WorkShuffleOrder.fromSongs(queueSongs, player.currentMediaItemIndex)
+                } else {
+                    BetterShuffleOrder(player.mediaItemCount, player.currentMediaItemIndex)
+                }
+            player.setShuffleOrder(order)
         }
         playbackManager.ack(this, StateAck.QueueReordered)
         deferSave()
@@ -472,13 +526,7 @@ class ExoPlaybackStateHolder(
             // Mark that we have started playing so that the notification can now be posted.
             L.d("Player has started playing")
             sessionOngoing = true
-            if (!openAudioEffectSession) {
-                // Convention to start an audioeffect session on play/pause rather than
-                // start/stop
-                L.d("Opening audio effect session")
-                broadcastAudioEffectAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
-                openAudioEffectSession = true
-            }
+            reconcileAudioEffectSession(audioOutputManager.signalPath.value.dspBypassed)
         } else if (openAudioEffectSession) {
             // Make sure to close the audio session when we stop playback.
             L.d("Closing audio effect session")
@@ -487,21 +535,105 @@ class ExoPlaybackStateHolder(
         }
     }
 
+    override fun onIsPlayingChanged(isPlaying: Boolean) {
+        super.onIsPlayingChanged(isPlaying)
+        if (isPlaying) {
+            val song = player.currentMediaItem?.song
+            if (song != null && activePlaySong != song) {
+                activePlaySong = song
+                accumulatedPlayMs = 0L
+                countedCurrentPlay = false
+            }
+            if (playStartElapsedMs == null) {
+                playStartElapsedMs = SystemClock.elapsedRealtime()
+            }
+        } else {
+            flushActivePlayTime()
+            commitPlayCountIfQualified(completedNaturally = false)
+        }
+    }
+
     override fun onPlaybackStateChanged(playbackState: Int) {
         super.onPlaybackStateChanged(playbackState)
 
-        if (playbackState == Player.STATE_ENDED && player.repeatMode == Player.REPEAT_MODE_OFF) {
-            goto(0)
-            player.pause()
+        if (playbackState == Player.STATE_ENDED) {
+            flushActivePlayTime()
+            commitPlayCountIfQualified(completedNaturally = true)
+            if (player.repeatMode == Player.REPEAT_MODE_OFF) {
+                goto(0)
+                player.pause()
+            }
         }
     }
 
     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+        flushActivePlayTime()
+        val completedNaturally =
+            reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+        commitPlayCountIfQualified(completedNaturally = completedNaturally)
+
+        activePlaySong = mediaItem?.song
+        accumulatedPlayMs = 0L
+        countedCurrentPlay = false
+        playStartElapsedMs = if (player.isPlaying) SystemClock.elapsedRealtime() else null
+
         super.onMediaItemTransition(mediaItem, reason)
+
+        syncSignalPath(mediaItem?.song)
 
         if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
             playbackManager.ack(this, StateAck.IndexMoved)
             deferSave()
+        }
+    }
+
+    private fun syncSignalPath(song: Song?) {
+        val bitPerfect =
+            audioOutputManager.updatePlaybackMetadata(
+                song = song,
+                decoderName = currentDecoderName,
+                pcmEncoding = replayGainProcessor.configuredEncoding,
+                replayGainDb = replayGainProcessor.currentAdjustmentDb,
+            )
+        replayGainProcessor.setBypassed(bitPerfect)
+        reconcileAudioEffectSession(bitPerfect)
+    }
+
+    private fun reconcileAudioEffectSession(bitPerfect: Boolean) {
+        val shouldOpen =
+            player.playWhenReady && !bitPerfect && dspRepository.config.value.externalBridgeMode
+        if (shouldOpen && !openAudioEffectSession) {
+            L.d("Opening external audio effect session")
+            broadcastAudioEffectAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
+            openAudioEffectSession = true
+        } else if (!shouldOpen && openAudioEffectSession) {
+            L.d("Closing external audio effect session")
+            broadcastAudioEffectAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION)
+            openAudioEffectSession = false
+        }
+    }
+
+    private fun flushActivePlayTime() {
+        val startedAt = playStartElapsedMs ?: return
+        val delta = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+        accumulatedPlayMs += delta
+        playStartElapsedMs = if (player.isPlaying) SystemClock.elapsedRealtime() else null
+    }
+
+    private fun commitPlayCountIfQualified(completedNaturally: Boolean) {
+        val song = activePlaySong ?: return
+        if (countedCurrentPlay) return
+        val minThresholdMs = minOf(30_000L, maxOf(1_000L, song.durationMs / 2L))
+        val qualified =
+            if (completedNaturally) {
+                accumulatedPlayMs > 0L
+            } else {
+                accumulatedPlayMs >= minThresholdMs
+            }
+        if (qualified) {
+            playCountRepository.incrementPlayCount(song)
+            countedCurrentPlay = true
         }
     }
 
@@ -556,6 +688,14 @@ class ExoPlaybackStateHolder(
     override fun onPauseOnRepeatChanged() {
         super.onPauseOnRepeatChanged()
         updatePauseOnRepeat()
+    }
+
+    override fun onReplayGainSettingsChanged() {
+        syncSignalPath(player.currentMediaItem?.song)
+    }
+
+    override fun onAudioOutputSettingsChanged() {
+        syncSignalPath(player.currentMediaItem?.song)
     }
 
     private fun updatePauseOnRepeat() {
@@ -648,27 +788,39 @@ class ExoPlaybackStateHolder(
         @ApplicationContext private val context: Context,
         private val playbackManager: PlaybackStateManager,
         private val persistenceRepository: PersistenceRepository,
+        private val playCountRepository: PlayCountRepository,
         private val playbackSettings: PlaybackSettings,
         private val commandFactory: PlaybackCommand.Factory,
         private val mediaSourceFactory: MediaSource.Factory,
         private val replayGainProcessor: ReplayGainAudioProcessor,
+        private val audioOutputManager: AudioOutputManager,
+        private val dspRepository: DspRepository,
         private val musicRepository: MusicRepository,
         private val imageSettings: ImageSettings,
     ) {
         fun create(): ExoPlaybackStateHolder {
+            val enableFloat = playbackSettings.floatOutput
+            val ffmpegSink =
+                DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloat)
+                    .setAudioProcessors(arrayOf(replayGainProcessor))
+                    .build()
+            val mediaCodecSink =
+                DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloat)
+                    .setAudioProcessors(arrayOf(replayGainProcessor))
+                    .build()
             // Since Auxio is a music player, only specify an audio renderer to save
             // battery/apk size/cache size]
             val audioRenderer = RenderersFactory { handler, _, audioListener, _, _ ->
                 arrayOf<BaseRenderer>(
-                    FfmpegAudioRenderer(handler, audioListener, replayGainProcessor),
+                    FfmpegAudioRenderer(handler, audioListener, ffmpegSink),
                     MediaCodecAudioRenderer(
                         context,
                         MediaCodecSelector.DEFAULT,
                         handler,
                         audioListener,
-                        DefaultAudioSink.Builder(context)
-                            .setAudioProcessors(arrayOf(replayGainProcessor))
-                            .build(),
+                        mediaCodecSink,
                     ),
                 )
             }
@@ -693,9 +845,12 @@ class ExoPlaybackStateHolder(
                 exoPlayer,
                 playbackManager,
                 persistenceRepository,
+                playCountRepository,
                 playbackSettings,
                 commandFactory,
                 replayGainProcessor,
+                audioOutputManager,
+                dspRepository,
                 musicRepository,
                 imageSettings,
             )

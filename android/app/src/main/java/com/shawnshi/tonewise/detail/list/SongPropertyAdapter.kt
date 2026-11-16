@@ -21,6 +21,7 @@ package com.shawnshi.tonewise.detail.list
 import android.text.format.Formatter
 import android.view.ViewGroup
 import androidx.annotation.StringRes
+import androidx.core.view.isVisible
 import androidx.recyclerview.widget.RecyclerView
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.ItemSongPropertyBinding
@@ -32,7 +33,10 @@ import com.shawnshi.tonewise.playback.formatDurationMs
 import com.shawnshi.tonewise.playback.replaygain.formatDb
 import com.shawnshi.tonewise.util.context
 import com.shawnshi.tonewise.util.inflater
+import org.oxycblt.musikr.Album
+import org.oxycblt.musikr.Genre
 import org.oxycblt.musikr.Music
+import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.fs.Format
 import org.oxycblt.musikr.fs.Path
 import org.oxycblt.musikr.tag.Date
@@ -42,7 +46,7 @@ import org.oxycblt.musikr.tag.Date
  *
  * @author Alexander Capehart (OxygenCobalt)
  */
-class SongPropertyAdapter :
+class SongPropertyAdapter(private val onAction: (SongProperty.Action) -> Unit = {}) :
     FlexibleListAdapter<SongProperty, SongPropertyViewHolder>(
         SongPropertyViewHolder.DIFF_CALLBACK
     ) {
@@ -50,7 +54,7 @@ class SongPropertyAdapter :
         SongPropertyViewHolder.from(parent)
 
     override fun onBindViewHolder(holder: SongPropertyViewHolder, position: Int) {
-        holder.bind(getItem(position))
+        holder.bind(getItem(position), onAction)
     }
 }
 
@@ -61,11 +65,31 @@ class SongPropertyAdapter :
  * @param value The value of the property.
  * @author Alexander Capehart (OxygenCobalt)
  */
-data class SongProperty(@StringRes val name: Int, val value: Value) {
+data class SongProperty(
+    @StringRes val name: Int,
+    val value: Value,
+    val action: Action? = null,
+) {
+    data class Action(@StringRes val label: Int, val type: ActionType)
+
+    sealed interface ActionType {
+        data class GoToAlbum(val album: Album) : ActionType
+
+        data class GoToArtist(val song: Song) : ActionType
+
+        data class GoToGenre(val genre: Genre) : ActionType
+
+        data class GoToComposer(val names: List<String>) : ActionType
+
+        data class GoToConductor(val names: List<String>) : ActionType
+    }
+
     sealed interface Value {
         data class MusicName(val music: Music) : Value
 
         data class MusicNames(val name: List<Music>) : Value
+
+        data class TextList(val values: List<String>) : Value
 
         data class Number(val value: Int, val subtitle: String?) : Value
 
@@ -94,7 +118,7 @@ data class SongProperty(@StringRes val name: Int, val value: Value) {
  */
 class SongPropertyViewHolder private constructor(private val binding: ItemSongPropertyBinding) :
     RecyclerView.ViewHolder(binding.root) {
-    fun bind(property: SongProperty) {
+    fun bind(property: SongProperty, onAction: (SongProperty.Action) -> Unit) {
         val context = binding.context
         binding.propertyName.hint = context.getString(property.name)
         when (property.value) {
@@ -105,6 +129,9 @@ class SongPropertyViewHolder private constructor(private val binding: ItemSongPr
             is SongProperty.Value.MusicNames -> {
                 val names = property.value.name.resolveNames(context)
                 binding.propertyValue.setText(names)
+            }
+            is SongProperty.Value.TextList -> {
+                binding.propertyValue.setText(property.value.values.joinToString(", "))
             }
             is SongProperty.Value.Number -> {
                 val value = context.getString(R.string.fmt_number, property.value.value)
@@ -150,6 +177,15 @@ class SongPropertyViewHolder private constructor(private val binding: ItemSongPr
                 binding.propertyValue.setText(value.formatDb(context))
             }
         }
+
+        val action = property.action
+        binding.propertyAction.isVisible = action != null
+        if (action != null) {
+            binding.propertyAction.text = context.getString(action.label)
+            binding.propertyAction.setOnClickListener { onAction(action) }
+        } else {
+            binding.propertyAction.setOnClickListener(null)
+        }
     }
 
     companion object {
@@ -168,7 +204,9 @@ class SongPropertyViewHolder private constructor(private val binding: ItemSongPr
         val DIFF_CALLBACK =
             object : SimpleDiffCallback<SongProperty>() {
                 override fun areContentsTheSame(oldItem: SongProperty, newItem: SongProperty) =
-                    oldItem.name == newItem.name && oldItem.value == newItem.value
+                    oldItem.name == newItem.name &&
+                        oldItem.value == newItem.value &&
+                        oldItem.action == newItem.action
             }
     }
 }

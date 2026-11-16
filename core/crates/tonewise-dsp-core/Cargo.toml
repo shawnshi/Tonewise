@@ -1,0 +1,11 @@
+[package]
+name = "tonewise-dsp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+symphonia.workspace = true
+thiserror.workspace = true
+tonewise-metadata = { path = "../tonewise-metadata" }

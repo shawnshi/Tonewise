@@ -22,6 +22,7 @@ import android.content.Context
 import kotlinx.coroutines.channels.Channel
 import org.oxycblt.musikr.BuildConfig
 import org.oxycblt.musikr.Config
+import org.oxycblt.musikr.DiscoveredPlaylist
 import org.oxycblt.musikr.Interpretation
 import org.oxycblt.musikr.MutableLibrary
 import org.oxycblt.musikr.graph.MusicGraph
@@ -30,8 +31,13 @@ import org.oxycblt.musikr.playlist.db.StoredPlaylists
 import org.oxycblt.musikr.playlist.interpret.PlaylistInterpreter
 import org.oxycblt.musikr.tag.interpret.TagInterpreter
 
+internal data class EvaluatedLibrary(
+    val library: MutableLibrary,
+    val discoveredPlaylists: List<DiscoveredPlaylist>,
+)
+
 internal interface EvaluateStep {
-    suspend fun evaluate(extractedMusic: Channel<Extracted>): MutableLibrary
+    suspend fun evaluate(extractedMusic: Channel<Extracted>): EvaluatedLibrary
 
     companion object {
         fun new(context: Context, config: Config, interpretation: Interpretation): EvaluateStep =
@@ -52,12 +58,21 @@ private class EvaluateStepImpl(
     private val storedPlaylists: StoredPlaylists,
     private val libraryFactory: LibraryFactory,
 ) : EvaluateStep {
-    override suspend fun evaluate(extractedMusic: Channel<Extracted>): MutableLibrary {
+    override suspend fun evaluate(extractedMusic: Channel<Extracted>): EvaluatedLibrary {
         val builder = MusicGraph.builder()
+        val discoveredPlaylists = mutableListOf<DiscoveredPlaylist>()
         for (extracted in extractedMusic) {
             when (extracted) {
                 is RawSong -> builder.add(tagInterpreter.interpret(extracted))
                 is RawPlaylist -> builder.add(playlistInterpreter.interpret(extracted.file))
+                is DiscoveredPlaylistItem ->
+                    discoveredPlaylists.add(
+                        DiscoveredPlaylist(
+                            uri = extracted.file.uri,
+                            path = extracted.file.path,
+                            modifiedMs = extracted.file.modifiedMs,
+                        )
+                    )
                 is NotAudio -> {}
                 is InvalidSong -> {}
             }
@@ -70,6 +85,9 @@ private class EvaluateStepImpl(
             graph.renderToGraphviz(context, fileName)
         }
 
-        return libraryFactory.create(graph, storedPlaylists, playlistInterpreter)
+        return EvaluatedLibrary(
+            libraryFactory.create(graph, storedPlaylists, playlistInterpreter),
+            discoveredPlaylists,
+        )
     }
 }

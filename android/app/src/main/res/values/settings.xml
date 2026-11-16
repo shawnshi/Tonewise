@@ -30,6 +30,8 @@
     <string name="set_key_locations_mode" translatable="false">auxio_locations_mode</string>
 
     <string name="set_key_headset_autoplay" translatable="false">auxio_headset_autoplay</string>
+    <string name="set_key_float_output" translatable="false">tonewise_float_output</string>
+    <string name="set_key_usb_bit_perfect" translatable="false">tonewise_usb_bit_perfect</string>
     <string name="set_key_replay_gain" translatable="false">auxio_replay_gain</string>
     <string name="set_key_pre_amp" translatable="false">auxio_pre_amp</string>
     <string name="set_key_pre_amp_with" translatable="false">auxio_pre_amp_with</string>

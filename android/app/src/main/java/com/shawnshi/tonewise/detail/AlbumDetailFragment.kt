@@ -218,7 +218,16 @@ class AlbumDetailFragment : DetailFragment<Album, Song>() {
                 findNavController()
                     .navigateSafe(AlbumDetailFragmentDirections.showArtistChoices(show.album.uid))
             }
-            is Show.GenreDetails,
+            is Show.GenreDetails -> {
+                L.d("Navigating to ${show.genre}")
+                findNavController()
+                    .navigateSafe(AlbumDetailFragmentDirections.showGenre(show.genre.uid))
+            }
+            is Show.SearchQuery -> {
+                L.d("Navigating to search for ${show.query}")
+                findNavController()
+                    .navigateSafe(AlbumDetailFragmentDirections.search(show.query))
+            }
             is Show.PlaylistDetails -> {
                 error("Unexpected show command $show")
             }

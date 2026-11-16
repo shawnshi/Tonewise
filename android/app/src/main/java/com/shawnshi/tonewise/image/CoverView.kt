@@ -343,13 +343,14 @@ constructor(context: Context, attrs: AttributeSet? = null, @AttrRes defStyleAttr
      * Bind a [Song]'s image to this view.
      *
      * @param song The [Song] to bind to the view.
+     * @param sharpSquare When true, bypass corner rounding for classical 1:1 album sleeves.
      */
-    fun bind(song: Song) =
+    fun bind(song: Song, sharpSquare: Boolean = false) =
         bindImpl(
             { song.cover },
             context.getString(R.string.desc_album_cover, song.album.name),
             R.drawable.ic_album_24,
-            squareishShapeAppearance,
+            if (sharpSquare) ShapeAppearanceModel.builder().build() else squareishShapeAppearance,
         )
 
     /**

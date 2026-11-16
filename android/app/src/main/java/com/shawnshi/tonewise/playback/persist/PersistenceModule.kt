@@ -32,6 +32,8 @@ import javax.inject.Singleton
 @InstallIn(SingletonComponent::class)
 interface PersistenceModule {
     @Binds fun repository(persistenceRepository: PersistenceRepositoryImpl): PersistenceRepository
+
+    @Binds fun playCountRepository(playCountRepository: PlayCountRepositoryImpl): PlayCountRepository
 }
 
 @Module

@@ -34,7 +34,9 @@ import org.oxycblt.musikr.tag.Disc
 import org.oxycblt.musikr.tag.Name
 import org.oxycblt.musikr.tag.ReleaseType
 import org.oxycblt.musikr.tag.ReplayGainAdjustment
+import org.oxycblt.musikr.tag.interpret.Naming
 import org.oxycblt.musikr.util.toUuidOrNull
+import org.oxycblt.musikr.util.update
 
 /**
  * Abstract music data. This contains universal information about all concrete music
@@ -322,6 +324,34 @@ interface Song : Music {
      * [Genre] name was specified in the metadata.
      */
     val genres: List<Genre>
+    /** The composers parsed from metadata tags, if any. */
+    val composers: List<String>
+    /** The conductors parsed from metadata tags, if any. */
+    val conductors: List<String>
+    /** Normalized DJ vocals classification (`vocal`, `instrumental`, `unknown`), if present. */
+    val djVocals: String?
+        get() = null
+    /** Normalized DJ energy classification (`low`, `medium`, `high`, `unknown`), if present. */
+    val djEnergy: String?
+        get() = null
+    /** Normalized DJ scene tags (`focus`, `coding`, `relax`, `energy`, `pop`). */
+    val djScenes: List<String>
+        get() = emptyList()
+    /** Classical work title (`WORK` / `TIT1`), if present. */
+    val workName: String?
+        get() = null
+    /** Classical movement title (`MOVEMENTNAME` / `MVNM`), if present. */
+    val movementName: String?
+        get() = null
+    /** Classical movement index (`MOVEMENTNUMBER` / `MVIN`), if present. */
+    val movementNumber: Int?
+        get() = null
+    /** MusicBrainz Work MBID (`MUSICBRAINZ_WORKID`), if present. */
+    val musicBrainzWorkId: String?
+        get() = null
+    /** Mood tags (`TMOO` / `MOOD`) parsed from metadata, if any. */
+    val moods: List<String>
+        get() = emptyList()
 }
 
 /**
@@ -400,4 +430,46 @@ interface Playlist : MusicParent {
     val durationMs: Long
     /** Useful information to quickly obtain a (single) cover for a Genre. */
     val covers: CoverCollection
+}
+
+/** Role classification for a person entity rendered in detail views. */
+enum class PersonRole {
+    ARTIST,
+    COMPOSER,
+    CONDUCTOR,
+}
+
+/**
+ * First-class [Artist] adapter for composers and conductors aggregated from [Song] metadata so
+ * they can open in their own detail screen, play/shuffle works, and display role-aware biographies.
+ */
+class PersonArtist(
+    val role: PersonRole,
+    val rawName: String,
+    override val songs: Set<Song>,
+    override val explicitAlbums: Set<Album>,
+    override val implicitAlbums: Set<Album> = emptySet(),
+    override val genres: List<Genre>,
+    override val covers: CoverCollection,
+    override val name: Name.Known = Naming.simple().name(rawName, null),
+) : Artist {
+    override val uid: Music.UID =
+        Music.UID.auxio(Music.UID.Item.ARTIST) {
+            update(role.name)
+            update(rawName.trim())
+        }
+
+    override val durationMs: Long = songs.sumOf { it.durationMs }
+
+    override fun hashCode(): Int {
+        var result = uid.hashCode()
+        result = 31 * result + role.hashCode()
+        result = 31 * result + songs.hashCode()
+        return result
+    }
+
+    override fun equals(other: Any?) =
+        other is PersonArtist && uid == other.uid && role == other.role && songs == other.songs
+
+    override fun toString() = "PersonArtist(role=$role, uid=$uid, name=$rawName)"
 }

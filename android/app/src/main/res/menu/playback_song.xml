@@ -15,6 +15,16 @@
         android:title="@string/lbl_album_details"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_composer_details"
+        android:icon="@drawable/ic_person_24"
+        android:title="@string/lbl_composer_details"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_conductor_details"
+        android:icon="@drawable/ic_person_24"
+        android:title="@string/lbl_conductor_details"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_detail"
         android:icon="@drawable/ic_details_24"
         android:title="@string/lbl_song_detail"

@@ -29,6 +29,22 @@
 
     </PreferenceCategory>
 
+    <PreferenceCategory android:title="@string/set_audio_output">
+
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:key="@string/set_key_float_output"
+            app:summary="@string/set_float_output_desc"
+            app:title="@string/set_float_output" />
+
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:key="@string/set_key_usb_bit_perfect"
+            app:summary="@string/set_usb_bit_perfect_desc"
+            app:title="@string/set_usb_bit_perfect" />
+
+    </PreferenceCategory>
+
     <PreferenceCategory android:title="@string/set_replay_gain">
 
         <com.shawnshi.tonewise.settings.ui.IntListPreference

@@ -55,6 +55,16 @@ internal data class PreSong(
     val preAlbum: PreAlbum,
     val preArtists: List<PreArtist>,
     val preGenres: List<PreGenre>,
+    val composers: List<String>,
+    val conductors: List<String>,
+    val djVocals: String? = null,
+    val djEnergy: String? = null,
+    val djScenes: List<String> = emptyList(),
+    val workName: String? = null,
+    val movementName: String? = null,
+    val movementNumber: Int? = null,
+    val musicBrainzWorkId: String? = null,
+    val moods: List<String> = emptyList(),
 )
 
 internal data class PreAlbum(

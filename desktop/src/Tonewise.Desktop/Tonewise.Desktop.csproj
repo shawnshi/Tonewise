@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>Tonewise.Desktop</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.10" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.250401001" />
+    <PackageReference Include="SkiaSharp.Views.WinUI" Version="3.119.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Tonewise.Interop\Tonewise.Interop.csproj" />
+    <ProjectReference Include="..\Tonewise.Audio\Tonewise.Audio.csproj" />
+    <ProjectReference Include="..\Tonewise.SyncHost\Tonewise.SyncHost.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\core\target\release\tonewise_core.dll" Condition="Exists('..\..\..\core\target\release\tonewise_core.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>tonewise_core.dll</Link>
+    </None>
+  </ItemGroup>
+</Project>

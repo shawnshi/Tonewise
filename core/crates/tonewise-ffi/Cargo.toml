@@ -1,0 +1,17 @@
+[package]
+name = "tonewise-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tonewise_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tonewise-metadata = { path = "../tonewise-metadata" }
+tonewise-rules = { path = "../tonewise-rules" }
+tonewise-sync = { path = "../tonewise-sync" }

@@ -1,22 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
-<com.google.android.material.textfield.TextInputLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
-    android:id="@+id/property_name"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:orientation="vertical"
     android:paddingStart="@dimen/spacing_medium"
     android:paddingTop="@dimen/spacing_small"
     android:paddingEnd="@dimen/spacing_medium"
-    android:paddingBottom="@dimen/spacing_small"
-    app:expandedHintEnabled="false"
-    tools:hint="@string/lbl_path">
+    android:paddingBottom="@dimen/spacing_small">
 
-    <com.shawnshi.tonewise.detail.ReadOnlyTextInput
-        android:id="@+id/property_value"
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/property_name"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textAlignment="viewStart"
-        tools:text="file.mp3" />
+        app:expandedHintEnabled="false"
+        tools:hint="@string/lbl_path">
 
-</com.google.android.material.textfield.TextInputLayout>
+        <com.shawnshi.tonewise.detail.ReadOnlyTextInput
+            android:id="@+id/property_value"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textAlignment="viewStart"
+            tools:text="file.mp3" />
+
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/property_action"
+        style="@style/Widget.Material3.Button.TextButton.Icon"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end"
+        android:minHeight="0dp"
+        android:paddingTop="@dimen/spacing_tiny"
+        android:paddingBottom="@dimen/spacing_tiny"
+        android:visibility="gone"
+        app:icon="@drawable/ic_open_20"
+        app:iconGravity="end"
+        tools:text="@string/lbl_composer_details"
+        tools:visibility="visible" />
+
+</LinearLayout>

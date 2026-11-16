@@ -36,7 +36,7 @@ import org.oxycblt.musikr.tag.Date
 import org.oxycblt.musikr.util.correctWhitespace
 import org.oxycblt.musikr.util.splitEscaped
 
-@Database(entities = [CachedFileData::class], version = 70, exportSchema = false)
+@Database(entities = [CachedFileData::class], version = 73, exportSchema = false)
 internal abstract class CacheDatabase : RoomDatabase() {
     abstract fun readDao(): CacheReadDao
 
@@ -107,10 +107,20 @@ internal data class CachedFileData(
     val albumArtistMusicBrainzIds: List<String>?,
     val albumArtistNames: List<String>?,
     val albumArtistSortNames: List<String>?,
+    val composerNames: List<String>?,
+    val conductorNames: List<String>?,
     val genreNames: List<String>?,
     val replayGainTrackAdjustment: Float?,
     val replayGainAlbumAdjustment: Float?,
     val coverId: String?,
+    val djVocals: String? = null,
+    val djEnergy: String? = null,
+    val djScenes: List<String>? = null,
+    val workName: String? = null,
+    val movementName: String? = null,
+    val movementNumber: Int? = null,
+    val musicBrainzWorkId: String? = null,
+    val moods: List<String>? = null,
 ) {
     object Converters {
         @TypeConverter

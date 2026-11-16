@@ -6,6 +6,26 @@
     android:layout_height="wrap_content"
     tools:parentTag="androidx.constraintlayout.widget.ConstraintLayout">
 
+    <TextView
+        android:id="@+id/playback_scene_pill"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:clickable="true"
+        android:focusable="true"
+        android:ellipsize="end"
+        android:fontFamily="monospace"
+        android:maxLines="1"
+        android:paddingStart="@dimen/spacing_small"
+        android:paddingEnd="@dimen/spacing_small"
+        android:paddingTop="4dp"
+        android:paddingBottom="2dp"
+        android:textColor="?attr/colorPrimary"
+        android:textSize="11sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="▲ Focus · Slot #1 (12)" />
+
     <com.shawnshi.tonewise.image.CoverView
         android:id="@+id/playback_cover"
         style="@style/Widget.Auxio.Image.Small"
@@ -14,7 +34,7 @@
         app:enableSelectionBadge="false"
         app:layout_constraintBottom_toTopOf="@+id/playback_progress_container"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        app:layout_constraintTop_toBottomOf="@+id/playback_scene_pill" />
 
     <TextView
         android:id="@+id/playback_song"
@@ -52,7 +72,7 @@
         android:layout_marginEnd="@dimen/spacing_tiny"
         app:layout_constraintBottom_toTopOf="@+id/playback_progress_container"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="parent">
+        app:layout_constraintTop_toBottomOf="@+id/playback_scene_pill">
 
         <com.google.android.material.button.MaterialButtonGroup
             android:id="@+id/playback_controls_container"

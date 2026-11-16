@@ -60,6 +60,11 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
     // Nothing to disable in song menus.
     override fun getDisabledItemIds(menu: Menu.ForSong) = setOf<Int>()
 
+    override fun getHiddenItemIds(menu: Menu.ForSong): Set<Int> = buildSet {
+        if (menu.song.composers.isEmpty()) add(R.id.action_composer_details)
+        if (menu.song.conductors.isEmpty()) add(R.id.action_conductor_details)
+    }
+
     override fun updateMenu(binding: DialogMenuBinding, menu: Menu.ForSong) {
         val context = requireContext()
         binding.menuCover.bind(menu.song)
@@ -83,6 +88,12 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
             R.id.action_playlist_add -> musicModel.addToPlaylist(menu.song)
             R.id.action_artist_details -> detailModel.showArtist(menu.song)
             R.id.action_album_details -> detailModel.showAlbum(menu.song.album)
+            R.id.action_composer_details -> {
+                menu.song.composers.firstOrNull()?.let(detailModel::showComposer)
+            }
+            R.id.action_conductor_details -> {
+                menu.song.conductors.firstOrNull()?.let(detailModel::showConductor)
+            }
             R.id.action_share -> requireContext().share(menu.song)
             R.id.action_detail -> detailModel.showSong(menu.song)
             else -> error("Unexpected menu item selected $item")

@@ -170,6 +170,15 @@ internal fun Metadata.composerNames() =
         ?: id3v2["TCOM"]
         ?: id3v2["TXXX:COMPOSER"])
 
+internal fun Metadata.conductorNames() =
+    (xiph["CONDUCTORS"]
+        ?: xiph["CONDUCTOR"]
+        ?: mp4["----:COM.APPLE.ITUNES:CONDUCTORS"]
+        ?: mp4["----:COM.APPLE.ITUNES:CONDUCTOR"]
+        ?: id3v2["TXXX:CONDUCTORS"]
+        ?: id3v2["TPE3"]
+        ?: id3v2["TXXX:CONDUCTOR"])
+
 internal fun Metadata.composerSortNames() =
     (xiph["COMPOSERSSORT"]
         ?: xiph["COMPOSERS_SORT"]
@@ -238,6 +247,92 @@ internal fun Metadata.albumArtistSortNames() =
 
 // Genre
 internal fun Metadata.genreNames() = xiph["GENRE"] ?: mp4["©gen"] ?: mp4["gnre"] ?: id3v2["TCON"]
+
+// Tonewise DJ metadata
+private val VALID_DJ_VOCALS = setOf("vocal", "instrumental", "unknown")
+private val VALID_DJ_ENERGY = setOf("low", "medium", "high", "unknown")
+private val VALID_DJ_SCENES = setOf("focus", "coding", "relax", "energy", "pop")
+
+private fun Metadata.customTag(key: String) =
+    xiph[key] ?: mp4["----:COM.APPLE.ITUNES:$key"] ?: id3v2["TXXX:$key"]
+
+internal fun Metadata.djVocals(): String? =
+    customTag("DJ_VOCALS")
+        ?.asSequence()
+        ?.map { it.trim().lowercase() }
+        ?.firstOrNull { it in VALID_DJ_VOCALS }
+
+internal fun Metadata.djEnergy(): String? =
+    customTag("DJ_ENERGY")
+        ?.asSequence()
+        ?.map { it.trim().lowercase() }
+        ?.firstOrNull { it in VALID_DJ_ENERGY }
+
+internal fun Metadata.djScenes(): List<String> =
+    customTag("DJ_SCENE")
+        .orEmpty()
+        .asSequence()
+        .flatMap { raw -> raw.split(';', ',', '/', '\u0000').asSequence() }
+        .map { it.trim().lowercase() }
+        .filter { it in VALID_DJ_SCENES }
+        .distinct()
+        .toList()
+
+// Tonewise Classical 4-tuple & Mood metadata
+internal fun Metadata.workName(): String? =
+    (xiph["WORK"]
+            ?: mp4["©wrk"]
+            ?: mp4["----:COM.APPLE.ITUNES:WORK"]
+            ?: id3v2["TIT1"]
+            ?: id3v2["TXXX:WORK"])
+        ?.firstOrNull()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+internal fun Metadata.movementName(): String? =
+    (xiph["MOVEMENTNAME"]
+            ?: xiph["MOVEMENT"]
+            ?: mp4["©mvn"]
+            ?: id3v2["MVNM"]
+            ?: id3v2["TXXX:MOVEMENTNAME"])
+        ?.firstOrNull()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+internal fun Metadata.movementNumber(): Int? =
+    (xiph["MOVEMENTNUMBER"]
+            ?: mp4["©mvi"]
+            ?: id3v2["MVIN"]
+            ?: id3v2["TXXX:MOVEMENTNUMBER"])
+        ?.firstOrNull()
+        ?.substringBefore('/')
+        ?.trim()
+        ?.toIntOrNull()
+
+internal fun Metadata.musicBrainzWorkId(): String? =
+    (xiph["MUSICBRAINZ_WORKID"]
+            ?: xiph["MUSICBRAINZ WORK ID"]
+            ?: mp4["----:COM.APPLE.ITUNES:MUSICBRAINZ WORK ID"]
+            ?: mp4["----:COM.APPLE.ITUNES:MUSICBRAINZ_WORKID"]
+            ?: id3v2["TXXX:MUSICBRAINZ WORK ID"]
+            ?: id3v2["TXXX:MUSICBRAINZ_WORKID"])
+        ?.firstOrNull()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+internal fun Metadata.moods(): List<String> =
+    (xiph["MOOD"]
+            ?: xiph["TMOO"]
+            ?: mp4["----:COM.APPLE.ITUNES:MOOD"]
+            ?: id3v2["TMOO"]
+            ?: id3v2["TXXX:MOOD"])
+        .orEmpty()
+        .asSequence()
+        .flatMap { raw -> raw.split(';', ',', '/', '\u0000').asSequence() }
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
+        .toList()
 
 // Compilation Flag
 internal fun Metadata.isCompilation() =

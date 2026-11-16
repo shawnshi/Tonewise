@@ -19,10 +19,13 @@
 package org.oxycblt.musikr
 
 import android.content.Context
+import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import org.oxycblt.musikr.fs.Path
 import org.oxycblt.musikr.pipeline.EvaluateStep
+import org.oxycblt.musikr.pipeline.EvaluatedLibrary
 import org.oxycblt.musikr.pipeline.ExploreStep
 import org.oxycblt.musikr.pipeline.Explored
 import org.oxycblt.musikr.pipeline.ExtractStep
@@ -74,9 +77,13 @@ interface Musikr {
     }
 }
 
+/** An external playlist file discovered in a playlist directory during music indexing. */
+data class DiscoveredPlaylist(val uri: Uri, val path: Path, val modifiedMs: Long)
+
 /** Simple library handle returned by [Musikr.run]. */
 interface LibraryResult {
     val library: MutableLibrary
+    val discoveredPlaylists: List<DiscoveredPlaylist>
 
     /**
      * Clean up expired resources. This should be done as soon as possible after music loading to
@@ -139,14 +146,19 @@ private class MusikrImpl(
                 }
                 onProgress(IndexingProgress.Indeterminate)
             }
-        val library = evaluateStep.evaluate(trackedExtractedChannel)
+        val evaluated = evaluateStep.evaluate(trackedExtractedChannel)
         merge(exploredTask, extractedTask, trackedExploredTask, trackedExtractedTask).await()
-        LibraryResultImpl(config, library)
+        LibraryResultImpl(config, evaluated)
     }
 }
 
-private class LibraryResultImpl(private val config: Config, override val library: MutableLibrary) :
-    LibraryResult {
+private class LibraryResultImpl(
+    private val config: Config,
+    private val evaluated: EvaluatedLibrary,
+) : LibraryResult {
+    override val library: MutableLibrary = evaluated.library
+    override val discoveredPlaylists: List<DiscoveredPlaylist> = evaluated.discoveredPlaylists
+
     override suspend fun cleanup() {
         config.storage.covers.cleanup(library.songs.mapNotNull { it.cover })
     }

@@ -73,16 +73,48 @@ abstract class M3U {
         /** The mime type used for M3U files by the android system. */
         const val MIME_TYPE = "audio/x-mpegurl"
 
+        private val M3U_MIME_TYPES =
+            setOf(
+                MIME_TYPE,
+                "audio/mpegurl",
+                "application/vnd.apple.mpegurl",
+                "application/x-mpegurl",
+                "application/mpegurl",
+            )
+
+        fun isM3uFile(fileName: String?, mimeType: String?): Boolean {
+            val normalizedName = fileName?.lowercase()
+            if (normalizedName != null) {
+                if (normalizedName.startsWith(".")) {
+                    return false
+                }
+                if (normalizedName.endsWith(".m3u") || normalizedName.endsWith(".m3u8")) {
+                    return true
+                }
+            }
+            val normalizedMime = mimeType?.lowercase()
+            return normalizedMime != null && normalizedMime in M3U_MIME_TYPES
+        }
+
+        fun isInPlaylistDirectory(path: Path): Boolean =
+            path.directory.components.components.any {
+                it.equals("playlist", ignoreCase = true) ||
+                    it.equals("playlists", ignoreCase = true)
+            }
+
         internal fun from(context: Context): M3U = M3UImpl(VolumeManager.from(context))
+
+        internal fun from(volumeManager: VolumeManager): M3U = M3UImpl(volumeManager)
     }
 }
 
 private class M3UImpl(private val volumeManager: VolumeManager) : M3U() {
     override fun read(stream: InputStream, workingDirectory: Path): ImportedPlaylist? {
         val volumes = volumeManager.getVolumes()
-        val reader = BufferedReader(InputStreamReader(stream))
+        val reader = BufferedReader(InputStreamReader(stream, Charsets.UTF_8))
         val paths = mutableListOf<PossiblePaths>()
         var name: String? = null
+        var isFirstLine = true
 
         consumeFile@ while (true) {
             var path: String?
@@ -91,9 +123,12 @@ private class M3UImpl(private val volumeManager: VolumeManager) : M3U() {
                 // prefixed with "#", and then a relative/absolute path or url to the file.
                 // We don't really care about the metadata except for the playlist name, so
                 // we discard everything but that.
-                val currentLine =
-                    (reader.readLine() ?: break@consumeFile).correctWhitespace()
-                        ?: continue@collectMetadata
+                var rawLine = reader.readLine() ?: break@consumeFile
+                if (isFirstLine) {
+                    isFirstLine = false
+                    rawLine = rawLine.removePrefix("\uFEFF")
+                }
+                val currentLine = rawLine.correctWhitespace() ?: continue@collectMetadata
                 if (currentLine.startsWith("#")) {
                     // Metadata entries are roughly structured
                     val split = currentLine.split(":", limit = 2)

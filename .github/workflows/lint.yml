@@ -35,6 +35,11 @@ jobs:
       uses: android-actions/setup-android@v3
     - name: Install Android SDK packages
       run: sdkmanager --install "platforms;android-37" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+    - name: Set up Rust toolchain for tonewise-core
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build tonewise-core desktop library for JNI parity tests
+      shell: pwsh
+      run: .\scripts\build-core-desktop.ps1
     - name: Check formatting with spotless
       working-directory: android
       run: .\gradlew.bat spotlessCheck

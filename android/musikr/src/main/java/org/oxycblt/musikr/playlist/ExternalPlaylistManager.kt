@@ -107,8 +107,7 @@ private class ExternalPlaylistManagerImpl(
                 }
                 // Strip extension
                 val fileName = filePath.name ?: return imported
-                val split = fileName.split(".")
-                var newName = split[0]
+                var newName = fileName.substringBeforeLast('.').ifEmpty { fileName }
                 // Replace delimiters with space
                 newName = newName.replace(Regex("[_-]"), " ")
                 // Replace long stretches of whitespace with one space

@@ -35,6 +35,13 @@ jobs:
       uses: android-actions/setup-android@v3
     - name: Install Android SDK packages
       run: sdkmanager --install "platforms;android-37" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+    - name: Set up Rust toolchain for tonewise-core
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+    - name: Build tonewise-core Android JNI libraries
+      shell: pwsh
+      run: .\scripts\build-core-android.ps1
     - name: Set up MSYS2 for Android FFmpeg build
       uses: msys2/setup-msys2@v2
       with:

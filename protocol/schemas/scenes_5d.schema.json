@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shawnshi/Tonewise/protocol/schemas/scenes_5d.schema.json",
+  "title": "Tonewise 5D Scenes Configuration",
+  "type": "object",
+  "required": ["schema_version", "scenes"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "scenes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/SceneCard" }
+    }
+  },
+  "$defs": {
+    "SceneCard": {
+      "type": "object",
+      "required": ["id", "title", "updated_at_ms", "sort_arc", "rule"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "title": { "type": "string", "minLength": 1 },
+        "subtitle": { "type": "string" },
+        "accent_hex": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "updated_at_ms": { "type": "integer", "minimum": 0 },
+        "deleted": { "type": "boolean", "default": false },
+        "bound_m3u8": { "type": ["string", "null"] },
+        "sort_arc": {
+          "type": "string",
+          "enum": ["flat", "energy_asc", "energy_desc_sleep", "work_shuffle", "rediscovery_90d"]
+        },
+        "tempo_null_passthrough": { "type": "boolean", "default": true },
+        "rule": { "$ref": "#/$defs/RuleExpr" }
+      }
+    },
+    "RuleExpr": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["all"],
+          "additionalProperties": false,
+          "properties": {
+            "all": { "type": "array", "items": { "$ref": "#/$defs/RuleExpr" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["any"],
+          "additionalProperties": false,
+          "properties": {
+            "any": { "type": "array", "items": { "$ref": "#/$defs/RuleExpr" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["not"],
+          "additionalProperties": false,
+          "properties": {
+            "not": { "$ref": "#/$defs/RuleExpr" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["predicate"],
+          "additionalProperties": false,
+          "properties": {
+            "predicate": { "$ref": "#/$defs/Predicate" }
+          }
+        }
+      ]
+    },
+    "Predicate": {
+      "type": "object",
+      "required": ["field", "op", "values"],
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "type": "string",
+          "enum": ["dj_scene", "dj_vocals", "dj_energy", "tempo_bucket", "mood_cluster", "genre", "min_rating", "unplayed_days_gte"]
+        },
+        "op": {
+          "type": "string",
+          "enum": ["in", "not_in", "eq", "gte"]
+        },
+        "values": {
+          "type": "array",
+          "items": { "type": ["string", "number"] }
+        }
+      }
+    }
+  }
+}

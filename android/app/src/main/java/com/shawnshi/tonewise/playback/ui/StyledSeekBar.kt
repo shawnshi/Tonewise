@@ -54,6 +54,11 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         binding.seekBarSlider.setWaveEnabled(enabled)
     }
 
+    /** Configures a 150-point precomputed RMS waveform envelope, or null to restore wavy mode. */
+    fun setWaveformEnvelope(envelope: FloatArray?) {
+        binding.seekBarSlider.setWaveformEnvelope(envelope)
+    }
+
     /** The current [Listener] attached to this instance. */
     var listener: Listener? = null
 

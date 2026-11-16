@@ -40,6 +40,7 @@ import org.oxycblt.musikr.fs.path.VolumeManager
 import org.oxycblt.musikr.fs.saf.contentResolverSafe
 import org.oxycblt.musikr.fs.saf.useQuery
 import org.oxycblt.musikr.fs.track.LocationObserver
+import org.oxycblt.musikr.playlist.m3u.M3U
 import org.oxycblt.musikr.util.tryAsyncWith
 
 /**
@@ -136,6 +137,99 @@ private constructor(
                     channel.send(deviceFile)
                 }
             }
+
+            explorePlaylists(channel, projection)
+        }
+    }
+
+    private suspend fun explorePlaylists(channel: Channel<File>, projection: Array<String>) {
+        var selector =
+            "${AOSPMediaStore.Files.FileColumns.SIZE} > 0 AND (" +
+                "${AOSPMediaStore.MediaColumns.DISPLAY_NAME} LIKE '%.m3u' OR " +
+                "${AOSPMediaStore.MediaColumns.DISPLAY_NAME} LIKE '%.m3u8' OR " +
+                "${AOSPMediaStore.MediaColumns.MIME_TYPE} IN (?, ?, ?, ?, ?))"
+        val args =
+            mutableListOf(
+                "audio/x-mpegurl",
+                "audio/mpegurl",
+                "application/vnd.apple.mpegurl",
+                "application/x-mpegurl",
+                "application/mpegurl",
+            )
+
+        when (query.mode) {
+            FilterMode.INCLUDE -> {
+                val pathSelector =
+                    pathInterpreterFactory.createSelector(query.filtered.map { it.path })
+                if (pathSelector != null) {
+                    selector += " AND (${pathSelector.template})"
+                    args.addAll(pathSelector.args)
+                }
+            }
+            FilterMode.EXCLUDE -> {
+                val pathSelector =
+                    pathInterpreterFactory.createSelector(query.filtered.map { it.path })
+                if (pathSelector != null) {
+                    selector += " AND NOT (${pathSelector.template})"
+                    args.addAll(pathSelector.args)
+                }
+            }
+        }
+
+        val filesUri = AOSPMediaStore.Files.getContentUri("external")
+        try {
+            context.contentResolverSafe.useQuery(
+                filesUri,
+                projection,
+                selector,
+                args.toTypedArray(),
+            ) { cursor ->
+                val pathInterpreter = pathInterpreterFactory.wrap(cursor)
+                val idIndex = cursor.getColumnIndexOrThrow(AOSPMediaStore.Files.FileColumns._ID)
+                val mimeTypeIndex =
+                    cursor.getColumnIndexOrThrow(AOSPMediaStore.MediaColumns.MIME_TYPE)
+                val sizeIndex = cursor.getColumnIndexOrThrow(AOSPMediaStore.MediaColumns.SIZE)
+                val dateAddedIndex =
+                    cursor.getColumnIndexOrThrow(AOSPMediaStore.MediaColumns.DATE_ADDED)
+                val dateModifiedIndex =
+                    cursor.getColumnIndexOrThrow(AOSPMediaStore.MediaColumns.DATE_MODIFIED)
+
+                while (cursor.moveToNext()) {
+                    val path =
+                        try {
+                            pathInterpreter.extract()
+                        } catch (e: Exception) {
+                            null
+                        } ?: continue
+                    val mimeType = cursor.getStringOrNull(mimeTypeIndex) ?: M3U.MIME_TYPE
+                    if (
+                        !M3U.isM3uFile(path.name, mimeType) ||
+                            !M3U.isInPlaylistDirectory(path)
+                    ) {
+                        continue
+                    }
+
+                    val id = cursor.getLong(idIndex)
+                    val uri = Uri.withAppendedPath(filesUri, id.toString())
+                    val size = cursor.getLong(sizeIndex)
+                    val dateAdded = cursor.getLong(dateAddedIndex) * 1000
+                    val dateModified = cursor.getLong(dateModifiedIndex) * 1000
+
+                    channel.send(
+                        File(
+                            uri = uri,
+                            path = path,
+                            modifiedMs = dateModified,
+                            mimeType = mimeType,
+                            size = size,
+                            addedMs = ForwardDateAdded(dateAdded),
+                            parent = null,
+                        )
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            // Some OEMs restrict MediaStore.Files queries; SAF still handles external playlists.
         }
     }
 

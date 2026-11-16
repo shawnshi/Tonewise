@@ -23,6 +23,8 @@ import dagger.Module
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import com.shawnshi.tonewise.playback.dsp.DspConfigSource
+import com.shawnshi.tonewise.playback.dsp.DspRepository
 import com.shawnshi.tonewise.playback.state.PlaybackStateManager
 import com.shawnshi.tonewise.playback.state.PlaybackStateManagerImpl
 
@@ -34,4 +36,6 @@ interface PlaybackModule {
     fun stateManager(playbackManager: PlaybackStateManagerImpl): PlaybackStateManager
 
     @Binds fun settings(playbackSettings: PlaybackSettingsImpl): PlaybackSettings
+
+    @Binds fun dspConfigSource(repo: DspRepository): DspConfigSource
 }

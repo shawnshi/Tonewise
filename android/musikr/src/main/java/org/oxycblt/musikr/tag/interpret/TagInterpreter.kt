@@ -42,6 +42,12 @@ internal interface TagInterpreter {
 }
 
 private class TagInterpreterImpl(private val interpretation: Interpretation) : TagInterpreter {
+    private companion object {
+        val VALID_DJ_VOCALS = setOf("vocal", "instrumental", "unknown")
+        val VALID_DJ_ENERGY = setOf("low", "medium", "high", "unknown")
+        val VALID_DJ_SCENES = setOf("focus", "coding", "relax", "energy", "pop")
+    }
+
     override fun interpret(song: RawSong): PreSong {
         val individualPreArtists =
             makePreArtists(
@@ -69,6 +75,16 @@ private class TagInterpreterImpl(private val interpretation: Interpretation) : T
             individualPreArtists.ifEmpty { albumPreArtists }.ifEmpty { listOf(unknownPreArtist()) }
         val rawGenres =
             makePreGenres(song.tags, interpretation).ifEmpty { listOf(unknownPreGenre()) }
+        val composers =
+            interpretation.separators
+                .split(song.tags.composerNames)
+                .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+                .distinct()
+        val conductors =
+            interpretation.separators
+                .split(song.tags.conductorNames)
+                .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+                .distinct()
         val uri = song.file.uri
 
         val songNameOrFile = song.tags.name ?: requireNotNull(song.file.path.name)
@@ -153,6 +169,23 @@ private class TagInterpreterImpl(private val interpretation: Interpretation) : T
             preAlbum = preAlbum,
             preArtists = rawArtists,
             preGenres = rawGenres,
+            composers = composers,
+            conductors = conductors,
+            djVocals = song.tags.djVocals?.trim()?.lowercase()?.takeIf { it in VALID_DJ_VOCALS },
+            djEnergy = song.tags.djEnergy?.trim()?.lowercase()?.takeIf { it in VALID_DJ_ENERGY },
+            djScenes =
+                song.tags.djScenes
+                    .asSequence()
+                    .flatMap { raw -> raw.split(';', ',', '/', '\u0000').asSequence() }
+                    .map { it.trim().lowercase() }
+                    .filter { it in VALID_DJ_SCENES }
+                    .distinct()
+                    .toList(),
+            workName = song.tags.workName?.trim()?.takeIf { it.isNotEmpty() },
+            movementName = song.tags.movementName?.trim()?.takeIf { it.isNotEmpty() },
+            movementNumber = song.tags.movementNumber,
+            musicBrainzWorkId = song.tags.musicBrainzWorkId?.trim()?.takeIf { it.isNotEmpty() },
+            moods = song.tags.moods.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
             cover = song.cover,
         )
     }

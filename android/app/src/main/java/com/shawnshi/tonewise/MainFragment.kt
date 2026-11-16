@@ -559,11 +559,12 @@ class MainFragment :
         when (show) {
             is Show.SongAlbumDetails,
             is Show.ArtistDetails,
-            is Show.AlbumDetails -> playbackModel.openMain()
+            is Show.AlbumDetails,
+            is Show.GenreDetails,
+            is Show.SearchQuery -> playbackModel.openMain()
             is Show.SongDetails,
             is Show.SongArtistDecision,
             is Show.AlbumArtistDecision,
-            is Show.GenreDetails,
             is Show.PlaylistDetails,
             null -> {}
         }

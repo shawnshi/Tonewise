@@ -71,7 +71,7 @@ constructor(private val listSettings: ListSettings, private val musicRepository:
                 when (it) {
                     is Song -> library.findSong(it.uid)
                     is Album -> library.findAlbum(it.uid)
-                    is Artist -> library.findArtist(it.uid)
+                    is Artist -> musicRepository.findArtist(it.uid)
                     is Genre -> library.findGenre(it.uid)
                     is Playlist -> library.findPlaylist(it.uid)
                 }

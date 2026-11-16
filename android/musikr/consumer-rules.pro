@@ -7,3 +7,4 @@
 -keep class org.oxycblt.musikr.metadata.MetadataResult$NoMetadata { *; }
 -keep class org.oxycblt.musikr.metadata.MetadataResult$NotAudio { *; }
 -keep class org.oxycblt.musikr.metadata.MetadataResult$ProviderFailed { *; }
+-keep class org.oxycblt.musikr.core.TonewiseCoreJNI { *; }

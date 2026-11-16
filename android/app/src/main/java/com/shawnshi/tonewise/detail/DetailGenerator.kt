@@ -30,6 +30,8 @@ import org.oxycblt.musikr.Artist
 import org.oxycblt.musikr.Genre
 import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.MusicParent
+import org.oxycblt.musikr.PersonArtist
+import org.oxycblt.musikr.PersonRole
 import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.tag.Disc
@@ -62,16 +64,21 @@ interface DetailGenerator {
 
 class DetailGeneratorFactoryImpl
 @Inject
-constructor(private val listSettings: ListSettings, private val musicRepository: MusicRepository) :
+constructor(
+    private val listSettings: ListSettings,
+    private val musicRepository: MusicRepository,
+    private val musicBioRepository: MusicBioRepository,
+) :
     DetailGenerator.Factory {
     override fun create(invalidator: DetailGenerator.Invalidator): DetailGenerator =
-        DetailGeneratorImpl(invalidator, listSettings, musicRepository)
+        DetailGeneratorImpl(invalidator, listSettings, musicRepository, musicBioRepository)
 }
 
 private class DetailGeneratorImpl(
     private val invalidator: DetailGenerator.Invalidator,
     private val listSettings: ListSettings,
     private val musicRepository: MusicRepository,
+    private val musicBioRepository: MusicBioRepository,
 ) : DetailGenerator, MusicRepository.UpdateListener, ListSettings.Listener {
     override fun attach() {
         listSettings.registerListener(this)
@@ -130,11 +137,19 @@ private class DetailGeneratorImpl(
             } else {
                 DetailSection.Songs(songs)
             }
-        return Detail(album, listOf(section))
+        val sections =
+            listOf(
+                DetailSection.Biography(
+                    R.string.lbl_album_bio,
+                    musicBioRepository.getAlbumBio(album),
+                ),
+                section,
+            )
+        return Detail(album, sections)
     }
 
     override fun artist(uid: Music.UID): Detail<Artist>? {
-        val artist = musicRepository.library?.findArtist(uid) ?: return null
+        val artist = musicRepository.findArtist(uid) ?: return null
         val grouping =
             artist.explicitAlbums.groupByTo(sortedMapOf()) {
                 // Remap the complicated ReleaseType data structure into detail sections
@@ -161,10 +176,19 @@ private class DetailGeneratorImpl(
                 artist.implicitAlbums.toMutableList()
         }
 
-        val sections =
-            grouping.mapTo(mutableListOf<DetailSection>()) { (category, albums) ->
-                DetailSection.Albums(category, ARTIST_ALBUM_SORT.albums(albums))
+        val bioTitleRes =
+            when ((artist as? PersonArtist)?.role) {
+                PersonRole.COMPOSER -> R.string.lbl_composer_bio
+                PersonRole.CONDUCTOR -> R.string.lbl_conductor_bio
+                else -> R.string.lbl_artist_bio
             }
+        val sections =
+            mutableListOf<DetailSection>(
+                DetailSection.Biography(bioTitleRes, musicBioRepository.getArtistBio(artist))
+            )
+        grouping.mapTo(sections) { (category, albums) ->
+            DetailSection.Albums(category, ARTIST_ALBUM_SORT.albums(albums))
+        }
         if (artist.songs.isNotEmpty()) {
             val songs = DetailSection.Songs(listSettings.artistSongSort.songs(artist.songs))
             sections.add(songs)
@@ -199,6 +223,11 @@ data class Detail<P : MusicParent>(val parent: P, val sections: List<DetailSecti
 sealed interface DetailSection {
     val order: Int
     val stringRes: Int
+
+    data class Biography(@StringRes override val stringRes: Int, val text: String) :
+        DetailSection {
+        override val order = -1
+    }
 
     abstract class PlainSection<T : Music> : DetailSection {
         abstract val items: List<T>

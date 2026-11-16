@@ -19,6 +19,7 @@
 package com.shawnshi.tonewise.list.recycler
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.view.ViewGroup
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.divider.MaterialDivider
@@ -35,6 +36,7 @@ import com.shawnshi.tonewise.list.adapter.SimpleDiffCallback
 import com.shawnshi.tonewise.music.areNamesTheSame
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
+import com.shawnshi.tonewise.playback.persist.PlayCountRepositoryImpl
 import com.shawnshi.tonewise.util.context
 import com.shawnshi.tonewise.util.getPlural
 import com.shawnshi.tonewise.util.inflater
@@ -43,6 +45,7 @@ import org.oxycblt.musikr.Artist
 import org.oxycblt.musikr.Genre
 import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.Song
+import org.oxycblt.musikr.tag.Name
 
 /**
  * A [RecyclerView.ViewHolder] that displays a [Song]. Use [from] to create an instance.
@@ -61,7 +64,10 @@ class SongViewHolder private constructor(private val binding: ItemSongBinding) :
         listener.bind(song, this, menuButton = binding.songMenu)
         binding.songAlbumCover.bind(song)
         binding.songName.text = song.name.resolve(binding.context)
-        binding.songInfo.text = song.artists.resolveNames(binding.context)
+        val artists = song.artists.resolveNames(binding.context)
+        val album = song.album.name.resolve(binding.context)
+        binding.songInfo.text = binding.context.getString(R.string.fmt_two, artists, album)
+        binding.songMeta.text = formatSongMeta(binding.context, song)
     }
 
     override fun updatePlayingIndicator(isActive: Boolean, isPlaying: Boolean) {
@@ -86,11 +92,34 @@ class SongViewHolder private constructor(private val binding: ItemSongBinding) :
         fun from(parent: ViewGroup) =
             SongViewHolder(ItemSongBinding.inflate(parent.context.inflater, parent, false))
 
+        fun formatSongMeta(
+            context: Context,
+            song: Song,
+            playCount: Int = PlayCountRepositoryImpl.getPlayCount(context, song),
+        ): String {
+            val year =
+                song.date?.year?.let { context.getString(R.string.fmt_number, it) }
+                    ?: context.getString(R.string.def_date)
+            val knownGenres = song.genres.filter { it.name is Name.Known }
+            val genre =
+                when {
+                    knownGenres.isNotEmpty() -> knownGenres.resolveNames(context)
+                    song.genres.isNotEmpty() -> song.genres.resolveNames(context)
+                    else -> context.getString(R.string.def_genre)
+                }
+            val plays = context.getString(R.string.fmt_play_count, playCount)
+            return context.getString(R.string.fmt_three, year, genre, plays)
+        }
+
         /** A comparator that can be used with DiffUtil. */
         val DIFF_CALLBACK =
             object : SimpleDiffCallback<Song>() {
                 override fun areContentsTheSame(oldItem: Song, newItem: Song) =
-                    oldItem.name == newItem.name && oldItem.artists.areNamesTheSame(newItem.artists)
+                    oldItem.name == newItem.name &&
+                        oldItem.artists.areNamesTheSame(newItem.artists) &&
+                        oldItem.album.name == newItem.album.name &&
+                        oldItem.date == newItem.date &&
+                        oldItem.genres.areNamesTheSame(newItem.genres)
             }
     }
 }

@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.R
+import com.shawnshi.tonewise.detail.list.BioItem
 import com.shawnshi.tonewise.detail.list.DiscDivider
 import com.shawnshi.tonewise.detail.list.DiscHeader
 import com.shawnshi.tonewise.detail.list.EditHeader
@@ -43,6 +44,7 @@ import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.MusicType
 import com.shawnshi.tonewise.playback.PlaySong
 import com.shawnshi.tonewise.playback.PlaybackSettings
+import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.util.Event
 import com.shawnshi.tonewise.util.MutableEvent
 import com.shawnshi.tonewise.util.unlikelyToBeNull
@@ -53,6 +55,7 @@ import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.MusicParent
 import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.Song
+import org.oxycblt.musikr.tag.Name
 import timber.log.Timber as L
 
 /**
@@ -68,6 +71,8 @@ constructor(
     private val listSettings: ListSettings,
     private val musicRepository: MusicRepository,
     private val playbackSettings: PlaybackSettings,
+    private val playCountRepository: PlayCountRepository,
+    private val musicBioRepository: MusicBioRepository,
     detailGeneratorFactory: DetailGenerator.Factory,
 ) : ViewModel(), DetailGenerator.Invalidator {
     /**
@@ -186,6 +191,31 @@ constructor(
 
     init {
         detailGenerator.attach()
+        viewModelScope.launch {
+            playCountRepository.updates.collect {
+                currentSong.value?.let(::refreshAudioInfo)
+                if (it > 0L) {
+                    if (currentAlbum.value != null) {
+                        invalidate(MusicType.ALBUMS, null)
+                    }
+                    if (currentArtist.value != null) {
+                        invalidate(MusicType.ARTISTS, null)
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            musicBioRepository.updates.collect {
+                if (it > 0L) {
+                    if (currentAlbum.value != null) {
+                        invalidate(MusicType.ALBUMS, null)
+                    }
+                    if (currentArtist.value != null) {
+                        invalidate(MusicType.ARTISTS, null)
+                    }
+                }
+            }
+        }
     }
 
     override fun onCleared() {
@@ -290,6 +320,39 @@ constructor(
      * @param playlist The [Playlist] to navigate with.
      */
     fun showPlaylist(playlist: Playlist) = showImpl(Show.PlaylistDetails(playlist))
+
+    /** Navigate to a composer by name, opening its aggregated [PersonArtist] detail view. */
+    fun showComposer(name: String) {
+        val composer = musicRepository.findComposer(name)
+        if (composer != null) {
+            showArtist(composer)
+        } else {
+            showPerson(name)
+        }
+    }
+
+    /** Navigate to a conductor by name, opening its aggregated [PersonArtist] detail view. */
+    fun showConductor(name: String) {
+        val conductor = musicRepository.findConductor(name)
+        if (conductor != null) {
+            showArtist(conductor)
+        } else {
+            showPerson(name)
+        }
+    }
+
+    /** Navigate to a composer or conductor by name, opening an existing [Artist] or search. */
+    fun showPerson(name: String) {
+        val artist =
+            musicRepository.library?.artists?.firstOrNull {
+                (it.name as? Name.Known)?.raw?.equals(name, ignoreCase = true) == true
+            }
+        if (artist != null) {
+            showArtist(artist)
+        } else {
+            showImpl(Show.SearchQuery(name))
+        }
+    }
 
     private fun showImpl(show: Show) {
         val existing = toShow.flow.value
@@ -507,15 +570,89 @@ constructor(
     private fun refreshAudioInfo(song: Song) {
         currentSongProperties.value = buildList {
             add(SongProperty(R.string.lbl_name, SongProperty.Value.MusicName(song)))
-            add(SongProperty(R.string.lbl_album, SongProperty.Value.MusicName(song.album)))
-            add(SongProperty(R.string.lbl_artists, SongProperty.Value.MusicNames(song.artists)))
-            add(SongProperty(R.string.lbl_genres, SongProperty.Value.MusicNames(song.genres)))
+            add(
+                SongProperty(
+                    R.string.lbl_play_count,
+                    SongProperty.Value.Number(playCountRepository.getPlayCount(song), null),
+                )
+            )
+            add(
+                SongProperty(
+                    R.string.lbl_album,
+                    SongProperty.Value.MusicName(song.album),
+                    SongProperty.Action(
+                        R.string.lbl_album_details,
+                        SongProperty.ActionType.GoToAlbum(song.album),
+                    ),
+                )
+            )
+            add(
+                SongProperty(
+                    R.string.lbl_artists,
+                    SongProperty.Value.MusicNames(song.artists),
+                    SongProperty.Action(
+                        R.string.lbl_artist_details,
+                        SongProperty.ActionType.GoToArtist(song),
+                    ),
+                )
+            )
+            if (song.composers.isNotEmpty()) {
+                add(
+                    SongProperty(
+                        R.string.lbl_composer,
+                        SongProperty.Value.TextList(song.composers),
+                        SongProperty.Action(
+                            R.string.lbl_composer_details,
+                            SongProperty.ActionType.GoToComposer(song.composers),
+                        ),
+                    )
+                )
+            }
+            if (song.conductors.isNotEmpty()) {
+                add(
+                    SongProperty(
+                        R.string.lbl_conductor,
+                        SongProperty.Value.TextList(song.conductors),
+                        SongProperty.Action(
+                            R.string.lbl_conductor_details,
+                            SongProperty.ActionType.GoToConductor(song.conductors),
+                        ),
+                    )
+                )
+            }
+            val primaryGenre = song.genres.firstOrNull { it.name is Name.Known }
+            add(
+                SongProperty(
+                    R.string.lbl_genres,
+                    SongProperty.Value.MusicNames(song.genres),
+                    primaryGenre?.let {
+                        SongProperty.Action(
+                            R.string.lbl_genre_details,
+                            SongProperty.ActionType.GoToGenre(it),
+                        )
+                    },
+                )
+            )
             song.date?.let { add(SongProperty(R.string.lbl_date, SongProperty.Value.ItemDate(it))) }
             song.track?.let {
                 add(SongProperty(R.string.lbl_track, SongProperty.Value.Number(it, null)))
             }
             song.disc?.let {
                 add(SongProperty(R.string.lbl_disc, SongProperty.Value.Number(it.number, it.name)))
+            }
+            if (song.djScenes.isNotEmpty()) {
+                add(
+                    SongProperty(
+                        R.string.lbl_dj_scene,
+                        SongProperty.Value.TextList(song.djScenes),
+                    )
+                )
+            }
+            song.djVocals?.let {
+                add(SongProperty(R.string.lbl_dj_vocals, SongProperty.Value.TextList(listOf(it))))
+            }
+            song.djEnergy?.let {
+                add(SongProperty(R.string.lbl_dj_energy, SongProperty.Value.TextList(listOf(it))))
             }
             add(SongProperty(R.string.lbl_path, SongProperty.Value.ItemPath(song.path)))
             add(SongProperty(R.string.lbl_size, SongProperty.Value.Size(song.size)))
@@ -554,11 +691,14 @@ constructor(
         for ((i, section) in detail.sections.withIndex()) {
             val items =
                 when (section) {
+                    is DetailSection.Biography ->
+                        if (section.text.isNotBlank()) listOf(BioItem(section.stringRes, section.text))
+                        else emptyList()
                     is DetailSection.PlainSection<*> -> {
                         val header =
                             if (section is DetailSection.Songs) songHeader(section.stringRes)
                             else BasicHeader(section.stringRes)
-                        if (newList.isNotEmpty()) {
+                        if (newList.isNotEmpty() && newList.last() !is BioItem) {
                             newList.add(PlainDivider(header))
                         }
                         newList.add(header)
@@ -566,7 +706,7 @@ constructor(
                     }
                     is DetailSection.Discs -> {
                         val header = SortHeader(section.stringRes)
-                        if (newList.isNotEmpty()) {
+                        if (newList.isNotEmpty() && newList.last() !is BioItem) {
                             newList.add(PlainDivider(header))
                         }
                         newList.add(header)
@@ -689,4 +829,11 @@ sealed interface Show {
      * @param playlist The [Playlist] to navigate with.
      */
     data class PlaylistDetails(val playlist: Playlist) : Show
+
+    /**
+     * Navigate to the search screen pre-populated with [query].
+     *
+     * @param query The query to search for.
+     */
+    data class SearchQuery(val query: String) : Show
 }

@@ -200,8 +200,19 @@ class GenreDetailFragment : DetailFragment<Genre, Music>() {
                     .navigateSafe(GenreDetailFragmentDirections.showArtistChoices(show.album.uid))
             }
             is Show.GenreDetails -> {
-                L.d("Navigated to this genre")
-                detailModel.toShow.consume()
+                if (show.genre == detailModel.currentGenre.value) {
+                    L.d("Navigated to this genre")
+                    detailModel.toShow.consume()
+                } else {
+                    L.d("Navigating to ${show.genre}")
+                    findNavController()
+                        .navigateSafe(GenreDetailFragmentDirections.showGenre(show.genre.uid))
+                }
+            }
+            is Show.SearchQuery -> {
+                L.d("Navigating to search for ${show.query}")
+                findNavController()
+                    .navigateSafe(GenreDetailFragmentDirections.search(show.query))
             }
             is Show.PlaylistDetails -> {
                 error("Unexpected show command $show")

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shawnshi/Tonewise/protocol/schemas/history.schema.json",
+  "title": "Tonewise Append-Only Playback History & Mutation Event Schemas",
+  "$defs": {
+    "HistoryEvent": {
+      "type": "object",
+      "required": ["track_uid", "utc_ts_ms", "device_id", "listened_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "track_uid": { "type": "string", "minLength": 1 },
+        "utc_ts_ms": { "type": "integer", "minimum": 0 },
+        "device_id": { "type": "string", "minLength": 1 },
+        "listened_ms": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "boolean", "default": true },
+        "scene_id": { "type": ["string", "null"] }
+      }
+    },
+    "TagMutationEvent": {
+      "type": "object",
+      "required": ["track_uid", "field", "value", "lww_ts_ms", "device_id"],
+      "additionalProperties": false,
+      "properties": {
+        "track_uid": { "type": "string", "minLength": 1 },
+        "field": {
+          "type": "string",
+          "enum": ["dj_scene", "dj_vocals", "dj_energy", "tempo_bucket", "mood", "rating"]
+        },
+        "value": {},
+        "lww_ts_ms": { "type": "integer", "minimum": 0 },
+        "device_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "SessionSlot": {
+      "type": "object",
+      "required": ["slot_index", "name", "updated_at_ms", "queue_track_uids", "current_index", "position_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "slot_index": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "name": { "type": "string", "minLength": 1 },
+        "scene_id": { "type": ["string", "null"] },
+        "updated_at_ms": { "type": "integer", "minimum": 0 },
+        "queue_track_uids": { "type": "array", "items": { "type": "string" } },
+        "current_index": { "type": "integer", "minimum": 0 },
+        "position_ms": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

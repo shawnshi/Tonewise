@@ -2,6 +2,7 @@
 <resources>
     <!-- Info namespace | App labels -->
     <string name="info_app_name" translatable="false">Tonewise</string>
+    <string name="info_app_tagline" translatable="false">Structured for works. Built for scenes. Bit-perfect to the ear.</string>
 
     <!-- Format Namespace | Value formatting/plurals -->
     <string name="fmt_two" translatable="false">%1$s • %2$s</string>
@@ -18,8 +19,4 @@
 
     <!-- Pkg Namespace | Dynamic package names -->
     <string name="pkg_authority_cover">com.shawnshi.tonewise.image.CoverProvider</string>
-
-    <!-- Supporter Namespace | Sponsor usernames  -->
-    <string name="sup_bkkellyh">bkkellyh - $500!</string>
-    <string name="sup_gruntstumper">gruntstumper - $100</string>
 </resources>

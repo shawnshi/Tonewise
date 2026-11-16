@@ -21,6 +21,9 @@ package com.shawnshi.tonewise.playback
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.os.Bundle
@@ -35,16 +38,27 @@ import androidx.dynamicanimation.animation.SpringForce
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import dagger.hilt.android.AndroidEntryPoint
+import java.util.Locale
+import javax.inject.Inject
 import kotlin.math.abs
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentPlaybackPanelBinding
+import com.shawnshi.tonewise.detail.BookletPdfDialog
 import com.shawnshi.tonewise.detail.DetailViewModel
+import com.shawnshi.tonewise.detail.WorkRecordingsDialog
 import com.shawnshi.tonewise.list.ListViewModel
+import com.shawnshi.tonewise.list.recycler.SongViewHolder
+import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
+import com.shawnshi.tonewise.playback.audio.SignalPathDialog
+import com.shawnshi.tonewise.playback.audio.SignalPathState
+import com.shawnshi.tonewise.playback.audio.SignalQualityTier
+import com.shawnshi.tonewise.playback.dsp.DspControlDialog
 import com.shawnshi.tonewise.playback.queue.QueueViewModel
 import com.shawnshi.tonewise.playback.state.RepeatMode
 import com.shawnshi.tonewise.playback.ui.StyledSeekBar
+import com.shawnshi.tonewise.playback.ui.clock.DeskClockDialog
 import com.shawnshi.tonewise.playback.ui.stepper.Direction
 import com.shawnshi.tonewise.playback.ui.stepper.StepperOverlay
 import com.shawnshi.tonewise.playback.ui.swiper.CarouselTransformer
@@ -75,6 +89,7 @@ class PlaybackPanelFragment :
     Toolbar.OnMenuItemClickListener,
     StyledSeekBar.Listener,
     StepperOverlay.Listener {
+    @Inject lateinit var musicRepository: MusicRepository
     private val coverPagerAdapter = CoverPagerAdapter(this)
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
@@ -144,9 +159,16 @@ class PlaybackPanelFragment :
             isSelected = true
             setOnClickListener { navigateToCurrentArtist() }
         }
-        binding.playbackAlbum?.apply {
+        binding.playbackAlbum.apply {
             isSelected = true
             setOnClickListener { navigateToCurrentAlbum() }
+        }
+        binding.playbackMeta.apply {
+            isSelected = true
+            setOnClickListener { playbackModel.song.value?.let(detailModel::showSong) }
+        }
+        binding.playbackQualityPill.setOnClickListener {
+            SignalPathDialog.newInstance().show(parentFragmentManager, SignalPathDialog.TAG)
         }
 
         binding.playbackSeekBar?.listener = this
@@ -174,7 +196,9 @@ class PlaybackPanelFragment :
         }
 
         // --- VIEWMODEL SETUP --
-        collectImmediately(playbackModel.song, ::updateSong)
+        collectImmediately(playbackModel.song, playbackModel.currentPlayCount, ::updateSong)
+        collectImmediately(playbackModel.signalPath, ::updateSignalPath)
+        collectImmediately(playbackModel.waveformEnvelope, ::updateWaveform)
         collectImmediately(playbackModel.parent, ::updateParent)
         collectImmediately(playbackModel.positionDs, ::updatePosition)
         collectImmediately(playbackModel.repeatMode, ::updateRepeat)
@@ -223,30 +247,33 @@ class PlaybackPanelFragment :
         binding.playbackRepeat.clearPendingIcon()
         binding.playbackSong.isSelected = false
         binding.playbackArtist.isSelected = false
-        binding.playbackAlbum?.isSelected = false
+        binding.playbackAlbum.isSelected = false
+        binding.playbackMeta.isSelected = false
+        binding.playbackQualityPill.setOnClickListener(null)
         binding.playbackToolbar.setOnMenuItemClickListener(null)
         userAwarePagerCallback?.release()
         binding.playbackPager?.adapter = null
     }
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
+        if (item.itemId == R.id.action_work_recordings) {
+            WorkRecordingsDialog.newInstance().show(parentFragmentManager, WorkRecordingsDialog.TAG)
+            return true
+        }
+        if (item.itemId == R.id.action_booklet_pdf) {
+            BookletPdfDialog.newInstance().show(parentFragmentManager, BookletPdfDialog.TAG)
+            return true
+        }
+        if (item.itemId == R.id.action_desk_clock) {
+            DeskClockDialog.newInstance().show(parentFragmentManager, DeskClockDialog.TAG)
+            return true
+        }
+        if (item.itemId == R.id.action_signal_path) {
+            SignalPathDialog.newInstance().show(parentFragmentManager, SignalPathDialog.TAG)
+            return true
+        }
         if (item.itemId == R.id.action_open_equalizer) {
-            // Launch the system equalizer app, if possible.
-            L.d("Launching equalizer")
-            val equalizerIntent =
-                Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL)
-                    // Provide audio session ID so the equalizer can show options for this app
-                    // in particular.
-                    .putExtra(AudioEffect.EXTRA_AUDIO_SESSION, playbackModel.currentAudioSessionId)
-                    // Signal music type so that the equalizer settings are appropriate for
-                    // music playback.
-                    .putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
-            try {
-                requireNotNull(equalizerLauncher) { "Equalizer panel launcher was not available" }
-                    .launch(equalizerIntent)
-            } catch (e: ActivityNotFoundException) {
-                requireContext().showToast(R.string.err_no_app)
-            }
+            DspControlDialog.newInstance().show(parentFragmentManager, DspControlDialog.TAG)
             return true
         }
 
@@ -257,7 +284,7 @@ class PlaybackPanelFragment :
         playbackModel.seekTo(positionDs)
     }
 
-    private fun updateSong(song: Song?) {
+    private fun updateSong(song: Song?, playCount: Int) {
         if (song == null) {
             // Nothing to do.
             return
@@ -266,10 +293,81 @@ class PlaybackPanelFragment :
         val binding = requireBinding()
         val context = requireContext()
         L.d("Updating song display: $song")
-        binding.playbackSong.text = song.name.resolve(context)
-        binding.playbackArtist.text = song.artists.resolveNames(context)
-        binding.playbackAlbum?.text = song.album.name.resolve(context)
+        val work = song.workName?.trim()?.takeIf { it.isNotEmpty() }
+        val classicalWork = if (work != null) musicRepository.findWorkForSong(song) else null
+        if (work != null) {
+            val mvtTitle = song.movementName?.trim()?.takeIf { it.isNotEmpty() } ?: song.name.resolve(context)
+            val mvtPrefix = song.movementNumber?.let { "$it. " } ?: ""
+            val mvtLabel = "$mvtPrefix$mvtTitle"
+            binding.playbackSong.typeface = Typeface.SERIF
+            binding.playbackSong.text =
+                if (mvtLabel.equals(work, ignoreCase = true)) work else "$work · $mvtLabel"
+
+            val composerPart = song.composers.firstOrNull()?.takeIf { it.isNotBlank() }
+            val conductorPart = song.conductors.firstOrNull()?.takeIf { it.isNotBlank() }
+            val performerPart = song.artists.resolveNames(context)
+            val roleLine =
+                listOfNotNull(composerPart, performerPart.takeIf { it.isNotBlank() }, conductorPart)
+                    .distinct()
+                    .joinToString(" · ")
+            binding.playbackArtist.text = roleLine.ifEmpty { performerPart }
+        } else {
+            binding.playbackSong.typeface = Typeface.DEFAULT
+            binding.playbackSong.text = song.name.resolve(context)
+            binding.playbackArtist.text = song.artists.resolveNames(context)
+        }
+        binding.playbackAlbum.text = song.album.name.resolve(context)
+
+        val baseMeta = SongViewHolder.formatSongMeta(context, song, playCount)
+        if (classicalWork != null && classicalWork.recordings.isNotEmpty()) {
+            val pill = context.getString(R.string.fmt_classical_recordings_pill, classicalWork.recordings.size)
+            binding.playbackMeta.text = if (baseMeta.isNotEmpty()) "$baseMeta · $pill" else pill
+            binding.playbackMeta.setOnClickListener {
+                WorkRecordingsDialog.newInstance().show(parentFragmentManager, WorkRecordingsDialog.TAG)
+            }
+        } else {
+            binding.playbackMeta.text = baseMeta
+            binding.playbackMeta.setOnClickListener {
+                playbackModel.song.value?.let(detailModel::showSong)
+            }
+        }
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
+    }
+
+    private fun updateSignalPath(state: SignalPathState) {
+        val pill = binding?.playbackQualityPill ?: return
+        val codec = state.sourceCodec ?: "PCM"
+        val rate =
+            if (state.sourceSampleRateHz > 0) {
+                String.format(Locale.US, "%.1f kHz", state.sourceSampleRateHz / 1000.0)
+            } else {
+                "-- kHz"
+            }
+        val (tierText, accentHex) =
+            when (state.qualityTier) {
+                SignalQualityTier.BIT_PERFECT -> "BIT-PERFECT" to "#2EC27E"
+                SignalQualityTier.HIGH_RES_FLOAT -> "HI-RES FLOAT" to "#4EA8DE"
+                SignalQualityTier.SYSTEM_MIXER -> "SYS MIXER" to "#E5A50A"
+            }
+        val rgText =
+            if (!state.dspBypassed && abs(state.replayGainDb) > 0.05f) {
+                String.format(Locale.US, "RG %+.1f dB", state.replayGainDb)
+            } else if (state.dspBypassed) {
+                "DSP BYPASS"
+            } else {
+                state.dspSummaryLabel
+            }
+        pill.text = "$codec · $rate · $rgText · $tierText"
+        val accentColor = Color.parseColor(accentHex)
+        pill.setTextColor(accentColor)
+        val density = pill.resources.displayMetrics.density
+        pill.background =
+            GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 999f * density
+                setColor((accentColor and 0x00FFFFFF) or 0x22000000)
+                setStroke((1f * density).toInt().coerceAtLeast(1), (accentColor and 0x00FFFFFF) or 0x88000000.toInt())
+            }
     }
 
     private fun updateParent(parent: MusicParent?) {
@@ -281,6 +379,10 @@ class PlaybackPanelFragment :
 
     private fun updatePosition(positionDs: Long) {
         requireBinding().playbackSeekBar?.positionDs = positionDs
+    }
+
+    private fun updateWaveform(envelope: FloatArray?) {
+        requireBinding().playbackSeekBar?.setWaveformEnvelope(envelope)
     }
 
     private fun updateRepeat(repeatMode: RepeatMode) {

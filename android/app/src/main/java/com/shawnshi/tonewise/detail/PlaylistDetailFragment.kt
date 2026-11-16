@@ -321,7 +321,14 @@ class PlaylistDetailFragment :
                 detailModel.toShow.consume()
             }
             is Show.GenreDetails -> {
-                error("Unexpected show command $show")
+                L.d("Navigating to ${show.genre}")
+                findNavController()
+                    .navigateSafe(PlaylistDetailFragmentDirections.showGenre(show.genre.uid))
+            }
+            is Show.SearchQuery -> {
+                L.d("Navigating to search for ${show.query}")
+                findNavController()
+                    .navigateSafe(PlaylistDetailFragmentDirections.search(show.query))
             }
             null -> {}
         }

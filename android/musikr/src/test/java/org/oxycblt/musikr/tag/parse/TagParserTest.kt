@@ -174,6 +174,58 @@ class TagParserTest {
         assertEquals(listOf("composer-artist-mbid"), tags.artistMusicBrainzIds)
     }
 
+    @Test
+    fun tagParser_djTags() {
+        val xiphMeta =
+            createTestMetadata(
+                xiphTags =
+                    mapOf(
+                        "DJ_VOCALS" to listOf("Unknown"),
+                        "DJ_ENERGY" to listOf("HIGH"),
+                        "DJ_SCENE" to listOf("Focus; coding, relax / invalid; ENERGY; pop"),
+                    )
+            )
+        val xiphTags = tagParser.parse(xiphMeta)
+        assertEquals("unknown", xiphTags.djVocals)
+        assertEquals("high", xiphTags.djEnergy)
+        assertEquals(listOf("focus", "coding", "relax", "energy", "pop"), xiphTags.djScenes)
+
+        val id3Meta =
+            createTestMetadata(
+                id3v2Tags =
+                    mapOf(
+                        "TXXX:DJ_VOCALS" to listOf("instrumental"),
+                        "TXXX:DJ_ENERGY" to listOf("unknown"),
+                        "TXXX:DJ_SCENE" to listOf("coding,focus"),
+                    )
+            )
+        val id3Tags = tagParser.parse(id3Meta)
+        assertEquals("instrumental", id3Tags.djVocals)
+        assertEquals("unknown", id3Tags.djEnergy)
+        assertEquals(listOf("coding", "focus"), id3Tags.djScenes)
+    }
+
+    @Test
+    fun tagParser_classicalAndMoodTags() {
+        val id3Meta =
+            createTestMetadata(
+                id3v2Tags =
+                    mapOf(
+                        "TIT1" to listOf("Symphony No. 7 in A Major, Op. 92"),
+                        "MVNM" to listOf("II. Allegretto"),
+                        "MVIN" to listOf("2/4"),
+                        "TMOO" to listOf("Focus; Intense"),
+                        "TXXX:MUSICBRAINZ WORK ID" to listOf("work-mbid-92"),
+                    )
+            )
+        val parsed = tagParser.parse(id3Meta)
+        assertEquals("Symphony No. 7 in A Major, Op. 92", parsed.workName)
+        assertEquals("II. Allegretto", parsed.movementName)
+        assertEquals(2, parsed.movementNumber)
+        assertEquals("work-mbid-92", parsed.musicBrainzWorkId)
+        assertEquals(listOf("Focus", "Intense"), parsed.moods)
+    }
+
     private fun createTestMetadata(
         id3v2Tags: Map<String, List<String>> = emptyMap(),
         xiphTags: Map<String, List<String>> = emptyMap(),

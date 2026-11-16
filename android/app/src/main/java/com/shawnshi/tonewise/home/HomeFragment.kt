@@ -59,6 +59,7 @@ import com.shawnshi.tonewise.music.PlaylistDecision
 import com.shawnshi.tonewise.music.PlaylistMessage
 import com.shawnshi.tonewise.playback.PlaybackDecision
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.sync.ScenesAndSyncDialog
 import com.shawnshi.tonewise.ui.FadingToolbarOffsetListener
 import com.shawnshi.tonewise.util.collect
 import com.shawnshi.tonewise.util.collectImmediately
@@ -191,6 +192,11 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
             R.id.action_search -> {
                 L.d("Navigating to search")
                 findNavController().navigateSafe(HomeFragmentDirections.search())
+                true
+            }
+            R.id.action_scenes_sync -> {
+                ScenesAndSyncDialog.newInstance()
+                    .show(parentFragmentManager, ScenesAndSyncDialog.TAG)
                 true
             }
             R.id.action_settings -> {
@@ -433,6 +439,10 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                 L.d("Navigating to ${show.playlist}")
                 findNavController()
                     .navigateSafe(HomeFragmentDirections.showPlaylist(show.playlist.uid))
+            }
+            is Show.SearchQuery -> {
+                L.d("Navigating to search for ${show.query}")
+                findNavController().navigateSafe(HomeFragmentDirections.search(show.query))
             }
             null -> {}
         }

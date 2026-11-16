@@ -28,7 +28,10 @@ import com.shawnshi.tonewise.list.Item
 import com.shawnshi.tonewise.list.SelectableListListener
 import com.shawnshi.tonewise.list.adapter.SelectionIndicatorAdapter
 import com.shawnshi.tonewise.list.adapter.SimpleDiffCallback
+import com.shawnshi.tonewise.list.recycler.SongViewHolder
+import com.shawnshi.tonewise.music.areNamesTheSame
 import com.shawnshi.tonewise.music.resolve
+import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.util.context
 import com.shawnshi.tonewise.util.inflater
 import org.oxycblt.musikr.Album
@@ -159,6 +162,7 @@ private class ArtistSongViewHolder private constructor(private val binding: Item
         binding.songAlbumCover.bind(song)
         binding.songName.text = song.name.resolve(binding.context)
         binding.songInfo.text = song.album.name.resolve(binding.context)
+        binding.songMeta.text = SongViewHolder.formatSongMeta(binding.context, song)
     }
 
     override fun updatePlayingIndicator(isActive: Boolean, isPlaying: Boolean) {
@@ -187,7 +191,10 @@ private class ArtistSongViewHolder private constructor(private val binding: Item
         val DIFF_CALLBACK =
             object : SimpleDiffCallback<Song>() {
                 override fun areContentsTheSame(oldItem: Song, newItem: Song) =
-                    oldItem.name == newItem.name && oldItem.album.name == newItem.album.name
+                    oldItem.name == newItem.name &&
+                        oldItem.album.name == newItem.album.name &&
+                        oldItem.date == newItem.date &&
+                        oldItem.genres.areNamesTheSame(newItem.genres)
             }
     }
 }

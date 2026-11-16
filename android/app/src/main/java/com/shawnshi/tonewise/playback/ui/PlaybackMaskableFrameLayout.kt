@@ -34,12 +34,24 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleRes: Int = -1
     MaskableFrameLayout(context, attrs, defStyleRes) {
     @Inject lateinit var uiSettings: UISettings
 
+    private val defaultShapeAppearanceModel: ShapeAppearanceModel
+
     init {
         // The parent FrameLayout will have already fetched/applied a rounded shape appearance
         // so in non-round mode we just force it back to sharp
         if (!uiSettings.roundMode) {
             shapeAppearanceModel = ShapeAppearanceModel.builder().build()
         }
+        defaultShapeAppearanceModel = shapeAppearanceModel
+    }
+
+    fun setSharpSquare(sharp: Boolean) {
+        shapeAppearanceModel =
+            if (sharp) {
+                ShapeAppearanceModel.builder().build()
+            } else {
+                defaultShapeAppearanceModel
+            }
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {

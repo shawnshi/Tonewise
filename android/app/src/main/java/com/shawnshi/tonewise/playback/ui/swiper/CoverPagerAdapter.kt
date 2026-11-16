@@ -58,7 +58,9 @@ class CoverViewHolder private constructor(private val binding: ItemCoverBinding)
      * @param listener An [StepperOverlay.Listener] to bind fast seek interactions to.
      */
     fun bind(song: Song, listener: StepperOverlay.Listener) {
-        binding.cover.bind(song)
+        val isClassical = !song.workName.isNullOrBlank()
+        binding.root.setSharpSquare(isClassical)
+        binding.cover.bind(song, sharpSquare = isClassical)
         binding.coverFastSeekOverlay.listener = listener
     }
 
@@ -76,7 +78,7 @@ class CoverViewHolder private constructor(private val binding: ItemCoverBinding)
         val DIFF_CALLBACK =
             object : SimpleDiffCallback<Song>() {
                 override fun areContentsTheSame(oldItem: Song, newItem: Song) =
-                    oldItem.cover == newItem.cover
+                    oldItem.cover == newItem.cover && oldItem.workName == newItem.workName
             }
     }
 }

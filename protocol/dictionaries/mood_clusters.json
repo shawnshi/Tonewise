@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "clusters": [
+    {
+      "id": "calm_relaxed",
+      "label_zh": "静谧松弛簇",
+      "label_en": "Calm & Relaxed",
+      "synonyms": [
+        "calm",
+        "chill",
+        "mellow",
+        "soothing",
+        "peaceful",
+        "serene",
+        "tranquil",
+        "gentle",
+        "relaxed",
+        "ambient",
+        "meditative"
+      ]
+    },
+    {
+      "id": "bright_joyful",
+      "label_zh": "明快愉悦簇",
+      "label_en": "Bright & Joyful",
+      "synonyms": [
+        "cheerful",
+        "happy",
+        "upbeat",
+        "bright",
+        "sunny",
+        "playful",
+        "joyful",
+        "optimistic",
+        "warm_bright",
+        "uplifting"
+      ]
+    },
+    {
+      "id": "deep_introspective",
+      "label_zh": "深沉内省簇",
+      "label_en": "Deep & Introspective",
+      "synonyms": [
+        "melancholic",
+        "melancholy",
+        "contemplative",
+        "introspective",
+        "somber",
+        "wistful",
+        "reflective",
+        "nostalgic",
+        "brooding",
+        "solemn"
+      ]
+    },
+    {
+      "id": "warm_romantic",
+      "label_zh": "温暖浪漫簇",
+      "label_en": "Warm & Romantic",
+      "synonyms": [
+        "romantic",
+        "intimate",
+        "warm",
+        "tender",
+        "sentimental",
+        "dreamy",
+        "sensual",
+        "nostalgic_warm",
+        "lyrical"
+      ]
+    },
+    {
+      "id": "high_tension",
+      "label_zh": "高张力簇",
+      "label_en": "High Tension & Energetic",
+      "synonyms": [
+        "intense",
+        "energetic",
+        "dramatic",
+        "driving",
+        "epic",
+        "aggressive",
+        "passionate",
+        "fierce",
+        "urgent",
+        "dynamic"
+      ]
+    }
+  ]
+}

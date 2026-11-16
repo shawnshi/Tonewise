@@ -81,7 +81,11 @@ constructor(
     private val transparentTrackTint = ColorStateList.valueOf(Color.TRANSPARENT)
     // Necessary due to us clobbering it when we enable the wavy track
     private var tmpTrackTintList: ColorStateList = trackActiveTintList
+    private var tmpTrackInactiveTintList: ColorStateList = trackInactiveTintList
     private var linearActiveTrackSuppressed = false
+    private var linearInactiveTrackSuppressed = false
+    private var waveformEnvelope: FloatArray? = null
+    private val waveformBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
     private var waveTransitionAnimation: SpringAnimation? = null
     private var currentAmplitudeFraction = MIN_VISIBLE_WAVE_FRACTION
@@ -211,6 +215,23 @@ constructor(
         }
     }
 
+    override fun setTrackInactiveTintList(trackColor: ColorStateList) {
+        tmpTrackInactiveTintList = trackColor
+        if (!linearInactiveTrackSuppressed) {
+            super.setTrackInactiveTintList(trackColor)
+        }
+    }
+
+    /**
+     * Configures a precomputed 150-point RMS waveform envelope (`0f..1f`), or `null` to use the
+     * default wavy progress track.
+     */
+    fun setWaveformEnvelope(envelope: FloatArray?) {
+        waveformEnvelope = envelope?.takeIf { it.size == 150 }
+        updateInactiveTrackSuppression()
+        invalidate()
+    }
+
     /**
      * Configure whether the wave effect is on or off.
      *
@@ -260,6 +281,13 @@ constructor(
             return
         }
         val progressFraction = ((value - valueFrom) / range).coerceIn(0f, 1f)
+
+        val envelope = waveformEnvelope
+        if (envelope != null) {
+            drawStaticWaveformEnvelope(canvas, envelope, trackLength, progressFraction)
+            return
+        }
+
         if (progressFraction <= 0f) {
             // Nothing to draw progress-wise (the wavy part is only from active process)
             return
@@ -643,6 +671,67 @@ constructor(
     }
 
     private fun shouldDrawWave(): Boolean = waveEnabled || waveTransitionAnimation != null
+
+    private fun updateInactiveTrackSuppression() {
+        val suppress = waveformEnvelope != null
+        if (suppress == linearInactiveTrackSuppressed) {
+            return
+        }
+        if (suppress) {
+            super.setTrackInactiveTintList(transparentTrackTint)
+        } else {
+            super.setTrackInactiveTintList(tmpTrackInactiveTintList)
+        }
+        linearInactiveTrackSuppressed = suppress
+    }
+
+    private fun drawStaticWaveformEnvelope(
+        canvas: Canvas,
+        envelope: FloatArray,
+        trackLength: Float,
+        progressFraction: Float,
+    ) {
+        val originX = trackSidePadding.toFloat()
+        val centerY = height / 2f
+        val isRtl = layoutDirection == LAYOUT_DIRECTION_RTL
+        val thumbX =
+            originX +
+                if (isRtl) {
+                    (1f - progressFraction) * trackLength
+                } else {
+                    progressFraction * trackLength
+                }
+
+        val activeColor =
+            tmpTrackTintList.getColorForState(drawableState, tmpTrackTintList.defaultColor)
+        val inactiveColor =
+            tmpTrackInactiveTintList.getColorForState(
+                drawableState,
+                tmpTrackInactiveTintList.defaultColor,
+            )
+
+        val count = envelope.size
+        val step = trackLength / count
+        val barWidth = (step * 0.65f).coerceIn(1.5f, 6f)
+        val halfBarW = barWidth / 2f
+        val minHalfH = max(trackHeight / 2f, 2f)
+        val maxHalfH = max(minHalfH + configuredAmplitudePx * 2.2f, trackHeight * 2.2f)
+        val gap = thumbTrackGapSize.toFloat()
+
+        for (i in 0 until count) {
+            val barIdx = if (isRtl) count - 1 - i else i
+            val cx = originX + (i + 0.5f) * step
+            if (gap > 0f && abs(cx - thumbX) < gap) {
+                continue
+            }
+            val amp = envelope[barIdx].coerceIn(0f, 1f)
+            val halfH = minHalfH + amp * (maxHalfH - minHalfH)
+            val isPlayed = if (isRtl) cx >= thumbX else cx <= thumbX
+            waveformBarPaint.color = if (isPlayed) activeColor else inactiveColor
+            patchRect.set(cx - halfBarW, centerY - halfH, cx + halfBarW, centerY + halfH)
+            canvas.drawRoundRect(patchRect, halfBarW, halfBarW, waveformBarPaint)
+        }
+    }
 
     private fun updateActiveTrackSuppression() {
         val suppress = true

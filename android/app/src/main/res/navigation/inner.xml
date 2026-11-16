@@ -147,6 +147,11 @@
         android:name="com.shawnshi.tonewise.search.SearchFragment"
         android:label="search_fragment"
         tools:layout="@layout/fragment_search">
+        <argument
+            android:name="query"
+            android:defaultValue="@null"
+            app:argType="string"
+            app:nullable="true" />
         <action
             android:id="@+id/show_song"
             app:destination="@id/song_detail_dialog" />
@@ -224,6 +229,12 @@
             android:id="@+id/show_artist"
             app:destination="@id/artist_detail_fragment" />
         <action
+            android:id="@+id/show_genre"
+            app:destination="@id/genre_detail_fragment" />
+        <action
+            android:id="@+id/search"
+            app:destination="@id/search_fragment" />
+        <action
             android:id="@+id/show_artist_choices"
             app:destination="@id/show_artist_choices_dialog" />
         <action
@@ -272,6 +283,12 @@
         <action
             android:id="@+id/show_artist"
             app:destination="@id/artist_detail_fragment" />
+        <action
+            android:id="@+id/show_genre"
+            app:destination="@id/genre_detail_fragment" />
+        <action
+            android:id="@+id/search"
+            app:destination="@id/search_fragment" />
         <action
             android:id="@+id/show_artist_choices"
             app:destination="@id/show_artist_choices_dialog" />
@@ -322,6 +339,12 @@
             android:id="@+id/show_artist"
             app:destination="@id/artist_detail_fragment" />
         <action
+            android:id="@+id/show_genre"
+            app:destination="@id/genre_detail_fragment" />
+        <action
+            android:id="@+id/search"
+            app:destination="@id/search_fragment" />
+        <action
             android:id="@+id/show_artist_choices"
             app:destination="@id/show_artist_choices_dialog" />
         <action
@@ -370,6 +393,12 @@
         <action
             android:id="@+id/show_artist"
             app:destination="@id/artist_detail_fragment" />
+        <action
+            android:id="@+id/show_genre"
+            app:destination="@id/genre_detail_fragment" />
+        <action
+            android:id="@+id/search"
+            app:destination="@id/search_fragment" />
         <action
             android:id="@+id/show_artist_choices"
             app:destination="@id/show_artist_choices_dialog" />
