@@ -1,18 +1,36 @@
-# Gradle
-.gradle
+# Gradle & Android
+.gradle/
 local.properties
 build/
 release/
+.externalNativeBuild/
+*.iml
+.cxx/
+.kotlin/
+*.apk
+*.aab
+android/musikr/.Rhistory
+android/musikr/src/main/cpp/taglib/build/
+android/musikr/src/main/cpp/taglib/pkg/
 
-# Studio
+# Rust (core/)
+core/target/
+**/*.rs.bk
+
+# .NET / WinUI 3 (desktop/)
+desktop/**/bin/
+desktop/**/obj/
+desktop/.vs/
+*.user
+*.suo
+
+# IDE & OS
 .idea/
-.DS_Store/
+.vscode/
+.DS_Store
+Thumbs.db
 captures/
 
 # Other
-.externalNativeBuild
-*.iml
-.cxx
-.kotlin
 .aider*
 .env

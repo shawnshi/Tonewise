@@ -1,8 +1,8 @@
-[submodule "media"]
-	path = media
+[submodule "android/media"]
+	path = android/media
 	url = https://github.com/OxygenCobalt/media.git
 
-[submodule "musikr/src/main/cpp/taglib"]
-	path = musikr/src/main/cpp/taglib
+[submodule "android/musikr/src/main/cpp/taglib"]
+	path = android/musikr/src/main/cpp/taglib
 	url = https://github.com/taglib/taglib.git
 	tag = ee1931b

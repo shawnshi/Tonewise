@@ -1,0 +1,112 @@
+在 Android 端（如 **Tonewise 知律** 基于 [OxygenCobalt/Auxio](https://github.com/oxygencobalt/Auxio) 的架构）构建发烧级播放效果调节体系，核心矛盾在于“硬件直通（Bit-Perfect）与数字信号处理（DSP）在物理底层的天然互斥”**。只要对 PCM 采样执行均衡、响度缩放或声场混合，就必然改变原始比特流；因此不能把均衡器做成全局常驻滤镜，而必须建立**“按输出端点自动仲裁的双模声学管线”。
+
+### 一、双模互斥声学路由架构（直通态 vs 浮点调音态）
+
+Android 原生混音器（`AudioFlinger`）默认会将音频重采样至 48kHz 并截断位深。为兼顾外置解码耳放的母带还原与无线耳机的频响补偿，音频引擎需在输出路由变更时自动仲裁两条互斥支路：
+
+```svg
+<svg viewBox="0 0 680 286" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    :root {
+      --lumi-ink: light-dark(#000000, #e0e0e0);
+      --lumi-muted: light-dark(#5f6368, #9aa0a6);
+      --lumi-dim: light-dark(#f2f0f0, #242528);
+      --lumi-container: light-dark(#e8e6e6, #2d2f33);
+      --lumi-outline: light-dark(#727676, #9a9b9c);
+      --lumi-accent-bg: light-dark(#dcf1ff, #192967);
+      --lumi-primary: light-dark(#3186ff, #9dd2ff);
+      --lumi-sans: 'Google Sans Flex', var(--font-family, 'Google Sans', sans-serif);
+      --lumi-mono: 'Google Sans Code', ui-monospace, monospace;
+    }
+    text { font-weight: 400; stroke: none; }
+    .t-l1 { font-family: var(--lumi-sans); font-size: 15px; fill: var(--lumi-ink); }
+    .t-l2 { font-family: var(--lumi-mono); font-size: 13px; font-style: italic; fill: var(--lumi-ink); }
+    .t-l4 { font-family: var(--lumi-sans); font-size: 13px; fill: var(--lumi-muted); }
+    .node-step { fill: var(--lumi-dim); stroke: none; }
+    .node-focal { fill: var(--lumi-accent-bg); stroke: var(--lumi-primary); stroke-width: 1.25; }
+    .node-store { fill: var(--lumi-container); stroke: var(--lumi-outline); stroke-width: 1; }
+    .edge-seg { fill: none; stroke: var(--lumi-ink); stroke-width: 1.3; stroke-linecap: round; stroke-dasharray: 0 4; }
+    .edge-arrow { fill: none; stroke: var(--lumi-ink); stroke-width: 1.3; stroke-linecap: round; stroke-dasharray: 0 4; marker-end: url(#lumi-caret); }
+  </style>
+  <defs>
+    <marker id="lumi-caret" viewBox="0 0 10 10" refX="7.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M 3 1.2 L 7.5 5 L 3 8.8" fill="none" stroke="var(--lumi-ink)" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+  </defs>
+
+  <rect class="node-step" x="20" y="26" width="172" height="80" rx="40" />
+  <text class="t-l1" x="106" y="57" text-anchor="middle" dominant-baseline="central">FFmpeg 解码流</text>
+  <text class="t-l2" x="106" y="79" text-anchor="middle" dominant-baseline="central">32-bit Float PCM</text>
+
+  <line class="edge-arrow" x1="200" y1="66" x2="244" y2="66" />
+
+  <rect class="node-focal" x="252" y="26" width="176" height="80" rx="40" />
+  <text class="t-l1" x="340" y="57" text-anchor="middle" dominant-baseline="central">端点声学路由器</text>
+  <text class="t-l4" x="340" y="79" text-anchor="middle" dominant-baseline="central">按设备与场景仲裁</text>
+
+  <line class="edge-arrow" x1="436" y1="66" x2="480" y2="66" />
+
+  <rect class="node-store" x="488" y="26" width="172" height="80" rx="40" />
+  <text class="t-l1" x="574" y="57" text-anchor="middle" dominant-baseline="central">USB 硬件直通</text>
+  <text class="t-l2" x="574" y="79" text-anchor="middle" dominant-baseline="central">BIT_PERFECT</text>
+
+  <path class="edge-seg" d="M 340 114 L 340 130 Q 340 146 324 146 L 274 146" />
+  <rect x="186" y="136" width="80" height="20" rx="10" fill="var(--lumi-dim)" />
+  <text class="t-l2" x="226" y="146" text-anchor="middle" dominant-baseline="central">DSP ON</text>
+  <path class="edge-arrow" d="M 178 146 L 132 146 Q 116 146 116 162 L 116 178" />
+
+  <rect class="node-focal" x="24" y="186" width="184" height="80" rx="40" />
+  <text class="t-l1" x="116" y="217" text-anchor="middle" dominant-baseline="central">内置浮点效果链</text>
+  <text class="t-l2" x="116" y="239" text-anchor="middle" dominant-baseline="central">64-bit Biquad DSP</text>
+
+  <line class="edge-arrow" x1="216" y1="226" x2="260" y2="226" />
+
+  <rect class="node-step" x="268" y="186" width="168" height="80" rx="40" />
+  <text class="t-l1" x="352" y="217" text-anchor="middle" dominant-baseline="central">前瞻软限幅器</text>
+  <text class="t-l2" x="352" y="239" text-anchor="middle" dominant-baseline="central">-0.2 dBFS Peak</text>
+
+  <line class="edge-arrow" x1="444" y1="226" x2="484" y2="226" />
+
+  <rect class="node-store" x="492" y="186" width="168" height="80" rx="40" />
+  <text class="t-l1" x="576" y="217" text-anchor="middle" dominant-baseline="central">AudioTrack 输出</text>
+  <text class="t-l2" x="576" y="239" text-anchor="middle" dominant-baseline="central">AudioSession 桥接</text>
+</svg>
+```
+
+* **外置 USB DAC 直通旁路**：在 Android 14 及以上系统（含 Android 16）接入外置 USB 解码器时，调用 `AudioManager.setPreferredMixerAttributes()` 激活 `MIXER_BEHAVIOR_BIT_PERFECT`（[Auxio Issue #1210](https://github.com/OxygenCobalt/Auxio/issues/1210)），此时自动挂起全部软件音效；需注意无物理音量键的小尾巴在直通态下会锁定满幅输出，应在界面首次开启时弹出耳膜保护确认，并在切换采样率时销毁重建 `AudioTrack` 以规避部分芯片组底层死锁（[Google Oboe Issue #2198](https://github.com/google/oboe/issues/2198)）。
+* **32-bit 浮点无损调音通路**：接入蓝牙耳机（如开放式不入耳耳机）、车载蓝牙或机身扬声器时，通过 [Media3 DefaultAudioSink](https://tessl.io/registry/tessl/maven-androidx-media3--media3-exoplayer/1.8.0/files/docs/audio-rendering.md) 开启 `setEnableFloatOutput(true)`，并在 `AudioProcessor` 链内部提升至 **64-bit 双精度浮点（`double`）** 执行滤波递归计算，消除 20Hz–100Hz 极低频段在 32-bit 单精度下的极点量化底噪。
+
+### 二、内置五级串行 DSP 效果链参数规格
+
+摒弃常见的“3D 环绕、重低音魔音”等劣质非线性失真滤镜，基于 [Media3 AudioProcessor](https://developer.android.com/media/media3/transformer/transformations) 按严格声学先后次序串联以下五个高精度效果模块：
+
+| 级联顺序与模块 | 核心算法与数学模型 | 关键可调参数范围 | 典型硬件与五维曲库联动策略 |
+| --- | --- | --- | --- |
+| **1. 响度归一与自动预衰减**<br>
+
+<br>`PreampProcessor` | 读取 [rsgain](https://github.com/complexlogic/rsgain) 标签并与 EQ 峰值增益求包络：`G_total = RG2 - max(0, Peak_EQ)` | 基础预增益 `-15.0` 至 `+6.0 dB`；安全余量阈值 `-0.5 dB` | 开启 [AutoEQ](https://github.com/jaakkopasanen/AutoEq) 或正向拉高某频段时，自动同步下压全局 Preamp，从源头杜绝数字削波爆音 |
+| **2. 双二阶参量均衡器**<br>
+
+<br>`BiquadPeqProcessor` | RBJ Audio EQ Cookbook 双二阶二型转置滤波器级联（兼容 EqualizerAPO `.txt`） | 10 段手动 / 64 段导入；`f0` `20Hz–20kHz`；`Q` `0.1–20.0`；`Gain` `±12 dB` | **开放式蓝牙耳机**自动挂载 `85Hz Low-Shelf +4.5dB (Q=0.71)` 补偿声短路漏音；`DJ_SCENE=focus` 夜间态可叠 `6kHz High-Shelf -2.5dB` 柔化齿音 |
+| **3. 双耳交叉馈送**<br>
+
+<br>`BauerCrossfeedProcessor` | Bauer 立体声转双耳网络（对侧声道低通延迟混合 + 同侧高频微补偿） | 截止频率 `500–900 Hz`；馈送深度 `1.5–9.5 dB`；声学延迟 `0.22–0.35 ms` | 聆听早期硬摇相爵士（左声道纯贝斯、右声道纯萨克斯）或古典室内乐时开启（推荐 `700Hz / 4.5dB`），消除长时佩戴耳机的头中撕裂感 |
+| **4. 声道平衡与相位校准**<br>
+
+<br>`BalancePhaseProcessor` | 左右声道独立线性增益与 `180°` 极性反转矩阵 | 左右精细偏置 `±6.0 dB`（步进 `0.1 dB`）；单声道折叠开关 | 补偿双耳高频听力微小不对称或部分复古发烧耳放低音量段的左右偏音 |
+| **5. 前瞻防削波软限幅**<br>
+
+<br>`LookaheadLimiter` | `3 ms` 环形缓冲前瞻包络检测 + 双曲正切（`tanh`）膝部软压缩 | 触发天花板 `-0.2 dBFS`；释放时间 `50–150 ms` 自适应 | 作为整条浮点管线的最后一道安全阀门，拦截瞬态鼓点叠加后的偶发越界峰值 |
+
+### 三、外部系统级音效桥接与国产 ROM 避坑机制
+
+许多发烧友已在手机端配置了全局声学工具，应用层必须做好会话开放与双重滤波防冲突治理：
+
+* **标准 AudioSession 生命周期广播**：系统级音效器（如 [Loundess-PEQ-RootlessJamesDSP](https://github.com/evoeram/Loundess-PEQ-RootlessJamesDSP) 与 Wavelet）依赖监听 `ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION` 意图挂载句柄（[AudioEffect 会话广播机制](https://github.com/EXPress-016/AudioEffect-Broadcaster-Xposed)）。在 Media3 `AnalyticsListener.onAudioSessionIdChanged` 回调中必须主动广播当前 `audioSessionId`，并在暂停或释放时发送关闭广播，支持用户在外部加载 `.wav/.irs` 脉冲卷积文件。
+* **内外部双重均衡互斥锁**：在设置中提供“内置浮点 DSP / 外部 AudioSession 音效器”二选一单选开关——切至外部桥接模式时自动旁路应用内 `BiquadPeqProcessor`，防止两套滤波器重复叠加引发剧烈相位畸变。
+* **定制系统全局音效冲突检测**：在澎湃 OS（HyperOS）等定制 Android 系统中，系统默认开启的“杜比全景声（Dolby Atmos）”或“小米音效”会对蓝牙与扬声器通路施加动态范围压缩（DRC）与虚拟环绕染色。建议在信号路径抽屉（借鉴 [Poweramp](https://powerampapp.com/) 信号检视器）中加入环境诊断提示，引导用户在开启应用内高精度 PEQ 时关闭系统层全局音效。
+
+### 四、关键调音交互细节建议
+
+* **按设备指纹自动记忆与无感切换**：以“输出类型 + 蓝牙 MAC 地址 / USB Product ID”为联合主键存储声学档案——拔下桌面 USB DAC 戴上蓝牙耳机的瞬间，自动从“硬件直通”切入该耳机的专属补偿曲线，无需每次进菜单手动切换。
+* **响度对齐（Gain-Matched）一键盲听对比**：人耳对 `0.5 dB` 以上的响度提升会本能误判为“解析力更好、声场更开阔”。调音面板顶栏应内置**等响度补偿 A/B 切换键**，在点击旁路对比时自动按均方根能量差对齐原声与调音后的整体音量，帮助准确审视频响改动是否真正改善了音色平衡。

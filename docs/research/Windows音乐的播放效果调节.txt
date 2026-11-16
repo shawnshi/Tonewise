@@ -1,0 +1,108 @@
+在 Windows 11 桌面端设计或配置音乐播放效果调节，底层逻辑与 Android 存在一个本质差异：**Windows 允许将“绕过系统混音器的硬件独占输出”与“满血高精度 DSP 调音”同时兼得**，前提是把效果器部署在**播放器进程内部**而非依赖系统级音效驱动。
+
+### 一、核心误区与三轨输出架构（为什么装了 Equalizer APO 开独占会失效）
+
+许多桌面发烧友习惯安装系统级的 [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) 来加载耳机补偿曲线，但只要在播放器（如 MusicBee、Foobar2000 或 **Tonewise Desktop**）中开启 **WASAPI Exclusive（独占模式）** 或 **ASIO**，系统级均衡器就会瞬间失效。原因在于 Equalizer APO 挂载于 Windows 音频引擎（`audiodg.exe`）的共享混音管线中，而 WASAPI 独占与 ASIO 在驱动层直接绕过了整套 [Windows APO 架构](https://github.com/dechamps/APO)（参考 [ASR 对 Equalizer APO 与独占旁路的实测讨论](https://www.audiosciencereview.com/forum/index.php?threads/equalizer-apo-and-asio.19520/)）。
+
+因此，桌面端最合理的工程架构是将 **64-bit 双精度浮点 DSP 管线置于播放器进程内部、独占音频接口之前**，按信号格式与输出设备分流三轨路径：
+
+```svg
+<svg viewBox="0 0 680 298" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    :root {
+      --lumi-ink: light-dark(#000000, #e0e0e0);
+      --lumi-muted: light-dark(#5f6368, #9aa0a6);
+      --lumi-dim: light-dark(#f2f0f0, #242528);
+      --lumi-container: light-dark(#e8e6e6, #2d2f33);
+      --lumi-outline: light-dark(#727676, #9a9b9c);
+      --lumi-accent-bg: light-dark(#dcf1ff, #192967);
+      --lumi-primary: light-dark(#3186ff, #9dd2ff);
+      --lumi-sans: 'Google Sans Flex', var(--font-family, 'Google Sans', sans-serif);
+      --lumi-mono: 'Google Sans Code', ui-monospace, monospace;
+    }
+    text { font-weight: 400; stroke: none; }
+    .t-l1 { font-family: var(--lumi-sans); font-size: 15px; fill: var(--lumi-ink); }
+    .t-l2 { font-family: var(--lumi-mono); font-size: 13px; font-style: italic; fill: var(--lumi-ink); }
+    .t-l4 { font-family: var(--lumi-sans); font-size: 13px; fill: var(--lumi-muted); }
+    .node-step { fill: var(--lumi-dim); stroke: none; }
+    .node-focal { fill: var(--lumi-accent-bg); stroke: var(--lumi-primary); stroke-width: 1.25; }
+    .node-store { fill: var(--lumi-container); stroke: var(--lumi-outline); stroke-width: 1; }
+    .edge-seg { fill: none; stroke: var(--lumi-ink); stroke-width: 1.3; stroke-linecap: round; stroke-dasharray: 0 4; }
+    .edge-arrow { fill: none; stroke: var(--lumi-ink); stroke-width: 1.3; stroke-linecap: round; stroke-dasharray: 0 4; marker-end: url(#lumi-caret); }
+  </style>
+  <defs>
+    <marker id="lumi-caret" viewBox="0 0 10 10" refX="7.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M 3 1.2 L 7.5 5 L 3 8.8" fill="none" stroke="var(--lumi-ink)" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+  </defs>
+
+  <rect class="node-step" x="20" y="26" width="168" height="80" rx="40" />
+  <text class="t-l1" x="104" y="57" text-anchor="middle" dominant-baseline="central">解码与源分流</text>
+  <text class="t-l2" x="104" y="79" text-anchor="middle" dominant-baseline="central">64-bit Float / DSD</text>
+
+  <line class="edge-arrow" x1="196" y1="66" x2="240" y2="66" />
+
+  <rect class="node-focal" x="248" y="26" width="184" height="80" rx="40" />
+  <text class="t-l1" x="340" y="57" text-anchor="middle" dominant-baseline="central">进程内 64-bit DSP</text>
+  <text class="t-l2" x="340" y="79" text-anchor="middle" dominant-baseline="central">PEQ · FIR · ISO226</text>
+
+  <line class="edge-arrow" x1="440" y1="66" x2="484" y2="66" />
+
+  <rect class="node-focal" x="492" y="26" width="168" height="80" rx="40" />
+  <text class="t-l1" x="576" y="57" text-anchor="middle" dominant-baseline="central">WASAPI 独占输出</text>
+  <text class="t-l4" x="576" y="79" text-anchor="middle" dominant-baseline="central">绕过 audiodg 混音</text>
+
+  <line class="edge-seg" x1="104" y1="114" x2="104" y2="134" />
+  <rect x="52" y="142" width="104" height="20" rx="10" fill="var(--lumi-dim)" />
+  <text class="t-l2" x="104" y="152" text-anchor="middle" dominant-baseline="central">Shared APO</text>
+  <line class="edge-arrow" x1="104" y1="170" x2="104" y2="190" />
+
+  <line class="edge-arrow" x1="340" y1="114" x2="340" y2="190" />
+  <line class="edge-arrow" x1="576" y1="114" x2="576" y2="190" />
+
+  <rect class="node-store" x="20" y="198" width="168" height="80" rx="40" />
+  <text class="t-l1" x="104" y="229" text-anchor="middle" dominant-baseline="central">WASAPI 共享输出</text>
+  <text class="t-l4" x="104" y="251" text-anchor="middle" dominant-baseline="central">兼容蓝牙与系统EQ</text>
+
+  <rect class="node-store" x="248" y="198" width="184" height="80" rx="40" />
+  <text class="t-l1" x="340" y="229" text-anchor="middle" dominant-baseline="central">ASIO 驱动通道</text>
+  <text class="t-l2" x="340" y="251" text-anchor="middle" dominant-baseline="central">Native DSD / PCM</text>
+
+  <line class="edge-arrow" x1="440" y1="238" x2="484" y2="238" />
+
+  <rect class="node-store" x="492" y="198" width="168" height="80" rx="40" />
+  <text class="t-l1" x="576" y="229" text-anchor="middle" dominant-baseline="central">外置 USB DAC</text>
+  <text class="t-l4" x="576" y="251" text-anchor="middle" dominant-baseline="central">硬件时钟自适应</text>
+</svg>
+```
+
+* **主力高保真调音路径（进程内 DSP → WASAPI Exclusive / ASIO）**：解码后在应用内存中使用 64-bit Float 完成参量均衡、房间卷积与响度补偿，随后通过 [NAudio `WasapiOut` 独占事件驱动模式](https://github.com/naudio/NAudio/blob/main/Docs/WaveProviders.md)直接写入 USB DAC。这样既保留了 DAC 硬件采样率随曲目（44.1kHz 至 192kHz）自动跳变与屏蔽系统弹窗通知音的优势，又不会像系统级 APO 那样被独占流旁路。
+* **Native DSD 的特殊仲裁**：1-bit 脉冲密度调制（DSD64–DSD512）无法直接做线性滤波。若未开启任何音效，直接走 ASIO Native DSD 原样直通；一旦用户点亮房间校准或 PEQ，引擎自动将其高精度解调为 `352.8kHz / 64-bit Float DXD` 施加滤波，并在信号路径面板中明确标注转换状态。
+* **共享模式防叠锁**：当输出切至蓝牙耳机或用户需同时听会议语音而回退至 WASAPI Shared 模式时，若检测到系统已挂载 [Equalizer APO](https://sourceforge.net/projects/equalizerapo/)，应用自动提示旁路内置同名曲线，防止系统层与应用层双重滤波失真。
+
+### 二、桌面端重算力专属的五级声学模块规格
+
+相比移动端受限于电池功耗，Windows 桌面端具备充裕的多核浮点与 SIMD（AVX2）算力，除基础的 ReplayGain 2.0、双二阶 PEQ 与双耳交叉馈送（Crossfeed）外，应重点引入以下桌面级高阶声学能力：
+
+| 桌面声学模块 | 核心算法与工程标准 | 关键参数与算力规格 | 桌面典型使用场景 |
+| --- | --- | --- | --- |
+| **1. 动态等响度响度补偿**<br>
+
+<br>`Iso226LoudnessNode` | 基于 [ISO 226 等响度曲线标准](https://en.wikipedia.org/wiki/Equal-loudness_contour)，随数字音量衰减实时动态补偿人耳低频与极高频灵敏度跌落 | 参考声压校准 `75–83 dB SPL`；自动联动 `60Hz Low-Shelf` 与 `8kHz High-Shelf` | 深夜书房低音量（60 dB 左右）写稿审听时，消除小音量下大提琴与鼓点干瘪单薄的问题，调回正常音量时补偿自动归零（参考 [ASR 等响度插件](https://www.audiosciencereview.com/forum/index.php?threads/free-loudnesscompensator-v1-0-0-iso-226-2003-equal-loudness-compensation-plugin.64439/)） |
+| **2. 双声道独立 64 段 PEQ**<br>
+
+<br>`DualChannelBiquadNode` | 64-bit 双精度转置二型双二阶滤波器级联，原生读写 [Equalizer APO 配置语法](https://sourceforge.net/p/equalizerapo/wiki/Configuration%20reference/) 与 [AutoEQ](https://github.com/jaakkopasanen/AutoEq) | 支持立体声联动（Linked）或 **L/R 左右声道独立均衡**；自动计算负向 Preamp 余量 | 除耳机曲线校准外，针对书桌一侧靠墙、一侧开阔导致的桌面监听音箱左右低频驻波不对称进行单侧精准削峰 |
+| **3. 非均匀分区脉冲卷积**<br>
+
+<br>`PartitionedFirConvolver` | 重叠保留法（Overlap-Save）分段快速傅里叶卷积（头段低延迟直接卷积 + 尾段大块 FFT） | 支持 `65,536` 至 `262,144 taps` 立体声及四通道真立体声 `.wav / .sofa` 脉冲文件 | 加载 REW 实测麦克风生成的书房房间声学校正（DRC）脉冲文件，或导入 [ASH-Toolset](https://shanonpearce.github.io/ASH-Toolset/) 双耳监听控制室脉冲（BRIR） |
+| **4. 64-bit VST3 插件宿主**<br>
+
+<br>`SandboxedVst3Host` | 独立子进程共享内存环形缓冲 VST3 宿主（参考 [Equalizer APO XT](https://github.com/115dkk/EqualizerAPO-XT) 双精度 VST3 管线） | 支持挂载 1–3 个外部 `.vst3` 插件，支持 Dry/Wet 干湿比混合与延迟自动补偿 | 按个人审美挂载专业录音室偶次谐波电子管染色插件、精细动态均衡器或李萨如相位矢量表，插件异常崩溃不波及主程序 |
+| **5. 母带重采样与抖动整形**<br>
+
+<br>`SoxSrcAndTpdfDither` | 多相滤波器高精度采样率转换（SRC）+ 三角概率密度函数（TPDF）量化抖动 | 阻带抑制 `140 dB`；线性相位或最小相位可选；24-bit 整型封包前注入 `±1 LSB` 抖动 | 兼容不支持冷门采样率（如 88.2kHz）的早期解码器，并在 64-bit 浮点 DSP 结果降位深送入 24-bit DAC 时消除低电平截断毛刺 |
+
+### 三、现成播放器（如 MusicBee）与 Tonewise 双端协同建议
+
+* **若当前在 MusicBee 中调音过渡**：在 `编辑 → 首选项 → 播放器` 中将输出切为 **WASAPI (Exclusive)**，关闭 Windows 11“系统 → 声音 → 属性”里的“音频增强”与空间音效；安装 MusicBee 的 VST 宿主插件或导入 [AutoEQ](https://github.com/jaakkopasanen/AutoEq) 参量参数时，务必把 `Preamp` 设为不高于负的最大正向增益（例如某频段提升了 `+5.0 dB`，前置增益至少设为 `-5.5 dB`），避免交响乐齐奏高潮处削波破音。
+* **PC 与 Android 双端调音档案互通**：在 **Tonewise** 体系下，可将 `/Music/.tonewise/dsp_profiles/` 目录下的标准 `.txt` 曲线设为双端通用契约——PC 端支持完整 64 段 PEQ + FIR 卷积 + ISO 226 等响度，同步至手机端时自动提取其中的 `Preamp` 与 `Filter` 双二阶指令挂载到手机内置浮点引擎或 [Loundess-PEQ-RootlessJamesDSP](https://github.com/evoeram/Loundess-PEQ-RootlessJamesDSP)，实现同一副耳机跨设备插拔时听感完全一致。

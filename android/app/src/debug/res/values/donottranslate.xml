@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="info_app_name" translatable="false">Tonewise Debug</string>
+    <string name="pkg_authority_cover">com.shawnshi.tonewise.debug.image.CoverProvider</string>
+</resources>

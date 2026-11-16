@@ -1,0 +1,84 @@
+diff --git a/libraries/decoder_ffmpeg/build.gradle.kts b/libraries/decoder_ffmpeg/build.gradle.kts
+index cee3303a73..6e58628d52 100644
+--- a/libraries/decoder_ffmpeg/build.gradle.kts
++++ b/libraries/decoder_ffmpeg/build.gradle.kts
+@@ -34,33 +34,39 @@ android.externalNativeBuild.cmake.version = "3.21.0+"
+ 
+ val assembleFfmpeg =
+   tasks.register<Exec>("assembleFfmpeg") {
+-    val host =
+-      when {
+-        Os.isFamily(Os.FAMILY_MAC) -> "darwin-x86_64"
+-        Os.isFamily(Os.FAMILY_UNIX) -> "linux-x86_64"
+-        else ->
+-          throw UnsupportedOperationException(
+-            "Building with Windows is not supported. Please use WSL or a unix-based operating system."
+-          )
+-    }
+-
+     val jniDir = project.file("src/main/jni")
+     val libsDir = jniDir.resolve("ffmpeg/android-libs")
+-    doFirst {
+-      if (libsDir.exists()) {
+-        commandLine("true")
+-      } else {
+-        val ndkDir = androidComponents.sdkComponents.ndkDirectory.get().asFile
+-        commandLine(
+-          jniDir.resolve("build_ffmpeg.sh"),
+-          project.file("src/main"),
+-          ndkDir,
+-          host,
+-          "21",
+-          "flac",
+-          "alac",
+-        )
++    val requiredLibraries =
++      listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64").flatMap { abi ->
++        listOf("libavutil.a", "libswresample.a", "libavcodec.a").map { library ->
++          libsDir.resolve(abi).resolve(library)
++        }
+       }
++
++    onlyIf("Skip FFmpeg compilation when all ABI archives are available") {
++      requiredLibraries.any { !it.isFile }
++    }
++
++    doFirst {
++      val host =
++        when {
++          Os.isFamily(Os.FAMILY_MAC) -> "darwin-x86_64"
++          Os.isFamily(Os.FAMILY_UNIX) -> "linux-x86_64"
++          else ->
++            throw UnsupportedOperationException(
++              "FFmpeg static archives are missing. Run build_ffmpeg.sh in MSYS2 UCRT64 to build them for all Android ABIs before building on Windows."
++            )
++        }
++      val ndkDir = androidComponents.sdkComponents.ndkDirectory.get().asFile
++      commandLine(
++        jniDir.resolve("build_ffmpeg.sh"),
++        project.file("src/main"),
++        ndkDir,
++        host,
++        "21",
++        "flac",
++        "alac",
++      )
+     }
+   }
+ 
+diff --git a/libraries/decoder_ffmpeg/src/main/jni/build_ffmpeg.sh b/libraries/decoder_ffmpeg/src/main/jni/build_ffmpeg.sh
+index e0a9aa4f84..e9c1886d65 100755
+--- a/libraries/decoder_ffmpeg/src/main/jni/build_ffmpeg.sh
++++ b/libraries/decoder_ffmpeg/src/main/jni/build_ffmpeg.sh
+@@ -22,6 +22,11 @@ NDK_PATH="$2"
+ echo "NDK path is ${NDK_PATH}"
+ HOST_PLATFORM="$3"
+ echo "Host platform is ${HOST_PLATFORM}"
++if [[ "${HOST_PLATFORM}" == "windows-x86_64" ]]
++then
++    ASFLAGS="${ASFLAGS:+${ASFLAGS} }-I. -x assembler-with-cpp"
++    export ASFLAGS
++fi
+ ANDROID_ABI="$4"
+ echo "ANDROID_ABI is ${ANDROID_ABI}"
+ ENABLED_DECODERS=("${@:5}")

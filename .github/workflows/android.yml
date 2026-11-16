@@ -8,27 +8,56 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    env:
+      JAVA_TOOL_OPTIONS: -Dhttps.protocols=TLSv1.2
 
     steps:
-    - name: Install ninja-build
-      run: sudo apt-get install -y ninja-build
-    - name: Clone repository
+    - name: Configure Git for Windows checkouts
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.symlinks true
+        git config --global core.longpaths true
+    - name: Checkout repository and submodules
       uses: actions/checkout@v4
-    - name: Clone submodules
-      run: git submodule update --init --recursive
+      with:
+        submodules: recursive
+    - name: Apply Windows Media3 FFmpeg patch
+      shell: pwsh
+      run: .\scripts\apply-media-patch.ps1
     - name: Set up JDK 21
       uses: actions/setup-java@v4
       with:
         java-version: "21"
-        distribution: "jetbrains"
+        distribution: "temurin"
         cache: gradle
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+    - name: Install Android SDK packages
+      run: sdkmanager --install "platforms;android-37" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+    - name: Set up MSYS2 for Android FFmpeg build
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: true
+        install: >-
+          base-devel
+          diffutils
+          nasm
+          perl
+          mingw-w64-ucrt-x86_64-gcc
+    - name: Build Android FFmpeg archives
+      shell: msys2 {0}
+      run: |
+        module="$(cygpath -u "$GITHUB_WORKSPACE/android/media/libraries/decoder_ffmpeg/src/main")"
+        sdk="$(cygpath -u "$ANDROID_HOME")"
+        ndk="$sdk/ndk/28.2.13676358"
+        bash "$module/jni/build_ffmpeg.sh" "$module" "$ndk" windows-x86_64 21 flac alac
     - name: Build debug APK with Gradle
-      run: ./gradlew app:packageDebug
+      working-directory: android
+      run: .\gradlew.bat app:packageDebug
     - name: Upload debug APK artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Auxio_Canary
-        path: ./app/build/outputs/apk/debug/app-debug.apk
+        name: Tonewise-debug
+        path: android/app/build/outputs/apk/debug/app-debug.apk
