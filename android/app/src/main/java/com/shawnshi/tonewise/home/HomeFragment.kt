@@ -46,9 +46,11 @@ import com.shawnshi.tonewise.home.list.AlbumListFragment
 import com.shawnshi.tonewise.home.list.ArtistListFragment
 import com.shawnshi.tonewise.home.list.GenreListFragment
 import com.shawnshi.tonewise.home.list.PlaylistListFragment
+import com.shawnshi.tonewise.home.list.SceneListFragment
 import com.shawnshi.tonewise.home.list.SongListFragment
 import com.shawnshi.tonewise.home.tabs.NamedTabStrategy
 import com.shawnshi.tonewise.home.tabs.Tab
+import com.shawnshi.tonewise.home.tabs.TabCustomizeDialog
 import com.shawnshi.tonewise.list.ListViewModel
 import com.shawnshi.tonewise.list.SelectionFragment
 import com.shawnshi.tonewise.list.menu.Menu
@@ -212,6 +214,10 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
 
             // Handle sort menu
             R.id.action_sort -> {
+                if (homeModel.currentTabType.value == MusicType.SCENES) {
+                    TabCustomizeDialog().show(parentFragmentManager, "TabCustomizeDialog")
+                    return true
+                }
                 // Junk click event when opening the menu
                 val directions =
                     when (homeModel.currentTabType.value) {
@@ -220,6 +226,7 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                         MusicType.ARTISTS -> HomeFragmentDirections.sortArtists()
                         MusicType.GENRES -> HomeFragmentDirections.sortGenres()
                         MusicType.PLAYLISTS -> HomeFragmentDirections.sortPlaylists()
+                        MusicType.SCENES -> error("Handled above")
                     }
                 findNavController().navigateSafe(directions)
                 true
@@ -272,6 +279,7 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                 MusicType.ARTISTS -> R.id.home_artist_recycler
                 MusicType.GENRES -> R.id.home_genre_recycler
                 MusicType.PLAYLISTS -> R.id.home_playlist_recycler
+                MusicType.SCENES -> android.view.View.NO_ID
             }
     }
 
@@ -498,6 +506,7 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                 MusicType.ARTISTS -> ArtistListFragment()
                 MusicType.GENRES -> GenreListFragment()
                 MusicType.PLAYLISTS -> PlaylistListFragment()
+                MusicType.SCENES -> SceneListFragment()
             }
     }
 }

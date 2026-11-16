@@ -23,6 +23,7 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Environment
+import androidx.core.content.edit
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.net.HttpURLConnection
@@ -73,6 +74,8 @@ constructor(
     private val waveformRepository: WaveformRepository,
 ) {
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
+    private val sceneOrderPrefs =
+        context.getSharedPreferences("tonewise_scene_order", Context.MODE_PRIVATE)
     private var activeDiscoveryListener: NsdManager.DiscoveryListener? = null
 
     private val _discoveredHosts = MutableStateFlow<List<DiscoveredSyncHost>>(emptyList())
@@ -191,7 +194,7 @@ constructor(
                 // 2. Pull scenes_5d.json
                 val scenesRaw = httpGetString("$cleanBase/api/v1/scenes")
                 cacheFile("scenes_5d.json", scenesRaw.toByteArray(Charsets.UTF_8))
-                _scenes.value = parseScenesJson(scenesRaw)
+                _scenes.value = applySceneOrder(parseScenesJson(scenesRaw))
 
                 // 3. Pull waveforms.bin if available
                 var wfMessage = "no waveforms"
@@ -316,6 +319,40 @@ constructor(
         File(dir, name).writeBytes(bytes)
     }
 
+    fun moveScene(fromIndex: Int, toIndex: Int) {
+        val current = _scenes.value.toMutableList()
+        if (fromIndex !in current.indices || toIndex !in current.indices || fromIndex == toIndex) {
+            return
+        }
+        val moved = current.removeAt(fromIndex)
+        current.add(toIndex, moved)
+        _scenes.value = current
+        val orderJson = JSONArray(current.map { it.id }).toString()
+        sceneOrderPrefs.edit { putString(KEY_SCENE_ORDER, orderJson) }
+    }
+
+    private fun applySceneOrder(list: List<SceneBanner>): List<SceneBanner> {
+        val raw = sceneOrderPrefs.getString(KEY_SCENE_ORDER, null) ?: return list
+        val savedIds =
+            runCatching {
+                    val arr = JSONArray(raw)
+                    List(arr.length()) { idx -> arr.getString(idx) }
+                }
+                .getOrNull() ?: return list
+        if (savedIds.isEmpty()) return list
+        val byId = list.associateBy { it.id }
+        val ordered = ArrayList<SceneBanner>(list.size)
+        val seen = HashSet<String>(list.size)
+        for (id in savedIds) {
+            val match = byId[id] ?: continue
+            if (seen.add(id)) ordered.add(match)
+        }
+        for (item in list) {
+            if (seen.add(item.id)) ordered.add(item)
+        }
+        return ordered
+    }
+
     private fun loadCachedOrDefaultScenes(): List<SceneBanner> {
         val cached = File(context.filesDir, ".tonewise/scenes_5d.json")
         val raw =
@@ -324,7 +361,7 @@ constructor(
             } else {
                 null
             } ?: DEFAULT_SCENES_JSON
-        return runCatching { parseScenesJson(raw) }.getOrDefault(emptyList())
+        return applySceneOrder(runCatching { parseScenesJson(raw) }.getOrDefault(emptyList()))
     }
 
     private fun parseScenesJson(raw: String): List<SceneBanner> {
@@ -392,6 +429,8 @@ constructor(
     )
 
     companion object {
+        private const val KEY_SCENE_ORDER = "scene_order_ids"
+
         fun sanitizePlaylistFilename(raw: String): String =
             raw.trim().ifEmpty { "Default" }.replace(Regex("[\\\\/:*?\"<>|\\s]+"), "_")
 

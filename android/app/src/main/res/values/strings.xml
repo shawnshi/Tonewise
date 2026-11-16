@@ -83,6 +83,7 @@
 
     <string name="lbl_playlist">Playlist</string>
     <string name="lbl_playlists">Playlists</string>
+    <string name="lbl_scenes">Scenes</string>
     <string name="lbl_new_playlist">New playlist</string>
     <string name="lbl_empty_playlist">Empty playlist</string>
     <string name="lbl_imported_playlist">Imported playlist</string>
@@ -523,7 +524,7 @@
     <string name="lbl_route_speaker">Built-in speaker</string>
     <string name="lbl_route_unknown">System audio device</string>
 
-    <string name="lbl_scenes_and_sync">Scenes &amp; LAN Sync</string>
+    <string name="lbl_scenes_and_sync">LAN, Handoff &amp; Last.fm</string>
     <string name="lbl_scenes_5d_feed">5D Scene Banners</string>
     <string name="lbl_handoff_slots">Persistent Queue Slots (Handoff)</string>
     <string name="lbl_save_slot_1">Save queue to Slot 1</string>
@@ -587,4 +588,19 @@
     <string name="lbl_scene_pill_default">Default Queue</string>
     <string name="fmt_scene_pill">▲ %1$s · Slot #%2$d (%3$d)</string>
     <string name="fmt_scene_switched_slot">Switched to Slot #%1$d: %2$s</string>
+    <string name="lbl_scene_move_up">Move scene up</string>
+    <string name="lbl_scene_move_down">Move scene down</string>
+    <string name="fmt_scene_track_count">%d tracks</string>
+    <string name="lbl_lastfm_title">Last.fm Scrobble &amp; Play History Sync</string>
+    <string name="lbl_lastfm_api_enable">Last.fm Web API scrobbling</string>
+    <string name="lbl_lastfm_broadcast_enable">Android scrobbler broadcast (Pano / SLS)</string>
+    <string name="lbl_lastfm_api_key">Last.fm API Key</string>
+    <string name="lbl_lastfm_shared_secret">Shared Secret</string>
+    <string name="lbl_lastfm_username">Username</string>
+    <string name="lbl_lastfm_password">Password (only for auth)</string>
+    <string name="lbl_lastfm_session_key">Session Key</string>
+    <string name="lbl_lastfm_auth">Authenticate &amp; Get Session</string>
+    <string name="lbl_lastfm_save">Save Config</string>
+    <string name="lbl_lastfm_sync_now">Sync Local Play History</string>
+    <string name="fmt_lastfm_stats">Pending: %1$d · Synced total: %2$d</string>
 </resources>

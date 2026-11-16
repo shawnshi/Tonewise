@@ -57,14 +57,16 @@ sealed class Tab(open val type: MusicType) {
         // Where V is a bit representing the visibility and T is a 3-bit integer representing the
         // MusicMode for this tab.
 
+        private const val SEQ_FORMAT_V2 = 1 shl 24
+
         /** The maximum index that a well-formed tab sequence should be. */
-        const val MAX_SEQUENCE_IDX = 4
+        const val MAX_SEQUENCE_IDX = 5
 
         /**
-         * The default tab sequence, in integer form. This represents a set of four visible tabs
-         * ordered as "Song", "Album", "Artist", "Genre", and "Playlists
+         * The default tab sequence, in integer form. This represents visible tabs ordered as
+         * "Songs", "Albums", "Artists", "Genres", "Playlists", and "Scenes".
          */
-        const val SEQUENCE_DEFAULT = 0b1000_1001_1010_1011_1100
+        const val SEQUENCE_DEFAULT = SEQ_FORMAT_V2 or 0b1000_1001_1010_1011_1100_1101
 
         /** Maps between the integer code in the tab sequence and it's [MusicType]. */
         private val MODE_TABLE =
@@ -74,6 +76,7 @@ sealed class Tab(open val type: MusicType) {
                 MusicType.ARTISTS,
                 MusicType.GENRES,
                 MusicType.PLAYLISTS,
+                MusicType.SCENES,
             )
 
         /**
@@ -91,7 +94,7 @@ sealed class Tab(open val type: MusicType) {
                 )
             }
 
-            var sequence = 0
+            var sequence = SEQ_FORMAT_V2
             var shift = MAX_SEQUENCE_IDX * 4
             for (tab in distinct) {
                 val bin =
@@ -114,11 +117,13 @@ sealed class Tab(open val type: MusicType) {
          * @return An array of [Tab]s corresponding to the sequence.
          */
         fun fromIntCode(intCode: Int): Array<Tab>? {
+            val isV2 = (intCode and SEQ_FORMAT_V2) != 0
+            val startIdx = if (isV2) MAX_SEQUENCE_IDX else 4
             val tabs = mutableListOf<Tab>()
 
             // Try to parse a mode for each chunk in the sequence.
             // If we can't parse one, just skip it.
-            for (shift in (0..MAX_SEQUENCE_IDX * 4).reversed() step 4) {
+            for (shift in (0..startIdx * 4).reversed() step 4) {
                 val chunk = intCode.shr(shift) and 0b1111
                 val mode = MODE_TABLE.getOrNull(chunk and 7) ?: continue
 
@@ -131,6 +136,13 @@ sealed class Tab(open val type: MusicType) {
                     }
             }
 
+            // Append any newly introduced tab modes (e.g., migrating 5-tab configs -> 6-tab).
+            for (mode in MODE_TABLE) {
+                if (tabs.none { it.type == mode }) {
+                    tabs += Visible(mode)
+                }
+            }
+
             // Make sure there are no duplicate tabs
             val distinct = tabs.distinctBy { it.type }
             if (tabs.size != distinct.size) {
@@ -139,8 +151,7 @@ sealed class Tab(open val type: MusicType) {
                 )
             }
 
-            // For safety, return null if we have an empty or larger-than-expected tab array.
-            if (distinct.isEmpty() || distinct.size < MAX_SEQUENCE_IDX) {
+            if (distinct.size < MODE_TABLE.size) {
                 L.e("Sequence size was ${distinct.size}, which is invalid")
                 return null
             }

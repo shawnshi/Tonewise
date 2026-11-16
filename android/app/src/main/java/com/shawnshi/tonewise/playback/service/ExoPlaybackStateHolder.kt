@@ -69,6 +69,7 @@ import com.shawnshi.tonewise.playback.state.RawQueue
 import com.shawnshi.tonewise.playback.state.RepeatMode
 import com.shawnshi.tonewise.playback.state.ShuffleMode
 import com.shawnshi.tonewise.playback.state.StateAck
+import com.shawnshi.tonewise.sync.LastFmRepository
 import org.oxycblt.musikr.MusicParent
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L
@@ -87,6 +88,7 @@ class ExoPlaybackStateHolder(
     private val dspRepository: DspRepository,
     private val musicRepository: MusicRepository,
     private val imageSettings: ImageSettings,
+    private val lastFmRepository: LastFmRepository,
 ) :
     PlaybackStateHolder,
     Player.Listener,
@@ -584,6 +586,7 @@ class ExoPlaybackStateHolder(
         super.onMediaItemTransition(mediaItem, reason)
 
         syncSignalPath(mediaItem?.song)
+        mediaItem?.song?.let { lastFmRepository.onNowPlaying(it) }
 
         if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
             playbackManager.ack(this, StateAck.IndexMoved)
@@ -640,6 +643,7 @@ class ExoPlaybackStateHolder(
             }
         if (qualified) {
             playCountRepository.incrementPlayCount(song)
+            lastFmRepository.onSongPlayed(song)
             countedCurrentPlay = true
         }
     }
@@ -804,6 +808,7 @@ class ExoPlaybackStateHolder(
         private val dspRepository: DspRepository,
         private val musicRepository: MusicRepository,
         private val imageSettings: ImageSettings,
+        private val lastFmRepository: LastFmRepository,
     ) {
         fun create(): ExoPlaybackStateHolder {
             val enableFloat = playbackSettings.floatOutput
@@ -860,6 +865,7 @@ class ExoPlaybackStateHolder(
                 dspRepository,
                 musicRepository,
                 imageSettings,
+                lastFmRepository,
             )
         }
     }

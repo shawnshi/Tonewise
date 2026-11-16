@@ -21,9 +21,7 @@ package com.shawnshi.tonewise.playback
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.os.Bundle
@@ -38,7 +36,6 @@ import androidx.dynamicanimation.animation.SpringForce
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import dagger.hilt.android.AndroidEntryPoint
-import java.util.Locale
 import javax.inject.Inject
 import kotlin.math.abs
 import com.shawnshi.tonewise.R
@@ -52,8 +49,6 @@ import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.audio.SignalPathDialog
-import com.shawnshi.tonewise.playback.audio.SignalPathState
-import com.shawnshi.tonewise.playback.audio.SignalQualityTier
 import com.shawnshi.tonewise.playback.dsp.DspControlDialog
 import com.shawnshi.tonewise.playback.queue.QueueViewModel
 import com.shawnshi.tonewise.playback.state.RepeatMode
@@ -167,9 +162,6 @@ class PlaybackPanelFragment :
             isSelected = true
             setOnClickListener { playbackModel.song.value?.let(detailModel::showSong) }
         }
-        binding.playbackQualityPill.setOnClickListener {
-            SignalPathDialog.newInstance().show(parentFragmentManager, SignalPathDialog.TAG)
-        }
 
         binding.playbackSeekBar?.listener = this
 
@@ -197,7 +189,6 @@ class PlaybackPanelFragment :
 
         // --- VIEWMODEL SETUP --
         collectImmediately(playbackModel.song, playbackModel.currentPlayCount, ::updateSong)
-        collectImmediately(playbackModel.signalPath, ::updateSignalPath)
         collectImmediately(playbackModel.waveformEnvelope, ::updateWaveform)
         collectImmediately(playbackModel.parent, ::updateParent)
         collectImmediately(playbackModel.positionDs, ::updatePosition)
@@ -249,7 +240,6 @@ class PlaybackPanelFragment :
         binding.playbackArtist.isSelected = false
         binding.playbackAlbum.isSelected = false
         binding.playbackMeta.isSelected = false
-        binding.playbackQualityPill.setOnClickListener(null)
         binding.playbackToolbar.setOnMenuItemClickListener(null)
         userAwarePagerCallback?.release()
         binding.playbackPager?.adapter = null
@@ -332,42 +322,6 @@ class PlaybackPanelFragment :
             }
         }
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
-    }
-
-    private fun updateSignalPath(state: SignalPathState) {
-        val pill = binding?.playbackQualityPill ?: return
-        val codec = state.sourceCodec ?: "PCM"
-        val rate =
-            if (state.sourceSampleRateHz > 0) {
-                String.format(Locale.US, "%.1f kHz", state.sourceSampleRateHz / 1000.0)
-            } else {
-                "-- kHz"
-            }
-        val (tierText, accentHex) =
-            when (state.qualityTier) {
-                SignalQualityTier.BIT_PERFECT -> "BIT-PERFECT" to "#2EC27E"
-                SignalQualityTier.HIGH_RES_FLOAT -> "HI-RES FLOAT" to "#4EA8DE"
-                SignalQualityTier.SYSTEM_MIXER -> "SYS MIXER" to "#E5A50A"
-            }
-        val rgText =
-            if (!state.dspBypassed && abs(state.replayGainDb) > 0.05f) {
-                String.format(Locale.US, "RG %+.1f dB", state.replayGainDb)
-            } else if (state.dspBypassed) {
-                "DSP BYPASS"
-            } else {
-                state.dspSummaryLabel
-            }
-        pill.text = "$codec · $rate · $rgText · $tierText"
-        val accentColor = Color.parseColor(accentHex)
-        pill.setTextColor(accentColor)
-        val density = pill.resources.displayMetrics.density
-        pill.background =
-            GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = 999f * density
-                setColor((accentColor and 0x00FFFFFF) or 0x22000000)
-                setStroke((1f * density).toInt().coerceAtLeast(1), (accentColor and 0x00FFFFFF) or 0x88000000.toInt())
-            }
     }
 
     private fun updateParent(parent: MusicParent?) {

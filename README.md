@@ -17,8 +17,8 @@
 * **Android 客户端四阶段演进 (`android/` S1–S4)**：
   * **S1 — 64-bit 浮点调音引擎与双模直通链路**：`TonewiseDspEngine` 5 级 `Double` 串联管线（Preamp → 10 段 RBJ Biquad PEQ / EqualizerAPO 导入 → Bauer 双耳 Crossfeed → 声道平衡/相位/单声道折叠 → `-0.2 dBFS` 3ms 前瞻软限幅）、按设备声学存档（`DspRepository`）、等响度 A/B 盲听对比、Android 14+ USB DAC `BIT_PERFECT` 硬件直通与采样率切换重武装、外置 `AudioSession`（Wavelet / RootlessJamesDSP）互斥以及 HyperOS/Dolby 系统音效冲突提示。
   * **S2 — 古典多版本作品索引与原子洗牌**：`:musikr` 新增 `WORK` / `MOVEMENTNAME` / `MOVEMENTNUMBER` / `MUSICBRAINZ_WORKID` / `MOOD` 标签解析（缓存库升至 v73）、`ClassicalWork` 同作品多演绎版本聚合、屏幕 C 演绎版本对比（`WorkRecordingsDialog` 同步切歌至对应乐章与播放进度）以及整部作品不拆散的原子随机排序（`WorkShuffleOrder`）。
-  * **S3 — 古典四元组排版、常驻音质胶囊与数码画册**：播放界面支持“作曲家—作品名—乐章—演绎者/指挥”古典四元组衬线排版（`Typeface.SERIF`）与 1:1 直角封面（`CoverView` / `PlaybackMaskableFrameLayout`）、常驻三色音质胶囊 `playback_quality_pill`（点击直达全链路信号路径 `SignalPathDialog`），以及基于原生 `PdfRenderer` 的零依赖 `BookletPdfDialog` 数码画册阅读器。
-  * **S4 — 情景浮条热切换、`.m3u8` 防抖回写与 OLED 桌面时钟**：底部播放栏顶部新增 `SceneContextPill`（短按打开 `ScenesAndSyncDialog`，长按跨 5 槽位热切换并自适应底部弹窗高度）、五维 DJ 标签筛选（`DJ_VOCALS` / `DJ_ENERGY` / `DJ_SCENE`）、局域网 mDNS 增量同步与 150 点 SeekBar 波形包络、2 秒防抖无 BOM UTF-8 POSIX `.m3u8` 回写，以及纯黑 `#000000` 全屏 `DeskClockDialog`（每 60 秒 `±2dp` 循环像素偏移防烧屏）。
+  * **S3 — 古典四元组排版与数码画册**：播放界面支持“作曲家—作品名—乐章—演绎者/指挥”古典四元组衬线排版（`Typeface.SERIF`）与 1:1 直角封面（`CoverView` / `PlaybackMaskableFrameLayout`），保持精简元数据区并在顶部工具栏直达全链路信号路径（`SignalPathDialog`）及基于原生 `PdfRenderer` 的零依赖 `BookletPdfDialog` 数码画册阅读器。
+  * **S4 — 独立情景页签、Last.fm 同步、`.m3u8` 回写与 OLED 桌面时钟**：`Library` 主导航新增独立 **Scenes** 页签（支持五维场景卡片手动排序与交互式 DJ 标签筛选，`SceneListFragment`），顶部保留 `SceneContextPill` 快捷热切 5 槽位持久队列，同步中心集成 Last.fm Web API v2.0（`auth.getMobileSession` / `track.updateNowPlaying` / `track.scrobble`）、系统广播 Scrobble（`com.adam.aslfms`）与本地历史播放记录增量同步（`LastFmRepository`）、2 秒防抖无 BOM UTF-8 POSIX `.m3u8` 回写及纯黑防烧屏 OLED `DeskClockDialog`；同步升级全幅无留白自适应与多密度应用图标。
 
 ## Release Download / 发行包下载
 
@@ -26,8 +26,8 @@
 
 * **安装包**：[releases/tonewise-android-release.apk](releases/tonewise-android-release.apk)
 * **版本与包名**：`com.shawnshi.tonewise` · `v4.1.5` (`versionCode 75`)
-* **文件大小**：`15,461,338` bytes (~14.75 MiB)
-* **SHA-256**：`6761757f62ad9b7e7d199478a1e0b194f8b7f9140fcd0daac4a6c7edc74151ca`
+* **文件大小**：`15,531,021` bytes (~14.81 MiB)
+* **SHA-256**：`a30fb4f8b2a8bef00c9d5b1f62c83a31c4b91491cfc4a43e2e1c00d18d6a0e14`
 * **签名说明**：已通过 `zipalign` 4 字节对齐与 `apksigner` v2/v3 签名校验（当前使用开发者本机调试签名密钥 `CN=Android Debug, O=Android, C=US` 封装，可直接侧载安装体验；正式商店分发请替换为独立发布密钥签章）。
 
 ## Screenshots
@@ -47,7 +47,7 @@
 * **发烧级音频路径与 64-bit DSP**：USB DAC `BIT_PERFECT` 硬件直通、5 级 64-bit Biquad PEQ / Bauer Crossfeed / 软限幅、EqualizerAPO 导入、等响度 A/B 盲听对比与信号路径 4 段实时监控
 * **古典音乐一等公民支持**：`WORK` / `MOVEMENTNAME` / `MOVEMENTNUMBER` / `MUSICBRAINZ_WORKID` / 作曲家 / 指挥深度索引、同作品多版本同乐章对比切换、原子乐章随机排序、衬线四元组视图与 `PdfRenderer` 数码画册阅读
 * **多维详情与传记体系**：曲目列表展示 `album` / `year` / `play count` / `genre`；专辑、艺术家、作曲家、指挥详情页支持本地及缓存传记展示
-* **五维入景与局域网零云同步**：`DJ_VOCALS` / `DJ_ENERGY` / `DJ_SCENE` 胶囊矩阵、5 槽位持久队列热切换、`_tonewise._tcp` mDNS 局域网同步、150 点静态 RMS 波形进度条、防抖 `.m3u8` 导出与 OLED 防烧屏桌面时钟
+* **独立情景页签、Last.fm 与局域网零云同步**：`Library` 主导航独立 **Scenes** 页签支持手动排序五维场景卡片与 `DJ_VOCALS` / `DJ_ENERGY` / `DJ_SCENE` 筛选，同步中心支持 **Last.fm** 认证实时 Scrobble、Android 系统 Scrobbler 广播及本地播放记录增量同步、5 槽位持久队列热切换、`_tonewise._tcp` mDNS 局域网同步、150 点静态 RMS 波形进度条、防抖 `.m3u8` 导出与 OLED 防烧屏桌面时钟
 * **高完成度本地播放器基础**：Material Design Expressive 交互、SAF/MediaStore 双后端、无缝播放、完整 ReplayGain 与 Android Auto / 桌面微件支持
 
 ## Permissions

@@ -81,24 +81,6 @@
             android:textSize="11sp"
             tools:text="2024 • Genre • 3 plays" />
 
-        <TextView
-            android:id="@+id/playback_quality_pill"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:clickable="true"
-            android:focusable="true"
-            android:fontFamily="monospace"
-            android:maxLines="1"
-            android:ellipsize="end"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp"
-            android:paddingTop="2dp"
-            android:paddingBottom="2dp"
-            android:textSize="10sp"
-            android:textStyle="bold"
-            tools:text="FLAC · 96.0 kHz · BIT-PERFECT" />
-
     </LinearLayout>
     <com.shawnshi.tonewise.playback.ui.ForcedLTRFrameLayout
         android:id="@+id/playback_controls_wrapper"

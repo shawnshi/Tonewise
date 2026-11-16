@@ -15,7 +15,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
- 
+
 package com.shawnshi.tonewise.sync
 
 import android.os.Build
@@ -23,37 +23,30 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,15 +54,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.core.graphics.toColorInt
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.material.bottomsheet.BackportBottomSheetDialogFragment
@@ -81,7 +72,6 @@ import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.ui.clock.DeskClockDialog
 import com.shawnshi.tonewise.util.showToast
-import org.oxycblt.musikr.tag.Name
 
 @AndroidEntryPoint
 class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
@@ -89,6 +79,7 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
     @Inject lateinit var lanSyncRepository: LanSyncRepository
     @Inject lateinit var sessionSlotStore: SessionSlotStore
     @Inject lateinit var musicRepository: MusicRepository
+    @Inject lateinit var lastFmRepository: LastFmRepository
 
     override fun onStart() {
         super.onStart()
@@ -108,58 +99,17 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
         return ComposeView(requireContext()).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
-                val scenes by lanSyncRepository.scenes.collectAsStateWithLifecycle()
                 val hosts by lanSyncRepository.discoveredHosts.collectAsStateWithLifecycle()
                 val syncStatus by lanSyncRepository.syncStatus.collectAsStateWithLifecycle()
                 val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
-                var selectedScene by remember { mutableStateOf("all") }
-                var selectedVocals by remember { mutableStateOf("all") }
-                var selectedEnergy by remember { mutableStateOf("all") }
-                val matchedSongs =
-                    remember(selectedScene, selectedVocals, selectedEnergy, musicRepository.library) {
-                        lanSyncRepository.matchSongsByDjFilter(
-                            selectedScene,
-                            selectedVocals,
-                            selectedEnergy,
-                        )
-                    }
+                val lastFmState by lastFmRepository.state.collectAsStateWithLifecycle()
 
                 TonewiseSyncTheme {
-                    ScenesAndSyncSheet(
-                        scenes = scenes,
+                    SyncHubSheet(
                         discoveredHosts = hosts,
                         syncStatus = syncStatus,
                         sessionSlots = slots,
-                        selectedScene = selectedScene,
-                        selectedVocals = selectedVocals,
-                        selectedEnergy = selectedEnergy,
-                        matchedCount = matchedSongs.size,
-                        onSelectScene = { selectedScene = it },
-                        onSelectVocals = { selectedVocals = it },
-                        onSelectEnergy = { selectedEnergy = it },
-                        onPlayMatched = {
-                            if (matchedSongs.isNotEmpty()) {
-                                val sceneLabel =
-                                    if (selectedScene == "all") "Custom" else selectedScene
-                                sessionSlotStore.setActiveScene(sceneLabel)
-                                lanSyncRepository.scheduleM3u8WriteBack(sceneLabel, matchedSongs)
-                                playbackModel.play(matchedSongs)
-                                dismiss()
-                            } else {
-                                requireContext().showToast(R.string.lbl_scene_no_matches)
-                            }
-                        },
-                        onLaunchScene = { banner ->
-                            val songs = lanSyncRepository.matchSongsForScene(banner)
-                            if (songs.isNotEmpty()) {
-                                sessionSlotStore.setActiveScene(banner.title)
-                                lanSyncRepository.scheduleM3u8WriteBack(banner.title, songs)
-                                playbackModel.play(songs)
-                                dismiss()
-                            } else {
-                                requireContext().showToast(R.string.lbl_scene_no_matches)
-                            }
-                        },
+                        lastFmState = lastFmState,
                         onSaveSlot = { slotIndex ->
                             val queue = playbackModel.pagerQueue.value
                             val uids = queue.queue.map { it.uid.toString() }
@@ -167,8 +117,7 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                                 requireContext().showToast(R.string.lbl_slot_empty_queue)
                             } else {
                                 val title =
-                                    (playbackModel.song.value?.name as? Name.Known)?.raw
-                                        ?: "Session #$slotIndex"
+                                    playbackModel.song.value?.name?.raw ?: "Session #$slotIndex"
                                 sessionSlotStore.saveSlot(
                                     SessionSlotItem(
                                         slotIndex = slotIndex,
@@ -202,6 +151,20 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                             }
                         },
                         onSyncUrl = { url -> lanSyncRepository.syncWithHost(url) },
+                        onSaveLastFm = { apiEnabled, broadcastEnabled, key, secret, user, sk ->
+                            lastFmRepository.updateConfig(
+                                apiEnabled = apiEnabled,
+                                broadcastEnabled = broadcastEnabled,
+                                apiKey = key,
+                                sharedSecret = secret,
+                                username = user,
+                                sessionKey = sk,
+                            )
+                        },
+                        onAuthLastFm = { key, secret, user, pass ->
+                            lastFmRepository.authenticateMobileSession(key, secret, user, pass)
+                        },
+                        onSyncLastFmHistory = { lastFmRepository.syncLocalPlayHistory() },
                         onOpenDeskClock = {
                             val fm = parentFragmentManager
                             dismiss()
@@ -236,27 +199,36 @@ private fun TonewiseSyncTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun ScenesAndSyncSheet(
-    scenes: List<SceneBanner>,
+private fun SyncHubSheet(
     discoveredHosts: List<DiscoveredSyncHost>,
     syncStatus: String,
     sessionSlots: List<SessionSlotItem>,
-    selectedScene: String,
-    selectedVocals: String,
-    selectedEnergy: String,
-    matchedCount: Int,
-    onSelectScene: (String) -> Unit,
-    onSelectVocals: (String) -> Unit,
-    onSelectEnergy: (String) -> Unit,
-    onPlayMatched: () -> Unit,
-    onLaunchScene: (SceneBanner) -> Unit,
+    lastFmState: LastFmState,
     onSaveSlot: (Int) -> Unit,
     onRestoreSlot: (SessionSlotItem) -> Unit,
     onSyncUrl: suspend (String) -> Unit,
+    onSaveLastFm: (Boolean, Boolean, String, String, String, String) -> Unit,
+    onAuthLastFm: suspend (String, String, String, String) -> Boolean,
+    onSyncLastFmHistory: suspend () -> Int,
     onOpenDeskClock: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var manualUrl by remember { mutableStateOf("http://192.168.1.100:45820") }
+    var apiEnabled by remember(lastFmState.apiEnabled) { mutableStateOf(lastFmState.apiEnabled) }
+    var broadcastEnabled by remember(lastFmState.broadcastEnabled) {
+        mutableStateOf(lastFmState.broadcastEnabled)
+    }
+    var apiKey by remember(lastFmState.apiKey) { mutableStateOf(lastFmState.apiKey) }
+    var sharedSecret by remember(lastFmState.sharedSecret) { mutableStateOf(lastFmState.sharedSecret) }
+    var username by remember(lastFmState.username) { mutableStateOf(lastFmState.username) }
+    var sessionKey by remember(lastFmState.sessionKey) { mutableStateOf(lastFmState.sessionKey) }
+    var password by remember { mutableStateOf("") }
+
+    LaunchedEffect(lastFmState.sessionKey) {
+        if (lastFmState.sessionKey.isNotEmpty()) {
+            password = ""
+        }
+    }
 
     Surface(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface) {
         Column(
@@ -273,87 +245,7 @@ private fun ScenesAndSyncSheet(
                 fontWeight = FontWeight.SemiBold,
             )
 
-            // 1. 5D Scene Banner Feed
-            Text(
-                text = stringResource(R.string.lbl_scenes_5d_feed),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            for (scene in scenes) {
-                val accent =
-                    runCatching { Color(scene.accentHex.toColorInt()) }
-                        .getOrElse { MaterialTheme.colorScheme.primary }
-                ElevatedCard(
-                    modifier = Modifier.fillMaxWidth().clickable { onLaunchScene(scene) },
-                    shape = RoundedCornerShape(14.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(
-                            modifier =
-                                Modifier.width(6.dp)
-                                    .height(42.dp)
-                                    .clip(RoundedCornerShape(3.dp))
-                                    .background(accent)
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = scene.title,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Medium,
-                            )
-                            if (scene.subtitle.isNotEmpty()) {
-                                Text(
-                                    text = scene.subtitle,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            HorizontalDivider()
-
-            // 1b. Interactive DJ Tag Matrix Filter
-            Text(
-                text = stringResource(R.string.lbl_dj_filter),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            DjTagFilterRow(
-                label = stringResource(R.string.lbl_dj_scene),
-                options = listOf("all", "focus", "coding", "relax", "energy", "pop"),
-                selected = selectedScene,
-                onSelect = onSelectScene,
-            )
-            DjTagFilterRow(
-                label = stringResource(R.string.lbl_dj_vocals),
-                options = listOf("all", "vocal", "instrumental", "unknown"),
-                selected = selectedVocals,
-                onSelect = onSelectVocals,
-            )
-            DjTagFilterRow(
-                label = stringResource(R.string.lbl_dj_energy),
-                options = listOf("all", "low", "medium", "high", "unknown"),
-                selected = selectedEnergy,
-                onSelect = onSelectEnergy,
-            )
-            Button(
-                onClick = onPlayMatched,
-                enabled = matchedCount > 0,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(stringResource(R.string.fmt_dj_play_matches, matchedCount))
-            }
-
-            HorizontalDivider()
-
-            // 2. 5-Slot Persistent Queues & Handoff
+            // 1. 5-Slot Persistent Queues & Handoff
             Text(
                 text = stringResource(R.string.lbl_handoff_slots),
                 style = MaterialTheme.typography.titleSmall,
@@ -395,6 +287,123 @@ private fun ScenesAndSyncSheet(
                     )
                 }
             }
+
+            HorizontalDivider()
+
+            // 2. Last.fm Scrobble & Local Play History Sync
+            Text(
+                text = stringResource(R.string.lbl_lastfm_title),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.lbl_lastfm_api_enable),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = apiEnabled,
+                    onCheckedChange = { checked ->
+                        apiEnabled = checked
+                        onSaveLastFm(checked, broadcastEnabled, apiKey, sharedSecret, username, sessionKey)
+                    },
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.lbl_lastfm_broadcast_enable),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = broadcastEnabled,
+                    onCheckedChange = { checked ->
+                        broadcastEnabled = checked
+                        onSaveLastFm(apiEnabled, checked, apiKey, sharedSecret, username, sessionKey)
+                    },
+                )
+            }
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it },
+                label = { Text(stringResource(R.string.lbl_lastfm_api_key)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = sharedSecret,
+                onValueChange = { sharedSecret = it },
+                label = { Text(stringResource(R.string.lbl_lastfm_shared_secret)) },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it },
+                label = { Text(stringResource(R.string.lbl_lastfm_username)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text(stringResource(R.string.lbl_lastfm_password)) },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = sessionKey,
+                onValueChange = { sessionKey = it },
+                label = { Text(stringResource(R.string.lbl_lastfm_session_key)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            onAuthLastFm(apiKey, sharedSecret, username, password)
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(stringResource(R.string.lbl_lastfm_auth))
+                }
+                OutlinedButton(
+                    onClick = {
+                        onSaveLastFm(apiEnabled, broadcastEnabled, apiKey, sharedSecret, username, sessionKey)
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(stringResource(R.string.lbl_lastfm_save))
+                }
+            }
+            Button(
+                onClick = { scope.launch { onSyncLastFmHistory() } },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.lbl_lastfm_sync_now))
+            }
+            Text(
+                text =
+                    "${stringResource(R.string.fmt_lastfm_stats, lastFmState.pendingCount, lastFmState.syncedPlayCountTotal)} · ${lastFmState.statusMessage}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             HorizontalDivider()
 
@@ -450,35 +459,6 @@ private fun ScenesAndSyncSheet(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(stringResource(R.string.lbl_open_desk_clock))
-            }
-        }
-    }
-}
-
-@Composable
-private fun DjTagFilterRow(
-    label: String,
-    options: List<String>,
-    selected: String,
-    onSelect: (String) -> Unit,
-) {
-    val allLabel = stringResource(R.string.lbl_dj_all)
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            for (opt in options) {
-                FilterChip(
-                    selected = selected == opt,
-                    onClick = { onSelect(opt) },
-                    label = { Text(if (opt == "all") allLabel else opt) },
-                )
             }
         }
     }

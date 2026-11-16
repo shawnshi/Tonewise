@@ -255,6 +255,7 @@
     <string name="lbl_sort_dsc">降序</string>
     <string name="lbl_playlist">播放列表</string>
     <string name="lbl_playlists">播放列表</string>
+    <string name="lbl_scenes">情景</string>
     <string name="desc_playlist_image">%s 的播放列表图片</string>
     <string name="set_intelligent_sorting">排序时忽略冠词</string>
     <string name="set_intelligent_sorting_desc">正确排列以数字或像是 \"the\" 这样的单词开头的名称（对英文歌曲效果最好）</string>
@@ -369,7 +370,7 @@
     <string name="set_saf_multithread_desc">更快但在一些设备上失败</string>
     <string name="err_share_too_large">过大无法分享</string>
     <string name="err_share_failed">无法分享这个</string>
-    <string name="lbl_scenes_and_sync">五维场景与局域网同步</string>
+    <string name="lbl_scenes_and_sync">同步、接力与 Last.fm</string>
     <string name="lbl_scenes_5d_feed">五维场景横幅流</string>
     <string name="lbl_handoff_slots">5 槽位持久队列（Handoff 接力）</string>
     <string name="lbl_save_slot_1">保存当前队列至槽位 1</string>
@@ -433,4 +434,19 @@
     <string name="lbl_scene_pill_default">默认队列</string>
     <string name="fmt_scene_pill">▲ %1$s · 槽位 #%2$d (%3$d)</string>
     <string name="fmt_scene_switched_slot">已切换至槽位 #%1$d：%2$s</string>
+    <string name="lbl_scene_move_up">上移情景</string>
+    <string name="lbl_scene_move_down">下移情景</string>
+    <string name="fmt_scene_track_count">%d 首匹配</string>
+    <string name="lbl_lastfm_title">Last.fm 播放记录同步 (Scrobble)</string>
+    <string name="lbl_lastfm_api_enable">启用 Last.fm API 自动上报</string>
+    <string name="lbl_lastfm_broadcast_enable">发送 Android 系统 Scrobble 广播 (Pano / SLS)</string>
+    <string name="lbl_lastfm_api_key">API Key</string>
+    <string name="lbl_lastfm_shared_secret">Shared Secret</string>
+    <string name="lbl_lastfm_username">用户名</string>
+    <string name="lbl_lastfm_password">密码（仅用于获取 Session，不落盘）</string>
+    <string name="lbl_lastfm_session_key">Session Key</string>
+    <string name="lbl_lastfm_auth">登录认证并获取 Session</string>
+    <string name="lbl_lastfm_save">保存配置</string>
+    <string name="lbl_lastfm_sync_now">同步本地播放记录到 Last.fm</string>
+    <string name="fmt_lastfm_stats">待上传队列：%1$d 条 · 累计已同步：%2$d 次播放</string>
 </resources>
