@@ -1008,6 +1008,126 @@ public sealed class WorkbenchP4Tests
         Assert.False(dsp.ReachedEndOfStream);
     }
 
+    [Fact]
+    public async Task LibraryFileWatcher_DetectsAddedAndDeletedAudioFiles_IgnoresInternalDir_AndRespectsSuspension()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "tw_p4_watch_" + Guid.NewGuid().ToString("N"));
+        string tonewiseDir = Path.Combine(tempDir, ".tonewise");
+        Directory.CreateDirectory(tonewiseDir);
+        string dbPath = Path.Combine(tonewiseDir, "manifest.db");
+
+        try
+        {
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var setup = conn.CreateCommand();
+                setup.CommandText = File.ReadAllText(FindSchemaSqlPath());
+                setup.ExecuteNonQuery();
+            }
+
+            var callbackTcs = new TaskCompletionSource<IReadOnlyList<string>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int fireCount = 0;
+
+            using var watcher = new LibraryFileWatcherService(tempDir, async changed =>
+            {
+                Interlocked.Increment(ref fireCount);
+                foreach (string p in changed)
+                {
+                    if (p.EndsWith(".flac", StringComparison.OrdinalIgnoreCase) && File.Exists(p))
+                    {
+                        var tags = LibraryFolderOrganizerService.ReadEmbeddedHeaderTags(p);
+                        using var conn = new SqliteConnection($"Data Source={dbPath}");
+                        conn.Open();
+                        using var ins = conn.CreateCommand();
+                        ins.CommandText = """
+                            INSERT OR REPLACE INTO tracks (
+                                track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                                rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                                title, album, album_artist
+                            ) VALUES (
+                                'u_watch_1', X'0102', 64, X'0304', 0,
+                                $rel, 128, 1000, 'flac', 44100, 1000,
+                                $ti, $al, $aa
+                            );
+                            """;
+                        ins.Parameters.AddWithValue("$rel", Path.GetRelativePath(tempDir, p).Replace('\\', '/'));
+                        ins.Parameters.AddWithValue("$ti", tags.Title ?? Path.GetFileNameWithoutExtension(p));
+                        ins.Parameters.AddWithValue("$al", tags.Album ?? "Unknown Album");
+                        ins.Parameters.AddWithValue("$aa", tags.AlbumArtist ?? tags.Artist ?? "Unknown Artist");
+                        ins.ExecuteNonQuery();
+                    }
+                    else if (p.EndsWith(".flac", StringComparison.OrdinalIgnoreCase) && !File.Exists(p))
+                    {
+                        LibraryFolderOrganizerService.OrganizeLibraryFolders(tempDir, dbPath);
+                    }
+                }
+                callbackTcs.TrySetResult(changed);
+                await Task.CompletedTask;
+            }, debounceMs: 100);
+
+            // 1. Internal .tonewise writes & .tmp writes must be ignored
+            File.WriteAllText(Path.Combine(tonewiseDir, "manifest.db-wal"), "ignore");
+            File.WriteAllText(Path.Combine(tempDir, "download.tmp"), "ignore");
+            await Task.Delay(260);
+            Assert.Equal(0, Volatile.Read(ref fireCount));
+
+            // 2. Changes during SuspendWatching() must not fire
+            using (watcher.SuspendWatching())
+            {
+                WriteMinimalFlacWithVorbisComments(Path.Combine(tempDir, "1-01 Suppressed.flac"), ("TITLE", "Suppressed"));
+                await Task.Delay(120);
+            }
+            await Task.Delay(600);
+            Assert.Equal(0, Volatile.Read(ref fireCount));
+
+            // 3. New audio file created normally must trigger incremental sync into manifest.db
+            string watchedFile = Path.Combine(tempDir, "1-01 Watched Song.flac");
+            WriteMinimalFlacWithVorbisComments(
+                watchedFile,
+                ("TITLE", "Watched Song"),
+                ("ARTIST", "Watcher Artist"),
+                ("ALBUM", "Watcher Album"));
+
+            var addCompleted = await Task.WhenAny(callbackTcs.Task, Task.Delay(5000));
+            Assert.Same(callbackTcs.Task, addCompleted);
+            var addPaths = await callbackTcs.Task;
+            Assert.Contains(addPaths, p => p.EndsWith("1-01 Watched Song.flac", StringComparison.OrdinalIgnoreCase));
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            {
+                conn.Open();
+                using var q = conn.CreateCommand();
+                q.CommandText = "SELECT title FROM tracks WHERE track_uid = 'u_watch_1';";
+                Assert.Equal("Watched Song", q.ExecuteScalar()?.ToString());
+            }
+
+            // 4. Delete the audio file and confirm deletion syncs cleanly
+            callbackTcs = new TaskCompletionSource<IReadOnlyList<string>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            File.Delete(watchedFile);
+            var delCompleted = await Task.WhenAny(callbackTcs.Task, Task.Delay(5000));
+            Assert.Same(callbackTcs.Task, delCompleted);
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            {
+                conn.Open();
+                using var q = conn.CreateCommand();
+                q.CommandText = "SELECT COUNT(*) FROM tracks WHERE track_uid = 'u_watch_1';";
+                Assert.Equal(0L, Convert.ToInt64(q.ExecuteScalar()));
+            }
+
+            // 5. Verify EnableAutoWatchLibrary persists in DesktopSettingsStore
+            string settingsPath = Path.Combine(tonewiseDir, "desktop_settings.json");
+            DesktopSettingsStore.Save(new DesktopUserSettings(EnableAutoWatchLibrary: false), settingsPath);
+            Assert.False(DesktopSettingsStore.Load(settingsPath).EnableAutoWatchLibrary);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
     private static string FindSchemaSqlPath()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

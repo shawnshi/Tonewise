@@ -771,3 +771,240 @@ public static partial class LibraryFolderOrganizerService
     [GeneratedRegex(@"^0*(\d+)")]
     private static partial Regex LeadingPositiveIntRegex();
 }
+
+/// <summary>
+/// Watches a music library root using <see cref="FileSystemWatcher"/>, ignores internal metadata
+/// and temporary files, coalesces burst edits with a debounce timer, and notifies callers safely.
+/// </summary>
+public sealed class LibraryFileWatcherService : IDisposable
+{
+    private static readonly HashSet<string> WatchedExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".flac", ".mp3", ".wav", ".m4a", ".alac", ".aac", ".ogg", ".opus", ".dsf", ".dff", ".m3u8"
+    };
+
+    private static readonly HashSet<string> TempExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".tmp", ".part", ".crdownload", ".bak"
+    };
+
+    private readonly string _musicRoot;
+    private readonly Func<IReadOnlyList<string>, Task> _onChangesDetected;
+    private readonly int _debounceMs;
+    private readonly FileSystemWatcher _watcher;
+    private readonly Lock _gate = new();
+    private readonly HashSet<string> _pendingPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Timer _debounceTimer;
+
+    private int _suspendCount;
+    private long _suppressUntilUtcTicks;
+    private bool _isProcessing;
+    private bool _rescheduleRequested;
+    private bool _disposed;
+
+    public LibraryFileWatcherService(
+        string musicRoot,
+        Func<IReadOnlyList<string>, Task> onChangesDetected,
+        int debounceMs = 1800)
+    {
+        _musicRoot = LongPathHelper.StripExtendedPrefix(Path.GetFullPath(musicRoot));
+        _onChangesDetected = onChangesDetected ?? throw new ArgumentNullException(nameof(onChangesDetected));
+        _debounceMs = Math.Clamp(debounceMs, 50, 30_000);
+        _debounceTimer = new Timer(_ => _ = FlushPendingAsync(), null, Timeout.Infinite, Timeout.Infinite);
+
+        _watcher = new FileSystemWatcher(_musicRoot)
+        {
+            IncludeSubdirectories = true,
+            InternalBufferSize = 65536,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
+        };
+        _watcher.Created += OnWatcherEvent;
+        _watcher.Deleted += OnWatcherEvent;
+        _watcher.Changed += OnWatcherEvent;
+        _watcher.Renamed += OnWatcherRenamed;
+        _watcher.Error += OnWatcherError;
+        _watcher.EnableRaisingEvents = true;
+    }
+
+    public IDisposable SuspendWatching()
+    {
+        Interlocked.Increment(ref _suspendCount);
+        lock (_gate)
+        {
+            _pendingPaths.Clear();
+            _debounceTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        }
+        return new SuspendScope(this);
+    }
+
+    private void OnWatcherEvent(object sender, FileSystemEventArgs e)
+    {
+        if (!ShouldProcessPath(e.FullPath, isChangeOnly: e.ChangeType == WatcherChangeTypes.Changed))
+            return;
+        EnqueuePath(e.FullPath);
+    }
+
+    private void OnWatcherRenamed(object sender, RenamedEventArgs e)
+    {
+        bool oldOk = ShouldProcessPath(e.OldFullPath, isChangeOnly: false);
+        bool newOk = ShouldProcessPath(e.FullPath, isChangeOnly: false);
+        if (!oldOk && !newOk) return;
+        EnqueuePath(newOk ? e.FullPath : e.OldFullPath);
+    }
+
+    private void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        EnqueuePath(_musicRoot);
+    }
+
+    internal static bool ShouldProcessPath(string? fullPath, bool isChangeOnly)
+    {
+        if (string.IsNullOrWhiteSpace(fullPath)) return false;
+
+        string normalized = fullPath.Replace('\\', '/');
+        foreach (string seg in normalized.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (seg.StartsWith('.')) return false;
+        }
+
+        string ext = Path.GetExtension(fullPath);
+        if (TempExtensions.Contains(ext)) return false;
+
+        if (!string.IsNullOrEmpty(ext))
+        {
+            return WatchedExtensions.Contains(ext);
+        }
+
+        // For extensionless entries (directories being created, moved, or deleted), skip noisy mtime-only Changed bubbles.
+        return !isChangeOnly;
+    }
+
+    private void EnqueuePath(string path)
+    {
+        if (_disposed || Volatile.Read(ref _suspendCount) > 0) return;
+        if (DateTime.UtcNow.Ticks < Interlocked.Read(ref _suppressUntilUtcTicks)) return;
+
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _pendingPaths.Add(path);
+            _debounceTimer.Change(_debounceMs, Timeout.Infinite);
+        }
+    }
+
+    private async Task FlushPendingAsync()
+    {
+        List<string> snapshot;
+        lock (_gate)
+        {
+            if (_disposed || Volatile.Read(ref _suspendCount) > 0 || DateTime.UtcNow.Ticks < Interlocked.Read(ref _suppressUntilUtcTicks))
+            {
+                _pendingPaths.Clear();
+                return;
+            }
+            if (_isProcessing)
+            {
+                _rescheduleRequested = true;
+                return;
+            }
+            if (_pendingPaths.Count == 0) return;
+
+            snapshot = _pendingPaths.ToList();
+            _pendingPaths.Clear();
+            _isProcessing = true;
+        }
+
+        try
+        {
+            await WaitForFilesReadableAsync(snapshot).ConfigureAwait(false);
+            if (!_disposed && Volatile.Read(ref _suspendCount) == 0)
+            {
+                await _onChangesDetected(snapshot).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // Non-fatal background watcher callback guard
+        }
+        finally
+        {
+            bool triggerAgain = false;
+            lock (_gate)
+            {
+                _isProcessing = false;
+                if (!_disposed && (_rescheduleRequested || _pendingPaths.Count > 0))
+                {
+                    _rescheduleRequested = false;
+                    triggerAgain = true;
+                }
+            }
+            if (triggerAgain)
+            {
+                try { _debounceTimer.Change(_debounceMs, Timeout.Infinite); } catch { }
+            }
+        }
+    }
+
+    private static async Task WaitForFilesReadableAsync(IReadOnlyList<string> paths)
+    {
+        int checks = 0;
+        foreach (string rawPath in paths)
+        {
+            if (checks >= 5) break;
+            string ext = Path.GetExtension(rawPath);
+            if (string.IsNullOrEmpty(ext) || !LongPathHelper.FileExists(rawPath)) continue;
+
+            checks++;
+            string ioPath = LongPathHelper.ToExtendedIfLong(rawPath);
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                try
+                {
+                    using var fs = new FileStream(ioPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    break;
+                }
+                catch
+                {
+                    await Task.Delay(100).ConfigureAwait(false);
+                }
+            }
+        }
+    }
+
+    private sealed class SuspendScope(LibraryFileWatcherService owner) : IDisposable
+    {
+        private int _ended;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _ended, 1) == 0)
+            {
+                Interlocked.Exchange(ref owner._suppressUntilUtcTicks, DateTime.UtcNow.AddMilliseconds(450).Ticks);
+                Interlocked.Decrement(ref owner._suspendCount);
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _pendingPaths.Clear();
+        }
+
+        try
+        {
+            _watcher.EnableRaisingEvents = false;
+            _watcher.Created -= OnWatcherEvent;
+            _watcher.Deleted -= OnWatcherEvent;
+            _watcher.Changed -= OnWatcherEvent;
+            _watcher.Renamed -= OnWatcherRenamed;
+            _watcher.Error -= OnWatcherError;
+            _watcher.Dispose();
+        }
+        catch { }
+
+        try { _debounceTimer.Dispose(); } catch { }
+    }
+}

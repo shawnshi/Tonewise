@@ -1099,6 +1099,11 @@
                                         <Button Style="{StaticResource StudioChipButtonStyle}" Content="文件夹整理" Command="{x:Bind ViewModel.OrganizeLibraryFoldersCommand}" AutomationProperties.Name="文件夹整理" ToolTipService.ToolTip="按 &lt;Album Artist&gt;\&lt;Album&gt;\&lt;Disc-Track#&gt; &lt;Title&gt; 整理散落与超长路径文件" />
                                     </StackPanel>
                                     <TextBlock Text="{x:Bind ViewModel.StorageOrganizeStatus, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFg94A3B8Brush}" TextWrapping="Wrap" />
+                                    <Border Height="1" Background="{ThemeResource TwBg242E42Brush}" Margin="0,2" />
+                                    <ToggleSwitch
+                                        Header="自动监测曲库文件变更"
+                                        IsOn="{x:Bind ViewModel.EnableAutoWatchLibrary, Mode=TwoWay}" />
+                                    <TextBlock Text="{x:Bind ViewModel.FileWatcherStatusText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFg94A3B8Brush}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
 

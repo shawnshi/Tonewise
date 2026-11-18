@@ -22,6 +22,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly TonewiseAudioEngine _engine = new();
     private readonly SynchronizationContext? _uiContext;
     private SyncHostServer? _syncHost;
+    private LibraryFileWatcherService? _libraryWatcher;
     private List<TrackItem> _allTracks = [];
     private EqualizerApoProfile? _eqProfile;
     private bool _suppressFilterRefresh;
@@ -391,6 +392,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private string _storageOrganizeStatus = "按 <Album Artist>\\<Album>\\<Disc-Track#> <Title> 规范自动整理散落曲目、补齐碟轨号并收敛超长路径。";
 
     [ObservableProperty]
+    private bool _enableAutoWatchLibrary = true;
+
+    [ObservableProperty]
+    private string _fileWatcherStatusText = "实时监测已开启：自动感知曲库内新增、移动、重命名或删除的音频文件与歌单。";
+
+    partial void OnEnableAutoWatchLibraryChanged(bool value)
+    {
+        RestartLibraryFileWatcher(_store.MusicRoot);
+        SaveUserSettings();
+    }
+
+    [ObservableProperty]
     private bool _isSettingsApisUiSubTab;
 
     [ObservableProperty]
@@ -586,6 +599,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             AppTheme = saved.AppTheme is "light" or "system" ? saved.AppTheme : "dark";
             IsShuffleEnabled = saved.IsShuffleEnabled;
             RepeatMode = saved.RepeatMode is "one" or "off" ? saved.RepeatMode : "all";
+            EnableAutoWatchLibrary = saved.EnableAutoWatchLibrary;
 
             if (!string.IsNullOrWhiteSpace(saved.SelectedEndpointId))
             {
@@ -669,7 +683,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             IsInspectorOpen: IsInspectorOpen,
             AppTheme: AppTheme,
             IsShuffleEnabled: IsShuffleEnabled,
-            RepeatMode: RepeatMode);
+            RepeatMode: RepeatMode,
+            EnableAutoWatchLibrary: EnableAutoWatchLibrary);
 
         try
         {
@@ -741,6 +756,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         SaveUserSettings();
         StatusMessage = $"已加载 {_allTracks.Count:N0} 首曲目（{musicRoot}）";
+        RestartLibraryFileWatcher(musicRoot);
 
         if (_uiContext is not null && _autoSyncedLastFmRoots.Add(musicRoot))
         {
@@ -2859,6 +2875,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         BeginBusy($"正在重建本地指纹库 {root} ...");
         try
         {
+            using var _watchGuard = _libraryWatcher?.SuspendWatching();
             await _store.ScanAndBuildManifestIfMissingAsync(root, forceRebuild: true, fastMode: true);
             _allTracks = await Task.Run(() => _store.LoadFromMusicRoot(root).ToList());
             ApplyFiveDimFilter();
@@ -2892,6 +2909,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         BeginBusy("正在按 <Album Artist>\\<Album>\\<Disc-Track#> <Title> 整理曲库文件夹...");
         try
         {
+            using var _watchGuard = _libraryWatcher?.SuspendWatching();
             var res = await Task.Run(() =>
             {
                 using var _ = _engine.SuspendIfPlayingFile(_allTracks.Select(t => t.FullPath));
@@ -2918,6 +2936,65 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             EndBusy();
         }
+    }
+
+    private void RestartLibraryFileWatcher(string? musicRoot)
+    {
+        Interlocked.Exchange(ref _libraryWatcher, null)?.Dispose();
+
+        if (!EnableAutoWatchLibrary)
+        {
+            FileWatcherStatusText = "实时监测已关闭（可随时点击「重建曲库索引」手动同步）。";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(musicRoot) || !LongPathHelper.DirectoryExists(musicRoot))
+        {
+            FileWatcherStatusText = "等待打开曲库后启动实时监测...";
+            return;
+        }
+
+        try
+        {
+            _libraryWatcher = new LibraryFileWatcherService(musicRoot, changed => OnLibraryFilesChangedAsync(musicRoot, changed));
+            FileWatcherStatusText = $"实时监测运行中（{musicRoot}）：自动同步新增、移动、重命名或删除的曲目与歌单。";
+        }
+        catch (Exception ex)
+        {
+            FileWatcherStatusText = $"实时监测启动失败：{ex.Message}";
+        }
+    }
+
+    private async Task OnLibraryFilesChangedAsync(string expectedRoot, IReadOnlyList<string> changedPaths)
+    {
+        if (!EnableAutoWatchLibrary || IsBusy) return;
+        if (!string.Equals(_store.MusicRoot, expectedRoot, StringComparison.OrdinalIgnoreCase)) return;
+
+        var loaded = await Task.Run(() =>
+        {
+            _store.ScanAndBuildManifestIfMissing(expectedRoot, forceRebuild: true, fastMode: true);
+            return _store.LoadFromMusicRoot(expectedRoot).ToList();
+        }).ConfigureAwait(false);
+
+        void ApplyWatcherUiUpdate()
+        {
+            if (!EnableAutoWatchLibrary || !string.Equals(_store.MusicRoot, expectedRoot, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _allTracks = loaded;
+            UpdateClassicalAdaptiveState();
+            TriggerFilterRefresh();
+            RefreshStagingProposals();
+            RefreshPlaylists();
+
+            FileWatcherStatusText =
+                $"实时监测运行中 · 最近自动同步 {DateTime.Now:HH:mm:ss}（捕获 {changedPaths.Count} 处变更，当前共 {_allTracks.Count:N0} 首）";
+            StatusMessage = $"曲库文件自动监测：已同步 {changedPaths.Count} 处变更，当前共 {_allTracks.Count:N0} 首曲目。";
+        }
+
+        if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
+            _uiContext.Post(_ => ApplyWatcherUiUpdate(), null);
+        else
+            ApplyWatcherUiUpdate();
     }
 
     [RelayCommand]
@@ -3886,6 +3963,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        Interlocked.Exchange(ref _libraryWatcher, null)?.Dispose();
         var host = Interlocked.Exchange(ref _syncHost, null);
         if (host is not null)
         {

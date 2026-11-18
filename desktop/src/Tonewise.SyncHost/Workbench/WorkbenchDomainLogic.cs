@@ -367,7 +367,8 @@ public sealed record DesktopUserSettings(
     bool IsInspectorOpen = true,
     string AppTheme = "dark",
     bool IsShuffleEnabled = false,
-    string RepeatMode = "all"
+    string RepeatMode = "all",
+    bool EnableAutoWatchLibrary = true
 );
 
 public static class DesktopSettingsStore
