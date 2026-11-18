@@ -15,7 +15,7 @@
 * **Rust 同源内核 (`core/`)**：完成 `tonewise-metadata`、`tonewise-rules`、`tonewise-dsp-core`、`tonewise-sync`、`tonewise-ffi`、`tonewise-cli` 六大 crate 构建与双端 JNI/FFI 对齐（`build-core-android.ps1` / `build-core-desktop.ps1`）。
 * **Windows 11 桌面端 (`desktop/`)**：完成 P1–P4、R1–R8 与工作台深度重构：
   * **母带级 64-bit 声学引擎 (`Tonewise.Audio`)**：Event-Driven WASAPI Exclusive / `AsioOut` 输出、`.dsf`/`.dff` 原生 DSD→`352.8 kHz / 64-bit DXD` 抽取解调、Stereo Linked & L/R 独立 64 段 EqualizerAPO 解析与按设备声学档案匹配、ISO 226 动态等响度、零延迟分区 FFT FIR 卷积（支持 REW `.wav` 与 `.sofa` 双耳脉冲）、沙盒化共享内存 VST3 宿主桥、`±1 LSB` TPDF 抖动与 Shared 模式 Equalizer APO 注册表冲突锁；
-  * **音乐信息维护与防毁库审校台 (`Tonewise.SyncHost/Curation`)**：贯彻“只补空缺”与“暂存对比台先审后写”双铁律，入库审校台支持单行 10 维缺标筛选（流派/作曲/指挥/专辑/厂牌/场景/节奏/封面/人声标签/90 天未听），`StagingDiffStore` 支持 `lofty` 物理音频文件头事务回写（保持纯音频 `audio_frame_blake3` 不变）与按批次一键回滚；内置 Cover Art Archive → iTunes → Last.fm 三级封面瀑布、MusicBrainz→Wikidata→Wikipedia/Last.fm 独立传记库（`/Music/.tonewise/encyclopedia.db`）、`symphonia` 声学五维推理与 AcoustID 原盘消歧；
+  * **音乐信息维护与防毁库审校台 (`Tonewise.SyncHost/Curation`)**：贯彻“只补空缺”与“暂存对比台先审后写”双铁律，入库审校台支持单行 10 维缺标筛选（流派/作曲/指挥/专辑/厂牌/场景/节奏/封面/人声标签/90 天未听），`StagingDiffStore` 支持 `lofty` 物理音频文件头事务回写（保持纯音频 `audio_frame_blake3` 不变）与按批次一键回滚；内置本地路径启发式→Apple iTunes Search (`cn`/`us`/`jp`)→MusicBrainz→豆瓣音乐→Last.fm 多源基础属性与封面瀑布（Cover Art Archive → iTunes → Last.fm）、MusicBrainz→Wikidata→Wikipedia/豆瓣音乐独立传记库（`/Music/.tonewise/encyclopedia.db`）、`symphonia` 声学五维推理与 AcoustID 原盘消歧；
   * **Last.fm 全量账本与双端同步 (`Tonewise.SyncHost`)**：集成 `LastFmWebApiClient` 并发分页拉取（支持 `user.gettoptracks`、`user.getlovedtracks`、`user.getrecenttracks` 全量同步，含繁简中文归一化、`Remastered`/`Live`/`feat.` 版本后缀剥离与同曲多副本匹配）及 `effective_play_count = max(legacy, lastfm_pulled) + local_unsynced_expired` 账本，提供 `_tonewise._tcp` mDNS + HTTP/2 `SyncHostServer`（含 `/api/v1/encyclopedia`、Header-Only `/api/v1/patch/{trackUid}`、5 槽位 `handoff` 与手机端 `history.jsonl` 归并）及 BOM-free 相对路径车载 U 盘 `.m3u8` 导出器；
   * **曜石黑工作台与微挂件 (`Tonewise.Desktop`)**：`#131720` + `#D9B372` 高密度三栏工作台、可点击 8 列表头升/降序排列、单/多曲复选批量编辑检查器（共有字段自动预填、按流派自动展开古典信息）、基于当前时段的 AutoDJ 智能排曲（70% 常听 + 30% 少听/未听探索并约束邻曲能量与 BPM 过渡）、顺序/随机与循环控制、Windows SMTC + Win32 全局热键（`Ctrl+Alt+P/C/M`）及防烧屏副屏 OLED 微挂件。
 * **Android 客户端四阶段演进 (`android/` S1–S4)**：
@@ -31,7 +31,7 @@
 | 平台 | 安装包 / 发行归档 | 版本与运行环境 | 文件大小 | SHA-256 |
 | :--- | :--- | :--- | :--- | :--- |
 | **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v4.1.5` (`versionCode 75`) | `15,600,886` bytes (~14.88 MiB) | `779390b0ad1dcb0c350120b1a0f09dcde0be971c7fa13f1dd11c4c7868af3ea8` |
-| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | WinUI 3 (`net9.0-windows10.0.26100.0` + 含 `tonewise_core.dll` & `tonewise-cli.exe`) | `46,374,740` bytes (~44.23 MiB) | `aa905cdbf581b5a8288f56c52f33ddbbc38c12cdcf065db422f66f80cfa83e62` |
+| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | WinUI 3 (`net9.0-windows10.0.26100.0` + 含 `tonewise_core.dll` & `tonewise-cli.exe`) | `46,381,441` bytes (~44.23 MiB) | `91160b4f95da9b026269d10b7c1324bc49b89e8be216296cb223721d366a507a` |
 
 * **Android 签名说明**：已通过 `zipalign` 4 字节对齐与 `apksigner` v2/v3 签名校验（当前使用开发者本机调试签名密钥 `CN=Android Debug, O=Android, C=US` 封装，可直接侧载安装体验；正式商店分发请替换为独立发布密钥签章）。
 * **Windows x64 运行说明**：解压 `tonewise-windows-x64-release.zip` 后直接运行 `Tonewise.Desktop.exe`（需安装 .NET 9 Desktop Runtime；Windows App SDK 1.7 与 Rust `tonewise_core.dll` / `tonewise-cli.exe` 已随压缩包自包含打包）。

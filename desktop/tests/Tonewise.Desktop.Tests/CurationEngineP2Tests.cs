@@ -312,4 +312,122 @@ public sealed class CurationEngineP2Tests
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
     }
+
+    [Fact]
+    public async Task DoubanMusic_PopulatesBasicMetadataPublisherGenreYear_And_EncyclopediaChineseBio()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "tw_p2_douban_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        string bioDbPath = Path.Combine(tempDir, "encyclopedia.db");
+
+        try
+        {
+            using var httpClient = new HttpClient(new StubDoubanHttpHandler());
+            var lookup = new BasicMetadataLookupService(httpClient);
+
+            var query = new BasicMetadataQuery(
+                TrackUid: "uid_douban_1",
+                FullPath: "",
+                RelPath: "01 - 昨夜之灯.flac",
+                Title: "昨夜之灯",
+                Artists: "蔡琴",
+                Album: "",
+                Composers: "",
+                Conductors: "",
+                WorkName: "",
+                MovementName: "",
+                Genre: "",
+                Year: null,
+                Publisher: "",
+                DurationMs: 177_000,
+                AlbumDirectory: "",
+                CoverArtPath: null
+            );
+
+            var (updates, savedCover) = await lookup.ResolveMissingMetadataAsync(query);
+            Assert.False(savedCover);
+            Assert.False(updates.ContainsKey("artists_json")); // Fill-Missing Only preserves non-empty Artists
+            Assert.Equal("昨夜之灯", updates["album"]);
+            Assert.Equal("1983", updates["year"]);
+            Assert.Equal("流行", updates["genre"]);
+            Assert.Equal("海山唱片股份有限公司", updates["publisher"]);
+
+            var enc = new EncyclopediaService(bioDbPath);
+            var bio = await enc.FetchAndCacheBiographyAsync(
+                EncyclopediaEntityType.Album,
+                "昨夜之灯",
+                mbid: null,
+                lastFmApiKey: null,
+                httpClient: httpClient);
+
+            Assert.NotNull(bio);
+            Assert.Contains("海山唱片1983年发行", bio!.SummaryZh);
+            Assert.Equal("流行 · 1983", bio.Era);
+            Assert.Equal("https://music.douban.com/subject/2989949/", bio.SourceUrl);
+
+            var cached = enc.GetBiography(EncyclopediaEntityType.Album, "昨夜之灯");
+            Assert.NotNull(cached);
+            Assert.Equal(bio.SummaryZh, cached!.SummaryZh);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    private sealed class StubDoubanHttpHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string url = request.RequestUri!.ToString();
+            if (url.StartsWith("https://m.douban.com/rexxar/api/v2/search/subjects", StringComparison.OrdinalIgnoreCase))
+            {
+                string json = """
+                {
+                  "subjects": {
+                    "items": [
+                      {
+                        "target_type": "music",
+                        "target_id": "2989949",
+                        "target": {
+                          "id": "2989949",
+                          "title": "昨夜之灯",
+                          "card_subtitle": "蔡琴 / 1983"
+                        }
+                      }
+                    ]
+                  }
+                }
+                """;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(json, Encoding.UTF8, "application/json")
+                });
+            }
+            if (url.StartsWith("https://m.douban.com/rexxar/api/v2/music/2989949", StringComparison.OrdinalIgnoreCase))
+            {
+                string json = """
+                {
+                  "id": "2989949",
+                  "title": "昨夜之灯",
+                  "singer": [{"name": "蔡琴"}],
+                  "pubdate": ["1983"],
+                  "genres": ["流行"],
+                  "publisher": ["海山唱片股份有限公司"],
+                  "version": ["专辑"],
+                  "songs": [{"title": "昨夜之灯", "track_number": 1}],
+                  "pic": {"large": "https://img3.doubanio.com/view/subject/m/public/s2928817.jpg"},
+                  "intro": "蔡琴经典个人专辑《昨夜之灯》，海山唱片1983年发行。",
+                  "url": "https://music.douban.com/subject/2989949/"
+                }
+                """;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(json, Encoding.UTF8, "application/json")
+                });
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+    }
 }

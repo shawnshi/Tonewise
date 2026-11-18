@@ -27,7 +27,7 @@ public sealed record BasicMetadataQuery(
 /// <summary>
 /// Resolves missing basic track metadata (`Album`, `Artists`, `Composers`, `Work`, `Movement`,
 /// `Genre`, `Year`, `Publisher`, `CoverArt`) using filename/folder heuristics, audio analysis hints,
-/// iTunes Search API, MusicBrainz Recording Search, and optional Last.fm `track.getInfo`.
+/// iTunes Search API, MusicBrainz Recording Search, Douban Music (豆瓣音乐), and optional Last.fm `track.getInfo`.
 /// Strictly adheres to Fill-Missing Only law (never proposes values for non-empty fields).
 /// </summary>
 public sealed partial class BasicMetadataLookupService
@@ -98,6 +98,24 @@ public sealed partial class BasicMetadataLookupService
                 onlineGenre ??= mb.Genre;
                 onlinePublisher ??= mb.Publisher;
             }
+        }
+
+        // 3.5) Online Douban Music (豆瓣音乐) fallback for publisher / genre / year / album / artist
+        if (string.IsNullOrWhiteSpace(onlinePublisher)
+            || (string.IsNullOrWhiteSpace(q.Genre) && string.IsNullOrWhiteSpace(onlineGenre))
+            || (!effectiveYear.HasValue && !onlineYear.HasValue)
+            || (string.IsNullOrWhiteSpace(effectiveAlbum) && string.IsNullOrWhiteSpace(onlineAlbum))
+            || (string.IsNullOrWhiteSpace(q.Artists) && string.IsNullOrWhiteSpace(onlineArtist)))
+        {
+            string? dbArtistQuery = !string.IsNullOrWhiteSpace(effectiveArtist) ? PrimaryToken(effectiveArtist) : onlineArtist;
+            string dbAlbumQuery = !string.IsNullOrWhiteSpace(effectiveAlbum) ? effectiveAlbum : (onlineAlbum ?? "");
+            var db = await QueryDoubanMusicAsync(dbArtistQuery ?? "", dbAlbumQuery, effectiveTitle, ct);
+            onlineArtist ??= db.Artist;
+            onlineAlbum ??= db.Album;
+            onlineYear ??= db.Year;
+            onlineGenre ??= db.Genre;
+            onlinePublisher ??= db.Publisher;
+            onlineCoverUrl ??= db.CoverUrl;
         }
 
         // 4) Optional Last.fm track.getInfo fallback for genre / album
@@ -442,6 +460,22 @@ public sealed partial class BasicMetadataLookupService
         return (null, null, null, null, null);
     }
 
+    private async Task<(string? Artist, string? Album, int? Year, string? Genre, string? Publisher, string? CoverUrl)> QueryDoubanMusicAsync(
+        string artist,
+        string album,
+        string title,
+        CancellationToken ct)
+    {
+        string targetTerm = !string.IsNullOrWhiteSpace(album) ? album : title;
+        string query = string.Join(" ", new[] { artist.Trim(), targetTerm.Trim() }.Where(s => !string.IsNullOrWhiteSpace(s)));
+        if (string.IsNullOrWhiteSpace(query)) return (null, null, null, null, null, null);
+
+        var subject = await DoubanMusicClient.LookupSubjectAsync(_http, query, artist, album, title, ct);
+        if (subject is null) return (null, null, null, null, null, null);
+
+        return (subject.Artist, subject.Album, subject.Year, subject.Genre, subject.Publisher, subject.CoverUrl);
+    }
+
     private async Task<(string? Album, string? Genre)> QueryLastFmTrackInfoAsync(
         string apiKey,
         string artist,
@@ -503,4 +537,231 @@ public sealed partial class BasicMetadataLookupService
 
     [GeneratedRegex(@"\b(?:Symphon|Concerto|Sonata|Quartet|Quintet|Prelude|Fugue|Etude|Nocturne|Requiem|Cantata|Op\.|BWV|KV|K\.|Hob\.)\b|交响|协奏|奏鸣|古典|巴洛克", RegexOptions.IgnoreCase)]
     private static partial Regex ClassicalKeywordRegex();
+}
+
+internal sealed record DoubanSubjectDetail(
+    string? Artist,
+    string? Album,
+    int? Year,
+    string? Genre,
+    string? Publisher,
+    string? CoverUrl,
+    string? Intro,
+    string? Era,
+    string? SourceUrl
+);
+
+internal static partial class DoubanMusicClient
+{
+    private const string BrowserUserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+    private static readonly Uri DoubanMusicReferer = new("https://m.douban.com/music/");
+
+    public static async Task<DoubanSubjectDetail?> LookupSubjectAsync(
+        HttpClient http,
+        string query,
+        string? expectedArtist,
+        string? expectedAlbum,
+        string? expectedTitle,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return null;
+        try
+        {
+            string searchUrl = $"https://m.douban.com/rexxar/api/v2/search/subjects?type=music&q={Uri.EscapeDataString(query.Trim())}";
+            string? searchJson = await GetDoubanJsonAsync(http, searchUrl, ct);
+            if (string.IsNullOrWhiteSpace(searchJson)) return null;
+
+            string? bestId = SelectBestSubjectId(searchJson, expectedArtist, expectedAlbum, expectedTitle);
+            if (string.IsNullOrWhiteSpace(bestId)) return null;
+
+            string detailUrl = $"https://m.douban.com/rexxar/api/v2/music/{Uri.EscapeDataString(bestId)}";
+            string? detailJson = await GetDoubanJsonAsync(http, detailUrl, ct);
+            if (string.IsNullOrWhiteSpace(detailJson)) return null;
+
+            return ParseDetailJson(bestId, detailJson, expectedAlbum, expectedTitle);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return null; }
+    }
+
+    public static async Task<(string? SummaryZh, string? Era, string? SourceUrl)> TryFetchBioAsync(
+        HttpClient http,
+        string displayName,
+        CancellationToken ct)
+    {
+        var detail = await LookupSubjectAsync(http, displayName, expectedArtist: displayName, expectedAlbum: displayName, expectedTitle: null, ct);
+        if (detail is null || string.IsNullOrWhiteSpace(detail.Intro))
+        {
+            return (null, null, null);
+        }
+        return (detail.Intro, detail.Era, detail.SourceUrl);
+    }
+
+    private static async Task<string?> GetDoubanJsonAsync(HttpClient http, string url, CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.Referrer = DoubanMusicReferer;
+        req.Headers.TryAddWithoutValidation("User-Agent", BrowserUserAgent);
+        req.Headers.TryAddWithoutValidation("Accept", "application/json");
+        using var resp = await http.SendAsync(req, ct);
+        if (!resp.IsSuccessStatusCode) return null;
+        return await resp.Content.ReadAsStringAsync(ct);
+    }
+
+    private static string? SelectBestSubjectId(string searchJson, string? expectedArtist, string? expectedAlbum, string? expectedTitle)
+    {
+        using var doc = JsonDocument.Parse(searchJson);
+        if (!doc.RootElement.TryGetProperty("subjects", out var subjects)
+            || !subjects.TryGetProperty("items", out var items)
+            || items.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        string? bestId = null;
+        int bestScore = int.MinValue;
+        string primaryTarget = !string.IsNullOrWhiteSpace(expectedAlbum) ? expectedAlbum.Trim() : (expectedTitle?.Trim() ?? "");
+
+        foreach (var item in items.EnumerateArray())
+        {
+            string? type = item.TryGetProperty("target_type", out var tt) ? tt.GetString() : null;
+            if (!string.IsNullOrWhiteSpace(type) && !type.Equals("music", StringComparison.OrdinalIgnoreCase)) continue;
+
+            string? id = item.TryGetProperty("target_id", out var tid) ? tid.GetString() : null;
+            if (!item.TryGetProperty("target", out var target)) target = default;
+            if (string.IsNullOrWhiteSpace(id) && target.ValueKind == JsonValueKind.Object && target.TryGetProperty("id", out var tid2))
+            {
+                id = tid2.GetString();
+            }
+            if (string.IsNullOrWhiteSpace(id)) continue;
+
+            string title = target.ValueKind == JsonValueKind.Object && target.TryGetProperty("title", out var tEl) ? (tEl.GetString() ?? "") : "";
+            string subtitle = target.ValueKind == JsonValueKind.Object && target.TryGetProperty("card_subtitle", out var sEl) ? (sEl.GetString() ?? "") : "";
+
+            int score = 0;
+            if (!string.IsNullOrWhiteSpace(primaryTarget))
+            {
+                if (title.Equals(primaryTarget, StringComparison.OrdinalIgnoreCase)) score += 6;
+                else if (title.Contains(primaryTarget, StringComparison.OrdinalIgnoreCase) || primaryTarget.Contains(title, StringComparison.OrdinalIgnoreCase)) score += 3;
+            }
+            if (!string.IsNullOrWhiteSpace(expectedArtist) && subtitle.Contains(expectedArtist.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                score += 4;
+            }
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestId = id;
+            }
+        }
+
+        return bestId;
+    }
+
+    private static DoubanSubjectDetail ParseDetailJson(string subjectId, string detailJson, string? expectedAlbum, string? expectedTitle)
+    {
+        using var doc = JsonDocument.Parse(detailJson);
+        var root = doc.RootElement;
+
+        string? subjectTitle = ReadNonEmptyString(root, "title");
+
+        string? artist = null;
+        if (root.TryGetProperty("singer", out var singerArr) && singerArr.ValueKind == JsonValueKind.Array)
+        {
+            var singers = singerArr.EnumerateArray()
+                .Select(s => ReadNonEmptyString(s, "name"))
+                .Where(n => n is not null)
+                .Cast<string>()
+                .ToList();
+            if (singers.Count > 0) artist = string.Join(" / ", singers);
+        }
+
+        int? year = ParseYearFromArray(root, "pubdate") ?? ParseYearFromString(ReadNonEmptyString(root, "card_subtitle"));
+        string? genre = ReadFirstArrayString(root, "genres");
+        string? publisher = ReadFirstArrayString(root, "publisher");
+
+        bool hasTrackMatch = false;
+        if (!string.IsNullOrWhiteSpace(expectedTitle)
+            && root.TryGetProperty("songs", out var songsArr)
+            && songsArr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var s in songsArr.EnumerateArray())
+            {
+                string? songTitle = ReadNonEmptyString(s, "title");
+                if (!string.IsNullOrWhiteSpace(songTitle)
+                    && (songTitle.Equals(expectedTitle, StringComparison.OrdinalIgnoreCase)
+                        || songTitle.Contains(expectedTitle, StringComparison.OrdinalIgnoreCase)
+                        || expectedTitle.Contains(songTitle, StringComparison.OrdinalIgnoreCase)))
+                {
+                    hasTrackMatch = true;
+                    break;
+                }
+            }
+        }
+
+        string? versionTag = ReadFirstArrayString(root, "version");
+        bool isAlbumSubject = !string.IsNullOrWhiteSpace(expectedAlbum)
+            || hasTrackMatch
+            || (!string.IsNullOrWhiteSpace(versionTag) && !versionTag.Equals("单曲", StringComparison.OrdinalIgnoreCase))
+            || !string.IsNullOrWhiteSpace(subjectTitle);
+        string? album = isAlbumSubject ? subjectTitle : null;
+
+        string? coverUrl = null;
+        if (root.TryGetProperty("pic", out var picObj) && picObj.ValueKind == JsonValueKind.Object)
+        {
+            coverUrl = ReadNonEmptyString(picObj, "large") ?? ReadNonEmptyString(picObj, "normal");
+        }
+        coverUrl ??= ReadNonEmptyString(root, "cover_url");
+        if (!string.IsNullOrWhiteSpace(coverUrl))
+        {
+            coverUrl = coverUrl
+                .Replace("/view/subject/s/public/", "/view/subject/l/public/", StringComparison.OrdinalIgnoreCase)
+                .Replace("/view/subject/m/public/", "/view/subject/l/public/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        string? intro = ReadNonEmptyString(root, "intro");
+        string? era = !string.IsNullOrWhiteSpace(genre) && year.HasValue
+            ? $"{genre} · {year.Value}"
+            : ReadNonEmptyString(root, "card_subtitle") ?? genre ?? year?.ToString();
+        string? sourceUrl = ReadNonEmptyString(root, "url") ?? $"https://music.douban.com/subject/{subjectId}/";
+
+        return new DoubanSubjectDetail(artist, album, year, genre, publisher, coverUrl, intro, era, sourceUrl);
+    }
+
+    private static string? ReadNonEmptyString(JsonElement obj, string propName)
+    {
+        if (obj.ValueKind != JsonValueKind.Object || !obj.TryGetProperty(propName, out var el) || el.ValueKind != JsonValueKind.String)
+            return null;
+        string? s = el.GetString()?.Trim();
+        return string.IsNullOrWhiteSpace(s) ? null : s;
+    }
+
+    private static string? ReadFirstArrayString(JsonElement obj, string propName)
+    {
+        if (!obj.TryGetProperty(propName, out var arr) || arr.ValueKind != JsonValueKind.Array) return null;
+        foreach (var el in arr.EnumerateArray())
+        {
+            if (el.ValueKind == JsonValueKind.String)
+            {
+                string? s = el.GetString()?.Trim();
+                if (!string.IsNullOrWhiteSpace(s)) return s;
+            }
+        }
+        return null;
+    }
+
+    private static int? ParseYearFromArray(JsonElement obj, string propName) =>
+        ParseYearFromString(ReadFirstArrayString(obj, propName));
+
+    private static int? ParseYearFromString(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var m = YearRegex().Match(text);
+        return m.Success && int.TryParse(m.Groups[1].Value, out int y) && y is >= 1900 and <= 2100 ? y : null;
+    }
+
+    [GeneratedRegex(@"\b((?:19|20)\d{2})\b")]
+    private static partial Regex YearRegex();
 }

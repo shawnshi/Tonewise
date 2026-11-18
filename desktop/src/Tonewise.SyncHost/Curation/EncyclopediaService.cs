@@ -30,7 +30,7 @@ public sealed record EntityBiographyEntry(
 
 /// <summary>
 /// Manages `/Music/.tonewise/encyclopedia.db` storing artist/composer/conductor/album/work biographies
-/// via Last.fm (Pop) and MusicBrainz -> Wikidata -> Wikipedia REST Summary (Classical).
+/// via Last.fm (Pop), Wikipedia / Douban Music (豆瓣音乐), and MusicBrainz -> Wikidata -> Wikipedia REST Summary (Classical).
 /// Never pollutes audio file COMMENT headers.
 /// </summary>
 public sealed partial class EncyclopediaService
@@ -283,6 +283,17 @@ public sealed partial class EncyclopediaService
             if (!string.IsNullOrWhiteSpace(zhJson))
             {
                 (summaryZh, era, sourceUrl) = ParseWikipediaSummaryJson(zhJson);
+            }
+
+            if (string.IsNullOrWhiteSpace(summaryZh))
+            {
+                var douban = await DoubanMusicClient.TryFetchBioAsync(client, displayName, ct);
+                if (!string.IsNullOrWhiteSpace(douban.SummaryZh))
+                {
+                    summaryZh = douban.SummaryZh;
+                    era ??= douban.Era;
+                    sourceUrl ??= douban.SourceUrl;
+                }
             }
 
             if (string.IsNullOrWhiteSpace(summaryZh))
