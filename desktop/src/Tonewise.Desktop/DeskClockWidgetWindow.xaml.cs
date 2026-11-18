@@ -1,5 +1,8 @@
+using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using SkiaSharp;
 using SkiaSharp.Views.Windows;
 using Tonewise.Desktop.ViewModels;
@@ -12,8 +15,10 @@ public sealed partial class DeskClockWidgetWindow : Window
 {
     public MainViewModel ViewModel { get; }
     private readonly DispatcherTimer _waveTimer;
+    private readonly DispatcherTimer _clockTimer;
     private readonly DispatcherTimer _burnInTimer;
     private int _burnInTick;
+    private bool _isCompactOverlay;
 
     private static readonly SKColor ChampagneGold = new(0xD9, 0xB3, 0x72);
     private static readonly SKColor DimTrack = new(0x64, 0x74, 0x8B, 0x60);
@@ -23,16 +28,19 @@ public sealed partial class DeskClockWidgetWindow : Window
         ViewModel = viewModel;
         InitializeComponent();
 
+        TrySetWidgetBackdrop();
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(WidgetTitleDragBar);
+
         string icoPath = Path.Combine(AppContext.BaseDirectory, "Assets", "tonewise.ico");
         if (File.Exists(icoPath)) AppWindow.SetIcon(icoPath);
 
-        AppWindow.Resize(new SizeInt32(480, 176));
-        if (AppWindow.Presenter is OverlappedPresenter presenter)
-        {
-            presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
-            presenter.IsAlwaysOnTop = true;
-            presenter.IsResizable = false;
-        }
+        ApplyOverlappedCompanionChrome();
+
+        UpdateClockText();
+        _clockTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _clockTimer.Tick += (_, _) => UpdateClockText();
+        _clockTimer.Start();
 
         _waveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         _waveTimer.Tick += (_, _) => WidgetWaveformCanvas.Invalidate();
@@ -44,9 +52,41 @@ public sealed partial class DeskClockWidgetWindow : Window
 
         Closed += (_, _) =>
         {
+            _clockTimer.Stop();
             _waveTimer.Stop();
             _burnInTimer.Stop();
         };
+    }
+
+    private void TrySetWidgetBackdrop()
+    {
+        try
+        {
+            SystemBackdrop = new DesktopAcrylicBackdrop();
+        }
+        catch
+        {
+            try
+            {
+                SystemBackdrop = new MicaBackdrop { Kind = MicaKind.BaseAlt };
+            }
+            catch
+            {
+                // Fallback to XAML border background when DWM backdrop is unavailable
+            }
+        }
+    }
+
+    private void ApplyOverlappedCompanionChrome()
+    {
+        AppWindow.SetPresenter(AppWindowPresenterKind.Overlapped);
+        AppWindow.Resize(new SizeInt32(500, 214));
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
+            presenter.IsAlwaysOnTop = true;
+            presenter.IsResizable = false;
+        }
     }
 
     public static (int Dx, int Dy) ComputeOledBurnInOffset(int tickCount) =>
@@ -56,6 +96,36 @@ public sealed partial class DeskClockWidgetWindow : Window
     {
         var (dx, dy) = ComputeOledBurnInOffset(tickCount);
         OledCanvasHost.Margin = new Thickness(4 + dx, 4 + dy, 4 - dx, 4 - dy);
+    }
+
+    private void UpdateClockText()
+    {
+        ClockTextBlock.Text = DateTime.Now.ToString("HH : mm");
+    }
+
+    private void OnTogglePipModeClick(object sender, RoutedEventArgs e)
+    {
+        _isCompactOverlay = !_isCompactOverlay;
+        if (_isCompactOverlay)
+        {
+            AppWindow.SetPresenter(AppWindowPresenterKind.CompactOverlay);
+            PipToggleButton.Content = "还原窗口";
+        }
+        else
+        {
+            ApplyOverlappedCompanionChrome();
+            PipToggleButton.Content = "PiP 画中画";
+        }
+    }
+
+    private void OnWaveformPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        double width = WidgetWaveformCanvas.ActualWidth;
+        if (width <= 0) return;
+        double x = e.GetCurrentPoint(WidgetWaveformCanvas).Position.X;
+        ViewModel.SeekFraction(Math.Clamp(x / width, 0.0, 1.0));
+        WidgetWaveformCanvas.Invalidate();
+        e.Handled = true;
     }
 
     private void OnCloseWidgetClick(object sender, RoutedEventArgs e) => Close();

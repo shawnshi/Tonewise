@@ -357,6 +357,7 @@ class TonewiseDspEngine {
     private var config: DspChainConfig = DspChainConfig()
 
     private var filters: List<BiquadFilter64> = emptyList()
+    private var frameWork = DoubleArray(2)
 
     // Stage 3: Bauer Crossfeed states (stereo only)
     private var crossLpL = 0.0
@@ -380,6 +381,9 @@ class TonewiseDspEngine {
     fun configure(sampleRateHz: Int, channels: Int) {
         this.sampleRateHz = max(sampleRateHz, 8000)
         this.channels = max(channels, 1)
+        if (frameWork.size < this.channels) {
+            frameWork = DoubleArray(this.channels)
+        }
         rebuildStages()
         resetState()
     }
@@ -432,7 +436,10 @@ class TonewiseDspEngine {
         val runLimiter =
             config.limiterEnabled && (!config.externalBridgeMode || config.enabled || abs(replayGainDb) > 1e-4)
 
-        val frameWork = DoubleArray(chCount)
+        if (frameWork.size < chCount) {
+            frameWork = DoubleArray(chCount)
+        }
+        val frameWork = this.frameWork
         for (frame in 0 until frameCount) {
             val base = frame * chCount
             // Stage 1 + Stage 2: Preamp + ReplayGain + 64-bit Biquad PEQ

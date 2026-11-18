@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow local LAN SyncHost HTTP connections while keeping public traffic strict where possible -->
+    <!-- Enforce HTTPS for all public metadata & scrobbling domains -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">audioscrobbler.com</domain>
+        <domain includeSubdomains="true">last.fm</domain>
+        <domain includeSubdomains="true">wikipedia.org</domain>
+    </domain-config>
+    <!-- Allow local dynamic LAN SyncHost HTTP connections on private subnets -->
     <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

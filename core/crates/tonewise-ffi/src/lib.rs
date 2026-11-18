@@ -250,6 +250,60 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                 .filter(|v| !v.is_empty() && *v != "[]");
 
             match field.as_str() {
+                "title" => match clean_val {
+                    Some(v) => tag.set_title(v.to_string()),
+                    None => tag.remove_title(),
+                },
+                "artist" | "artists" | "artists_json" => {
+                    let display = clean_val.map(|v| {
+                        if v.starts_with('[') {
+                            serde_json::from_str::<Vec<String>>(v)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|s| !s.trim().is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" / ")
+                        } else {
+                            v.to_string()
+                        }
+                    });
+                    match display.as_deref().filter(|s| !s.trim().is_empty()) {
+                        Some(v) => tag.set_artist(v.to_string()),
+                        None => tag.remove_artist(),
+                    }
+                }
+                "composer" | "composers" | "composers_json" => {
+                    tag.remove_key(&ItemKey::Composer);
+                    if let Some(v) = clean_val {
+                        let items: Vec<String> = if v.starts_with('[') {
+                            serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
+                        } else {
+                            v.split([';', ','])
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        };
+                        for c in items {
+                            tag.push(TagItem::new(ItemKey::Composer, ItemValue::Text(c)));
+                        }
+                    }
+                }
+                "conductor" | "conductors" | "conductors_json" => {
+                    tag.remove_key(&ItemKey::Conductor);
+                    if let Some(v) = clean_val {
+                        let items: Vec<String> = if v.starts_with('[') {
+                            serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
+                        } else {
+                            v.split([';', ','])
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        };
+                        for c in items {
+                            tag.push(TagItem::new(ItemKey::Conductor, ItemValue::Text(c)));
+                        }
+                    }
+                }
                 "album" => match clean_val {
                     Some(v) => tag.set_album(v.to_string()),
                     None => tag.remove_album(),
@@ -367,6 +421,22 @@ fn into_c_string(s: String) -> *mut c_char {
         .into_raw()
 }
 
+fn ffi_catch<F: FnOnce() -> String>(f: F) -> *mut c_char {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(out) => into_c_string(out),
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic in tonewise_core".to_string()
+            };
+            into_c_string(json_error(&format!("native panic caught: {msg}")))
+        }
+    }
+}
+
 unsafe fn read_c_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
         return None;
@@ -397,7 +467,7 @@ pub unsafe extern "C" fn tonewise_split_artists_json(raw_utf8: *const c_char) ->
     let Some(raw) = (unsafe { read_c_str(raw_utf8) }) else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(split_artists_json_impl(raw))
+    ffi_catch(|| split_artists_json_impl(raw))
 }
 
 /// # Safety
@@ -412,7 +482,7 @@ pub unsafe extern "C" fn tonewise_evaluate_scene_json(
     else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(evaluate_scene_json_impl(scene, tracks))
+    ffi_catch(|| evaluate_scene_json_impl(scene, tracks))
 }
 
 /// # Safety
@@ -422,7 +492,7 @@ pub unsafe extern "C" fn tonewise_merge_m3u8_json(request_json: *const c_char) -
     let Some(req) = (unsafe { read_c_str(request_json) }) else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(merge_m3u8_json_impl(req))
+    ffi_catch(|| merge_m3u8_json_impl(req))
 }
 
 /// # Safety
@@ -432,7 +502,7 @@ pub unsafe extern "C" fn tonewise_audio_fingerprint_path(path_utf8: *const c_cha
     let Some(path) = (unsafe { read_c_str(path_utf8) }) else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(fingerprint_path_impl(path))
+    ffi_catch(|| fingerprint_path_impl(path))
 }
 
 /// # Safety
@@ -448,7 +518,7 @@ pub unsafe extern "C" fn tonewise_lookup_waveform_json(
     ) else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(lookup_waveform_path_impl(archive_path, hex))
+    ffi_catch(|| lookup_waveform_path_impl(archive_path, hex))
 }
 
 /// # Safety
@@ -460,7 +530,7 @@ pub unsafe extern "C" fn tonewise_apply_lww_mutations_json(
     let Some(req) = (unsafe { read_c_str(request_json) }) else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(apply_lww_mutations_json_impl(req))
+    ffi_catch(|| apply_lww_mutations_json_impl(req))
 }
 
 /// # Safety
@@ -470,7 +540,7 @@ pub unsafe extern "C" fn tonewise_merge_sessions_json(request_json: *const c_cha
     let Some(req) = (unsafe { read_c_str(request_json) }) else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(merge_sessions_json_impl(req))
+    ffi_catch(|| merge_sessions_json_impl(req))
 }
 
 /// # Safety
@@ -496,7 +566,7 @@ pub unsafe extern "C" fn tonewise_apply_header_patch_path(
     } else {
         unsafe { std::slice::from_raw_parts(new_header_ptr, new_header_len) }
     };
-    into_c_string(apply_header_patch_path_impl(path, old_hex, bytes))
+    ffi_catch(|| apply_header_patch_path_impl(path, old_hex, bytes))
 }
 
 /// # Safety
@@ -506,7 +576,7 @@ pub unsafe extern "C" fn tonewise_analyze_audio_path(path_utf8: *const c_char) -
     let Some(path) = (unsafe { read_c_str(path_utf8) }) else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(analyze_audio_path_impl(path))
+    ffi_catch(|| analyze_audio_path_impl(path))
 }
 
 /// # Safety
@@ -516,7 +586,7 @@ pub unsafe extern "C" fn tonewise_write_audio_tags_json(request_json: *const c_c
     let Some(req) = (unsafe { read_c_str(request_json) }) else {
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
-    into_c_string(write_audio_tags_json_impl(req))
+    ffi_catch(|| write_audio_tags_json_impl(req))
 }
 
 // -----------------------------------------------------------------------------

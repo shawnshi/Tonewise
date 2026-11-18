@@ -33,7 +33,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,10 +49,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -87,6 +82,7 @@ import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.MusicSettings
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.fs.Path
 
@@ -130,7 +126,7 @@ class BookletPdfDialog : BackportBottomSheetDialogFragment() {
                     onDispose { handle?.closeQuietly() }
                 }
 
-                TonewiseBookletTheme {
+                TonewiseComposeTheme {
                     BookletPdfSheet(
                         title = song?.album?.name?.resolve(context) ?: "",
                         subtitle = song?.workName ?: "",
@@ -348,20 +344,6 @@ private object BookletLocator {
 
     private fun sanitizeKey(raw: String): String =
         raw.lowercase().replace(Regex("[^a-z0-9\\u4e00-\\u9fff]+"), "")
-}
-
-@Composable
-private fun TonewiseBookletTheme(content: @Composable () -> Unit) {
-    val context = LocalContext.current
-    val dark = isSystemInDarkTheme()
-    val scheme =
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-                if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            dark -> darkColorScheme()
-            else -> lightColorScheme()
-        }
-    MaterialTheme(colorScheme = scheme, content = content)
 }
 
 @Composable

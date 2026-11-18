@@ -2,24 +2,9 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
-        android:id="@+id/action_work_recordings"
-        android:icon="@drawable/ic_album_24"
-        android:title="@string/lbl_work_recordings"
-        app:showAsAction="ifRoom" />
-    <item
-        android:id="@+id/action_booklet_pdf"
-        android:icon="@drawable/ic_file_24"
-        android:title="@string/lbl_booklet_pdf"
-        app:showAsAction="ifRoom" />
-    <item
         android:id="@+id/action_desk_clock"
         android:icon="@drawable/ic_time_24"
         android:title="@string/lbl_desk_clock"
-        app:showAsAction="ifRoom" />
-    <item
-        android:id="@+id/action_signal_path"
-        android:icon="@drawable/ic_about_24"
-        android:title="@string/lbl_signal_path"
         app:showAsAction="always" />
     <item
         android:id="@+id/action_open_equalizer"

@@ -9,6 +9,12 @@
         app:showAsAction="ifRoom" />
 
     <item
+        android:id="@+id/action_focus_filter"
+        android:icon="@drawable/ic_filter_24"
+        android:title="@string/lbl_dj_filter"
+        app:showAsAction="ifRoom" />
+
+    <item
         android:id="@+id/action_sort"
         android:icon="@drawable/ic_sort_24"
         android:title="@string/lbl_sort"

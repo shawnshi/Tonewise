@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -18,6 +19,12 @@ public sealed record CloudLovedTrack(
     string Artist,
     string Title,
     long LovedAtUnixSec
+);
+
+public sealed record CloudTopTrack(
+    string Artist,
+    string Title,
+    int PlayCount
 );
 
 public sealed record LedgerPlaybackEvent(
@@ -99,24 +106,27 @@ public static partial class LastFmLedgerService
             .ToHashSet(StringComparer.Ordinal);
 
         using var conn = OpenReadWrite(manifestDbPath);
-        var trackByKey = BuildTrackLookupByNormalizedKey(conn, artistAliasMap);
+        var index = BuildTrackLookupIndex(conn, artistAliasMap);
         var newlyAddedByTrack = new Dictionary<string, int>(StringComparer.Ordinal);
         var newLines = new List<string>();
         int matchedTotal = 0;
 
         foreach (var ct in cloudTracks)
         {
-            string key = NormalizeKey(ct.Artist, ct.Title, artistAliasMap);
-            if (!trackByKey.TryGetValue(key, out string? uid)) continue;
+            if (!TryResolveTrackUids(ct.Artist, ct.Title, artistAliasMap, index, out var uids) || uids.Count == 0) continue;
 
-            string stampKey = $"{uid}@{ct.PlayedAtUnixSec}";
+            string primaryUid = uids[0];
+            string stampKey = $"{primaryUid}@{ct.PlayedAtUnixSec}";
             if (!seenSet.Add(stampKey)) continue;
 
             matchedTotal++;
-            newlyAddedByTrack[uid] = newlyAddedByTrack.TryGetValue(uid, out int c) ? c + 1 : 1;
+            foreach (string uid in uids)
+            {
+                newlyAddedByTrack[uid] = newlyAddedByTrack.TryGetValue(uid, out int c) ? c + 1 : 1;
+            }
 
             var ev = new LedgerPlaybackEvent(
-                TrackUid: uid,
+                TrackUid: primaryUid,
                 Artist: ct.Artist,
                 Title: ct.Title,
                 Album: ct.Album,
@@ -165,25 +175,70 @@ public static partial class LastFmLedgerService
         new StagingDiffStore(manifestDbPath).EnsureSchema();
 
         using var conn = OpenReadWrite(manifestDbPath);
-        var trackByKey = BuildTrackLookupByNormalizedKey(conn, artistAliasMap);
+        var index = BuildTrackLookupIndex(conn, artistAliasMap);
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         int updated = 0;
 
         using var tx = conn.BeginTransaction();
         foreach (var loved in lovedTracks)
         {
-            string key = NormalizeKey(loved.Artist, loved.Title, artistAliasMap);
-            if (!trackByKey.TryGetValue(key, out string? uid)) continue;
+            if (!TryResolveTrackUids(loved.Artist, loved.Title, artistAliasMap, index, out var uids) || uids.Count == 0) continue;
 
+            foreach (string uid in uids)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                    UPDATE tracks
+                    SET rating = 5,
+                        rating_ts = CASE WHEN rating_ts < $ts THEN $ts ELSE rating_ts END
+                    WHERE track_uid = $uid AND rating < 5;
+                    """;
+                cmd.Parameters.AddWithValue("$ts", nowMs);
+                cmd.Parameters.AddWithValue("$uid", uid);
+                updated += cmd.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+        return updated;
+    }
+
+    public static int SyncTopTrackPlayCounts(
+        string manifestDbPath,
+        IEnumerable<CloudTopTrack> topTracks,
+        IReadOnlyDictionary<string, string>? artistAliasMap = null)
+    {
+        if (!File.Exists(manifestDbPath)) return 0;
+        new StagingDiffStore(manifestDbPath).EnsureSchema();
+
+        using var conn = OpenReadWrite(manifestDbPath);
+        var index = BuildTrackLookupIndex(conn, artistAliasMap);
+        var maxByUid = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var top in topTracks)
+        {
+            if (top.PlayCount <= 0) continue;
+            if (!TryResolveTrackUids(top.Artist, top.Title, artistAliasMap, index, out var uids) || uids.Count == 0) continue;
+            foreach (string uid in uids)
+            {
+                maxByUid[uid] = Math.Max(maxByUid.GetValueOrDefault(uid, 0), top.PlayCount);
+            }
+        }
+
+        if (maxByUid.Count == 0) return 0;
+
+        int updated = 0;
+        using var tx = conn.BeginTransaction();
+        foreach (var (uid, cloudCount) in maxByUid)
+        {
             using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
             cmd.CommandText = """
                 UPDATE tracks
-                SET rating = 5,
-                    rating_ts = CASE WHEN rating_ts < $ts THEN $ts ELSE rating_ts END
-                WHERE track_uid = $uid AND rating < 5;
+                SET lastfm_pulled_count = MAX(lastfm_pulled_count, $cnt),
+                    play_count_total = MAX(legacy_play_count, MAX(lastfm_pulled_count, $cnt)) + local_unsynced_expired_count
+                WHERE track_uid = $uid AND lastfm_pulled_count < $cnt;
                 """;
-            cmd.Parameters.AddWithValue("$ts", nowMs);
+            cmd.Parameters.AddWithValue("$cnt", cloudCount);
             cmd.Parameters.AddWithValue("$uid", uid);
             updated += cmd.ExecuteNonQuery();
         }
@@ -376,35 +431,154 @@ public static partial class LastFmLedgerService
         return map;
     }
 
-    private static Dictionary<string, string> BuildTrackLookupByNormalizedKey(
+    private sealed record TrackLookupIndex(
+        Dictionary<string, List<string>> ByExactArtistTitle,
+        Dictionary<string, List<string>> ByCoreArtistCoreTitle,
+        Dictionary<string, List<string>> ByExactTitle,
+        Dictionary<string, List<string>> ByCoreTitle
+    );
+
+    private static TrackLookupIndex BuildTrackLookupIndex(
         SqliteConnection conn,
         IReadOnlyDictionary<string, string>? artistAliasMap)
     {
-        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        var exactMap = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var coreMap = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var exactTitleMap = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var coreTitleMap = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+
+        static void AddIndex(Dictionary<string, List<string>> dict, string key, string uid)
+        {
+            if (string.IsNullOrWhiteSpace(key)) return;
+            if (!dict.TryGetValue(key, out var list))
+            {
+                list = new List<string>(2);
+                dict[key] = list;
+            }
+            if (!list.Contains(uid)) list.Add(uid);
+        }
+
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT track_uid, title, artists_json FROM tracks;";
+        cmd.CommandText = "SELECT track_uid, title, artists_json, album_artist FROM tracks;";
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
             string uid = reader.GetString(0);
             string title = reader.GetString(1);
             string artistsJson = reader.IsDBNull(2) ? "[]" : reader.GetString(2);
+            string albumArtist = reader.IsDBNull(3) ? "" : reader.GetString(3);
+
+            string normTitle = NormalizeToken(title);
+            string coreTitle = NormalizeCoreTitle(title);
+            AddIndex(exactTitleMap, normTitle, uid);
+            AddIndex(coreTitleMap, coreTitle, uid);
+
+            // Also index post-colon work subtitle (e.g. "Schumann:Sicilienne" -> "Sicilienne")
+            int colonIdx = title.IndexOf(':');
+            string? postColonCore = colonIdx > 1 && colonIdx < title.Length - 2
+                ? NormalizeCoreTitle(title[(colonIdx + 1)..])
+                : null;
+            if (!string.IsNullOrWhiteSpace(postColonCore) && postColonCore != coreTitle)
+            {
+                AddIndex(coreTitleMap, postColonCore, uid);
+            }
+
             List<string>? artists;
             try { artists = JsonSerializer.Deserialize<List<string>>(artistsJson); }
             catch { artists = null; }
+            artists ??= [];
+            if (!string.IsNullOrWhiteSpace(albumArtist) && !artists.Contains(albumArtist, StringComparer.OrdinalIgnoreCase))
+            {
+                artists.Add(albumArtist);
+            }
 
-            if (artists is null || artists.Count == 0) continue;
+            foreach (string artist in artists)
+            {
+                if (string.IsNullOrWhiteSpace(artist)) continue;
+                string exactKey = NormalizeKey(artist, title, artistAliasMap);
+                AddIndex(exactMap, exactKey, uid);
 
-            string primaryKey = NormalizeKey(artists[0], title, artistAliasMap);
-            map.TryAdd(primaryKey, uid);
+                string coreArtist = NormalizeCoreArtist(artist, artistAliasMap);
+                if (!string.IsNullOrWhiteSpace(coreArtist) && !string.IsNullOrWhiteSpace(coreTitle))
+                {
+                    AddIndex(coreMap, $"{coreArtist}||{coreTitle}", uid);
+                    if (!string.IsNullOrWhiteSpace(postColonCore))
+                    {
+                        AddIndex(coreMap, $"{coreArtist}||{postColonCore}", uid);
+                    }
+                }
+            }
 
             if (artists.Count > 1)
             {
-                string joinedKey = NormalizeKey(string.Join(" & ", artists), title, artistAliasMap);
-                map.TryAdd(joinedKey, uid);
+                string joinedArtist = string.Join(" & ", artists);
+                AddIndex(exactMap, NormalizeKey(joinedArtist, title, artistAliasMap), uid);
+                string coreJoined = NormalizeCoreArtist(joinedArtist, artistAliasMap);
+                if (!string.IsNullOrWhiteSpace(coreJoined) && !string.IsNullOrWhiteSpace(coreTitle))
+                {
+                    AddIndex(coreMap, $"{coreJoined}||{coreTitle}", uid);
+                }
             }
         }
-        return map;
+        return new TrackLookupIndex(exactMap, coreMap, exactTitleMap, coreTitleMap);
+    }
+
+    private static bool TryResolveTrackUids(
+        string artist,
+        string title,
+        IReadOnlyDictionary<string, string>? artistAliasMap,
+        TrackLookupIndex index,
+        out IReadOnlyList<string> uids)
+    {
+        string key = NormalizeKey(artist, title, artistAliasMap);
+        if (index.ByExactArtistTitle.TryGetValue(key, out var exactHits) && exactHits.Count > 0)
+        {
+            uids = exactHits;
+            return true;
+        }
+
+        string coreArtist = NormalizeCoreArtist(artist, artistAliasMap);
+        string coreTitle = NormalizeCoreTitle(title);
+        if (!string.IsNullOrWhiteSpace(coreArtist) && !string.IsNullOrWhiteSpace(coreTitle)
+            && index.ByCoreArtistCoreTitle.TryGetValue($"{coreArtist}||{coreTitle}", out var coreHits)
+            && coreHits.Count > 0)
+        {
+            uids = coreHits;
+            return true;
+        }
+
+        int colonIdx = title.IndexOf(':');
+        if (colonIdx > 1 && colonIdx < title.Length - 2 && !string.IsNullOrWhiteSpace(coreArtist))
+        {
+            string postColon = NormalizeCoreTitle(title[(colonIdx + 1)..]);
+            if (!string.IsNullOrWhiteSpace(postColon)
+                && index.ByCoreArtistCoreTitle.TryGetValue($"{coreArtist}||{postColon}", out var colonHits)
+                && colonHits.Count > 0)
+            {
+                uids = colonHits;
+                return true;
+            }
+        }
+
+        string normTitle = NormalizeToken(title);
+        if (!string.IsNullOrEmpty(normTitle)
+            && index.ByExactTitle.TryGetValue(normTitle, out var titleHits)
+            && titleHits.Count is >= 1 and <= 3)
+        {
+            uids = titleHits;
+            return true;
+        }
+
+        if (!string.IsNullOrEmpty(coreTitle)
+            && index.ByCoreTitle.TryGetValue(coreTitle, out var coreTitleHits)
+            && coreTitleHits.Count is >= 1 and <= 3)
+        {
+            uids = coreTitleHits;
+            return true;
+        }
+
+        uids = [];
+        return false;
     }
 
     private static List<LedgerPlaybackEvent> ReadJsonlEvents(string path)
@@ -454,10 +628,71 @@ public static partial class LastFmLedgerService
 
     private static string NormalizeToken(string raw)
     {
-        string lower = raw.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        string simplified = ToSimplifiedChinese(raw.Trim());
+        string lower = simplified.ToLowerInvariant();
         string stripped = NonWordRegex().Replace(lower, " ");
         return SpaceRegex().Replace(stripped, " ").Trim();
     }
+
+    private static string NormalizeCoreTitle(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        string simplified = ToSimplifiedChinese(raw.Trim());
+        string noParen = EditionParenRegex().Replace(simplified, " ");
+        string noBracket = EditionBracketRegex().Replace(noParen, " ");
+        string noDash = EditionDashRegex().Replace(noBracket, "");
+        string result = NormalizeToken(noDash);
+        return string.IsNullOrEmpty(result) ? NormalizeToken(simplified) : result;
+    }
+
+    private static string NormalizeCoreArtist(string raw, IReadOnlyDictionary<string, string>? artistAliasMap)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        string trimmed = raw.Trim();
+        if (artistAliasMap is not null)
+        {
+            foreach (var kv in artistAliasMap)
+            {
+                if (string.Equals(kv.Key.Trim(), trimmed, StringComparison.OrdinalIgnoreCase))
+                {
+                    trimmed = kv.Value.Trim();
+                    break;
+                }
+            }
+        }
+        string noFeat = FeatRegex().Replace(trimmed, "");
+        string result = NormalizeToken(noFeat);
+        return string.IsNullOrEmpty(result) ? NormalizeToken(trimmed) : result;
+    }
+
+    private static string ToSimplifiedChinese(string input)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrEmpty(input)) return input;
+        const uint LcmapSimplifiedChinese = 0x02000000;
+        try
+        {
+            var sb = new StringBuilder(input.Length);
+            int written = LCMapStringEx("zh-CN", LcmapSimplifiedChinese, input, input.Length, sb, input.Length, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            return written > 0 ? sb.ToString(0, written) : input;
+        }
+        catch
+        {
+            return input;
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int LCMapStringEx(
+        string lpLocaleName,
+        uint dwMapFlags,
+        string lpSrcStr,
+        int cchSrc,
+        StringBuilder lpDestStr,
+        int cchDest,
+        IntPtr lpVersionInformation,
+        IntPtr lpReserved,
+        IntPtr sortHandle);
 
     public static int MarkEventsScrobbled(string tonewiseDir, IEnumerable<LedgerPlaybackEvent> scrobbledItems)
     {
@@ -502,6 +737,18 @@ public static partial class LastFmLedgerService
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex SpaceRegex();
+
+    [GeneratedRegex(@"\((?:[^)]*(?:remaster|feat\.?|ft\.?|live|version|edit|mix|mono|stereo|deluxe|bonus|acoustic|soundtrack|ost|single|中文版|国语|粤语)[^)]*)\)", RegexOptions.IgnoreCase)]
+    private static partial Regex EditionParenRegex();
+
+    [GeneratedRegex(@"\[(?:[^\]]*(?:remaster|feat\.?|ft\.?|live|version|edit|mix|mono|stereo|deluxe|bonus|acoustic)[^\]]*)\]", RegexOptions.IgnoreCase)]
+    private static partial Regex EditionBracketRegex();
+
+    [GeneratedRegex(@"\s+-\s+(?:.*(?:remaster|version|edit|mix|live|mono|stereo|soundtrack|from\s+|single|中文版|国语版|粤语版).*)$", RegexOptions.IgnoreCase)]
+    private static partial Regex EditionDashRegex();
+
+    [GeneratedRegex(@"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", RegexOptions.IgnoreCase)]
+    private static partial Regex FeatRegex();
 }
 
 public sealed record LastFmAccountConfig(
@@ -540,7 +787,8 @@ public sealed record LastFmFullSyncSummary(
     int LovedTracksUpdated,
     int DeduplicatedCount,
     int ExpiredArchivedCount,
-    int PushedScrobbles
+    int PushedScrobbles,
+    int TopPlayCountsUpdated = 0
 );
 
 /// <summary>
@@ -550,11 +798,12 @@ public sealed record LastFmFullSyncSummary(
 public sealed class LastFmWebApiClient
 {
     private const string ApiBaseUrl = "https://ws.audioscrobbler.com/2.0/";
+    private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
     private readonly HttpClient _http;
 
     public LastFmWebApiClient(HttpClient? httpClient = null)
     {
-        _http = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        _http = httpClient ?? SharedHttpClient;
     }
 
     public async Task<string> AuthenticateMobileSessionAsync(
@@ -583,6 +832,55 @@ public sealed class LastFmWebApiClient
                ?? throw new InvalidOperationException("Last.fm mobile session key missing");
     }
 
+    private async Task<IReadOnlyList<T>> FetchPagedAsync<T>(
+        Func<int, Task<(IReadOnlyList<T> Items, int TotalPages)>> fetchPage,
+        int maxPagesCap,
+        int maxConcurrency,
+        CancellationToken ct)
+    {
+        var (firstItems, totalPages) = await fetchPage(1);
+        int maxPage = Math.Min(Math.Max(1, totalPages), maxPagesCap);
+        if (maxPage <= 1 || firstItems.Count == 0)
+        {
+            return firstItems;
+        }
+
+        var pageBuckets = new IReadOnlyList<T>[maxPage + 1];
+        pageBuckets[1] = firstItems;
+
+        using var sem = new SemaphoreSlim(maxConcurrency);
+        var tasks = new List<Task>(maxPage - 1);
+        for (int p = 2; p <= maxPage; p++)
+        {
+            int pageNum = p;
+            tasks.Add(Task.Run(async () =>
+            {
+                await sem.WaitAsync(ct);
+                try
+                {
+                    var (items, _) = await fetchPage(pageNum);
+                    pageBuckets[pageNum] = items;
+                }
+                finally
+                {
+                    sem.Release();
+                }
+            }, ct));
+        }
+
+        await Task.WhenAll(tasks);
+
+        var combined = new List<T>(firstItems.Count * maxPage);
+        for (int p = 1; p <= maxPage; p++)
+        {
+            if (pageBuckets[p] is { Count: > 0 } items)
+            {
+                combined.AddRange(items);
+            }
+        }
+        return combined;
+    }
+
     public async Task<IReadOnlyList<CloudRecentTrack>> FetchRecentTracksAsync(
         string apiKey,
         string username,
@@ -590,29 +888,68 @@ public sealed class LastFmWebApiClient
         int limit = 200,
         CancellationToken ct = default)
     {
-        string url =
-            $"{ApiBaseUrl}?method=user.getrecenttracks&user={Uri.EscapeDataString(username)}&api_key={Uri.EscapeDataString(apiKey)}&limit={Math.Clamp(limit, 1, 200)}&format=json"
-            + (fromUnixSec > 0 ? $"&from={fromUnixSec}" : "");
+        int perPage = Math.Clamp(limit, 1, 200);
+        return await FetchPagedAsync(
+            async page =>
+            {
+                string url =
+                    $"{ApiBaseUrl}?method=user.getrecenttracks&user={Uri.EscapeDataString(username)}&api_key={Uri.EscapeDataString(apiKey)}&limit={perPage}&page={page}&format=json"
+                    + (fromUnixSec > 0 ? $"&from={fromUnixSec}" : "");
 
-        using var resp = await _http.GetAsync(url, ct);
-        if (!resp.IsSuccessStatusCode) return [];
-        string json = await resp.Content.ReadAsStringAsync(ct);
-        return ParseRecentTracksJson(json);
+                using var resp = await _http.GetAsync(url, ct);
+                if (!resp.IsSuccessStatusCode) return ((IReadOnlyList<CloudRecentTrack>)[], 1);
+                string json = await resp.Content.ReadAsStringAsync(ct);
+                return ParseRecentTracksJson(json);
+            },
+            maxPagesCap: 15,
+            maxConcurrency: 4,
+            ct);
     }
 
     public async Task<IReadOnlyList<CloudLovedTrack>> FetchLovedTracksAsync(
         string apiKey,
         string username,
-        int limit = 200,
+        int limit = 1000,
         CancellationToken ct = default)
     {
-        string url =
-            $"{ApiBaseUrl}?method=user.getlovedtracks&user={Uri.EscapeDataString(username)}&api_key={Uri.EscapeDataString(apiKey)}&limit={Math.Clamp(limit, 1, 200)}&format=json";
+        int perPage = Math.Clamp(limit, 1, 1000);
+        return await FetchPagedAsync(
+            async page =>
+            {
+                string url =
+                    $"{ApiBaseUrl}?method=user.getlovedtracks&user={Uri.EscapeDataString(username)}&api_key={Uri.EscapeDataString(apiKey)}&limit={perPage}&page={page}&format=json";
 
-        using var resp = await _http.GetAsync(url, ct);
-        if (!resp.IsSuccessStatusCode) return [];
-        string json = await resp.Content.ReadAsStringAsync(ct);
-        return ParseLovedTracksJson(json);
+                using var resp = await _http.GetAsync(url, ct);
+                if (!resp.IsSuccessStatusCode) return ((IReadOnlyList<CloudLovedTrack>)[], 1);
+                string json = await resp.Content.ReadAsStringAsync(ct);
+                return ParseLovedTracksJson(json);
+            },
+            maxPagesCap: 50,
+            maxConcurrency: 4,
+            ct);
+    }
+
+    public async Task<IReadOnlyList<CloudTopTrack>> FetchUserTopTracksAsync(
+        string apiKey,
+        string username,
+        int limit = 1000,
+        CancellationToken ct = default)
+    {
+        int perPage = Math.Clamp(limit, 1, 1000);
+        return await FetchPagedAsync(
+            async page =>
+            {
+                string url =
+                    $"{ApiBaseUrl}?method=user.gettoptracks&user={Uri.EscapeDataString(username)}&api_key={Uri.EscapeDataString(apiKey)}&period=overall&limit={perPage}&page={page}&format=json";
+
+                using var resp = await _http.GetAsync(url, ct);
+                if (!resp.IsSuccessStatusCode) return ((IReadOnlyList<CloudTopTrack>)[], 1);
+                string json = await resp.Content.ReadAsStringAsync(ct);
+                return ParseTopTracksJson(json);
+            },
+            maxPagesCap: 100,
+            maxConcurrency: 5,
+            ct);
     }
 
     public async Task<int> PushScrobbleBatchAsync(
@@ -668,7 +1005,16 @@ public sealed class LastFmWebApiClient
         LastFmAccountConfig config,
         CancellationToken ct = default)
     {
-        var recent = await FetchRecentTracksAsync(config.ApiKey, config.Username, config.LastPullUnixSec, ct: ct);
+        var topTracks = await FetchUserTopTracksAsync(config.ApiKey, config.Username, ct: ct);
+        int topUpdated = LastFmLedgerService.SyncTopTrackPlayCounts(manifestDbPath, topTracks);
+
+        long effectiveFromSec = config.LastPullUnixSec;
+        var recent = await FetchRecentTracksAsync(config.ApiKey, config.Username, effectiveFromSec, ct: ct);
+        if (effectiveFromSec > 0 && recent.Count == 0)
+        {
+            // Recover from a future or skewed watermark (e.g. testing clock ahead of Last.fm server time)
+            recent = await FetchRecentTracksAsync(config.ApiKey, config.Username, fromUnixSec: 0, ct: ct);
+        }
         int pulledCount = LastFmLedgerService.IngestPulledCloudPlays(manifestDbPath, tonewiseDir, recent);
 
         var loved = await FetchLovedTracksAsync(config.ApiKey, config.Username, ct: ct);
@@ -680,38 +1026,56 @@ public sealed class LastFmWebApiClient
         );
 
         int pushedTotal = 0;
-        foreach (var batch in prep.Batches)
+        if (!string.IsNullOrWhiteSpace(config.SessionKey) && !string.IsNullOrWhiteSpace(config.ApiSecret))
         {
-            int accepted = await PushScrobbleBatchAsync(config.ApiKey, config.ApiSecret, config.SessionKey, batch, ct);
-            if (accepted > 0)
+            foreach (var batch in prep.Batches)
             {
-                LastFmLedgerService.MarkEventsScrobbled(tonewiseDir, batch.Items);
-                pushedTotal += accepted;
+                int accepted = await PushScrobbleBatchAsync(config.ApiKey, config.ApiSecret, config.SessionKey, batch, ct);
+                if (accepted > 0)
+                {
+                    LastFmLedgerService.MarkEventsScrobbled(tonewiseDir, batch.Items);
+                    pushedTotal += accepted;
+                }
             }
         }
 
         long maxPulledTs = recent.Count > 0 ? recent.Max(r => r.PlayedAtUnixSec) + 1 : config.LastPullUnixSec;
-        LastFmAccountConfig.Save(tonewiseDir, config with { LastPullUnixSec = Math.Max(config.LastPullUnixSec, maxPulledTs) });
+        LastFmAccountConfig.Save(tonewiseDir, config with { LastPullUnixSec = maxPulledTs });
 
         return new LastFmFullSyncSummary(
-            PulledCloudPlays: pulledCount,
+            PulledCloudPlays: pulledCount + topUpdated,
             LovedTracksUpdated: lovedCount,
             DeduplicatedCount: prep.DeduplicatedCount,
             ExpiredArchivedCount: prep.ExpiredCount,
-            PushedScrobbles: pushedTotal
+            PushedScrobbles: pushedTotal,
+            TopPlayCountsUpdated: topUpdated
         );
     }
 
-    private static IReadOnlyList<CloudRecentTrack> ParseRecentTracksJson(string json)
+    private static int ReadTotalPages(JsonElement container)
+    {
+        if (container.TryGetProperty("@attr", out var attr)
+            && attr.TryGetProperty("totalPages", out var tp))
+        {
+            if (tp.ValueKind == JsonValueKind.Number && tp.TryGetInt32(out int num)) return Math.Max(1, num);
+            if (int.TryParse(tp.GetString(), out int parsed)) return Math.Max(1, parsed);
+        }
+        return 1;
+    }
+
+    private static (IReadOnlyList<CloudRecentTrack> Items, int TotalPages) ParseRecentTracksJson(string json)
     {
         var list = new List<CloudRecentTrack>();
+        int totalPages = 1;
         try
         {
             using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("recenttracks", out var rt)
-                || !rt.TryGetProperty("track", out var tracks)
+            if (!doc.RootElement.TryGetProperty("recenttracks", out var rt))
+                return (list, totalPages);
+            totalPages = ReadTotalPages(rt);
+            if (!rt.TryGetProperty("track", out var tracks)
                 || tracks.ValueKind != JsonValueKind.Array)
-                return list;
+                return (list, totalPages);
 
             foreach (var tr in tracks.EnumerateArray())
             {
@@ -739,19 +1103,22 @@ public sealed class LastFmWebApiClient
             }
         }
         catch { /* Return partial results on schema mismatch */ }
-        return list;
+        return (list, totalPages);
     }
 
-    private static IReadOnlyList<CloudLovedTrack> ParseLovedTracksJson(string json)
+    private static (IReadOnlyList<CloudLovedTrack> Items, int TotalPages) ParseLovedTracksJson(string json)
     {
         var list = new List<CloudLovedTrack>();
+        int totalPages = 1;
         try
         {
             using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("lovedtracks", out var lt)
-                || !lt.TryGetProperty("track", out var tracks)
+            if (!doc.RootElement.TryGetProperty("lovedtracks", out var lt))
+                return (list, totalPages);
+            totalPages = ReadTotalPages(lt);
+            if (!lt.TryGetProperty("track", out var tracks)
                 || tracks.ValueKind != JsonValueKind.Array)
-                return list;
+                return (list, totalPages);
 
             foreach (var tr in tracks.EnumerateArray())
             {
@@ -772,6 +1139,43 @@ public sealed class LastFmWebApiClient
             }
         }
         catch { /* Return partial results safely */ }
-        return list;
+        return (list, totalPages);
+    }
+
+    private static (IReadOnlyList<CloudTopTrack> Items, int TotalPages) ParseTopTracksJson(string json)
+    {
+        var list = new List<CloudTopTrack>();
+        int totalPages = 1;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("toptracks", out var tt))
+                return (list, totalPages);
+            totalPages = ReadTotalPages(tt);
+            if (!tt.TryGetProperty("track", out var tracks)
+                || tracks.ValueKind != JsonValueKind.Array)
+                return (list, totalPages);
+
+            foreach (var tr in tracks.EnumerateArray())
+            {
+                string artist = tr.TryGetProperty("artist", out var ar) && ar.TryGetProperty("name", out var arName)
+                    ? (arName.GetString() ?? "")
+                    : "";
+                string title = tr.TryGetProperty("name", out var nm) ? (nm.GetString() ?? "") : "";
+                int playCount = 0;
+                if (tr.TryGetProperty("playcount", out var pc))
+                {
+                    if (pc.ValueKind == JsonValueKind.Number) pc.TryGetInt32(out playCount);
+                    else int.TryParse(pc.GetString(), out playCount);
+                }
+
+                if (!string.IsNullOrWhiteSpace(artist) && !string.IsNullOrWhiteSpace(title) && playCount > 0)
+                {
+                    list.Add(new CloudTopTrack(artist, title, playCount));
+                }
+            }
+        }
+        catch { /* Return partial results safely */ }
+        return (list, totalPages);
     }
 }

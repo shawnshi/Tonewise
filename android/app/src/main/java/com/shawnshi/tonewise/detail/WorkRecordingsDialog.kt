@@ -25,7 +25,6 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,10 +43,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -72,6 +67,7 @@ import com.shawnshi.tonewise.music.WorkRecording
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.formatDurationMs
+import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import org.oxycblt.musikr.Song
 
 @AndroidEntryPoint
@@ -91,7 +87,7 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
                 val song by playbackModel.song.collectAsStateWithLifecycle()
                 val work = song?.let(musicRepository::findWorkForSong)
 
-                TonewiseWorkTheme {
+                TonewiseComposeTheme {
                     WorkRecordingsSheet(
                         currentSong = song,
                         work = work,
@@ -156,20 +152,6 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
 
         fun newInstance() = WorkRecordingsDialog()
     }
-}
-
-@Composable
-private fun TonewiseWorkTheme(content: @Composable () -> Unit) {
-    val context = LocalContext.current
-    val dark = isSystemInDarkTheme()
-    val scheme =
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-                if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            dark -> darkColorScheme()
-            else -> lightColorScheme()
-        }
-    MaterialTheme(colorScheme = scheme, content = content)
 }
 
 @Composable

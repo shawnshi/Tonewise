@@ -12,6 +12,11 @@
         android:title="@string/lbl_shuffle"
         app:showAsAction="ifRoom" />
     <item
+        android:id="@+id/action_focus_filter"
+        android:icon="@drawable/ic_filter_24"
+        android:title="@string/lbl_dj_filter"
+        app:showAsAction="ifRoom" />
+    <item
         android:id="@+id/placeholder"
         android:title=""
         app:showAsAction="never" />

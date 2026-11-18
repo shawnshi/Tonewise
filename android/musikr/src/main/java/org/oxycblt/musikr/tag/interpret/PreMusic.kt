@@ -65,6 +65,7 @@ internal data class PreSong(
     val movementNumber: Int? = null,
     val musicBrainzWorkId: String? = null,
     val moods: List<String> = emptyList(),
+    val tempoBpm: Float? = null,
 )
 
 internal data class PreAlbum(

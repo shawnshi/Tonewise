@@ -52,4 +52,5 @@ data class ParsedTags(
     val movementNumber: Int? = null,
     val musicBrainzWorkId: String? = null,
     val moods: List<String> = listOf(),
+    val tempoBpm: Float? = null,
 )

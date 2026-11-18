@@ -84,6 +84,7 @@ private data object TagParserImpl : TagParser {
             movementNumber = metadata.movementNumber(),
             musicBrainzWorkId = metadata.musicBrainzWorkId(),
             moods = metadata.moods(),
+            tempoBpm = metadata.tempoBpm(),
         )
     }
 }

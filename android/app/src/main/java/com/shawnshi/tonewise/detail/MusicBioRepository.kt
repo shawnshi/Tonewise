@@ -19,13 +19,13 @@
 package com.shawnshi.tonewise.detail
 
 import android.content.Context
-import android.content.SharedPreferences
-import androidx.core.content.edit
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.formatDurationMs
 import com.shawnshi.tonewise.playback.persist.PlayCountRepository
+import com.shawnshi.tonewise.sync.BioCacheEntity
+import com.shawnshi.tonewise.sync.TonewiseSyncDatabase
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.net.HttpURLConnection
 import java.net.URL
@@ -54,6 +54,8 @@ interface MusicBioRepository {
     fun getAlbumBio(album: Album): String
 
     fun getArtistBio(artist: Artist): String
+
+    fun importSyncedEncyclopediaJson(rawJson: String): Int
 }
 
 @Singleton
@@ -64,15 +66,36 @@ constructor(
     private val playCountRepository: PlayCountRepository,
 ) : MusicBioRepository {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val prefs: SharedPreferences by lazy {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    }
+    private val syncDb: TonewiseSyncDatabase by lazy { TonewiseSyncDatabase.getInstance(context) }
     private val memoryCache = ConcurrentHashMap<String, String>()
     private val inFlight = ConcurrentHashMap.newKeySet<String>()
     private val missedKeys = ConcurrentHashMap.newKeySet<String>()
 
     private val _updates = MutableStateFlow(0L)
     override val updates: StateFlow<Long> = _updates
+    @Volatile private var dbWarmupStarted = false
+
+    init {
+        warmupFromDbAsync()
+    }
+
+    private fun warmupFromDbAsync() {
+        if (dbWarmupStarted) return
+        dbWarmupStarted = true
+        scope.launch {
+            val all = runCatching { syncDb.bioCacheDao().getAll() }.getOrDefault(emptyList())
+            var loaded = 0
+            for (entity in all) {
+                if (entity.summary.isNotBlank()) {
+                    memoryCache.putIfAbsent(entity.cacheKey, entity.summary)
+                    loaded++
+                }
+            }
+            if (loaded > 0) {
+                _updates.value += 1
+            }
+        }
+    }
 
     override fun getAlbumBio(album: Album): String {
         val isZh = isChineseLocale()
@@ -115,6 +138,61 @@ constructor(
 
         val summary = buildPersonArchiveSummary(artist, role, isZh)
         return joinParagraphs(curated, summary)
+    }
+
+    override fun importSyncedEncyclopediaJson(rawJson: String): Int {
+        val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: return 0
+        val items = root.optJSONArray("items") ?: return 0
+        var imported = 0
+        val now = System.currentTimeMillis()
+        val entities = ArrayList<BioCacheEntity>()
+        for (i in 0 until items.length()) {
+            val obj = items.optJSONObject(i) ?: continue
+            val entityType = obj.optString("entity_type", "").trim().lowercase()
+            val displayName = obj.optString("display_name", "").trim()
+            val normalizedName = obj.optString("normalized_name", "").trim()
+            if (entityType.isEmpty() || (displayName.isEmpty() && normalizedName.isEmpty())) {
+                continue
+            }
+            val summaryZh = obj.optString("summary_zh", "").trim().takeIf { it.isNotEmpty() }
+            val summaryEn = obj.optString("summary_en", "").trim().takeIf { it.isNotEmpty() }
+            if (summaryZh == null && summaryEn == null) continue
+
+            val kinds =
+                when (entityType) {
+                    "composer",
+                    "conductor" -> listOf(entityType, "artist")
+                    else -> listOf(entityType)
+                }
+            val names = listOfNotNull(
+                displayName.takeIf { it.isNotEmpty() },
+                normalizedName.takeIf { it.isNotEmpty() },
+            )
+            for (kind in kinds) {
+                for (name in names) {
+                    if (summaryZh != null) {
+                        val zhKey = cacheKey(kind, isZh = true, rawName = name)
+                        memoryCache[zhKey] = summaryZh
+                        missedKeys.remove(zhKey)
+                        entities.add(BioCacheEntity(zhKey, summaryZh, now))
+                    }
+                    if (summaryEn != null) {
+                        val enKey = cacheKey(kind, isZh = false, rawName = name)
+                        memoryCache[enKey] = summaryEn
+                        missedKeys.remove(enKey)
+                        entities.add(BioCacheEntity(enKey, summaryEn, now))
+                    }
+                }
+            }
+            imported++
+        }
+        if (entities.isNotEmpty()) {
+            syncDb.bioCacheDao().upsertAll(entities)
+        }
+        if (imported > 0) {
+            _updates.value += 1
+        }
+        return imported
     }
 
     private fun isChineseLocale(): Boolean =
@@ -366,21 +444,28 @@ constructor(
         isZh: Boolean,
     ): String? {
         memoryCache[cacheKey]?.let { return it }
-        val persisted = prefs.getString(cacheKey, null)
-        if (!persisted.isNullOrBlank()) {
-            memoryCache[cacheKey] = persisted
-            return persisted
-        }
-        if (missedKeys.contains(cacheKey) || queries.isEmpty()) {
+        if (missedKeys.contains(cacheKey)) {
             return null
         }
         if (inFlight.add(cacheKey)) {
             scope.launch {
                 try {
+                    val persisted = runCatching { syncDb.bioCacheDao().getSummary(cacheKey) }.getOrNull()
+                    if (!persisted.isNullOrBlank()) {
+                        memoryCache[cacheKey] = persisted
+                        _updates.value += 1
+                        return@launch
+                    }
+                    if (queries.isEmpty()) {
+                        return@launch
+                    }
                     val fetched = fetchWikipediaSummary(queries, isZh)
                     if (!fetched.isNullOrBlank()) {
                         memoryCache[cacheKey] = fetched
-                        prefs.edit { putString(cacheKey, fetched) }
+                        syncDb.bioCacheDao()
+                            .upsertAll(
+                                listOf(BioCacheEntity(cacheKey, fetched, System.currentTimeMillis()))
+                            )
                         _updates.value += 1
                     } else {
                         missedKeys.add(cacheKey)

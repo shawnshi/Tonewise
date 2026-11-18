@@ -32,23 +32,44 @@ import androidx.room.RoomDatabase
 import androidx.room.Transaction
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
 import org.oxycblt.musikr.tag.Date
 import org.oxycblt.musikr.util.correctWhitespace
 import org.oxycblt.musikr.util.splitEscaped
 
-@Database(entities = [CachedFileData::class], version = 73, exportSchema = false)
+@Database(entities = [CachedFileData::class], version = 74, exportSchema = false)
 internal abstract class CacheDatabase : RoomDatabase() {
     abstract fun readDao(): CacheReadDao
 
     abstract fun writeDao(): CacheWriteDao
 
     companion object {
+        val MIGRATION_70_73 =
+            Migration(70, 73) { db ->
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN composerNames TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN conductorNames TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN djVocals TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN djEnergy TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN djScenes TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN workName TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN movementName TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN movementNumber INTEGER")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN musicBrainzWorkId TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN moods TEXT")
+            }
+
+        val MIGRATION_73_74 =
+            Migration(73, 74) { db ->
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN tempoBpm REAL")
+            }
+
         fun from(context: Context) =
             Room.databaseBuilder(
                     context.applicationContext,
                     CacheDatabase::class.java,
                     "music_cache.db",
                 )
+                .addMigrations(MIGRATION_70_73, MIGRATION_73_74)
                 .fallbackToDestructiveMigration(true)
                 .build()
     }
@@ -121,6 +142,7 @@ internal data class CachedFileData(
     val movementNumber: Int? = null,
     val musicBrainzWorkId: String? = null,
     val moods: List<String>? = null,
+    val tempoBpm: Float? = null,
 ) {
     object Converters {
         @TypeConverter

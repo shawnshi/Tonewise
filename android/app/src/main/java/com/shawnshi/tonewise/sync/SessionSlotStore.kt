@@ -19,12 +19,15 @@
 package com.shawnshi.tonewise.sync
 
 import android.content.Context
-import androidx.core.content.edit
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import org.oxycblt.musikr.core.TonewiseCore
@@ -41,26 +44,31 @@ data class SessionSlotItem(
 
 @Singleton
 class SessionSlotStore @Inject constructor(@ApplicationContext context: Context) {
-    private val prefs = context.getSharedPreferences("tonewise_session_slots", Context.MODE_PRIVATE)
+    private val syncDb: TonewiseSyncDatabase by lazy { TonewiseSyncDatabase.getInstance(context) }
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private val _slots = MutableStateFlow(loadSlots())
     val slots: StateFlow<List<SessionSlotItem>> = _slots
 
     private val _activeSceneLabel =
-        MutableStateFlow(prefs.getString(KEY_ACTIVE_SCENE, "Default") ?: "Default")
+        MutableStateFlow(syncDb.syncKvDao().getValue(KEY_ACTIVE_SCENE) ?: "Default")
     val activeSceneLabel: StateFlow<String> = _activeSceneLabel
 
-    private val _activeSlotIndex = MutableStateFlow(prefs.getInt(KEY_ACTIVE_SLOT, 1).coerceIn(1, 5))
+    private val _activeSlotIndex =
+        MutableStateFlow(
+            (syncDb.syncKvDao().getValue(KEY_ACTIVE_SLOT)?.toIntOrNull() ?: 1).coerceIn(1, 5)
+        )
     val activeSlotIndex: StateFlow<Int> = _activeSlotIndex
 
     fun setActiveScene(sceneLabel: String, slotIndex: Int = _activeSlotIndex.value) {
         val cleanLabel = sceneLabel.trim().ifEmpty { "Default" }
         val cleanSlot = slotIndex.coerceIn(1, 5)
-        prefs.edit {
-            putString(KEY_ACTIVE_SCENE, cleanLabel)
-            putInt(KEY_ACTIVE_SLOT, cleanSlot)
-        }
         _activeSceneLabel.value = cleanLabel
         _activeSlotIndex.value = cleanSlot
+        ioScope.launch {
+            syncDb.syncKvDao().putValue(SyncKvEntity(KEY_ACTIVE_SCENE, cleanLabel))
+            syncDb.syncKvDao().putValue(SyncKvEntity(KEY_ACTIVE_SLOT, cleanSlot.toString()))
+        }
     }
 
     fun saveSlot(slot: SessionSlotItem) {
@@ -98,12 +106,15 @@ class SessionSlotStore @Inject constructor(@ApplicationContext context: Context)
     fun exportSlotsJson(): String = toJsonArray(_slots.value).toString()
 
     private fun persist(list: List<SessionSlotItem>) {
-        prefs.edit { putString(KEY_SLOTS_JSON, toJsonArray(list).toString()) }
         _slots.value = list
+        ioScope.launch {
+            val serialized = toJsonArray(list).toString()
+            syncDb.syncKvDao().putValue(SyncKvEntity(KEY_SLOTS_JSON, serialized))
+        }
     }
 
     private fun loadSlots(): List<SessionSlotItem> {
-        val raw = prefs.getString(KEY_SLOTS_JSON, null) ?: return emptyList()
+        val raw = syncDb.syncKvDao().getValue(KEY_SLOTS_JSON) ?: return emptyList()
         return runCatching { parseSlots(raw) }.getOrDefault(emptyList())
     }
 
@@ -147,8 +158,8 @@ class SessionSlotStore @Inject constructor(@ApplicationContext context: Context)
     }
 
     private companion object {
-        const val KEY_SLOTS_JSON = "slots_json"
-        const val KEY_ACTIVE_SCENE = "active_scene_label"
-        const val KEY_ACTIVE_SLOT = "active_slot_index"
+        const val KEY_SLOTS_JSON = "session_slots_json"
+        const val KEY_ACTIVE_SCENE = "session_active_scene_label"
+        const val KEY_ACTIVE_SLOT = "session_active_slot_index"
     }
 }

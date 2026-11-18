@@ -186,6 +186,7 @@ private class TagInterpreterImpl(private val interpretation: Interpretation) : T
             movementNumber = song.tags.movementNumber,
             musicBrainzWorkId = song.tags.musicBrainzWorkId?.trim()?.takeIf { it.isNotEmpty() },
             moods = song.tags.moods.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+            tempoBpm = song.tags.tempoBpm?.takeIf { it.isFinite() && it > 0f },
             cover = song.cover,
         )
     }

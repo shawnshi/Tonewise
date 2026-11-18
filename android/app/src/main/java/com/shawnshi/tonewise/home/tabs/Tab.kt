@@ -60,13 +60,14 @@ sealed class Tab(open val type: MusicType) {
         private const val SEQ_FORMAT_V2 = 1 shl 24
 
         /** The maximum index that a well-formed tab sequence should be. */
-        const val MAX_SEQUENCE_IDX = 5
+        const val MAX_SEQUENCE_IDX = 7
 
         /**
          * The default tab sequence, in integer form. This represents visible tabs ordered as
-         * "Songs", "Albums", "Artists", "Genres", "Playlists", and "Scenes".
+         * "Songs", "Albums", "Artists", "Genres", "Playlists", "Scenes", "Composers", and
+         * "Conductors".
          */
-        const val SEQUENCE_DEFAULT = SEQ_FORMAT_V2 or 0b1000_1001_1010_1011_1100_1101
+        const val SEQUENCE_DEFAULT = 0b1000_1001_1010_1011_1100_1101_1110_1111.toInt()
 
         /** Maps between the integer code in the tab sequence and it's [MusicType]. */
         private val MODE_TABLE =
@@ -77,6 +78,8 @@ sealed class Tab(open val type: MusicType) {
                 MusicType.GENRES,
                 MusicType.PLAYLISTS,
                 MusicType.SCENES,
+                MusicType.COMPOSERS,
+                MusicType.CONDUCTORS,
             )
 
         /**
@@ -87,14 +90,19 @@ sealed class Tab(open val type: MusicType) {
          */
         fun toIntCode(tabs: Array<Tab>): Int {
             // Like when deserializing, make sure there are no duplicate tabs for whatever reason.
-            val distinct = tabs.distinctBy { it.type }
+            val distinct = tabs.distinctBy { it.type }.toMutableList()
             if (tabs.size != distinct.size) {
                 L.w(
                     "Tab sequences should not have duplicates [old: ${tabs.size} new: ${distinct.size}]"
                 )
             }
+            for (mode in MODE_TABLE) {
+                if (distinct.none { it.type == mode }) {
+                    distinct += Visible(mode)
+                }
+            }
 
-            var sequence = SEQ_FORMAT_V2
+            var sequence = 0
             var shift = MAX_SEQUENCE_IDX * 4
             for (tab in distinct) {
                 val bin =
@@ -117,14 +125,16 @@ sealed class Tab(open val type: MusicType) {
          * @return An array of [Tab]s corresponding to the sequence.
          */
         fun fromIntCode(intCode: Int): Array<Tab>? {
-            val isV2 = (intCode and SEQ_FORMAT_V2) != 0
-            val startIdx = if (isV2) MAX_SEQUENCE_IDX else 4
+            decodeV3(intCode)?.let { return it }
+
+            val isV2 = (intCode ushr 25) == 0 && (intCode and SEQ_FORMAT_V2) != 0
+            val startIdx = if (isV2) 5 else 4
             val tabs = mutableListOf<Tab>()
 
-            // Try to parse a mode for each chunk in the sequence.
+            // Try to parse a mode for each chunk in the legacy sequence (V1: 5 tabs, V2: 6 tabs).
             // If we can't parse one, just skip it.
             for (shift in (0..startIdx * 4).reversed() step 4) {
-                val chunk = intCode.shr(shift) and 0b1111
+                val chunk = intCode.ushr(shift) and 0b1111
                 val mode = MODE_TABLE.getOrNull(chunk and 7) ?: continue
 
                 // Figure out the visibility
@@ -136,7 +146,7 @@ sealed class Tab(open val type: MusicType) {
                     }
             }
 
-            // Append any newly introduced tab modes (e.g., migrating 5-tab configs -> 6-tab).
+            // Append any newly introduced tab modes (e.g., migrating 5/6-tab configs -> 8-tab).
             for (mode in MODE_TABLE) {
                 if (tabs.none { it.type == mode }) {
                     tabs += Visible(mode)
@@ -157,6 +167,26 @@ sealed class Tab(open val type: MusicType) {
             }
 
             return distinct.toTypedArray()
+        }
+
+        private fun decodeV3(intCode: Int): Array<Tab>? {
+            val tabs = ArrayList<Tab>(MODE_TABLE.size)
+            val seen = BooleanArray(MODE_TABLE.size)
+            for (idx in 0 until MODE_TABLE.size) {
+                val shift = (MAX_SEQUENCE_IDX - idx) * 4
+                val chunk = intCode.ushr(shift) and 0b1111
+                val modeIdx = chunk and 7
+                val mode = MODE_TABLE.getOrNull(modeIdx) ?: return null
+                if (seen[modeIdx]) return null
+                seen[modeIdx] = true
+                tabs +=
+                    if (chunk and 1.shl(3) != 0) {
+                        Visible(mode)
+                    } else {
+                        Invisible(mode)
+                    }
+            }
+            return tabs.toTypedArray()
         }
     }
 }

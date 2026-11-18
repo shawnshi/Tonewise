@@ -33,6 +33,10 @@ interface ListSettings : Settings<ListSettings.Listener> {
     var albumSort: Sort
     /** The [Sort] mode used in Artist lists. */
     var artistSort: Sort
+    /** The [Sort] mode used in Composer lists. */
+    var composerSort: Sort
+    /** The [Sort] mode used in Conductor lists. */
+    var conductorSort: Sort
     /** The [Sort] mode used in Genre lists. */
     var genreSort: Sort
     /** The [Sort] mode used in Playlist lists. */
@@ -52,6 +56,10 @@ interface ListSettings : Settings<ListSettings.Listener> {
         fun onAlbumSongSortChanged() {}
 
         fun onArtistSortChanged() {}
+
+        fun onComposerSortChanged() {}
+
+        fun onConductorSortChanged() {}
 
         fun onArtistSongSortChanged() {}
 
@@ -97,6 +105,30 @@ class ListSettingsImpl @Inject constructor(@ApplicationContext val context: Cont
         set(value) {
             sharedPreferences.edit {
                 putInt(getString(R.string.set_key_artists_sort), value.intCode)
+                apply()
+            }
+        }
+
+    override var composerSort: Sort
+        get() =
+            Sort.fromIntCode(
+                sharedPreferences.getInt(getString(R.string.set_key_composers_sort), Int.MIN_VALUE)
+            ) ?: Sort(Sort.Mode.ByName, Sort.Direction.ASCENDING)
+        set(value) {
+            sharedPreferences.edit {
+                putInt(getString(R.string.set_key_composers_sort), value.intCode)
+                apply()
+            }
+        }
+
+    override var conductorSort: Sort
+        get() =
+            Sort.fromIntCode(
+                sharedPreferences.getInt(getString(R.string.set_key_conductors_sort), Int.MIN_VALUE)
+            ) ?: Sort(Sort.Mode.ByName, Sort.Direction.ASCENDING)
+        set(value) {
+            sharedPreferences.edit {
+                putInt(getString(R.string.set_key_conductors_sort), value.intCode)
                 apply()
             }
         }
@@ -176,6 +208,8 @@ class ListSettingsImpl @Inject constructor(@ApplicationContext val context: Cont
             getString(R.string.set_key_albums_sort) -> listener.onAlbumSortChanged()
             getString(R.string.set_key_album_songs_sort) -> listener.onAlbumSongSortChanged()
             getString(R.string.set_key_artists_sort) -> listener.onArtistSortChanged()
+            getString(R.string.set_key_composers_sort) -> listener.onComposerSortChanged()
+            getString(R.string.set_key_conductors_sort) -> listener.onConductorSortChanged()
             getString(R.string.set_key_artist_songs_sort) -> listener.onArtistSongSortChanged()
             getString(R.string.set_key_genres_sort) -> listener.onGenreSortChanged()
             getString(R.string.set_key_genre_songs_sort) -> listener.onGenreSongSortChanged()

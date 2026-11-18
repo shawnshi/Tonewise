@@ -53,6 +53,8 @@ sealed class TabNode {
                 MusicType.SONGS -> 's'
                 MusicType.ALBUMS -> 'a'
                 MusicType.ARTISTS -> 'r'
+                MusicType.COMPOSERS -> 'o'
+                MusicType.CONDUCTORS -> 'd'
                 MusicType.GENRES -> 'g'
                 MusicType.PLAYLISTS -> 'p'
                 MusicType.SCENES -> 'c'
@@ -63,6 +65,8 @@ sealed class TabNode {
                     MusicType.SONGS -> R.drawable.ic_song_bitmap_24
                     MusicType.ALBUMS -> R.drawable.ic_album_bitmap_24
                     MusicType.ARTISTS -> R.drawable.ic_artist_bitmap_24
+                    MusicType.COMPOSERS -> R.drawable.ic_artist_bitmap_24
+                    MusicType.CONDUCTORS -> R.drawable.ic_artist_bitmap_24
                     MusicType.GENRES -> R.drawable.ic_genre_bitmap_24
                     MusicType.PLAYLISTS -> R.drawable.ic_playlist_bitmap_24
                     MusicType.SCENES -> R.drawable.ic_playlist_bitmap_24
@@ -85,6 +89,8 @@ sealed class TabNode {
                     's' -> Home(MusicType.SONGS)
                     'a' -> Home(MusicType.ALBUMS)
                     'r' -> Home(MusicType.ARTISTS)
+                    'o' -> Home(MusicType.COMPOSERS)
+                    'd' -> Home(MusicType.CONDUCTORS)
                     'g' -> Home(MusicType.GENRES)
                     'p' -> Home(MusicType.PLAYLISTS)
                     'c' -> Home(MusicType.SCENES)

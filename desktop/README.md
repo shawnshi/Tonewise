@@ -11,3 +11,13 @@
 ```powershell
 dotnet test desktop/Tonewise.sln
 ```
+
+## 界面预览 (Screenshots)
+
+| 曲库与列头排序 | 批量多选与属性精修 |
+| :---: | :---: |
+| <img src="../docs/assets/screenshots/desktop-01-library-sort.png" alt="曲库与列头排序" width="460"> | <img src="../docs/assets/screenshots/desktop-02-multiselect-inspector.png" alt="批量多选与属性精修" width="460"> |
+| **古典作品与四元组检查器** | **场景编排与 AutoDJ** |
+| <img src="../docs/assets/screenshots/desktop-03-classical-works.png" alt="古典作品与四元组检查器" width="460"> | <img src="../docs/assets/screenshots/desktop-04-scenes-autodj.png" alt="场景编排与 AutoDJ" width="460"> |
+| **入库审校与缺标体检** | **Last.fm 与局域网同步** |
+| <img src="../docs/assets/screenshots/desktop-05-inbox-audit.png" alt="入库审校与缺标体检" width="460"> | <img src="../docs/assets/screenshots/desktop-06-lastfm-sync.png" alt="Last.fm 与局域网同步" width="460"> |

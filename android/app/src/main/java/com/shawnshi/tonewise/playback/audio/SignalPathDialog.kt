@@ -24,7 +24,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,10 +43,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -72,6 +67,7 @@ import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.dsp.DspControlDialog
 import com.shawnshi.tonewise.playback.dsp.DspRepository
+import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 
 @AndroidEntryPoint
 class SignalPathDialog : BackportBottomSheetDialogFragment() {
@@ -88,7 +84,7 @@ class SignalPathDialog : BackportBottomSheetDialogFragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val pathState by playbackModel.signalPath.collectAsStateWithLifecycle()
-                TonewiseSignalTheme {
+                TonewiseComposeTheme {
                     SignalPathSheet(
                         state = pathState,
                         onOpenDsp = {
@@ -111,21 +107,6 @@ class SignalPathDialog : BackportBottomSheetDialogFragment() {
 
         fun newInstance() = SignalPathDialog()
     }
-}
-
-@Composable
-private fun TonewiseSignalTheme(content: @Composable () -> Unit) {
-    val context = LocalContext.current
-    val dark = isSystemInDarkTheme()
-    val colorScheme =
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-                if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            }
-            dark -> darkColorScheme()
-            else -> lightColorScheme()
-        }
-    MaterialTheme(colorScheme = colorScheme, content = content)
 }
 
 @Composable

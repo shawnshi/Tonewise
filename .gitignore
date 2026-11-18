@@ -10,6 +10,7 @@ release/
 *.apk
 !releases/
 !releases/*.apk
+*.idsig
 *.aab
 android/musikr/.Rhistory
 android/musikr/src/main/cpp/taglib/build/

@@ -36,6 +36,8 @@ data class AudioFrameFingerprint(
  * Android, `tonewise_core.dll` in Windows unit tests).
  */
 object TonewiseCore {
+    fun parseJson(input: String): Any? = MiniJson.parse(input)
+
     fun abiVersion(): Int {
         TonewiseCoreJNI.ensureLoaded()
         return TonewiseCoreJNI.nativeAbiVersion()
@@ -211,10 +213,13 @@ object TonewiseCore {
 
 /** Minimal strict RFC 8259 JSON parser for zero-dependency JVM/Android parity across FFI. */
 internal object MiniJson {
+    private const val MAX_DEPTH = 64
+
     fun parse(input: String): Any? = Parser(input).parseValue()
 
     private class Parser(private val src: String) {
         private var pos = 0
+        private var depth = 0
 
         fun parseValue(): Any? {
             skipWhitespace()
@@ -233,50 +238,64 @@ internal object MiniJson {
         }
 
         private fun parseObject(): Map<String, Any?> {
-            pos++ // '{'
-            skipWhitespace()
-            val map = LinkedHashMap<String, Any?>()
-            if (peek('}')) {
-                pos++
-                return map
+            if (++depth > MAX_DEPTH) {
+                throw IllegalArgumentException("JSON nesting depth exceeded $MAX_DEPTH")
             }
-            while (true) {
+            try {
+                pos++ // '{'
                 skipWhitespace()
-                val key = parseString()
-                skipWhitespace()
-                expect(':')
-                val value = parseValue()
-                map[key] = value
-                skipWhitespace()
-                if (peek(',')) {
+                val map = LinkedHashMap<String, Any?>()
+                if (peek('}')) {
                     pos++
-                } else {
-                    expect('}')
-                    break
+                    return map
                 }
+                while (true) {
+                    skipWhitespace()
+                    val key = parseString()
+                    skipWhitespace()
+                    expect(':')
+                    val value = parseValue()
+                    map[key] = value
+                    skipWhitespace()
+                    if (peek(',')) {
+                        pos++
+                    } else {
+                        expect('}')
+                        break
+                    }
+                }
+                return map
+            } finally {
+                depth--
             }
-            return map
         }
 
         private fun parseArray(): List<Any?> {
-            pos++ // '['
-            skipWhitespace()
-            val list = ArrayList<Any?>()
-            if (peek(']')) {
-                pos++
-                return list
+            if (++depth > MAX_DEPTH) {
+                throw IllegalArgumentException("JSON nesting depth exceeded $MAX_DEPTH")
             }
-            while (true) {
-                list.add(parseValue())
+            try {
+                pos++ // '['
                 skipWhitespace()
-                if (peek(',')) {
+                val list = ArrayList<Any?>()
+                if (peek(']')) {
                     pos++
-                } else {
-                    expect(']')
-                    break
+                    return list
                 }
+                while (true) {
+                    list.add(parseValue())
+                    skipWhitespace()
+                    if (peek(',')) {
+                        pos++
+                    } else {
+                        expect(']')
+                        break
+                    }
+                }
+                return list
+            } finally {
+                depth--
             }
-            return list
         }
 
         private fun parseString(): String {

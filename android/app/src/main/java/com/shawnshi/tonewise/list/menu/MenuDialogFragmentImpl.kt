@@ -31,6 +31,7 @@ import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.sync.QuickTagDialog
 import com.shawnshi.tonewise.playback.formatDurationMs
 import com.shawnshi.tonewise.util.getPlural
 import com.shawnshi.tonewise.util.share
@@ -96,6 +97,10 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
             }
             R.id.action_share -> requireContext().share(menu.song)
             R.id.action_detail -> detailModel.showSong(menu.song)
+            R.id.action_quick_tag -> {
+                QuickTagDialog.newInstance(menu.song.uid.toString())
+                    .show(parentFragmentManager, QuickTagDialog.TAG)
+            }
             else -> error("Unexpected menu item selected $item")
         }
     }

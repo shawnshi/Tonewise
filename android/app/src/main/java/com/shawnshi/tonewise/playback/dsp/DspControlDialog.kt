@@ -29,7 +29,6 @@ import android.view.ViewGroup
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -52,10 +51,6 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -78,6 +73,7 @@ import java.util.Locale
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.util.showToast
 import kotlin.math.roundToInt
 
@@ -111,7 +107,7 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
                 val signalPath by playbackModel.signalPath.collectAsStateWithLifecycle()
                 val romHint by dspRepository.romConflictHint.collectAsStateWithLifecycle()
 
-                TonewiseDspTheme {
+                TonewiseComposeTheme {
                     DspControlSheet(
                         config = config,
                         profileLabel = profileLabel,
@@ -148,20 +144,6 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
 
         fun newInstance() = DspControlDialog()
     }
-}
-
-@Composable
-private fun TonewiseDspTheme(content: @Composable () -> Unit) {
-    val context = LocalContext.current
-    val dark = isSystemInDarkTheme()
-    val scheme =
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-                if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            dark -> darkColorScheme()
-            else -> lightColorScheme()
-        }
-    MaterialTheme(colorScheme = scheme, content = content)
 }
 
 @Composable

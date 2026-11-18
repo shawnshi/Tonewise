@@ -113,6 +113,8 @@ class TabViewHolder private constructor(private val binding: ItemTabBinding) :
                     MusicType.SONGS -> R.string.lbl_songs
                     MusicType.ALBUMS -> R.string.lbl_albums
                     MusicType.ARTISTS -> R.string.lbl_artists
+                    MusicType.COMPOSERS -> R.string.lbl_composers
+                    MusicType.CONDUCTORS -> R.string.lbl_conductors
                     MusicType.GENRES -> R.string.lbl_genres
                     MusicType.PLAYLISTS -> R.string.lbl_playlists
                     MusicType.SCENES -> R.string.lbl_scenes

@@ -13,18 +13,20 @@
         android:clickable="true"
         android:focusable="true"
         android:ellipsize="end"
-        android:fontFamily="monospace"
+        android:fontFamily="sans-serif-medium"
         android:maxLines="1"
         android:paddingStart="@dimen/spacing_small"
         android:paddingEnd="@dimen/spacing_small"
         android:paddingTop="4dp"
-        android:paddingBottom="2dp"
+        android:paddingBottom="0dp"
         android:textColor="?attr/colorPrimary"
         android:textSize="11sp"
+        android:visibility="gone"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
-        tools:text="▲ Focus · Slot #1 (12)" />
+        tools:text="Focus · Slot #2 (12)"
+        tools:visibility="visible" />
 
     <com.shawnshi.tonewise.image.CoverView
         android:id="@+id/playback_cover"
@@ -95,15 +97,10 @@
 
             <com.shawnshi.tonewise.playback.ui.button.WidthFixMaterialButton
                 android:id="@+id/playback_secondary_action"
-                style="@style/Widget.Material3Expressive.Button.IconButton.Outlined"
-                app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Small"
+                style="@style/Widget.Auxio.Button.Playback.Toggle"
+                app:materialSizeOverlay="@style/SizeOverlay.Tonewise.Button.Playback.Toggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:checkable="true"
-                app:toggleCheckedStateOnClick="false"
-                app:backgroundTint="?attr/colorSurfaceContainerLow"
-                app:iconTint="@color/sel_checkable_icon"
-                app:strokeColor="@color/sel_checkable_outline"
                 tools:icon="@drawable/ic_skip_next_24" />
         </com.google.android.material.button.MaterialButtonGroup>
 

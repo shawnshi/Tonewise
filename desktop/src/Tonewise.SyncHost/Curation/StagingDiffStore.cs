@@ -26,7 +26,11 @@ public sealed record TagDiffProposal(
     long CreatedAtMs = 0
 );
 
-public sealed record CurationCommitResult(string BatchId, int CommittedCount, int PhysicalFilesUpdated = 0);
+public sealed record CurationCommitResult(
+    string BatchId,
+    int CommittedCount,
+    int PhysicalFilesUpdated = 0,
+    IReadOnlyList<string>? CommittedTrackUids = null);
 
 /// <summary>
 /// Enforces the two anti-corruption curation laws against `manifest.db`:
@@ -50,7 +54,31 @@ public sealed class StagingDiffStore
             ["album"] = "album",
             ["year"] = "year",
             ["publisher"] = "publisher",
+            ["rating"] = "rating",
+            ["work"] = "work_name",
+            ["work_name"] = "work_name",
+            ["movement"] = "movement_name",
+            ["movement_name"] = "movement_name",
+            ["title"] = "title",
+            ["artist"] = "artists_json",
+            ["artists"] = "artists_json",
+            ["artists_json"] = "artists_json",
+            ["composer"] = "composers_json",
+            ["composers"] = "composers_json",
+            ["composers_json"] = "composers_json",
+            ["conductor"] = "conductors_json",
+            ["conductors"] = "conductors_json",
+            ["conductors_json"] = "conductors_json",
         };
+
+    private static bool IsPhysicalTagColumn(string column) => column switch
+    {
+        "title" or "artists_json" or "composers_json" or "conductors_json"
+            or "album" or "genre" or "year" or "publisher"
+            or "tempo_bpm" or "mood_json" or "dj_scene_json"
+            or "dj_vocals" or "dj_energy" => true,
+        _ => false,
+    };
 
     private static readonly IReadOnlyDictionary<string, string> FieldToTimestampColumnMap =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -61,6 +89,7 @@ public sealed class StagingDiffStore
             ["tempo_bpm"] = "tempo_ts",
             ["tempo_bucket"] = "tempo_ts",
             ["mood_json"] = "mood_ts",
+            ["rating"] = "rating_ts",
         };
 
     public string DbPath { get; }
@@ -197,17 +226,30 @@ public sealed class StagingDiffStore
         return inserted;
     }
 
-    public IReadOnlyList<TagDiffProposal> GetPendingProposals()
+    public IReadOnlyList<TagDiffProposal> GetPendingProposals(int limit = 0)
     {
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT proposal_id, track_uid, field_name, original_value, suggested_value,
-                   confidence, source_tag, status, batch_id, created_at_ms
-            FROM staging_diff_queue
-            WHERE status IN ('Pending', 'Approved')
-            ORDER BY confidence DESC, created_at_ms DESC;
-            """;
+        cmd.CommandText = limit > 0
+            ? """
+              SELECT proposal_id, track_uid, field_name, original_value, suggested_value,
+                     confidence, source_tag, status, batch_id, created_at_ms
+              FROM staging_diff_queue
+              WHERE status IN ('Pending', 'Approved')
+              ORDER BY CASE WHEN status = 'Approved' THEN 0 ELSE 1 END, confidence DESC, created_at_ms DESC
+              LIMIT $lim;
+              """
+            : """
+              SELECT proposal_id, track_uid, field_name, original_value, suggested_value,
+                     confidence, source_tag, status, batch_id, created_at_ms
+              FROM staging_diff_queue
+              WHERE status IN ('Pending', 'Approved')
+              ORDER BY CASE WHEN status = 'Approved' THEN 0 ELSE 1 END, confidence DESC, created_at_ms DESC;
+              """;
+        if (limit > 0)
+        {
+            cmd.Parameters.AddWithValue("$lim", limit);
+        }
 
         var list = new List<TagDiffProposal>();
         using var reader = cmd.ExecuteReader();
@@ -229,6 +271,52 @@ public sealed class StagingDiffStore
         return list;
     }
 
+    public (int ApprovedCount, int PendingCount) GetPendingProposalCounts()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT
+                COALESCE(SUM(CASE WHEN status = 'Approved' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END), 0)
+            FROM staging_diff_queue;
+            """;
+        using var reader = cmd.ExecuteReader();
+        if (reader.Read())
+        {
+            return (reader.GetInt32(0), reader.GetInt32(1));
+        }
+        return (0, 0);
+    }
+
+    public IReadOnlyList<string> GetCommitCandidateTrackUids(
+        double autoApproveThreshold = 0.80,
+        int maxProposals = 500)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        int limit = maxProposals > 0 ? maxProposals : 100_000;
+        cmd.CommandText = """
+            SELECT DISTINCT track_uid
+            FROM (
+                SELECT track_uid
+                FROM staging_diff_queue
+                WHERE status = 'Approved' OR (status = 'Pending' AND confidence >= $thresh)
+                ORDER BY CASE WHEN status = 'Approved' THEN 0 ELSE 1 END, confidence DESC, created_at_ms DESC
+                LIMIT $lim
+            );
+            """;
+        cmd.Parameters.AddWithValue("$thresh", autoApproveThreshold);
+        cmd.Parameters.AddWithValue("$lim", limit);
+        var uids = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            uids.Add(reader.GetString(0));
+        }
+        return uids;
+    }
+
     public void SetProposalApproval(string proposalId, bool approved)
     {
         using var conn = OpenConnection();
@@ -239,7 +327,44 @@ public sealed class StagingDiffStore
         cmd.ExecuteNonQuery();
     }
 
-    public CurationCommitResult CommitApprovedBatch(string? customBatchId = null, double autoApproveThreshold = 0.80)
+    public int ApproveAllHighConfidence(double minConfidence = 0.80)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE staging_diff_queue
+            SET status = 'Approved'
+            WHERE status = 'Pending' AND confidence >= $thresh;
+            """;
+        cmd.Parameters.AddWithValue("$thresh", minConfidence);
+        return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Deletes Pending and Rejected proposals only; explicitly Approved proposals are preserved.
+    /// </summary>
+    public int ClearPendingProposals()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM staging_diff_queue WHERE status IN ('Pending', 'Rejected');";
+        return cmd.ExecuteNonQuery();
+    }
+
+    public int CountPendingAtOrAbove(double minConfidence)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM staging_diff_queue WHERE status = 'Pending' AND confidence >= $thresh;";
+        cmd.Parameters.AddWithValue("$thresh", minConfidence);
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    public CurationCommitResult CommitApprovedBatch(
+        string? customBatchId = null,
+        double autoApproveThreshold = 0.80,
+        int maxProposals = 500,
+        int maxPhysicalFiles = 25)
     {
         string batchId = string.IsNullOrWhiteSpace(customBatchId)
             ? $"batch-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..6]}"
@@ -254,13 +379,17 @@ public sealed class StagingDiffStore
         using (var selectCmd = conn.CreateCommand())
         {
             selectCmd.Transaction = tx;
+            int limit = maxProposals > 0 ? maxProposals : 100_000;
             selectCmd.CommandText = """
                 SELECT proposal_id, track_uid, field_name, original_value, suggested_value,
                        confidence, source_tag, status, batch_id, created_at_ms
                 FROM staging_diff_queue
-                WHERE status = 'Approved' OR (status = 'Pending' AND confidence >= $thresh);
+                WHERE status = 'Approved' OR (status = 'Pending' AND confidence >= $thresh)
+                ORDER BY CASE WHEN status = 'Approved' THEN 0 ELSE 1 END, confidence DESC, created_at_ms DESC
+                LIMIT $lim;
                 """;
             selectCmd.Parameters.AddWithValue("$thresh", autoApproveThreshold);
+            selectCmd.Parameters.AddWithValue("$lim", limit);
             using var reader = selectCmd.ExecuteReader();
             while (reader.Read())
             {
@@ -291,12 +420,15 @@ public sealed class StagingDiffStore
             string column = ResolveColumnName(item.FieldName);
             ApplyTrackColumnValue(conn, tx, item.TrackUid, column, item.SuggestedValue, nowMs);
 
-            if (!updatesByTrack.TryGetValue(item.TrackUid, out var trackUpdates))
+            if (IsPhysicalTagColumn(column))
             {
-                trackUpdates = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-                updatesByTrack[item.TrackUid] = trackUpdates;
+                if (!updatesByTrack.TryGetValue(item.TrackUid, out var trackUpdates))
+                {
+                    trackUpdates = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                    updatesByTrack[item.TrackUid] = trackUpdates;
+                }
+                trackUpdates[column] = item.SuggestedValue;
             }
-            trackUpdates[column] = item.SuggestedValue;
 
             using var markCmd = conn.CreateCommand();
             markCmd.Transaction = tx;
@@ -321,8 +453,115 @@ public sealed class StagingDiffStore
             batchCmd.ExecuteNonQuery();
         }
 
-        int physicalUpdated = WriteBackUpdatesToPhysicalFiles(conn, tx, updatesByTrack);
+        int physicalUpdated = WriteBackUpdatesToPhysicalFiles(conn, tx, updatesByTrack, maxPhysicalFiles);
+        var committedUids = targets.Select(t => t.TrackUid).Distinct(StringComparer.Ordinal).ToList();
 
+        tx.Commit();
+        return new CurationCommitResult(batchId, committed, physicalUpdated, committedUids);
+    }
+
+    public CurationCommitResult ApplyDirectCuratedEdits(
+        IEnumerable<string> trackUids,
+        IReadOnlyDictionary<string, string?> fieldUpdates)
+    {
+        var uids = trackUids
+            .Where(u => !string.IsNullOrWhiteSpace(u))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        string batchId = $"batch-lexicon-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..6]}";
+        if (uids.Count == 0 || fieldUpdates.Count == 0)
+        {
+            return new CurationCommitResult(batchId, 0);
+        }
+
+        var normalizedUpdates = new List<(string Column, string? Value)>();
+        foreach (var (key, val) in fieldUpdates)
+        {
+            string col = ResolveColumnName(key);
+            normalizedUpdates.Add((col, val));
+        }
+
+        long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        using var conn = OpenConnection();
+        EnsureOptionalTrackColumns(conn);
+        using var tx = conn.BeginTransaction();
+
+        int committed = 0;
+        var fileUpdatesByTrack = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
+
+        foreach (string uid in uids)
+        {
+            foreach (var (col, val) in normalizedUpdates)
+            {
+                string? origVal = null;
+                using (var origCmd = conn.CreateCommand())
+                {
+                    origCmd.Transaction = tx;
+                    origCmd.CommandText = $"SELECT {col} FROM tracks WHERE track_uid = $uid;";
+                    origCmd.Parameters.AddWithValue("$uid", uid);
+                    object? rawOrig = origCmd.ExecuteScalar();
+                    if (rawOrig is not null && rawOrig != DBNull.Value)
+                    {
+                        origVal = Convert.ToString(rawOrig, System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                }
+
+                ApplyTrackColumnValue(conn, tx, uid, col, val, nowMs);
+
+                using (var qCmd = conn.CreateCommand())
+                {
+                    qCmd.Transaction = tx;
+                    qCmd.CommandText = """
+                        INSERT INTO staging_diff_queue (
+                            proposal_id, track_uid, field_name, original_value, suggested_value,
+                            confidence, source_tag, status, batch_id, created_at_ms
+                        ) VALUES ($id, $uid, $field, $orig, $sugg, 1.0, 'Lexicon-T', 'Committed', $bid, $ts)
+                        ON CONFLICT(proposal_id) DO UPDATE SET
+                            original_value = excluded.original_value,
+                            suggested_value = excluded.suggested_value,
+                            status = 'Committed',
+                            batch_id = excluded.batch_id,
+                            created_at_ms = excluded.created_at_ms;
+                        """;
+                    qCmd.Parameters.AddWithValue("$id", $"lexicon:{batchId}:{uid}:{col}");
+                    qCmd.Parameters.AddWithValue("$uid", uid);
+                    qCmd.Parameters.AddWithValue("$field", col);
+                    qCmd.Parameters.AddWithValue("$orig", (object?)origVal ?? DBNull.Value);
+                    qCmd.Parameters.AddWithValue("$sugg", val ?? "");
+                    qCmd.Parameters.AddWithValue("$bid", batchId);
+                    qCmd.Parameters.AddWithValue("$ts", nowMs);
+                    qCmd.ExecuteNonQuery();
+                }
+
+                if (IsPhysicalTagColumn(col))
+                {
+                    if (!fileUpdatesByTrack.TryGetValue(uid, out var trackUpdates))
+                    {
+                        trackUpdates = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                        fileUpdatesByTrack[uid] = trackUpdates;
+                    }
+                    trackUpdates[col] = val;
+                }
+
+                committed++;
+            }
+        }
+
+        using (var batchCmd = conn.CreateCommand())
+        {
+            batchCmd.Transaction = tx;
+            batchCmd.CommandText = """
+                INSERT INTO curation_batches (batch_id, committed_at_ms, item_count, rolled_back)
+                VALUES ($bid, $ts, $cnt, 0);
+                """;
+            batchCmd.Parameters.AddWithValue("$bid", batchId);
+            batchCmd.Parameters.AddWithValue("$ts", nowMs);
+            batchCmd.Parameters.AddWithValue("$cnt", committed);
+            batchCmd.ExecuteNonQuery();
+        }
+
+        int physicalUpdated = WriteBackUpdatesToPhysicalFiles(conn, tx, fileUpdatesByTrack);
         tx.Commit();
         return new CurationCommitResult(batchId, committed, physicalUpdated);
     }
@@ -406,14 +645,16 @@ public sealed class StagingDiffStore
     private int WriteBackUpdatesToPhysicalFiles(
         SqliteConnection conn,
         SqliteTransaction tx,
-        Dictionary<string, Dictionary<string, string?>> updatesByTrack)
+        Dictionary<string, Dictionary<string, string?>> updatesByTrack,
+        int maxPhysicalFiles = int.MaxValue)
     {
-        if (string.IsNullOrWhiteSpace(MusicRoot) || updatesByTrack.Count == 0)
+        if (string.IsNullOrWhiteSpace(MusicRoot) || updatesByTrack.Count == 0 || maxPhysicalFiles <= 0)
             return 0;
 
         int updatedFiles = 0;
         foreach (var (uid, updates) in updatesByTrack)
         {
+            if (updatedFiles >= maxPhysicalFiles) break;
             string? relPath;
             using (var pathCmd = conn.CreateCommand())
             {
@@ -495,10 +736,69 @@ public sealed class StagingDiffStore
 
     private static object CoerceColumnValue(string column, string rawValue)
     {
-        if (column == "year" && int.TryParse(rawValue, out int y))
-            return y;
-        if (column == "tempo_bpm" && double.TryParse(rawValue, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double bpm))
-            return bpm;
+        if (column == "year")
+        {
+            return int.TryParse(rawValue.Trim(), out int y) ? y : DBNull.Value;
+        }
+        if (column == "rating")
+        {
+            return int.TryParse(rawValue.Trim(), out int r) ? Math.Clamp(r, 0, 5) : 0;
+        }
+        if (column == "tempo_bpm")
+        {
+            return double.TryParse(rawValue.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double bpm) && double.IsFinite(bpm) && bpm > 0
+                ? bpm
+                : DBNull.Value;
+        }
+        if (column == "tempo_bucket")
+        {
+            return rawValue.Trim().ToLowerInvariant() switch
+            {
+                "very slow" or "veryslow" => "Very Slow",
+                "slow" => "Slow",
+                "moderate" or "medium" => "Moderate",
+                "fast" or "upbeat" => "Fast",
+                "very fast" or "veryfast" => "Very Fast",
+                _ => DBNull.Value,
+            };
+        }
+        if (column == "dj_vocals")
+        {
+            return rawValue.Trim().ToLowerInvariant() switch
+            {
+                "vocal" => "vocal",
+                "instrumental" => "instrumental",
+                _ => "unknown",
+            };
+        }
+        if (column == "dj_energy")
+        {
+            return rawValue.Trim().ToLowerInvariant() switch
+            {
+                "low" => "low",
+                "medium" or "moderate" => "medium",
+                "high" => "high",
+                _ => DBNull.Value,
+            };
+        }
+        if (column == "artists_json" || column == "composers_json" || column == "conductors_json")
+        {
+            string trimmed = rawValue.Trim();
+            if (trimmed.StartsWith('[')) return trimmed;
+            var parts = new List<string>();
+            foreach (string seg in trimmed.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                try
+                {
+                    parts.AddRange(TonewiseCoreClient.SplitArtists(seg));
+                }
+                catch
+                {
+                    parts.AddRange(seg.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                }
+            }
+            return JsonSerializer.Serialize(parts.Distinct(StringComparer.OrdinalIgnoreCase));
+        }
         if (column.EndsWith("_json", StringComparison.Ordinal))
         {
             string trimmed = rawValue.Trim();
@@ -506,7 +806,7 @@ public sealed class StagingDiffStore
             var parts = trimmed.Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             return JsonSerializer.Serialize(parts);
         }
-        return rawValue;
+        return string.IsNullOrWhiteSpace(rawValue) ? DBNull.Value : rawValue.Trim();
     }
 
     private static void EnsureOptionalTrackColumns(SqliteConnection conn)

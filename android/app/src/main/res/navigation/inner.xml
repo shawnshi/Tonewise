@@ -22,6 +22,12 @@
             android:id="@+id/sort_artists"
             app:destination="@+id/artist_sort_dialog" />
         <action
+            android:id="@+id/sort_composers"
+            app:destination="@+id/composer_sort_dialog" />
+        <action
+            android:id="@+id/sort_conductors"
+            app:destination="@+id/conductor_sort_dialog" />
+        <action
             android:id="@+id/sort_genres"
             app:destination="@+id/genre_sort_dialog" />
         <action
@@ -118,6 +124,18 @@
         android:id="@+id/artist_sort_dialog"
         android:name="com.shawnshi.tonewise.home.sort.ArtistSortDialog"
         android:label="artist_sort_dialog"
+        tools:layout="@layout/dialog_sort" />
+
+    <dialog
+        android:id="@+id/composer_sort_dialog"
+        android:name="com.shawnshi.tonewise.home.sort.ComposerSortDialog"
+        android:label="composer_sort_dialog"
+        tools:layout="@layout/dialog_sort" />
+
+    <dialog
+        android:id="@+id/conductor_sort_dialog"
+        android:name="com.shawnshi.tonewise.home.sort.ConductorSortDialog"
+        android:label="conductor_sort_dialog"
         tools:layout="@layout/dialog_sort" />
 
     <dialog

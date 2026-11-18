@@ -18,12 +18,13 @@
 
 package com.shawnshi.tonewise.sync
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,16 +36,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -54,9 +53,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -70,7 +70,7 @@ import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.PlaybackViewModel
-import com.shawnshi.tonewise.playback.ui.clock.DeskClockDialog
+import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.util.showToast
 
 @AndroidEntryPoint
@@ -104,7 +104,7 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                 val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
                 val lastFmState by lastFmRepository.state.collectAsStateWithLifecycle()
 
-                TonewiseSyncTheme {
+                TonewiseComposeTheme {
                     SyncHubSheet(
                         discoveredHosts = hosts,
                         syncStatus = syncStatus,
@@ -164,12 +164,18 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                         onAuthLastFm = { key, secret, user, pass ->
                             lastFmRepository.authenticateMobileSession(key, secret, user, pass)
                         },
-                        onSyncLastFmHistory = { lastFmRepository.syncLocalPlayHistory() },
-                        onOpenDeskClock = {
-                            val fm = parentFragmentManager
-                            dismiss()
-                            DeskClockDialog.newInstance().show(fm, DeskClockDialog.TAG)
+                        onStartLastFmBrowserAuth = { key, secret ->
+                            val url = lastFmRepository.startBrowserAuth(key, secret)
+                            if (url != null) {
+                                runCatching {
+                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                }
+                            }
                         },
+                        onCompleteLastFmBrowserAuth = { key, secret ->
+                            lastFmRepository.completeBrowserAuth(key, secret)
+                        },
+                        onSyncLastFmHistory = { lastFmRepository.syncLocalPlayHistory() },
                     )
                 }
             }
@@ -184,21 +190,6 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
 }
 
 @Composable
-private fun TonewiseSyncTheme(content: @Composable () -> Unit) {
-    val context = LocalContext.current
-    val dark = isSystemInDarkTheme()
-    val colorScheme =
-        when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-                if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            }
-            dark -> darkColorScheme()
-            else -> lightColorScheme()
-        }
-    MaterialTheme(colorScheme = colorScheme, content = content)
-}
-
-@Composable
 private fun SyncHubSheet(
     discoveredHosts: List<DiscoveredSyncHost>,
     syncStatus: String,
@@ -209,8 +200,9 @@ private fun SyncHubSheet(
     onSyncUrl: suspend (String) -> Unit,
     onSaveLastFm: (Boolean, Boolean, String, String, String, String) -> Unit,
     onAuthLastFm: suspend (String, String, String, String) -> Boolean,
+    onStartLastFmBrowserAuth: suspend (String, String) -> Unit,
+    onCompleteLastFmBrowserAuth: suspend (String, String) -> Boolean,
     onSyncLastFmHistory: suspend () -> Int,
-    onOpenDeskClock: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var manualUrl by remember { mutableStateOf("http://192.168.1.100:45820") }
@@ -223,6 +215,10 @@ private fun SyncHubSheet(
     var username by remember(lastFmState.username) { mutableStateOf(lastFmState.username) }
     var sessionKey by remember(lastFmState.sessionKey) { mutableStateOf(lastFmState.sessionKey) }
     var password by remember { mutableStateOf("") }
+    var showLastFmConfig by
+        remember(lastFmState.sessionKey) {
+            mutableStateOf(!lastFmState.hasValidApiSession && lastFmState.sessionKey.isBlank())
+        }
 
     LaunchedEffect(lastFmState.sessionKey) {
         if (lastFmState.sessionKey.isNotEmpty()) {
@@ -290,106 +286,145 @@ private fun SyncHubSheet(
 
             HorizontalDivider()
 
-            // 2. Last.fm Scrobble & Local Play History Sync
-            Text(
-                text = stringResource(R.string.lbl_lastfm_title),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            // 2. Last.fm Scrobble & Local Play History Sync (compact summary + collapsible config)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = stringResource(R.string.lbl_lastfm_api_enable),
-                    style = MaterialTheme.typography.bodyMedium,
+                    text =
+                        if (lastFmState.username.isNotBlank()) {
+                            "${stringResource(R.string.lbl_lastfm_title)} · ${lastFmState.username}"
+                        } else {
+                            stringResource(R.string.lbl_lastfm_title)
+                        },
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f),
                 )
-                Switch(
-                    checked = apiEnabled,
-                    onCheckedChange = { checked ->
-                        apiEnabled = checked
-                        onSaveLastFm(checked, broadcastEnabled, apiKey, sharedSecret, username, sessionKey)
-                    },
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.lbl_lastfm_broadcast_enable),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                Switch(
-                    checked = broadcastEnabled,
-                    onCheckedChange = { checked ->
-                        broadcastEnabled = checked
-                        onSaveLastFm(apiEnabled, checked, apiKey, sharedSecret, username, sessionKey)
-                    },
-                )
-            }
-            OutlinedTextField(
-                value = apiKey,
-                onValueChange = { apiKey = it },
-                label = { Text(stringResource(R.string.lbl_lastfm_api_key)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = sharedSecret,
-                onValueChange = { sharedSecret = it },
-                label = { Text(stringResource(R.string.lbl_lastfm_shared_secret)) },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = username,
-                onValueChange = { username = it },
-                label = { Text(stringResource(R.string.lbl_lastfm_username)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text(stringResource(R.string.lbl_lastfm_password)) },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = sessionKey,
-                onValueChange = { sessionKey = it },
-                label = { Text(stringResource(R.string.lbl_lastfm_session_key)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        scope.launch {
-                            onAuthLastFm(apiKey, sharedSecret, username, password)
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text(stringResource(R.string.lbl_lastfm_auth))
+                TextButton(onClick = { showLastFmConfig = !showLastFmConfig }) {
+                    Text(stringResource(R.string.lbl_lastfm_config_toggle))
+                    Icon(
+                        painter = painterResource(R.drawable.ic_down_24),
+                        contentDescription = null,
+                        modifier = Modifier.rotate(if (showLastFmConfig) 180f else 0f),
+                    )
                 }
-                OutlinedButton(
-                    onClick = {
-                        onSaveLastFm(apiEnabled, broadcastEnabled, apiKey, sharedSecret, username, sessionKey)
-                    },
-                    modifier = Modifier.weight(1f),
+            }
+            if (showLastFmConfig) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(stringResource(R.string.lbl_lastfm_save))
+                    Text(
+                        text = stringResource(R.string.lbl_lastfm_api_enable),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = apiEnabled,
+                        onCheckedChange = { checked ->
+                            apiEnabled = checked
+                            onSaveLastFm(checked, broadcastEnabled, apiKey, sharedSecret, username, sessionKey)
+                        },
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = stringResource(R.string.lbl_lastfm_broadcast_enable),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = broadcastEnabled,
+                        onCheckedChange = { checked ->
+                            broadcastEnabled = checked
+                            onSaveLastFm(apiEnabled, checked, apiKey, sharedSecret, username, sessionKey)
+                        },
+                    )
+                }
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = { Text(stringResource(R.string.lbl_lastfm_api_key)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = sharedSecret,
+                    onValueChange = { sharedSecret = it },
+                    label = { Text(stringResource(R.string.lbl_lastfm_shared_secret)) },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    label = { Text(stringResource(R.string.lbl_lastfm_username)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text(stringResource(R.string.lbl_lastfm_password)) },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = sessionKey,
+                    onValueChange = { sessionKey = it },
+                    label = { Text(stringResource(R.string.lbl_lastfm_session_key)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                onAuthLastFm(apiKey, sharedSecret, username, password)
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(stringResource(R.string.lbl_lastfm_auth))
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            onSaveLastFm(apiEnabled, broadcastEnabled, apiKey, sharedSecret, username, sessionKey)
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(stringResource(R.string.lbl_lastfm_save))
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { scope.launch { onStartLastFmBrowserAuth(apiKey, sharedSecret) } },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(stringResource(R.string.lbl_lastfm_browser_auth))
+                    }
+                    OutlinedButton(
+                        onClick = { scope.launch { onCompleteLastFmBrowserAuth(apiKey, sharedSecret) } },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(stringResource(R.string.lbl_lastfm_complete_auth))
+                    }
                 }
             }
             Button(
@@ -453,13 +488,6 @@ private fun SyncHubSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-
-            OutlinedButton(
-                onClick = onOpenDeskClock,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(stringResource(R.string.lbl_open_desk_clock))
-            }
         }
     }
 }

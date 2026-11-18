@@ -49,21 +49,54 @@ public sealed class TonewiseAudioEngine : IDisposable
     public event Action<DesktopSignalPathState>? SignalPathChanged;
     public event Action? PlaybackEnded;
 
+    public string? CurrentFilePath { get; private set; }
     public bool IsPlaying => _output?.PlaybackState == PlaybackState.Playing;
 
-    public TimeSpan Position => _sourceSamples switch
+    public TimeSpan Position
     {
-        AudioFileReader afr => afr.CurrentTime,
-        DsdStreamReader dsd => dsd.CurrentTime,
-        _ => TimeSpan.Zero,
-    };
+        get
+        {
+            lock (_engineLock)
+            {
+                try
+                {
+                    return _sourceSamples switch
+                    {
+                        AudioFileReader afr => afr.CurrentTime,
+                        DsdStreamReader dsd => dsd.CurrentTime,
+                        _ => TimeSpan.Zero,
+                    };
+                }
+                catch
+                {
+                    return TimeSpan.Zero;
+                }
+            }
+        }
+    }
 
-    public TimeSpan Duration => _sourceSamples switch
+    public TimeSpan Duration
     {
-        AudioFileReader afr => afr.TotalTime,
-        DsdStreamReader dsd => dsd.TotalTime,
-        _ => TimeSpan.Zero,
-    };
+        get
+        {
+            lock (_engineLock)
+            {
+                try
+                {
+                    return _sourceSamples switch
+                    {
+                        AudioFileReader afr => afr.TotalTime,
+                        DsdStreamReader dsd => dsd.TotalTime,
+                        _ => TimeSpan.Zero,
+                    };
+                }
+                catch
+                {
+                    return TimeSpan.Zero;
+                }
+            }
+        }
+    }
 
     public string SignalPathStatus => CurrentSignalPath.SignalPathBadge;
 
@@ -73,6 +106,19 @@ public sealed class TonewiseAudioEngine : IDisposable
         set
         {
             _volumeAttenuationDb = Math.Clamp(value, -60.0, 0.0);
+            ApplyRuntimeDspConfig();
+        }
+    }
+
+    private bool _isMuted;
+
+    public bool IsMuted
+    {
+        get => _isMuted;
+        set
+        {
+            if (_isMuted == value) return;
+            _isMuted = value;
             ApplyRuntimeDspConfig();
         }
     }
@@ -183,61 +229,45 @@ public sealed class TonewiseAudioEngine : IDisposable
             string ext = Path.GetExtension(filePath).ToLowerInvariant();
             _isDsdSource = ext is ".dsf" or ".dff";
 
-            ISampleProvider sourceSamples;
-            IDisposable sourceDisposable;
-            if (_isDsdSource)
-            {
-                var dsd = new DsdStreamReader(filePath);
-                sourceSamples = dsd;
-                sourceDisposable = dsd;
-            }
-            else
-            {
-                var reader = new AudioFileReader(filePath);
-                sourceSamples = reader;
-                sourceDisposable = reader;
-            }
-
-            var dsp = new DspSampleProvider(sourceSamples);
-            ConfigureDspLocked(dsp, reloadFir: true);
-
-            bool exclusiveOk = false;
-            bool asioOk = false;
+            ISampleProvider? sourceSamples = null;
+            IDisposable? sourceDisposable = null;
             IWavePlayer? player = null;
             MMDevice? device = null;
-            _asioDriverName = null;
+            bool exclusiveOk = false;
+            bool asioOk = false;
 
-            if (!string.IsNullOrWhiteSpace(_selectedDeviceId)
-                && _selectedDeviceId.StartsWith(AudioDeviceRouter.AsioIdPrefix, StringComparison.OrdinalIgnoreCase))
+            try
             {
-                string driver = _selectedDeviceId[AudioDeviceRouter.AsioIdPrefix.Length..];
-                try
+                if (_isDsdSource)
                 {
-                    var asio = new AsioOut(driver);
-                    asio.Init(dsp.ToWaveProvider());
-                    player = asio;
-                    asioOk = true;
-                    exclusiveOk = true;
-                    _asioDriverName = driver;
+                    var dsd = new DsdStreamReader(filePath);
+                    sourceSamples = dsd;
+                    sourceDisposable = dsd;
                 }
-                catch
+                else
                 {
-                    player?.Dispose();
-                    player = null;
+                    var reader = new AudioFileReader(filePath);
+                    sourceSamples = reader;
+                    sourceDisposable = reader;
                 }
-            }
 
-            if (player is null)
-            {
-                device = AudioDeviceRouter.ResolveDevice(_selectedDeviceId);
-                if (device is not null && _preferExclusive)
+                var dsp = new DspSampleProvider(sourceSamples);
+                ConfigureDspLocked(dsp, reloadFir: true);
+
+                _asioDriverName = null;
+
+                if (!string.IsNullOrWhiteSpace(_selectedDeviceId)
+                    && _selectedDeviceId.StartsWith(AudioDeviceRouter.AsioIdPrefix, StringComparison.OrdinalIgnoreCase))
                 {
+                    string driver = _selectedDeviceId[AudioDeviceRouter.AsioIdPrefix.Length..];
                     try
                     {
-                        var wasapi = new WasapiOut(device, AudioClientShareMode.Exclusive, true, 60);
-                        wasapi.Init(dsp);
-                        player = wasapi;
+                        var asio = new AsioOut(driver);
+                        asio.Init(dsp.ToWaveProvider());
+                        player = asio;
+                        asioOk = true;
                         exclusiveOk = true;
+                        _asioDriverName = driver;
                     }
                     catch
                     {
@@ -248,39 +278,174 @@ public sealed class TonewiseAudioEngine : IDisposable
 
                 if (player is null)
                 {
-                    var shared = device is not null
-                        ? new WasapiOut(device, AudioClientShareMode.Shared, true, 100)
-                        : new WasapiOut(AudioClientShareMode.Shared, 100);
-                    shared.Init(dsp);
-                    player = shared;
+                    device = AudioDeviceRouter.ResolveDevice(_selectedDeviceId);
+                    if (device is not null && _preferExclusive)
+                    {
+                        try
+                        {
+                            var wasapi = new WasapiOut(device, AudioClientShareMode.Exclusive, true, 60);
+                            wasapi.Init(dsp);
+                            player = wasapi;
+                            exclusiveOk = true;
+                        }
+                        catch
+                        {
+                            player?.Dispose();
+                            player = null;
+                        }
+                    }
+
+                    if (player is null)
+                    {
+                        var shared = device is not null
+                            ? new WasapiOut(device, AudioClientShareMode.Shared, true, 100)
+                            : new WasapiOut(AudioClientShareMode.Shared, 100);
+                        shared.Init(dsp);
+                        player = shared;
+                    }
+                }
+
+                _isAsioActive = asioOk;
+                dsp.IsBypassed = ShouldBypassDspLocked(exclusiveOk);
+
+                var capturedSource = sourceSamples;
+                var capturedPlayer = player;
+                player.PlaybackStopped += (_, args) =>
+                {
+                    bool isActiveOutput;
+                    bool finished = false;
+                    lock (_engineLock)
+                    {
+                        isActiveOutput = ReferenceEquals(_output, capturedPlayer);
+                        if (isActiveOutput)
+                        {
+                            try
+                            {
+                                finished = capturedSource switch
+                                {
+                                    AudioFileReader afr => afr.Position >= afr.Length - 1024,
+                                    DsdStreamReader dsd => dsd.CurrentTime >= dsd.TotalTime - TimeSpan.FromMilliseconds(50),
+                                    _ => false,
+                                };
+                            }
+                            catch
+                            {
+                                finished = false;
+                            }
+                        }
+                    }
+                    if (isActiveOutput && args.Exception is null && finished)
+                    {
+                        PlaybackEnded?.Invoke();
+                    }
+                };
+
+                CurrentFilePath = filePath;
+                _sourceSamples = sourceSamples;
+                _sourceDisposable = sourceDisposable;
+                _dsp = dsp;
+                _device = device;
+                _output = player;
+
+                UpdateSignalPathSnapshot(exclusiveOk);
+                player.Play();
+            }
+            catch
+            {
+                player?.Dispose();
+                sourceDisposable?.Dispose();
+                device?.Dispose();
+                CurrentFilePath = null;
+                _isAsioActive = false;
+                throw;
+            }
+        }
+    }
+
+    public IDisposable SuspendIfPlayingFile(IEnumerable<string> targetFullPaths)
+    {
+        var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string p in targetFullPaths)
+        {
+            if (!string.IsNullOrWhiteSpace(p))
+            {
+                try { targets.Add(Path.GetFullPath(p)); } catch { targets.Add(p); }
+            }
+        }
+        if (targets.Count == 0) return NoopDisposable.Instance;
+
+        lock (_engineLock)
+        {
+            if (string.IsNullOrWhiteSpace(CurrentFilePath))
+                return NoopDisposable.Instance;
+
+            string activeFull;
+            try { activeFull = Path.GetFullPath(CurrentFilePath); } catch { activeFull = CurrentFilePath; }
+            if (!targets.Contains(activeFull))
+                return NoopDisposable.Instance;
+
+            TimeSpan savedPos = TimeSpan.Zero;
+            try
+            {
+                savedPos = _sourceSamples switch
+                {
+                    AudioFileReader afr => afr.CurrentTime,
+                    DsdStreamReader dsd => dsd.CurrentTime,
+                    _ => TimeSpan.Zero,
+                };
+            }
+            catch { }
+
+            bool wasPlaying = IsPlaying;
+            string savedPath = CurrentFilePath;
+            StopInternal();
+            return new ResumePlaybackToken(this, savedPath, savedPos, wasPlaying);
+        }
+    }
+
+    private void ResumeSuspendedPlayback(string filePath, TimeSpan position, bool shouldPlay)
+    {
+        try
+        {
+            if (!File.Exists(filePath)) return;
+            PlayFile(filePath);
+            lock (_engineLock)
+            {
+                if (_sourceSamples is AudioFileReader afr)
+                {
+                    afr.CurrentTime = TimeSpan.FromSeconds(Math.Clamp(position.TotalSeconds, 0.0, afr.TotalTime.TotalSeconds));
+                }
+                else if (_sourceSamples is DsdStreamReader dsd && dsd.TotalTime.TotalSeconds > 0)
+                {
+                    dsd.SeekFraction(Math.Clamp(position.TotalSeconds / dsd.TotalTime.TotalSeconds, 0.0, 0.999));
+                }
+                if (!shouldPlay)
+                {
+                    _output?.Pause();
                 }
             }
+        }
+        catch
+        {
+            // Do not crash on resume token Dispose if audio file became temporarily unavailable
+        }
+    }
 
-            _isAsioActive = asioOk;
-            dsp.IsBypassed = ShouldBypassDspLocked(exclusiveOk);
+    private sealed class NoopDisposable : IDisposable
+    {
+        public static readonly NoopDisposable Instance = new();
+        public void Dispose() { }
+    }
 
-            player.PlaybackStopped += (_, args) =>
+    private sealed class ResumePlaybackToken(TonewiseAudioEngine engine, string path, TimeSpan pos, bool play) : IDisposable
+    {
+        private int _disposed;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
             {
-                bool finished = _sourceSamples switch
-                {
-                    AudioFileReader afr => afr.Position >= afr.Length - 1024,
-                    DsdStreamReader dsd => dsd.CurrentTime >= dsd.TotalTime - TimeSpan.FromMilliseconds(50),
-                    _ => false,
-                };
-                if (args.Exception is null && finished)
-                {
-                    PlaybackEnded?.Invoke();
-                }
-            };
-
-            _sourceSamples = sourceSamples;
-            _sourceDisposable = sourceDisposable;
-            _dsp = dsp;
-            _device = device;
-            _output = player;
-
-            UpdateSignalPathSnapshot(exclusiveOk);
-            player.Play();
+                engine.ResumeSuspendedPlayback(path, pos, play);
+            }
         }
     }
 
@@ -301,6 +466,7 @@ public sealed class TonewiseAudioEngine : IDisposable
     {
         dsp.Configure(_activeProfile, _activeReplayGainDb);
         dsp.ConfigureIso226(_iso226Enabled, _iso226RefSplDb, _volumeAttenuationDb);
+        dsp.ConfigureMasterVolume(_volumeAttenuationDb, _isMuted);
         dsp.ConfigureDither(_tpdfDitherEnabled, 24);
         if (reloadFir)
         {
@@ -326,9 +492,10 @@ public sealed class TonewiseAudioEngine : IDisposable
         bool hasPreampOrRg = _activeProfile is not null && Math.Abs(_activeProfile.PreampDb) >= 1e-6
                              || Math.Abs(_activeReplayGainDb) >= 1e-6;
         bool hasIso = _iso226Enabled && _volumeAttenuationDb < -0.5;
+        bool hasVolume = _isMuted || _volumeAttenuationDb < -0.05;
         bool hasFir = (!string.IsNullOrWhiteSpace(_firWavPath) && File.Exists(_firWavPath))
                       || (_firLeftIr is not null && _firRightIr is not null);
-        return !hasEq && !hasPreampOrRg && !hasIso && !hasFir;
+        return !hasEq && !hasPreampOrRg && !hasIso && !hasFir && !hasVolume;
     }
 
     public void TogglePlayPause()
@@ -445,6 +612,7 @@ public sealed class TonewiseAudioEngine : IDisposable
 
     private void StopInternal()
     {
+        CurrentFilePath = null;
         _output?.Stop();
         _output?.Dispose();
         _output = null;

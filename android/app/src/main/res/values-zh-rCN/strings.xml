@@ -174,7 +174,9 @@
     <string name="lbl_props">曲目属性</string>
     <string name="lbl_play_count">播放次数</string>
     <string name="lbl_composer">作曲家</string>
+    <string name="lbl_composers">作曲家</string>
     <string name="lbl_conductor">指挥</string>
+    <string name="lbl_conductors">指挥</string>
     <string name="lbl_format">格式</string>
     <string name="lbl_size">大小</string>
     <string name="lbl_bitrate">比特率</string>
@@ -446,7 +448,36 @@
     <string name="lbl_lastfm_password">密码（仅用于获取 Session，不落盘）</string>
     <string name="lbl_lastfm_session_key">Session Key</string>
     <string name="lbl_lastfm_auth">登录认证并获取 Session</string>
+    <string name="lbl_lastfm_browser_auth">浏览器授权 (推荐)</string>
+    <string name="lbl_lastfm_complete_auth">完成授权并获取 Session</string>
     <string name="lbl_lastfm_save">保存配置</string>
     <string name="lbl_lastfm_sync_now">同步本地播放记录到 Last.fm</string>
     <string name="fmt_lastfm_stats">待上传队列：%1$d 条 · 累计已同步：%2$d 次播放</string>
+    <string name="lbl_dj_exclude_vocal">排除人声 (NOT vocal)</string>
+    <string name="lbl_dj_tempo">节奏速度 (Tempo)</string>
+    <string name="lbl_dj_mood">情绪聚类 (Mood Cluster)</string>
+    <string name="lbl_dj_sort_arc">能量弧线排序 (Sort Arc)</string>
+    <string name="lbl_quick_tag_title">当前曲目 · 红心与五维标签速改</string>
+    <string name="lbl_quick_tag_no_song">请先播放一首曲目，即可在此标记红心与五维标签</string>
+    <string name="lbl_quick_tag_loved">红心收藏 (Rating = 5)</string>
+    <string name="fmt_pending_mutations">待同步至 PC 的 LWW 标签修改：%d 条</string>
+    <string name="lbl_scene_reorder">排序</string>
+    <string name="lbl_scene_done">完成</string>
+    <string name="lbl_scene_empty_hint">可在 PC 端推理或播放页速改标签</string>
+    <string name="lbl_lastfm_config_toggle">配置</string>
+    <string name="lbl_love_track">收藏红心</string>
+    <string name="lbl_quick_tag_menu">修正五维属性</string>
+    <string name="lbl_focus_filter">Focus 正反选布尔漏斗</string>
+    <string name="lbl_focus_hint">单击正向包含 (+)，再点切换红色排除 (-)，第三次清除</string>
+    <string name="lbl_focus_reset">重置</string>
+    <string name="lbl_focus_queue_add">将 %d 首加入队列</string>
+    <string name="lbl_dj_freeze_active">同属性续杯中</string>
+    <string name="lbl_dj_freeze_restored">已解除续杯，恢复原队列</string>
+    <string name="fmt_dj_freeze_started">DJ Freeze 续杯：%1$s（%2$d 首）</string>
+    <string name="lbl_quick_tag_tempo_add">+ 五维标签</string>
+    <string name="lbl_rediscovery_90d_title">尘封好歌重温（&gt;90天未听）</string>
+    <string name="lbl_rediscovery_90d_subtitle">唤醒曲库底部沉睡超过 90 天的老唱片</string>
+    <string name="lbl_save_current_slot">保存</string>
+    <string name="fmt_queue_slot">槽位 %d</string>
+    <string name="lbl_quick_tag_saved">已写入五维 LWW 微补丁队列</string>
 </resources>

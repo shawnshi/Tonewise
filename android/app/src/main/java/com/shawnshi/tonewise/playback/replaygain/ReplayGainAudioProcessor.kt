@@ -25,6 +25,7 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.pow
@@ -226,157 +227,155 @@ constructor(
         val pos = inputBuffer.position()
         val limit = inputBuffer.limit()
         val size = limit - pos
-        val buffer = replaceOutputBuffer(size)
+        val prevOrder = inputBuffer.order()
+        inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+        val buffer = replaceOutputBuffer(size).order(ByteOrder.LITTLE_ENDIAN)
 
-        val dspCfg = dspConfigSource?.config?.value ?: DspChainConfig()
-        dspEngine.updateConfig(dspCfg)
-        val nonIdentityDsp = dspCfg.hasNonIdentityProcessing()
+        try {
+            val dspCfg = dspConfigSource?.config?.value ?: DspChainConfig()
+            dspEngine.updateConfig(dspCfg)
+            val nonIdentityDsp = dspCfg.hasNonIdentityProcessing()
 
-        if (isBypassed || (!nonIdentityDsp && volume == 1f)) {
-            buffer.put(inputBuffer.slice())
-        } else if (!nonIdentityDsp) {
-            val scale = volume.toDouble()
-            when (inputAudioFormat.encoding) {
-                C.ENCODING_PCM_16BIT -> {
-                    for (i in pos until limit step 2) {
-                        val sample =
-                            (inputBuffer.getLeShort(i) * scale)
-                                .toInt()
-                                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                                .toShort()
-                        buffer.putLeShort(sample)
-                    }
-                }
-                C.ENCODING_PCM_24BIT -> {
-                    for (i in pos until limit step 3) {
-                        val sample =
-                            (inputBuffer.getLeInt24(i) * scale)
-                                .toInt()
-                                .coerceIn(MIN_INT24, MAX_INT24)
-                        buffer.putLeInt24(sample)
-                    }
-                }
-                C.ENCODING_PCM_32BIT -> {
-                    for (i in pos until limit step 4) {
-                        val sample =
-                            (inputBuffer.getLeInt32(i) * scale)
-                                .coerceIn(Int.MIN_VALUE.toDouble(), Int.MAX_VALUE.toDouble())
-                                .toInt()
-                        buffer.putLeInt32(sample)
-                    }
-                }
-                C.ENCODING_PCM_FLOAT -> {
-                    for (i in pos until limit step 4) {
-                        val bits = inputBuffer.getLeInt32(i)
-                        val sample = Float.fromBits(bits)
-                        val scaled = (sample * scale).toFloat()
-                        buffer.putLeInt32(scaled.toRawBits())
-                    }
-                }
-                else -> buffer.put(inputBuffer.slice())
-            }
-        } else {
-            val bytesPerSample =
-                when (inputAudioFormat.encoding) {
-                    C.ENCODING_PCM_16BIT -> 2
-                    C.ENCODING_PCM_24BIT -> 3
-                    C.ENCODING_PCM_32BIT,
-                    C.ENCODING_PCM_FLOAT -> 4
-                    else -> 0
-                }
-            val ch = inputAudioFormat.channelCount.coerceAtLeast(1)
-            val totalSamples = if (bytesPerSample > 0) size / bytesPerSample else 0
-            val frameCount = totalSamples / ch
-            if (frameCount <= 0) {
+            if (isBypassed || (!nonIdentityDsp && volume == 1f)) {
                 buffer.put(inputBuffer.slice())
-            } else {
-                val usedSamples = frameCount * ch
-                if (workBuffer.size < usedSamples) {
-                    workBuffer = DoubleArray(usedSamples)
-                }
+            } else if (!nonIdentityDsp) {
+                val scale = volume.toDouble()
                 when (inputAudioFormat.encoding) {
                     C.ENCODING_PCM_16BIT -> {
-                        var offset = pos
-                        for (s in 0 until usedSamples) {
-                            workBuffer[s] = inputBuffer.getLeShort(offset) / 32768.0
-                            offset += 2
-                        }
-                    }
-                    C.ENCODING_PCM_24BIT -> {
-                        var offset = pos
-                        for (s in 0 until usedSamples) {
-                            workBuffer[s] = inputBuffer.getLeInt24(offset) / 8388608.0
-                            offset += 3
-                        }
-                    }
-                    C.ENCODING_PCM_32BIT -> {
-                        var offset = pos
-                        for (s in 0 until usedSamples) {
-                            workBuffer[s] = inputBuffer.getLeInt32(offset) / 2147483648.0
-                            offset += 4
-                        }
-                    }
-                    C.ENCODING_PCM_FLOAT -> {
-                        var offset = pos
-                        for (s in 0 until usedSamples) {
-                            workBuffer[s] = Float.fromBits(inputBuffer.getLeInt32(offset)).toDouble()
-                            offset += 4
-                        }
-                    }
-                }
-
-                dspEngine.processInterleaved(
-                    samples = workBuffer,
-                    frameCount = frameCount,
-                    replayGainDb = currentAdjustmentDb.toDouble(),
-                )
-
-                when (inputAudioFormat.encoding) {
-                    C.ENCODING_PCM_16BIT -> {
-                        for (s in 0 until usedSamples) {
-                            val v =
-                                (workBuffer[s] * 32768.0)
-                                    .roundToInt()
+                        for (i in pos until limit step 2) {
+                            val sample =
+                                (inputBuffer.getShort(i) * scale)
+                                    .toInt()
                                     .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
                                     .toShort()
-                            buffer.putLeShort(v)
+                            buffer.putShort(sample)
                         }
                     }
                     C.ENCODING_PCM_24BIT -> {
-                        for (s in 0 until usedSamples) {
-                            val v = (workBuffer[s] * 8388608.0).roundToInt().coerceIn(MIN_INT24, MAX_INT24)
-                            buffer.putLeInt24(v)
+                        for (i in pos until limit step 3) {
+                            val sample =
+                                (inputBuffer.getLeInt24(i) * scale)
+                                    .toInt()
+                                    .coerceIn(MIN_INT24, MAX_INT24)
+                            buffer.putLeInt24(sample)
                         }
                     }
                     C.ENCODING_PCM_32BIT -> {
-                        for (s in 0 until usedSamples) {
-                            val v =
-                                (workBuffer[s] * 2147483648.0)
-                                    .roundToLong()
-                                    .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+                        for (i in pos until limit step 4) {
+                            val sample =
+                                (inputBuffer.getInt(i) * scale)
+                                    .coerceIn(Int.MIN_VALUE.toDouble(), Int.MAX_VALUE.toDouble())
                                     .toInt()
-                            buffer.putLeInt32(v)
+                            buffer.putInt(sample)
                         }
                     }
                     C.ENCODING_PCM_FLOAT -> {
-                        for (s in 0 until usedSamples) {
-                            buffer.putLeInt32(workBuffer[s].toFloat().toRawBits())
+                        for (i in pos until limit step 4) {
+                            val bits = inputBuffer.getInt(i)
+                            val sample = Float.fromBits(bits)
+                            val scaled = (sample * scale).toFloat()
+                            buffer.putInt(scaled.toRawBits())
+                        }
+                    }
+                    else -> buffer.put(inputBuffer.slice())
+                }
+            } else {
+                val bytesPerSample =
+                    when (inputAudioFormat.encoding) {
+                        C.ENCODING_PCM_16BIT -> 2
+                        C.ENCODING_PCM_24BIT -> 3
+                        C.ENCODING_PCM_32BIT,
+                        C.ENCODING_PCM_FLOAT -> 4
+                        else -> 0
+                    }
+                val ch = inputAudioFormat.channelCount.coerceAtLeast(1)
+                val totalSamples = if (bytesPerSample > 0) size / bytesPerSample else 0
+                val frameCount = totalSamples / ch
+                if (frameCount <= 0) {
+                    buffer.put(inputBuffer.slice())
+                } else {
+                    val usedSamples = frameCount * ch
+                    if (workBuffer.size < usedSamples) {
+                        workBuffer = DoubleArray(usedSamples)
+                    }
+                    when (inputAudioFormat.encoding) {
+                        C.ENCODING_PCM_16BIT -> {
+                            var offset = pos
+                            for (s in 0 until usedSamples) {
+                                workBuffer[s] = inputBuffer.getShort(offset) / 32768.0
+                                offset += 2
+                            }
+                        }
+                        C.ENCODING_PCM_24BIT -> {
+                            var offset = pos
+                            for (s in 0 until usedSamples) {
+                                workBuffer[s] = inputBuffer.getLeInt24(offset) / 8388608.0
+                                offset += 3
+                            }
+                        }
+                        C.ENCODING_PCM_32BIT -> {
+                            var offset = pos
+                            for (s in 0 until usedSamples) {
+                                workBuffer[s] = inputBuffer.getInt(offset) / 2147483648.0
+                                offset += 4
+                            }
+                        }
+                        C.ENCODING_PCM_FLOAT -> {
+                            var offset = pos
+                            for (s in 0 until usedSamples) {
+                                workBuffer[s] = Float.fromBits(inputBuffer.getInt(offset)).toDouble()
+                                offset += 4
+                            }
+                        }
+                    }
+
+                    dspEngine.processInterleaved(
+                        samples = workBuffer,
+                        frameCount = frameCount,
+                        replayGainDb = currentAdjustmentDb.toDouble(),
+                    )
+
+                    when (inputAudioFormat.encoding) {
+                        C.ENCODING_PCM_16BIT -> {
+                            for (s in 0 until usedSamples) {
+                                val v =
+                                    (workBuffer[s] * 32768.0)
+                                        .roundToInt()
+                                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                                        .toShort()
+                                buffer.putShort(v)
+                            }
+                        }
+                        C.ENCODING_PCM_24BIT -> {
+                            for (s in 0 until usedSamples) {
+                                val v = (workBuffer[s] * 8388608.0).roundToInt().coerceIn(MIN_INT24, MAX_INT24)
+                                buffer.putLeInt24(v)
+                            }
+                        }
+                        C.ENCODING_PCM_32BIT -> {
+                            for (s in 0 until usedSamples) {
+                                val v =
+                                    (workBuffer[s] * 2147483648.0)
+                                        .roundToLong()
+                                        .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+                                        .toInt()
+                                buffer.putInt(v)
+                            }
+                        }
+                        C.ENCODING_PCM_FLOAT -> {
+                            for (s in 0 until usedSamples) {
+                                buffer.putInt(workBuffer[s].toFloat().toRawBits())
+                            }
                         }
                     }
                 }
             }
+        } finally {
+            inputBuffer.order(prevOrder)
         }
 
         inputBuffer.position(limit)
         buffer.flip()
-    }
-
-    private fun ByteBuffer.getLeShort(at: Int) =
-        get(at + 1).toInt().shl(8).or(get(at).toInt().and(0xFF)).toShort()
-
-    private fun ByteBuffer.putLeShort(short: Short) {
-        put(short.toByte())
-        put(short.toInt().shr(8).toByte())
     }
 
     private fun ByteBuffer.getLeInt24(at: Int): Int {
@@ -390,21 +389,6 @@ constructor(
         put(value.toByte())
         put((value shr 8).toByte())
         put((value shr 16).toByte())
-    }
-
-    private fun ByteBuffer.getLeInt32(at: Int): Int {
-        val b0 = get(at).toInt() and 0xFF
-        val b1 = get(at + 1).toInt() and 0xFF
-        val b2 = get(at + 2).toInt() and 0xFF
-        val b3 = get(at + 3).toInt() and 0xFF
-        return (b3 shl 24) or (b2 shl 16) or (b1 shl 8) or b0
-    }
-
-    private fun ByteBuffer.putLeInt32(value: Int) {
-        put(value.toByte())
-        put((value shr 8).toByte())
-        put((value shr 16).toByte())
-        put((value shr 24).toByte())
     }
 
     private companion object {

@@ -352,6 +352,23 @@ interface Song : Music {
     /** Mood tags (`TMOO` / `MOOD`) parsed from metadata, if any. */
     val moods: List<String>
         get() = emptyList()
+    /** Raw BPM parsed from `BPM` / `TBPM` / `TEMPO` tags, if present. */
+    val tempoBpm: Float?
+        get() = null
+    /** Canonical 5D Tempo bucket derived from [tempoBpm], if present. */
+    val tempoBucket: String?
+        get() = bpmToTempoBucket(tempoBpm)
+}
+
+fun bpmToTempoBucket(bpm: Float?): String? {
+    if (bpm == null || !bpm.isFinite() || bpm <= 0f) return null
+    return when {
+        bpm < 65f -> "Very Slow"
+        bpm < 90f -> "Slow"
+        bpm < 120f -> "Moderate"
+        bpm < 150f -> "Fast"
+        else -> "Very Fast"
+    }
 }
 
 /**

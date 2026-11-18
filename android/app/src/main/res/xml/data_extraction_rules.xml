@@ -5,10 +5,16 @@
         <exclude
             domain="database"
             path="music_cache.db" />
+        <exclude
+            domain="sharedpref"
+            path="tonewise_lastfm.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude
             domain="database"
             path="music_cache.db" />
+        <exclude
+            domain="sharedpref"
+            path="tonewise_lastfm.xml" />
     </device-transfer>
 </data-extraction-rules>

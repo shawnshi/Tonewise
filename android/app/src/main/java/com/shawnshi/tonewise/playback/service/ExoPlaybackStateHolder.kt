@@ -49,6 +49,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
@@ -141,9 +144,11 @@ class ExoPlaybackStateHolder(
             reconcileAudioEffectSession(bitPerfect)
         }
         mainScope.launch {
-            dspRepository.config.collect {
-                audioOutputManager.refreshRoute()
-            }
+            dspRepository.config
+                .map { it.enabled to it.externalBridgeMode }
+                .distinctUntilChanged()
+                .drop(1)
+                .collect { audioOutputManager.refreshRoute() }
         }
         playbackSettings.registerListener(this)
         imageSettings.registerListener(this)

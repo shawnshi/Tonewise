@@ -62,6 +62,7 @@ public sealed class SyncHostServer : IAsyncDisposable
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options =>
         {
+            options.Limits.MaxRequestBodySize = 16 * 1024 * 1024;
             options.ListenAnyIP(port, listen =>
             {
                 listen.Protocols = HttpProtocols.Http1AndHttp2;
@@ -94,6 +95,10 @@ public sealed class SyncHostServer : IAsyncDisposable
             string wfPath = Path.Combine(_tonewiseDir, "waveforms.bin");
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
             string encPath = Path.Combine(_tonewiseDir, "encyclopedia.db");
+            if (File.Exists(dbPath))
+            {
+                CheckpointWalIfPresent(dbPath);
+            }
             return Results.Json(new
             {
                 schema_version = 1,
@@ -213,6 +218,7 @@ public sealed class SyncHostServer : IAsyncDisposable
         {
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
             if (!File.Exists(dbPath)) return Results.NotFound();
+            CheckpointWalIfPresent(dbPath);
             return Results.File(dbPath, "application/x-sqlite3", enableRangeProcessing: true);
         });
 
@@ -270,11 +276,17 @@ public sealed class SyncHostServer : IAsyncDisposable
             string safeDevice = SanitizeId(body.DeviceId);
             string mutPath = Path.Combine(_tonewiseDir, $"mutations.{safeDevice}.jsonl");
             var lines = body.Mutations.Select(m => m.GetRawText()).ToList();
+            int appliedCount = 0;
+            string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
             lock (_fileLock)
             {
                 File.AppendAllLines(mutPath, lines, new UTF8Encoding(false));
+                if (File.Exists(dbPath) && body.Mutations.Count > 0)
+                {
+                    appliedCount = ApplyLwwMutationsToManifest(dbPath, body.Mutations);
+                }
             }
-            return Results.Json(new { accepted = lines.Count });
+            return Results.Json(new { accepted = lines.Count, applied_count = appliedCount });
         });
 
         app.MapGet("/api/v1/handoff", () =>
@@ -319,6 +331,116 @@ public sealed class SyncHostServer : IAsyncDisposable
         string json = JsonSerializer.Serialize(slots, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(path, json + "\n", new UTF8Encoding(false));
     }
+
+    private static void CheckpointWalIfPresent(string dbPath)
+    {
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA wal_checkpoint(PASSIVE);";
+            cmd.ExecuteNonQuery();
+        }
+        catch
+        {
+            // Non-fatal WAL checkpoint guard
+        }
+    }
+
+    private static int ApplyLwwMutationsToManifest(string dbPath, IReadOnlyList<JsonElement> mutations)
+    {
+        int applied = 0;
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+
+        foreach (var m in mutations)
+        {
+            if (m.ValueKind != JsonValueKind.Object) continue;
+
+            string? trackUid = m.TryGetProperty("track_uid", out var uidEl) ? uidEl.GetString() : null;
+            string? rawField = m.TryGetProperty("field", out var fEl) ? fEl.GetString()
+                : (m.TryGetProperty("field_name", out var fnEl) ? fnEl.GetString() : null);
+
+            long incomingTs = 0;
+            if (m.TryGetProperty("ts", out var tsEl) && tsEl.TryGetInt64(out long t1)) incomingTs = t1;
+            else if (m.TryGetProperty("ts_ms", out var ts2El) && ts2El.TryGetInt64(out long t2)) incomingTs = t2;
+            else if (m.TryGetProperty("updated_at_ms", out var ts3El) && ts3El.TryGetInt64(out long t3)) incomingTs = t3;
+
+            if (string.IsNullOrWhiteSpace(trackUid) || string.IsNullOrWhiteSpace(rawField) || incomingTs <= 0)
+                continue;
+
+            if (!LwwFieldColumnMap.TryGetValue(rawField.Trim(), out var mapping))
+                continue;
+
+            object dbVal = DBNull.Value;
+            if (m.TryGetProperty("value", out var valEl) && valEl.ValueKind != JsonValueKind.Null && valEl.ValueKind != JsonValueKind.Undefined)
+            {
+                if (mapping.ValCol is "dj_scene_json" or "mood_json")
+                {
+                    dbVal = valEl.ValueKind == JsonValueKind.Array ? valEl.GetRawText()
+                        : (valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "[]") : "[]");
+                }
+                else if (mapping.ValCol == "rating")
+                {
+                    int rVal = valEl.ValueKind == JsonValueKind.Number && valEl.TryGetInt32(out int ri) ? ri
+                        : (int.TryParse(valEl.ToString(), out int rp) ? rp : 0);
+                    dbVal = Math.Clamp(rVal, 0, 5);
+                }
+                else if (mapping.ValCol == "tempo_bpm")
+                {
+                    if (valEl.ValueKind == JsonValueKind.Number && valEl.TryGetDouble(out double dVal))
+                        dbVal = dVal;
+                    else if (double.TryParse(valEl.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double dp))
+                        dbVal = dp;
+                }
+                else
+                {
+                    dbVal = valEl.ValueKind == JsonValueKind.String ? (object)(valEl.GetString() ?? "") : valEl.ToString();
+                }
+            }
+
+            long currentTs = 0;
+            using (var checkCmd = conn.CreateCommand())
+            {
+                checkCmd.Transaction = tx;
+                checkCmd.CommandText = $"SELECT {mapping.TsCol} FROM tracks WHERE track_uid = $uid;";
+                checkCmd.Parameters.AddWithValue("$uid", trackUid);
+                object? existing = checkCmd.ExecuteScalar();
+                if (existing is null || existing == DBNull.Value) continue;
+                currentTs = Convert.ToInt64(existing);
+            }
+
+            if (incomingTs > currentTs)
+            {
+                using var updCmd = conn.CreateCommand();
+                updCmd.Transaction = tx;
+                updCmd.CommandText = $"UPDATE tracks SET {mapping.ValCol} = $val, {mapping.TsCol} = $ts WHERE track_uid = $uid;";
+                updCmd.Parameters.AddWithValue("$val", dbVal);
+                updCmd.Parameters.AddWithValue("$ts", incomingTs);
+                updCmd.Parameters.AddWithValue("$uid", trackUid);
+                applied += updCmd.ExecuteNonQuery();
+            }
+        }
+
+        tx.Commit();
+        return applied;
+    }
+
+    private static readonly IReadOnlyDictionary<string, (string ValCol, string TsCol)> LwwFieldColumnMap =
+        new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["dj_scene"] = ("dj_scene_json", "dj_scene_ts"),
+            ["dj_scene_json"] = ("dj_scene_json", "dj_scene_ts"),
+            ["dj_vocals"] = ("dj_vocals", "dj_vocals_ts"),
+            ["dj_energy"] = ("dj_energy", "dj_energy_ts"),
+            ["tempo_bpm"] = ("tempo_bpm", "tempo_ts"),
+            ["tempo_bucket"] = ("tempo_bucket", "tempo_ts"),
+            ["mood"] = ("mood_json", "mood_ts"),
+            ["mood_json"] = ("mood_json", "mood_ts"),
+            ["rating"] = ("rating", "rating_ts"),
+        };
 
     private static string SanitizeId(string id) =>
         string.Concat(id.Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_'));

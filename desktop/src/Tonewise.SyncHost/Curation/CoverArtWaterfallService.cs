@@ -30,11 +30,12 @@ public sealed class CoverArtWaterfallService
     public const int MinimumDimensionPx = 600;
     public const double MaxAspectRatioDeviation = 0.05;
 
+    private static readonly HttpClient SharedHttpClient = CreateDefaultHttpClient();
     private readonly HttpClient _http;
 
     public CoverArtWaterfallService(HttpClient? httpClient = null)
     {
-        _http = httpClient ?? CreateDefaultHttpClient();
+        _http = httpClient ?? SharedHttpClient;
     }
 
     public static bool ValidateImageHeaderAndAspectRatio(

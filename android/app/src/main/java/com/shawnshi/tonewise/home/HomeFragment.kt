@@ -42,8 +42,11 @@ import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentHomeBinding
 import com.shawnshi.tonewise.detail.DetailViewModel
 import com.shawnshi.tonewise.detail.Show
+import com.shawnshi.tonewise.home.focus.FocusFilterDialog
 import com.shawnshi.tonewise.home.list.AlbumListFragment
 import com.shawnshi.tonewise.home.list.ArtistListFragment
+import com.shawnshi.tonewise.home.list.ComposerListFragment
+import com.shawnshi.tonewise.home.list.ConductorListFragment
 import com.shawnshi.tonewise.home.list.GenreListFragment
 import com.shawnshi.tonewise.home.list.PlaylistListFragment
 import com.shawnshi.tonewise.home.list.SceneListFragment
@@ -196,6 +199,11 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                 findNavController().navigateSafe(HomeFragmentDirections.search())
                 true
             }
+            R.id.action_focus_filter -> {
+                FocusFilterDialog.newInstance()
+                    .show(parentFragmentManager, FocusFilterDialog.TAG)
+                true
+            }
             R.id.action_scenes_sync -> {
                 ScenesAndSyncDialog.newInstance()
                     .show(parentFragmentManager, ScenesAndSyncDialog.TAG)
@@ -224,6 +232,8 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                         MusicType.SONGS -> HomeFragmentDirections.sortSongs()
                         MusicType.ALBUMS -> HomeFragmentDirections.sortAlbums()
                         MusicType.ARTISTS -> HomeFragmentDirections.sortArtists()
+                        MusicType.COMPOSERS -> HomeFragmentDirections.sortComposers()
+                        MusicType.CONDUCTORS -> HomeFragmentDirections.sortConductors()
                         MusicType.GENRES -> HomeFragmentDirections.sortGenres()
                         MusicType.PLAYLISTS -> HomeFragmentDirections.sortPlaylists()
                         MusicType.SCENES -> error("Handled above")
@@ -277,6 +287,8 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                 MusicType.SONGS -> R.id.home_song_recycler
                 MusicType.ALBUMS -> R.id.home_album_recycler
                 MusicType.ARTISTS -> R.id.home_artist_recycler
+                MusicType.COMPOSERS -> R.id.home_composer_recycler
+                MusicType.CONDUCTORS -> R.id.home_conductor_recycler
                 MusicType.GENRES -> R.id.home_genre_recycler
                 MusicType.PLAYLISTS -> R.id.home_playlist_recycler
                 MusicType.SCENES -> android.view.View.NO_ID
@@ -504,6 +516,8 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                 MusicType.SONGS -> SongListFragment()
                 MusicType.ALBUMS -> AlbumListFragment()
                 MusicType.ARTISTS -> ArtistListFragment()
+                MusicType.COMPOSERS -> ComposerListFragment()
+                MusicType.CONDUCTORS -> ConductorListFragment()
                 MusicType.GENRES -> GenreListFragment()
                 MusicType.PLAYLISTS -> PlaylistListFragment()
                 MusicType.SCENES -> SceneListFragment()

@@ -101,6 +101,8 @@ private constructor(
             when (type) {
                 MusicType.ALBUMS -> library.albums
                 MusicType.ARTISTS -> library.artists
+                MusicType.COMPOSERS -> musicRepository.composers
+                MusicType.CONDUCTORS -> musicRepository.conductors
                 MusicType.GENRES -> library.genres
                 MusicType.PLAYLISTS -> library.playlists
                 else -> return
@@ -208,6 +210,8 @@ private constructor(
                     MusicType.SONGS -> homeGenerator.songs().map { it.toMediaItem(context) }
                     MusicType.ALBUMS -> homeGenerator.albums().map { it.toMediaItem(context) }
                     MusicType.ARTISTS -> homeGenerator.artists().map { it.toMediaItem(context) }
+                    MusicType.COMPOSERS -> homeGenerator.composers().map { it.toMediaItem(context) }
+                    MusicType.CONDUCTORS -> homeGenerator.conductors().map { it.toMediaItem(context) }
                     MusicType.GENRES -> homeGenerator.genres().map { it.toMediaItem(context) }
                     MusicType.PLAYLISTS -> homeGenerator.playlists().map { it.toMediaItem(context) }
                     MusicType.SCENES -> emptyList()

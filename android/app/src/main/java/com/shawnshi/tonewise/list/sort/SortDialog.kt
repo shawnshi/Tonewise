@@ -38,6 +38,8 @@ abstract class SortDialog :
 
     abstract fun getModeChoices(): List<Sort.Mode>
 
+    protected open fun allowSaveUnchangedSort(): Boolean = false
+
     override fun onCreateBinding(inflater: LayoutInflater) = DialogSortBinding.inflate(inflater)
 
     override fun onBindingCreated(binding: DialogSortBinding, savedInstanceState: Bundle?) {
@@ -82,7 +84,10 @@ abstract class SortDialog :
 
     private fun updateButtons() {
         val binding = requireBinding()
-        binding.sortSave.isEnabled = getCurrentSort().let { it != null && it != getInitialSort() }
+        binding.sortSave.isEnabled =
+            getCurrentSort().let {
+                it != null && (it != getInitialSort() || allowSaveUnchangedSort())
+            }
     }
 
     private fun getCurrentSort(): Sort? {

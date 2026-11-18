@@ -95,6 +95,10 @@ object IntegerTable {
     const val MUSIC_MODE_PLAYLISTS = 0xA107
     /** MusicMode.SCENES */
     const val MUSIC_MODE_SCENES = 0xA106
+    /** MusicMode.COMPOSERS */
+    const val MUSIC_MODE_COMPOSERS = 0xA105
+    /** MusicMode.CONDUCTORS */
+    const val MUSIC_MODE_CONDUCTORS = 0xA104
     /** Sort.Mode.ByName */
     const val SORT_BY_NAME = 0xA10C
     /** Sort.Mode.ByArtist */

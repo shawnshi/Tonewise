@@ -21,23 +21,40 @@ package com.shawnshi.tonewise.playback
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.audiofx.AudioEffect
 import android.os.Build
 import android.os.Bundle
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.MenuItem
 import android.view.View
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.Toolbar
+import androidx.core.view.isVisible
 import androidx.core.view.updatePadding
 import androidx.dynamicanimation.animation.SpringForce
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.R as MaterialR
+import com.google.android.material.color.MaterialColors
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlin.math.abs
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentPlaybackPanelBinding
 import com.shawnshi.tonewise.detail.BookletPdfDialog
@@ -49,7 +66,10 @@ import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.audio.SignalPathDialog
+import com.shawnshi.tonewise.playback.audio.SignalPathState
+import com.shawnshi.tonewise.playback.audio.SignalQualityTier
 import com.shawnshi.tonewise.playback.dsp.DspControlDialog
+import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.playback.queue.QueueViewModel
 import com.shawnshi.tonewise.playback.state.RepeatMode
 import com.shawnshi.tonewise.playback.ui.StyledSeekBar
@@ -59,6 +79,11 @@ import com.shawnshi.tonewise.playback.ui.stepper.StepperOverlay
 import com.shawnshi.tonewise.playback.ui.swiper.CarouselTransformer
 import com.shawnshi.tonewise.playback.ui.swiper.CoverPagerAdapter
 import com.shawnshi.tonewise.playback.ui.swiper.UserAwarePagerCallback
+import com.shawnshi.tonewise.sync.FocusFilterSpec
+import com.shawnshi.tonewise.sync.FocusPillState
+import com.shawnshi.tonewise.sync.LanSyncRepository
+import com.shawnshi.tonewise.sync.QuickTagDialog
+import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.ViewBindingFragment
 import com.shawnshi.tonewise.util.collectImmediately
 import com.shawnshi.tonewise.util.dampen
@@ -85,6 +110,9 @@ class PlaybackPanelFragment :
     StyledSeekBar.Listener,
     StepperOverlay.Listener {
     @Inject lateinit var musicRepository: MusicRepository
+    @Inject lateinit var lanSyncRepository: LanSyncRepository
+    @Inject lateinit var sessionSlotStore: SessionSlotStore
+    @Inject lateinit var playCountRepository: PlayCountRepository
     private val coverPagerAdapter = CoverPagerAdapter(this)
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
@@ -92,6 +120,9 @@ class PlaybackPanelFragment :
     private val queueModel: QueueViewModel by viewModels()
     private var equalizerLauncher: ActivityResultLauncher<Intent>? = null
     private var userAwarePagerCallback: UserAwarePagerCallback? = null
+    private var djFreezeBackup: Pair<List<Song>, Int>? = null
+    private var activeFreezeToken: String? = null
+    private var latestSignalPath: SignalPathState? = null
 
     override fun onCreateBinding(inflater: LayoutInflater) =
         FragmentPlaybackPanelBinding.inflate(inflater)
@@ -145,7 +176,9 @@ class PlaybackPanelFragment :
             offscreenPageLimit = 1
         }
 
-        // Set up fast seek overlay
+        binding.playbackComposer.setOnClickListener {
+            playbackModel.song.value?.composers?.firstOrNull()?.let(detailModel::showComposer)
+        }
         binding.playbackSong.apply {
             isSelected = true
             setOnClickListener { navigateToCurrentSong() }
@@ -181,6 +214,17 @@ class PlaybackPanelFragment :
         }
         binding.playbackSkipNext.setOnClickListener { playbackModel.next() }
         binding.playbackShuffle.setOnClickListener { playbackModel.toggleShuffled() }
+        binding.playbackLove?.setOnClickListener {
+            playbackModel.song.value?.let { current ->
+                val nextLoved = !lanSyncRepository.isLoved(current)
+                lanSyncRepository.enqueueTagMutation(
+                    current,
+                    "rating",
+                    if (nextLoved) "5" else "3",
+                )
+                updateLoveButton(current)
+            }
+        }
         binding.playbackMore?.setOnClickListener {
             playbackModel.song.value?.let {
                 listModel.openMenu(R.menu.playback_song, it, PlaySong.ByItself)
@@ -189,6 +233,16 @@ class PlaybackPanelFragment :
 
         // --- VIEWMODEL SETUP --
         collectImmediately(playbackModel.song, playbackModel.currentPlayCount, ::updateSong)
+        collectImmediately(lanSyncRepository.pendingMutationCount) { _ ->
+            playbackModel.song.value?.let { current ->
+                updateMicroCapsules(
+                    song = current,
+                    isClassical = !current.workName.isNullOrBlank(),
+                    classicalWork = musicRepository.findWorkForSong(current),
+                )
+            }
+        }
+        collectImmediately(playbackModel.signalPath, ::updateSignalPill)
         collectImmediately(playbackModel.waveformEnvelope, ::updateWaveform)
         collectImmediately(playbackModel.parent, ::updateParent)
         collectImmediately(playbackModel.positionDs, ::updatePosition)
@@ -246,20 +300,8 @@ class PlaybackPanelFragment :
     }
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
-        if (item.itemId == R.id.action_work_recordings) {
-            WorkRecordingsDialog.newInstance().show(parentFragmentManager, WorkRecordingsDialog.TAG)
-            return true
-        }
-        if (item.itemId == R.id.action_booklet_pdf) {
-            BookletPdfDialog.newInstance().show(parentFragmentManager, BookletPdfDialog.TAG)
-            return true
-        }
         if (item.itemId == R.id.action_desk_clock) {
             DeskClockDialog.newInstance().show(parentFragmentManager, DeskClockDialog.TAG)
-            return true
-        }
-        if (item.itemId == R.id.action_signal_path) {
-            SignalPathDialog.newInstance().show(parentFragmentManager, SignalPathDialog.TAG)
             return true
         }
         if (item.itemId == R.id.action_open_equalizer) {
@@ -285,44 +327,333 @@ class PlaybackPanelFragment :
         L.d("Updating song display: $song")
         val work = song.workName?.trim()?.takeIf { it.isNotEmpty() }
         val classicalWork = if (work != null) musicRepository.findWorkForSong(song) else null
+        binding.playbackAlbum.isVisible = false
+        binding.playbackMeta.isVisible = false
+        binding.playbackSignalPill.isVisible = false
+
         if (work != null) {
-            val mvtTitle = song.movementName?.trim()?.takeIf { it.isNotEmpty() } ?: song.name.resolve(context)
+            val mvtTitle =
+                song.movementName?.trim()?.takeIf { it.isNotEmpty() } ?: song.name.resolve(context)
             val mvtPrefix = song.movementNumber?.let { "$it. " } ?: ""
             val mvtLabel = "$mvtPrefix$mvtTitle"
-            binding.playbackSong.typeface = Typeface.SERIF
-            binding.playbackSong.text =
-                if (mvtLabel.equals(work, ignoreCase = true)) work else "$work · $mvtLabel"
-
-            val composerPart = song.composers.firstOrNull()?.takeIf { it.isNotBlank() }
-            val conductorPart = song.conductors.firstOrNull()?.takeIf { it.isNotBlank() }
-            val performerPart = song.artists.resolveNames(context)
-            val roleLine =
-                listOfNotNull(composerPart, performerPart.takeIf { it.isNotBlank() }, conductorPart)
+            val composerLabel =
+                song.composers
+                    .filter { it.isNotBlank() }
                     .distinct()
                     .joinToString(" · ")
-            binding.playbackArtist.text = roleLine.ifEmpty { performerPart }
-        } else {
-            binding.playbackSong.typeface = Typeface.DEFAULT
-            binding.playbackSong.text = song.name.resolve(context)
-            binding.playbackArtist.text = song.artists.resolveNames(context)
-        }
-        binding.playbackAlbum.text = song.album.name.resolve(context)
+                    .ifEmpty { song.artists.resolveNames(context) }
 
-        val baseMeta = SongViewHolder.formatSongMeta(context, song, playCount)
-        if (classicalWork != null && classicalWork.recordings.isNotEmpty()) {
-            val pill = context.getString(R.string.fmt_classical_recordings_pill, classicalWork.recordings.size)
-            binding.playbackMeta.text = if (baseMeta.isNotEmpty()) "$baseMeta · $pill" else pill
-            binding.playbackMeta.setOnClickListener {
-                WorkRecordingsDialog.newInstance().show(parentFragmentManager, WorkRecordingsDialog.TAG)
+            // Classical 3-row editorial typography:
+            // 1. Composer · Work eyebrow -> 2. Movement title -> 3. Ensemble · Conductor
+            binding.playbackComposer.apply {
+                isVisible = true
+                typeface = Typeface.SERIF
+                text = "$composerLabel · $work"
+            }
+            binding.playbackSong.apply {
+                typeface = Typeface.SERIF
+                isSingleLine = false
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                isSelected = false
+                text = mvtLabel
+            }
+            val performerPart = song.artists.resolveNames(context)
+            val conductorPart = song.conductors.firstOrNull()?.takeIf { it.isNotBlank() }
+            val ensembleLine =
+                listOfNotNull(performerPart.takeIf { it.isNotBlank() }, conductorPart)
+                    .distinct()
+                    .joinToString(" · ")
+                    .ifEmpty { song.album.name.resolve(context) }
+            binding.playbackArtist.apply {
+                typeface = Typeface.DEFAULT
+                isSingleLine = true
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.MARQUEE
+                isSelected = true
+                text = ensembleLine
             }
         } else {
-            binding.playbackMeta.text = baseMeta
-            binding.playbackMeta.setOnClickListener {
-                playbackModel.song.value?.let(detailModel::showSong)
+            binding.playbackComposer.isVisible = false
+            binding.playbackSong.apply {
+                isSingleLine = true
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.MARQUEE
+                isSelected = true
+                typeface = Typeface.DEFAULT
+                text = song.name.resolve(context)
+            }
+            binding.playbackArtist.apply {
+                isSingleLine = true
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.MARQUEE
+                isSelected = true
+                typeface = Typeface.DEFAULT
+                text = "${song.artists.resolveNames(context)} · ${song.album.name.resolve(context)}"
             }
         }
+        updateLoveButton(song)
+        updateMicroCapsules(song = song, isClassical = work != null, classicalWork = classicalWork)
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
     }
+
+    private fun updateMicroCapsules(
+        song: Song,
+        isClassical: Boolean,
+        classicalWork: com.shawnshi.tonewise.music.ClassicalWork?,
+    ) {
+        val row = requireBinding().playbackCapsuleRow
+        row.removeAllViews()
+        val context = requireContext()
+
+        fun addCapsuleView(
+            label: CharSequence,
+            highlighted: Boolean = false,
+            onClick: () -> Unit,
+        ) {
+            val density = resources.displayMetrics.density
+            val hPad = (10f * density).toInt()
+            val vPad = (4f * density).toInt()
+            val endMargin = (6f * density).toInt()
+
+            val bgColor =
+                if (highlighted) {
+                    MaterialColors.getColor(row, MaterialR.attr.colorPrimaryContainer)
+                } else {
+                    MaterialColors.getColor(row, MaterialR.attr.colorSurfaceContainer)
+                }
+            val fgColor =
+                if (highlighted) {
+                    MaterialColors.getColor(row, MaterialR.attr.colorOnPrimaryContainer)
+                } else {
+                    MaterialColors.getColor(row, MaterialR.attr.colorOnSurfaceVariant)
+                }
+            val strokeColor =
+                if (highlighted) {
+                    MaterialColors.getColor(row, androidx.appcompat.R.attr.colorPrimary)
+                } else {
+                    MaterialColors.getColor(row, MaterialR.attr.colorOutlineVariant)
+                }
+
+            val shape =
+                GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 999f * density
+                    setColor(bgColor)
+                    setStroke((1f * density).toInt().coerceAtLeast(1), strokeColor)
+                }
+
+            val tv =
+                TextView(context).apply {
+                    text = label
+                    setTextColor(fgColor)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    isSingleLine = true
+                    background = shape
+                    setPadding(hPad, vPad, hPad, vPad)
+                    layoutParams =
+                        LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            )
+                            .apply { marginEnd = endMargin }
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { onClick() }
+                }
+            row.addView(tv)
+        }
+
+        // First slot in Unified Studio Strip: live audio signal path badge
+        latestSignalPath?.let { state ->
+            addCapsuleView(label = formatSignalStripLabel(state, row)) {
+                SignalPathDialog.newInstance().show(parentFragmentManager, SignalPathDialog.TAG)
+            }
+        }
+
+        if (isClassical) {
+            if (classicalWork != null && classicalWork.recordings.isNotEmpty()) {
+                val recCount = classicalWork.recordings.size
+                addCapsuleView(
+                    label = context.getString(R.string.fmt_classical_recordings_pill, recCount)
+                ) {
+                    WorkRecordingsDialog.newInstance()
+                        .show(parentFragmentManager, WorkRecordingsDialog.TAG)
+                }
+            }
+            addCapsuleView(label = context.getString(R.string.lbl_booklet_pdf)) {
+                BookletPdfDialog.newInstance().show(parentFragmentManager, BookletPdfDialog.TAG)
+            }
+            return
+        }
+
+        val entries = mutableListOf<Triple<String, String, FocusFilterSpec>>()
+        for (sc in lanSyncRepository.getEffectiveDjScenes(song)) {
+            entries +=
+                Triple(
+                    "scene:$sc",
+                    humanizeDjLabel(sc),
+                    FocusFilterSpec(scenes = mapOf(sc to FocusPillState.INCLUDE)),
+                )
+        }
+        for (cl in lanSyncRepository.getEffectiveMoodClusters(song)) {
+            entries +=
+                Triple(
+                    "mood:$cl",
+                    humanizeDjLabel(cl),
+                    FocusFilterSpec(moods = mapOf(cl to FocusPillState.INCLUDE)),
+                )
+        }
+        val vocals = lanSyncRepository.getEffectiveDjVocals(song)
+        if (!vocals.equals("unknown", ignoreCase = true) && vocals.isNotBlank()) {
+            entries +=
+                Triple(
+                    "vocals:$vocals",
+                    humanizeDjLabel(vocals),
+                    FocusFilterSpec(vocals = mapOf(vocals to FocusPillState.INCLUDE)),
+                )
+        }
+        val energy = lanSyncRepository.getEffectiveDjEnergy(song)
+        if (!energy.equals("unknown", ignoreCase = true) && energy.isNotBlank()) {
+            entries +=
+                Triple(
+                    "energy:$energy",
+                    humanizeDjLabel(energy),
+                    FocusFilterSpec(energies = mapOf(energy to FocusPillState.INCLUDE)),
+                )
+        }
+
+        for ((token, label, spec) in entries) {
+            val isActive = activeFreezeToken == token
+            val displayLabel = if (isActive) "❄ $label" else label
+            addCapsuleView(label = displayLabel, highlighted = isActive) {
+                toggleDjFreeze(song = song, token = token, label = label, spec = spec)
+            }
+        }
+
+        addCapsuleView(label = context.getString(R.string.lbl_quick_tag_tempo_add)) {
+            QuickTagDialog.newInstance(song.uid.toString())
+                .show(parentFragmentManager, QuickTagDialog.TAG)
+        }
+    }
+
+    private fun humanizeDjLabel(raw: String): String =
+        when (raw.trim().lowercase()) {
+            "focus" -> "Focus 专注"
+            "coding" -> "Coding 编程"
+            "relax" -> "Relax 松弛"
+            "energy" -> "Energy 律动"
+            "pop" -> "Pop 流行"
+            "calm_relaxed" -> "松弛"
+            "bright_joyful" -> "明快"
+            "deep_introspective" -> "内省"
+            "warm_romantic" -> "温润"
+            "high_tension" -> "张力"
+            "instrumental" -> "纯器乐"
+            "vocal" -> "人声"
+            "low" -> "低能"
+            "medium" -> "中能"
+            "high" -> "高能"
+            else -> raw
+        }
+
+    private fun formatSignalStripLabel(state: SignalPathState, containerView: View): CharSequence {
+        val rateHz = state.outputSampleRateHz ?: state.sourceSampleRateHz
+        val rateText =
+            if (rateHz > 0) {
+                if (rateHz % 1000 == 0) "${rateHz / 1000}kHz"
+                else String.format("%.1fkHz", rateHz / 1000.0)
+            } else {
+                null
+            }
+        val (dotColor, tierLabel) =
+            when (state.qualityTier) {
+                SignalQualityTier.BIT_PERFECT ->
+                    Color.parseColor("#D9B372") to "USB BIT-PERFECT"
+                SignalQualityTier.HIGH_RES_FLOAT ->
+                    Color.parseColor("#4DA3FF") to
+                        if (state.dspSummaryLabel == "Flat") "32-bit Float"
+                        else "64-bit DSP · ${state.dspSummaryLabel}"
+                SignalQualityTier.SYSTEM_MIXER ->
+                    MaterialColors.getColor(containerView, MaterialR.attr.colorOnSurfaceVariant) to
+                        "System Mixer"
+            }
+        val summary = listOfNotNull(tierLabel, rateText).joinToString(" · ")
+        return SpannableStringBuilder("● ").append(summary).apply {
+            setSpan(ForegroundColorSpan(dotColor), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
+    private fun toggleDjFreeze(
+        song: Song,
+        token: String,
+        label: String,
+        spec: FocusFilterSpec,
+    ) {
+        val context = requireContext()
+        if (activeFreezeToken == token) {
+            freezeJob?.cancel()
+            val backup = djFreezeBackup
+            activeFreezeToken = null
+            djFreezeBackup = null
+            if (backup != null && backup.first.isNotEmpty()) {
+                playbackModel.restoreSessionQueue(
+                    songs = backup.first,
+                    index = backup.second.coerceIn(0, backup.first.lastIndex),
+                    positionMs = playbackModel.positionDs.value * 100L,
+                )
+            }
+            context.showToast(R.string.lbl_dj_freeze_restored)
+            updateMicroCapsules(
+                song = song,
+                isClassical = !song.workName.isNullOrBlank(),
+                classicalWork = musicRepository.findWorkForSong(song),
+            )
+            return
+        }
+
+        freezeJob?.cancel()
+        freezeJob =
+            viewLifecycleOwner.lifecycleScope.launch {
+                val matches =
+                    withContext(Dispatchers.Default) {
+                        lanSyncRepository.matchSongsByFocus(spec)
+                    }
+                if (binding == null) return@launch
+                val currentSong = playbackModel.song.value ?: song
+                val freezeQueue = listOf(currentSong) + matches.filter { it.uid != currentSong.uid }
+                if (freezeQueue.size <= 1) {
+                    context.showToast(R.string.lbl_scene_no_matches)
+                    return@launch
+                }
+                if (activeFreezeToken == null) {
+                    val pq = playbackModel.pagerQueue.value
+                    if (pq.queue.isNotEmpty()) {
+                        djFreezeBackup = pq.queue to pq.index
+                    }
+                }
+                activeFreezeToken = token
+                sessionSlotStore.setActiveScene("${getString(R.string.lbl_dj_freeze_active)} · $label")
+                playbackModel.restoreSessionQueue(
+                    songs = freezeQueue,
+                    index = 0,
+                    positionMs = playbackModel.positionDs.value * 100L,
+                )
+                android.widget.Toast.makeText(
+                        context.applicationContext,
+                        getString(R.string.fmt_dj_freeze_started, label, freezeQueue.size),
+                        android.widget.Toast.LENGTH_SHORT,
+                    )
+                    .show()
+                updateMicroCapsules(
+                    song = currentSong,
+                    isClassical = !currentSong.workName.isNullOrBlank(),
+                    classicalWork = musicRepository.findWorkForSong(currentSong),
+                )
+            }
+    }
+
+    private var freezeJob: Job? = null
 
     private fun updateParent(parent: MusicParent?) {
         val binding = requireBinding()
@@ -333,6 +664,29 @@ class PlaybackPanelFragment :
 
     private fun updatePosition(positionDs: Long) {
         requireBinding().playbackSeekBar?.positionDs = positionDs
+    }
+
+    private fun updateLoveButton(song: Song?) {
+        val b = requireBinding()
+        val btn = b.playbackLove ?: return
+        val loved = song != null && lanSyncRepository.isLoved(song)
+        btn.setIconResource(if (loved) R.drawable.ic_heart_filled_24 else R.drawable.ic_heart_outline_24)
+        btn.iconTint =
+            if (loved) {
+                android.content.res.ColorStateList.valueOf(Color.parseColor("#D96B52"))
+            } else {
+                b.playbackMore?.iconTint
+            }
+    }
+
+    private fun updateSignalPill(state: SignalPathState) {
+        latestSignalPath = state
+        val current = playbackModel.song.value ?: return
+        updateMicroCapsules(
+            song = current,
+            isClassical = !current.workName.isNullOrBlank(),
+            classicalWork = musicRepository.findWorkForSong(current),
+        )
     }
 
     private fun updateWaveform(envelope: FloatArray?) {

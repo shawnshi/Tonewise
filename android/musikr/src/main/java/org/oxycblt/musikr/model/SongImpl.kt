@@ -92,6 +92,8 @@ internal class SongImpl(private val handle: SongCore) : Song {
 
     override val moods: List<String> = preSong.moods
 
+    override val tempoBpm: Float? = preSong.tempoBpm
+
     private val hashCode = 31 * uid.hashCode() + preSong.hashCode()
 
     override fun hashCode() = hashCode

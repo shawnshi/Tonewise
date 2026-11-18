@@ -6,47 +6,105 @@
     xmlns:skia="using:SkiaSharp.Views.Windows"
     Title="Tonewise OLED Companion">
 
-    <Grid Background="#131720">
+    <Grid Background="Transparent" RequestedTheme="Dark">
         <Border x:Name="OledCanvasHost"
                 Margin="4"
-                Background="#1A202C"
-                BorderBrush="#33D9B372"
+                Background="#DD141923"
+                BorderBrush="#44D9B372"
                 BorderThickness="1"
                 CornerRadius="12"
-                Padding="12,10">
-            <Grid RowSpacing="8">
+                Padding="12,8,12,10">
+            <Grid RowSpacing="6">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="24" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="36" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <!-- Header: Title + Champagne Signal Path Badge -->
-                <Grid Grid.Row="0" ColumnSpacing="8">
+                <!-- Row 0: Native DWM Drag Bar (no overlapping controls) + PiP Toggle + Close -->
+                <Grid Grid.Row="0" ColumnSpacing="6">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0" Spacing="1">
-                        <TextBlock Text="{x:Bind ViewModel.CurrentTrack.Title, Mode=OneWay, FallbackValue='Tonewise Companion'}"
-                                   Foreground="#E2E8F0" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{x:Bind ViewModel.CurrentTrack.ArtistsDisplay, Mode=OneWay, FallbackValue='Ready'}"
-                                   Foreground="#94A3B8" FontSize="11" TextTrimming="CharacterEllipsis" />
-                    </StackPanel>
-                    <Border Grid.Column="1" Background="#26D9B372" BorderBrush="#66D9B372" BorderThickness="1"
-                            CornerRadius="6" Padding="6,2" VerticalAlignment="Top">
-                        <TextBlock Text="{x:Bind ViewModel.SignalPathBadge, Mode=OneWay}"
-                                   Foreground="#D9B372" FontSize="10" FontFamily="Consolas" />
+                    <Border x:Name="WidgetTitleDragBar" Grid.Column="0" Background="Transparent" VerticalAlignment="Stretch">
+                        <TextBlock
+                            Text="TONEWISE OLED COMPANION"
+                            FontSize="9"
+                            FontWeight="SemiBold"
+                            CharacterSpacing="80"
+                            Foreground="#D9B372"
+                            VerticalAlignment="Center" />
                     </Border>
+                    <Button
+                        x:Name="PipToggleButton"
+                        Grid.Column="1"
+                        Content="PiP 画中画"
+                        Padding="8,2"
+                        FontSize="10"
+                        Background="#242C3B"
+                        Foreground="#CBD5E1"
+                        Click="OnTogglePipModeClick"
+                        AutomationProperties.Name="切换 CompactOverlay 置顶画中画模式"
+                        ToolTipService.ToolTip="切换 Windows CompactOverlay 置顶画中画模式" />
+                    <Button
+                        Grid.Column="2"
+                        Content="×"
+                        Padding="8,1"
+                        FontSize="11"
+                        Background="Transparent"
+                        Foreground="#94A3B8"
+                        Click="OnCloseWidgetClick"
+                        AutomationProperties.Name="关闭 OLED 副屏挂件" />
                 </Grid>
 
-                <!-- 150-Point Champagne Gold Waveform -->
+                <!-- Row 1: Large Anti-Burn-In Flip Clock + Track Info + Scene & Signal Badge -->
+                <Grid Grid.Row="1" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock x:Name="ClockTextBlock"
+                               Grid.Column="0"
+                               Text="00 : 00"
+                               Foreground="#E2E8F0"
+                               FontSize="30"
+                               FontWeight="Bold"
+                               FontFamily="Consolas"
+                               VerticalAlignment="Center" />
+
+                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind ViewModel.ActiveFilterPillsSummary, Mode=OneWay}"
+                                   Foreground="#D9B372" FontSize="10" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{x:Bind ViewModel.CurrentTrack.Title, Mode=OneWay, FallbackValue='Tonewise Companion'}"
+                                   Foreground="#E2E8F0" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{x:Bind ViewModel.CurrentTrack.ArtistsDisplay, Mode=OneWay, FallbackValue='拖动顶部金色栏可跨显示器移动'}"
+                                   Foreground="#94A3B8" FontSize="11" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="2" Spacing="4" HorizontalAlignment="Right" VerticalAlignment="Top">
+                        <Border Background="#26D9B372" BorderBrush="#66D9B372" BorderThickness="1"
+                                CornerRadius="6" Padding="6,2">
+                            <TextBlock Text="{x:Bind ViewModel.SignalPathBadge, Mode=OneWay}"
+                                       Foreground="#D9B372" FontSize="10" FontFamily="Consolas" MaxWidth="136" TextTrimming="CharacterEllipsis" />
+                        </Border>
+                        <TextBlock Text="{x:Bind ViewModel.TimeDisplay, Mode=OneWay}"
+                                   Foreground="#94A3B8" FontSize="10" FontFamily="Consolas" HorizontalAlignment="Right" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- Row 2: 150-Point Champagne Gold Click-to-Seek Waveform -->
                 <skia:SKXamlCanvas x:Name="WidgetWaveformCanvas"
-                                   Grid.Row="1"
+                                   Grid.Row="2"
+                                   PointerPressed="OnWaveformPointerPressed"
                                    PaintSurface="OnPaintWaveform" />
 
-                <!-- Quick Transport & Coding Instant Switch -->
-                <Grid Grid.Row="2" ColumnSpacing="6">
+                <!-- Row 3: Transport + Quick Scene Capsules -->
+                <Grid Grid.Row="3" ColumnSpacing="4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
@@ -54,25 +112,34 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <Button Grid.Column="0" Content="Prev" Padding="8,3" FontSize="11"
+                    <Button Grid.Column="0" Content="⏮" Padding="7,3" FontSize="11"
                             Background="#242C3B" Foreground="#E2E8F0"
-                            Command="{x:Bind ViewModel.PreviousTrackCommand}" />
+                            Command="{x:Bind ViewModel.PreviousTrackCommand}"
+                            AutomationProperties.Name="上一曲" />
                     <Button Grid.Column="1" Content="{x:Bind ViewModel.PlayPauseLabel, Mode=OneWay}" Padding="10,3" FontSize="11"
                             Background="#D9B372" Foreground="#131720" FontWeight="SemiBold"
-                            Command="{x:Bind ViewModel.TogglePlayPauseCommand}" />
-                    <Button Grid.Column="2" Content="Next" Padding="8,3" FontSize="11"
+                            Command="{x:Bind ViewModel.TogglePlayPauseCommand}"
+                            AutomationProperties.Name="播放或暂停" />
+                    <Button Grid.Column="2" Content="⏭" Padding="7,3" FontSize="11"
                             Background="#242C3B" Foreground="#E2E8F0"
-                            Command="{x:Bind ViewModel.NextTrackCommand}" />
-                    <TextBlock Grid.Column="3" Text="{x:Bind ViewModel.TimeDisplay, Mode=OneWay}"
-                               Foreground="#94A3B8" FontSize="11" FontFamily="Consolas"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    <Button Grid.Column="4" Content="Coding" Padding="8,3" FontSize="11"
-                            Background="#242C3B" BorderBrush="#D9B372" BorderThickness="1" Foreground="#D9B372"
+                            Command="{x:Bind ViewModel.NextTrackCommand}"
+                            AutomationProperties.Name="下一曲" />
+
+                    <Button Grid.Column="4" Content="专注" Padding="7,3" FontSize="10"
+                            Background="#242C3B" BorderBrush="#66D9B372" BorderThickness="1" Foreground="#D9B372"
+                            Command="{x:Bind ViewModel.ActivateDtdDeepFocusSceneCommand}" />
+                    <Button Grid.Column="5" Content="编码" Padding="7,3" FontSize="10"
+                            Background="#242C3B" Foreground="#E2E8F0"
                             Command="{x:Bind ViewModel.ActivateCodingQuickSceneCommand}" />
-                    <Button Grid.Column="5" Content="×" Padding="7,3" FontSize="11"
-                            Background="Transparent" Foreground="#94A3B8"
-                            Click="OnCloseWidgetClick" />
+                    <Button Grid.Column="6" Content="松弛" Padding="7,3" FontSize="10"
+                            Background="#242C3B" Foreground="#E2E8F0"
+                            Command="{x:Bind ViewModel.ActivateDtdAfternoonRelaxSceneCommand}" />
+                    <Button Grid.Column="7" Content="助眠" Padding="7,3" FontSize="10"
+                            Background="#242C3B" Foreground="#E2E8F0"
+                            Command="{x:Bind ViewModel.ActivateDtdNightSleepSceneCommand}" />
                 </Grid>
             </Grid>
         </Border>

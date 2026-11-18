@@ -91,6 +91,7 @@ class DBCache private constructor(private val readDao: CacheReadDao) : Cache {
                             movementNumber = dbSong.movementNumber,
                             musicBrainzWorkId = dbSong.musicBrainzWorkId,
                             moods = dbSong.moods ?: listOf(),
+                            tempoBpm = dbSong.tempoBpm,
                         ),
                         coverId = dbSong.coverId,
                     )
@@ -203,4 +204,5 @@ private fun CachedFile.toDbData() =
         movementNumber = audio?.tags?.movementNumber,
         musicBrainzWorkId = audio?.tags?.musicBrainzWorkId,
         moods = audio?.tags?.moods,
+        tempoBpm = audio?.tags?.tempoBpm,
     )

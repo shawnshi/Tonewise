@@ -23,6 +23,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.widget.Toast
 import androidx.core.view.doOnLayout
+import androidx.core.view.isVisible
 import androidx.fragment.app.activityViewModels
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -33,7 +34,6 @@ import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.state.RepeatMode
-import com.shawnshi.tonewise.sync.ScenesAndSyncDialog
 import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.ViewBindingFragment
 import com.shawnshi.tonewise.util.collectImmediately
@@ -52,6 +52,8 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
     @Inject lateinit var musicRepository: MusicRepository
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
+    private var latestSong: Song? = null
+    private var latestScenePrefix: String? = null
 
     override fun onCreateBinding(inflater: LayoutInflater) =
         FragmentPlaybackBarBinding.inflate(inflater)
@@ -74,15 +76,14 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
         // Set up marquee on song information
         binding.playbackSong.isSelected = true
         binding.playbackInfo.isSelected = true
-        binding.playbackScenePill.apply {
-            isSelected = true
-            setOnClickListener {
-                ScenesAndSyncDialog.newInstance().show(parentFragmentManager, ScenesAndSyncDialog.TAG)
-            }
-            setOnLongClickListener {
-                hotSwitchNextSlot()
-                true
-            }
+        binding.playbackScenePill.isVisible = false
+        binding.playbackCover.setOnLongClickListener {
+            hotSwitchNextSlot()
+            true
+        }
+        binding.playbackSecondaryAction.setOnLongClickListener {
+            hotSwitchNextSlot()
+            true
         }
         binding.root.doOnLayout { (binding.root.parent as? View)?.requestApplyInsets() }
 
@@ -116,14 +117,26 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
     }
 
     private fun updateScenePill(sceneLabel: String, slotIndex: Int, queue: PagerQueue) {
-        val pill = binding?.playbackScenePill ?: return
-        val label =
-            if (sceneLabel.equals("Default", ignoreCase = true)) {
-                getString(R.string.lbl_scene_pill_default)
+        binding?.playbackScenePill?.isVisible = false
+        val isDefault = sceneLabel.equals("Default", ignoreCase = true)
+        latestScenePrefix =
+            if ((isDefault && slotIndex == 1) || queue.queue.isEmpty()) {
+                null
+            } else if (isDefault) {
+                getString(R.string.lbl_scene_pill_default) + " #$slotIndex"
             } else {
                 sceneLabel
             }
-        pill.text = getString(R.string.fmt_scene_pill, label, slotIndex, queue.queue.size)
+        refreshInfoLine()
+    }
+
+    private fun refreshInfoLine() {
+        val b = binding ?: return
+        val song = latestSong ?: return
+        val baseArtist = song.artists.resolveNames(requireContext())
+        val prefix = latestScenePrefix
+        b.playbackInfo.text =
+            if (!prefix.isNullOrBlank()) "$prefix · $baseArtist" else baseArtist
     }
 
     private fun hotSwitchNextSlot() {
@@ -160,9 +173,10 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
 
         val context = requireContext()
         val binding = requireBinding()
+        latestSong = song
         binding.playbackCover.bind(song)
         binding.playbackSong.text = song.name.resolve(context)
-        binding.playbackInfo.text = song.artists.resolveNames(context)
+        refreshInfoLine()
         binding.playbackProgressBar.max = song.durationMs.msToDs().toInt()
     }
 

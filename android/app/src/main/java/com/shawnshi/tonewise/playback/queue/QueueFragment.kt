@@ -20,19 +20,47 @@ package com.shawnshi.tonewise.playback.queue
 
 import android.os.Bundle
 import android.view.LayoutInflater
+import android.widget.Toast
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.core.view.isInvisible
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import kotlin.math.min
+import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentQueueBinding
 import com.shawnshi.tonewise.list.EditClickListListener
+import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.sync.LanSyncRepository
+import com.shawnshi.tonewise.sync.SessionSlotItem
+import com.shawnshi.tonewise.sync.SessionSlotStore
+import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.ui.ViewBindingFragment
 import com.shawnshi.tonewise.util.collectImmediately
+import com.shawnshi.tonewise.util.showToast
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L
 
@@ -43,6 +71,9 @@ import timber.log.Timber as L
  */
 @AndroidEntryPoint
 class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickListListener<Song> {
+    @Inject lateinit var sessionSlotStore: SessionSlotStore
+    @Inject lateinit var musicRepository: MusicRepository
+    @Inject lateinit var lanSyncRepository: LanSyncRepository
     private val queueModel: QueueViewModel by viewModels()
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val queueAdapter = QueueAdapter(this)
@@ -54,6 +85,29 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
         super.onBindingCreated(binding, savedInstanceState)
 
         // --- UI SETUP ---
+        binding.queueSlotBar.apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
+                val activeSlotIndex by sessionSlotStore.activeSlotIndex.collectAsStateWithLifecycle()
+                val activeSceneLabel by
+                    sessionSlotStore.activeSceneLabel.collectAsStateWithLifecycle()
+
+                TonewiseComposeTheme {
+                    QueuePersistentSlotBar(
+                        slots = slots,
+                        activeSlotIndex = activeSlotIndex,
+                        onSelectSlot = { slotIdx, existing ->
+                            handleSlotChipClick(slotIdx, activeSlotIndex, activeSceneLabel, existing)
+                        },
+                        onSaveCurrent = {
+                            saveCurrentQueueToSlot(activeSlotIndex, activeSceneLabel)
+                        },
+                    )
+                }
+            }
+        }
+
         binding.queueRecycler.apply {
             adapter = queueAdapter
             touchHelper =
@@ -138,6 +192,123 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
                 L.d("Scrolling downwards, offsetting by $offset")
                 binding.queueRecycler.scrollToPosition(min(queue.lastIndex, offset))
             }
+        }
+    }
+
+    private fun saveCurrentQueueToSlot(slotIndex: Int, sceneLabel: String, showFeedback: Boolean = true) {
+        val pagerQueue = playbackModel.pagerQueue.value
+        val uids = pagerQueue.queue.map { it.uid.toString() }
+        if (uids.isEmpty()) {
+            if (showFeedback) {
+                requireContext().showToast(R.string.lbl_slot_empty_queue)
+            }
+            return
+        }
+        val title =
+            sceneLabel
+                .takeUnless { it.equals("Default", ignoreCase = true) || it.isBlank() }
+                ?: playbackModel.song.value?.name?.raw
+                ?: getString(R.string.fmt_queue_slot, slotIndex)
+        sessionSlotStore.saveSlot(
+            SessionSlotItem(
+                slotIndex = slotIndex,
+                name = title,
+                sceneId = null,
+                updatedAtMs = System.currentTimeMillis(),
+                queueTrackUids = uids,
+                currentIndex = pagerQueue.index,
+                positionMs = playbackModel.positionDs.value * 100L,
+            )
+        )
+        lanSyncRepository.scheduleM3u8WriteBack(title, pagerQueue.queue)
+        if (showFeedback) {
+            Toast.makeText(
+                    requireContext().applicationContext,
+                    getString(R.string.fmt_scene_switched_slot, slotIndex, title),
+                    Toast.LENGTH_SHORT,
+                )
+                .show()
+        }
+    }
+
+    private fun handleSlotChipClick(
+        targetSlotIndex: Int,
+        activeSlotIndex: Int,
+        activeSceneLabel: String,
+        existing: SessionSlotItem?,
+    ) {
+        if (targetSlotIndex == activeSlotIndex) {
+            saveCurrentQueueToSlot(targetSlotIndex, activeSceneLabel, showFeedback = true)
+            return
+        }
+        // Snapshot the outgoing active slot automatically before switching away.
+        saveCurrentQueueToSlot(activeSlotIndex, activeSceneLabel, showFeedback = false)
+        if (existing == null || existing.queueTrackUids.isEmpty()) {
+            saveCurrentQueueToSlot(targetSlotIndex, "Default", showFeedback = true)
+            return
+        }
+        val allSongs =
+            musicRepository.library?.songs?.associateBy { it.uid.toString() } ?: emptyMap()
+        val resolved = existing.queueTrackUids.mapNotNull { allSongs[it] }
+        if (resolved.isEmpty()) {
+            requireContext().showToast(R.string.lbl_scene_no_matches)
+            return
+        }
+        sessionSlotStore.setActiveScene(existing.name, targetSlotIndex)
+        playbackModel.restoreSessionQueue(
+            songs = resolved,
+            index = existing.currentIndex.coerceIn(0, resolved.lastIndex),
+            positionMs = existing.positionMs,
+        )
+        Toast.makeText(
+                requireContext().applicationContext,
+                getString(R.string.fmt_scene_switched_slot, targetSlotIndex, existing.name),
+                Toast.LENGTH_SHORT,
+            )
+            .show()
+    }
+}
+
+@Composable
+private fun QueuePersistentSlotBar(
+    slots: List<SessionSlotItem>,
+    activeSlotIndex: Int,
+    onSelectSlot: (Int, SessionSlotItem?) -> Unit,
+    onSaveCurrent: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = androidx.compose.ui.graphics.Color.Transparent,
+    ) {
+        androidx.compose.foundation.layout.Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier =
+                    Modifier.fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                for (slotIdx in 1..5) {
+                    val existing = slots.firstOrNull { it.slotIndex == slotIdx }
+                    val selected = activeSlotIndex == slotIdx
+                    val label =
+                        if (existing != null) {
+                            "#$slotIdx (${existing.queueTrackUids.size})"
+                        } else {
+                            "+ #$slotIdx"
+                        }
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onSelectSlot(slotIdx, existing) },
+                        label = { Text(label) },
+                    )
+                }
+                AssistChip(
+                    onClick = onSaveCurrent,
+                    label = { Text(stringResource(R.string.lbl_save_current_slot)) },
+                )
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         }
     }
 }

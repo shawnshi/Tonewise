@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
@@ -242,6 +243,384 @@ public sealed class LastFmLedgerAndSyncP3Tests
         {
             SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LastFmWebApiClient_PullsTopTrackPlayCounts_AndLovedTracks_WithoutSessionKey()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_p4_lfm_top_" + Guid.NewGuid().ToString("N"));
+        string dotTonewise = Path.Combine(tempRoot, ".tonewise");
+        Directory.CreateDirectory(dotTonewise);
+        string dbPath = Path.Combine(dotTonewise, "manifest.db");
+
+        try
+        {
+            string schemaSql = File.ReadAllText(Path.Combine(FindRepoRoot(), "protocol", "schemas", "manifest.sql"));
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var setup = conn.CreateCommand();
+                setup.CommandText = schemaSql;
+                setup.ExecuteNonQuery();
+            }
+
+            new StagingDiffStore(dbPath).EnsureSchema();
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                        title, album, album_artist, artists_json, legacy_play_count, lastfm_pulled_count,
+                        local_unsynced_expired_count, play_count_total, rating
+                    ) VALUES (
+                        'uid_goldberg_top', X'01', 16, X'02', 128,
+                        'Bach/01.flac', 100, 1000, 'flac', 96000, 210000,
+                        'Aria', 'Goldberg Variations', 'Glenn Gould', '["Johann Sebastian Bach"]',
+                        0, 0, 0, 0, 0
+                    ), (
+                        'uid_unique_title', X'03', 16, X'04', 128,
+                        'Ambient/02.flac', 100, 1000, 'flac', 96000, 180000,
+                        'Dawn Reflected', 'Morning Sketches', NULL, '["Unknown Ensemble"]',
+                        2, 0, 0, 2, 0
+                    );
+                    """;
+                ins.ExecuteNonQuery();
+            }
+
+            var handler = new StubHttpHandler(req =>
+            {
+                string query = req.RequestUri?.Query ?? "";
+                if (query.Contains("method=user.gettoptracks", StringComparison.OrdinalIgnoreCase))
+                {
+                    return """
+                        {
+                          "toptracks": {
+                            "@attr": { "totalPages": "1" },
+                            "track": [
+                              { "name": "Aria", "playcount": "18", "artist": { "name": "Glenn Gould" } },
+                              { "name": "Dawn Reflected", "playcount": "9", "artist": { "name": "Different Cloud ArtistTag" } }
+                            ]
+                          }
+                        }
+                        """;
+                }
+                if (query.Contains("method=user.getrecenttracks", StringComparison.OrdinalIgnoreCase))
+                {
+                    return """{ "recenttracks": { "@attr": { "totalPages": "1" }, "track": [] } }""";
+                }
+                if (query.Contains("method=user.getlovedtracks", StringComparison.OrdinalIgnoreCase))
+                {
+                    return """
+                        {
+                          "lovedtracks": {
+                            "@attr": { "totalPages": "1" },
+                            "track": [
+                              { "name": "Aria", "artist": { "name": "Glenn Gould" } }
+                            ]
+                          }
+                        }
+                        """;
+                }
+                return "{}";
+            });
+
+            using var httpClient = new HttpClient(handler);
+            var client = new LastFmWebApiClient(httpClient);
+            var config = new LastFmAccountConfig(
+                ApiKey: "test-key",
+                ApiSecret: "",
+                Username: "testuser",
+                SessionKey: "",
+                LastPullUnixSec: 0);
+
+            var summary = await client.RunFullBidirectionalSyncAsync(dbPath, dotTonewise, config);
+            Assert.Equal(2, summary.TopPlayCountsUpdated);
+            Assert.Equal(1, summary.LovedTracksUpdated);
+            Assert.Equal(0, summary.PushedScrobbles);
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            {
+                conn.Open();
+                using var q1 = conn.CreateCommand();
+                q1.CommandText = "SELECT lastfm_pulled_count, play_count_total, rating FROM tracks WHERE track_uid = 'uid_goldberg_top';";
+                using var r1 = q1.ExecuteReader();
+                Assert.True(r1.Read());
+                Assert.Equal(18, r1.GetInt32(0));
+                Assert.Equal(18, r1.GetInt32(1));
+                Assert.Equal(5, r1.GetInt32(2));
+
+                using var q2 = conn.CreateCommand();
+                q2.CommandText = "SELECT lastfm_pulled_count, play_count_total FROM tracks WHERE track_uid = 'uid_unique_title';";
+                using var r2 = q2.ExecuteReader();
+                Assert.True(r2.Read());
+                Assert.Equal(9, r2.GetInt32(0));
+                Assert.Equal(9, r2.GetInt32(1));
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BasicMetadataLookupService_FillsOnlyMissingFields_WithoutOverwritingExisting()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_p4_meta_" + Guid.NewGuid().ToString("N"));
+        string albumDir = Path.Combine(tempRoot, "Artists", "Ryuichi Sakamoto");
+        Directory.CreateDirectory(albumDir);
+
+        try
+        {
+            // Valid minimal JPEG with SOF0 frame encoding 800x800 (0x0320 x 0x0320)
+            byte[] validJpeg =
+            [
+                0xFF, 0xD8,
+                0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x03, 0x20, 0x03, 0x20, 0x03, 0x01, 0x11, 0x00,
+                0xFF, 0xD9
+            ];
+
+            var handler = new StubBinaryHttpHandler(req =>
+            {
+                string url = req.RequestUri?.AbsoluteUri ?? "";
+                if (url.Contains("itunes.apple.com", StringComparison.OrdinalIgnoreCase))
+                {
+                    string json = """
+                        {
+                          "results": [{
+                            "trackName": "Solari",
+                            "artistName": "Cloud Override Artist",
+                            "collectionName": "1996",
+                            "primaryGenreName": "Cloud Override Genre",
+                            "releaseDate": "1996-05-17T07:00:00Z",
+                            "trackTimeMillis": 250000,
+                            "artworkUrl100": "https://cdn.example.invalid/cover/100x100bb.jpg"
+                          }]
+                        }
+                        """;
+                    return (Encoding.UTF8.GetBytes(json), "application/json");
+                }
+                if (url.Contains("musicbrainz.org", StringComparison.OrdinalIgnoreCase))
+                {
+                    string json = """
+                        {
+                          "recordings": [{
+                            "length": 250000,
+                            "releases": [{
+                              "title": "1996",
+                              "date": "1996-05-17",
+                              "label-info": [{ "label": { "name": "Milan Records" } }]
+                            }]
+                          }]
+                        }
+                        """;
+                    return (Encoding.UTF8.GetBytes(json), "application/json");
+                }
+                if (url.Contains("cdn.example.invalid", StringComparison.OrdinalIgnoreCase))
+                {
+                    return (validJpeg, "image/jpeg");
+                }
+                return (null, "text/plain");
+            });
+
+            using var httpClient = new HttpClient(handler);
+            var service = new BasicMetadataLookupService(httpClient);
+            var query = new BasicMetadataQuery(
+                TrackUid: "uid_solari",
+                FullPath: Path.Combine(albumDir, "01 - Solari.flac"),
+                RelPath: "Artists/Ryuichi Sakamoto/01 - Solari.flac",
+                Title: "Solari",
+                Artists: "Original Artist",
+                Album: "",
+                Composers: "",
+                Conductors: "",
+                WorkName: "",
+                MovementName: "",
+                Genre: "Rock",
+                Year: null,
+                Publisher: "",
+                DurationMs: 250000,
+                AlbumDirectory: albumDir,
+                CoverArtPath: null);
+
+            var (updates, savedCover) = await service.ResolveMissingMetadataAsync(query);
+
+            // Must NOT overwrite non-empty Artists or Genre
+            Assert.False(updates.ContainsKey("artists_json"));
+            Assert.False(updates.ContainsKey("genre"));
+
+            // Must fill missing Album, Year, Publisher, and save cover.jpg
+            Assert.Equal("1996", updates["album"]);
+            Assert.Equal("1996", updates["year"]);
+            Assert.Equal("Milan Records", updates["publisher"]);
+            Assert.True(savedCover);
+            Assert.True(File.Exists(Path.Combine(albumDir, "cover.jpg")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LastFmWebApiClient_MatchesTraditionalSimplifiedChinese_EditionSuffixes_MultiCopy_AndSkewedClockFallback()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_p4_lfm_cjk_" + Guid.NewGuid().ToString("N"));
+        string dotTonewise = Path.Combine(tempRoot, ".tonewise");
+        Directory.CreateDirectory(dotTonewise);
+        string dbPath = Path.Combine(dotTonewise, "manifest.db");
+
+        try
+        {
+            string schemaSql = File.ReadAllText(Path.Combine(FindRepoRoot(), "protocol", "schemas", "manifest.sql"));
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var setup = conn.CreateCommand();
+                setup.CommandText = schemaSql;
+                setup.ExecuteNonQuery();
+            }
+
+            new StagingDiffStore(dbPath).EnsureSchema();
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                        title, album, artists_json, legacy_play_count, lastfm_pulled_count,
+                        local_unsynced_expired_count, play_count_total, rating
+                    ) VALUES (
+                        'uid_chen_trad', X'11', 16, X'12', 128,
+                        'Pop/01.flac', 100, 1000, 'flac', 44100, 220000,
+                        '滾滾紅塵', '精選', '["陳淑樺"]', 0, 0, 0, 0, 0
+                    ), (
+                        'uid_hey_jude_1', X'21', 16, X'22', 128,
+                        'Beatles/A/01.flac', 100, 1000, 'flac', 96000, 420000,
+                        'Hey Jude', '1', '["The Beatles"]', 0, 0, 0, 0, 0
+                    ), (
+                        'uid_hey_jude_2', X'31', 16, X'32', 128,
+                        'Beatles/Past/01.flac', 100, 1000, 'flac', 96000, 420000,
+                        'Hey Jude', 'Past Masters', '["The Beatles"]', 0, 0, 0, 0, 0
+                    );
+                    """;
+                ins.ExecuteNonQuery();
+            }
+
+            var handler = new StubHttpHandler(req =>
+            {
+                string q = req.RequestUri?.Query ?? "";
+                if (q.Contains("method=user.gettoptracks", StringComparison.OrdinalIgnoreCase))
+                {
+                    return """
+                        {
+                          "toptracks": {
+                            "@attr": { "totalPages": "1" },
+                            "track": [
+                              { "name": "滚滚红尘", "playcount": "42", "artist": { "name": "陈淑桦" } },
+                              { "name": "Hey Jude - Remastered 2015", "playcount": "31", "artist": { "name": "The Beatles" } }
+                            ]
+                          }
+                        }
+                        """;
+                }
+                if (q.Contains("method=user.getrecenttracks", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Simulate future/skewed &from= watermark returning empty until fallback fromUnixSec=0 is queried
+                    if (q.Contains("&from=", StringComparison.OrdinalIgnoreCase))
+                        return """{ "recenttracks": { "@attr": { "totalPages": "1" }, "track": [] } }""";
+                    return """
+                        {
+                          "recenttracks": {
+                            "@attr": { "totalPages": "1" },
+                            "track": [
+                              { "name": "滚滚红尘", "artist": { "#text": "陈淑桦" }, "album": { "#text": "" }, "date": { "uts": "1730000500" } }
+                            ]
+                          }
+                        }
+                        """;
+                }
+                if (q.Contains("method=user.getlovedtracks", StringComparison.OrdinalIgnoreCase))
+                {
+                    return """
+                        {
+                          "lovedtracks": {
+                            "@attr": { "totalPages": "1" },
+                            "track": [
+                              { "name": "滚滚红尘", "artist": { "name": "陈淑桦" } },
+                              { "name": "Hey Jude - Remastered 2015", "artist": { "name": "The Beatles" } }
+                            ]
+                          }
+                        }
+                        """;
+                }
+                return "{}";
+            });
+
+            using var httpClient = new HttpClient(handler);
+            var client = new LastFmWebApiClient(httpClient);
+            var config = new LastFmAccountConfig("k", "", "u", "", LastPullUnixSec: 1_900_000_000L);
+            var summary = await client.RunFullBidirectionalSyncAsync(dbPath, dotTonewise, config);
+
+            Assert.Equal(3, summary.TopPlayCountsUpdated);
+            Assert.Equal(3, summary.LovedTracksUpdated);
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT track_uid, play_count_total, rating FROM tracks ORDER BY track_uid;";
+                using var r = cmd.ExecuteReader();
+                int rows = 0;
+                while (r.Read())
+                {
+                    rows++;
+                    Assert.True(r.GetInt32(1) >= 31);
+                    Assert.Equal(5, r.GetInt32(2));
+                }
+                Assert.Equal(3, rows);
+            }
+
+            var updatedCfg = LastFmAccountConfig.Load(dotTonewise);
+            Assert.Equal(1730000501L, updatedCfg!.LastPullUnixSec);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    private sealed class StubHttpHandler(Func<HttpRequestMessage, string> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string json = responder(request);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        }
+    }
+
+    private sealed class StubBinaryHttpHandler(Func<HttpRequestMessage, (byte[]? Body, string MediaType)> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var (body, mediaType) = responder(request);
+            if (body is null) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            var msg = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+            msg.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType);
+            return Task.FromResult(msg);
         }
     }
 }

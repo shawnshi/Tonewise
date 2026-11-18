@@ -88,6 +88,12 @@ interface MusicRepository {
     /** The current library */
     val library: Library?
 
+    /** All extracted classical composers indexed from the current library. */
+    val composers: Collection<PersonArtist>
+
+    /** All extracted classical conductors indexed from the current library. */
+    val conductors: Collection<PersonArtist>
+
     /** The current state of music loading. Null if no load has occurred yet. */
     val indexingState: IndexingState?
 
@@ -294,6 +300,12 @@ constructor(
     @Volatile private var workBySongUid: Map<Music.UID, ClassicalWork> = emptyMap()
     @Volatile private var previousCompletedState: IndexingState.Completed? = null
     @Volatile private var currentIndexingState: IndexingState? = null
+    override val composers: Collection<PersonArtist>
+        get() = composerMap.values.distinctBy { it.uid }
+
+    override val conductors: Collection<PersonArtist>
+        get() = conductorMap.values.distinctBy { it.uid }
+
     override val indexingState: IndexingState?
         get() = currentIndexingState ?: previousCompletedState
 

@@ -29,43 +29,129 @@ public sealed class LibraryStore
             ? new EncyclopediaService(EncyclopediaDbPath)
             : null;
 
-    public bool ScanAndBuildManifestIfMissing(string musicRoot, bool forceRebuild = false)
+    public bool ScanAndBuildManifestIfMissing(string musicRoot, bool forceRebuild = false, bool fastMode = true)
     {
         if (string.IsNullOrWhiteSpace(musicRoot) || !Directory.Exists(musicRoot))
             return false;
 
         string tonewiseDir = Path.Combine(musicRoot, ".tonewise");
         string dbPath = Path.Combine(tonewiseDir, "manifest.db");
-        if (!forceRebuild && File.Exists(dbPath))
+        if (!forceRebuild && HasPopulatedManifest(dbPath))
             return false;
 
         string? cliExe = FindTonewiseCliExecutable();
         if (cliExe is not null)
         {
-            using var proc = Process.Start(new ProcessStartInfo
+            using var proc = StartScanCliProcess(cliExe, musicRoot, tonewiseDir, fastMode);
+            if (proc is not null)
             {
-                FileName = cliExe,
-                ArgumentList = { "scan", musicRoot, "--out", tonewiseDir },
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
-            proc?.WaitForExit(120_000);
-            if (proc is { ExitCode: 0 } && File.Exists(dbPath))
-            {
-                return true;
+                if (!proc.WaitForExit(300_000))
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                }
+                else if (proc.HasExited && proc.ExitCode == 0 && HasPopulatedManifest(dbPath))
+                {
+                    return true;
+                }
             }
         }
 
         // Fallback: in-process Rust FFI scan + minimal SQLite manifest build
         Directory.CreateDirectory(tonewiseDir);
         BuildManifestWithFfiFallback(musicRoot, dbPath);
-        return File.Exists(dbPath);
+        return HasPopulatedManifest(dbPath);
+    }
+
+    public async Task<bool> ScanAndBuildManifestIfMissingAsync(
+        string musicRoot,
+        bool forceRebuild = false,
+        bool fastMode = true,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(musicRoot) || !Directory.Exists(musicRoot))
+            return false;
+
+        string tonewiseDir = Path.Combine(musicRoot, ".tonewise");
+        string dbPath = Path.Combine(tonewiseDir, "manifest.db");
+        if (!forceRebuild && HasPopulatedManifest(dbPath))
+            return false;
+
+        string? cliExe = FindTonewiseCliExecutable();
+        if (cliExe is not null)
+        {
+            using var proc = StartScanCliProcess(cliExe, musicRoot, tonewiseDir, fastMode);
+            if (proc is not null)
+            {
+                try
+                {
+                    await proc.WaitForExitAsync(ct).ConfigureAwait(false);
+                    if (proc.HasExited && proc.ExitCode == 0 && HasPopulatedManifest(dbPath))
+                    {
+                        return true;
+                    }
+                }
+                finally
+                {
+                    if (!proc.HasExited)
+                    {
+                        try { proc.Kill(entireProcessTree: true); } catch { }
+                    }
+                }
+            }
+        }
+
+        ct.ThrowIfCancellationRequested();
+        await Task.Run(() =>
+        {
+            Directory.CreateDirectory(tonewiseDir);
+            BuildManifestWithFfiFallback(musicRoot, dbPath);
+        }, ct).ConfigureAwait(false);
+        return HasPopulatedManifest(dbPath);
+    }
+
+    private static Process? StartScanCliProcess(string cliExe, string musicRoot, string tonewiseDir, bool fastMode)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = cliExe,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        psi.ArgumentList.Add("scan");
+        psi.ArgumentList.Add(musicRoot);
+        psi.ArgumentList.Add("--out");
+        psi.ArgumentList.Add(tonewiseDir);
+        if (fastMode)
+        {
+            psi.ArgumentList.Add("--fast");
+        }
+        return Process.Start(psi);
+    }
+
+    private static bool HasPopulatedManifest(string dbPath)
+    {
+        if (!File.Exists(dbPath))
+            return false;
+
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT EXISTS(SELECT 1 FROM tracks LIMIT 1);";
+            object? res = cmd.ExecuteScalar();
+            return res is not null && res != DBNull.Value && Convert.ToInt64(res) > 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public IReadOnlyList<TrackItem> LoadFromMusicRoot(string musicRoot)
     {
         MusicRoot = musicRoot;
-        ScanAndBuildManifestIfMissing(musicRoot, forceRebuild: false);
+        ScanAndBuildManifestIfMissing(musicRoot, forceRebuild: false, fastMode: true);
         string tonewiseDir = Path.Combine(musicRoot, ".tonewise");
         string dbPath = Path.Combine(tonewiseDir, "manifest.db");
         string wfPath = Path.Combine(tonewiseDir, "waveforms.bin");
@@ -79,18 +165,62 @@ public sealed class LibraryStore
             return [];
         }
 
-        var items = new List<TrackItem>();
+        var albumAssetsCache = new Dictionary<string, (string? Cover, string? Booklet)>(StringComparer.OrdinalIgnoreCase);
         using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
         conn.Open();
 
         var cols = ReadExistingColumns(conn);
+        string selectSql = BuildTrackSelectSql(cols, "ORDER BY album, rel_path");
+        return ReadTracksFromSql(conn, musicRoot, selectSql, albumAssetsCache);
+    }
+
+    public IReadOnlyDictionary<string, TrackItem> LoadTracksByUids(string musicRoot, IReadOnlyCollection<string> trackUids)
+    {
+        var result = new Dictionary<string, TrackItem>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(musicRoot) || trackUids.Count == 0)
+            return result;
+
+        string dbPath = Path.Combine(musicRoot, ".tonewise", "manifest.db");
+        if (!File.Exists(dbPath))
+            return result;
+
+        var albumAssetsCache = new Dictionary<string, (string? Cover, string? Booklet)>(StringComparer.OrdinalIgnoreCase);
+        using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+        conn.Open();
+        var cols = ReadExistingColumns(conn);
+
+        var distinctUids = trackUids.Where(u => !string.IsNullOrWhiteSpace(u)).Distinct(StringComparer.Ordinal).ToList();
+        const int batchSize = 500;
+        for (int offset = 0; offset < distinctUids.Count; offset += batchSize)
+        {
+            var chunk = distinctUids.Skip(offset).Take(batchSize).ToList();
+            var paramNames = Enumerable.Range(0, chunk.Count).Select(i => $"$u{i}").ToArray();
+            string sql = BuildTrackSelectSql(cols, $"WHERE track_uid IN ({string.Join(", ", paramNames)})");
+            var loaded = ReadTracksFromSql(conn, musicRoot, sql, albumAssetsCache, cmd =>
+            {
+                for (int i = 0; i < chunk.Count; i++)
+                {
+                    cmd.Parameters.AddWithValue(paramNames[i], chunk[i]);
+                }
+            });
+            foreach (var item in loaded)
+            {
+                result[item.TrackUid] = item;
+            }
+        }
+
+        return result;
+    }
+
+    private static string BuildTrackSelectSql(HashSet<string> cols, string tailClause)
+    {
         bool hasPublisher = cols.Contains("publisher");
         bool hasPlayCountTotal = cols.Contains("play_count_total");
         bool hasLedgerCols = cols.Contains("legacy_play_count")
                              && cols.Contains("lastfm_pulled_count")
                              && cols.Contains("local_unsynced_expired_count");
 
-        string selectSql = $"""
+        return $"""
             SELECT
                 track_uid, audio_frame_blake3, rel_path, title, album,
                 artists_json, composers_json, conductors_json, work_name, movement_name,
@@ -103,11 +233,21 @@ public sealed class LibraryStore
                 {(hasLedgerCols ? "lastfm_pulled_count" : "0")} AS lastfm_pulled_count,
                 {(hasLedgerCols ? "local_unsynced_expired_count" : "0")} AS local_unsynced_expired_count
             FROM tracks
-            ORDER BY album, rel_path
+            {tailClause}
             """;
+    }
 
+    private static List<TrackItem> ReadTracksFromSql(
+        SqliteConnection conn,
+        string musicRoot,
+        string selectSql,
+        Dictionary<string, (string? Cover, string? Booklet)> albumAssetsCache,
+        Action<SqliteCommand>? bindParameters = null)
+    {
+        var items = new List<TrackItem>();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = selectSql;
+        bindParameters?.Invoke(cmd);
 
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
@@ -117,6 +257,15 @@ public sealed class LibraryStore
             string relPath = reader.GetString(2);
             string fullPath = Path.Combine(musicRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
             string albumDir = Path.GetDirectoryName(fullPath) ?? musicRoot;
+
+            if (!albumAssetsCache.TryGetValue(albumDir, out var assets))
+            {
+                assets = (
+                    FindFirstExisting(albumDir, "cover.jpg", "cover.png", "folder.jpg"),
+                    FindBookletPdf(albumDir)
+                );
+                albumAssetsCache[albumDir] = assets;
+            }
 
             var artists = ParseStringArray(reader.GetString(5));
             var composers = ParseStringArray(reader.GetString(6));
@@ -164,8 +313,8 @@ public sealed class LibraryStore
                     Publisher: publisher,
                     EffectivePlayCount: effectiveCount,
                     AlbumDirectory: albumDir,
-                    CoverArtPath: FindFirstExisting(albumDir, "cover.jpg", "cover.png", "folder.jpg"),
-                    BookletPdfPath: FindBookletPdf(albumDir)
+                    CoverArtPath: assets.Cover,
+                    BookletPdfPath: assets.Booklet
                 )
             );
         }
@@ -179,6 +328,9 @@ public sealed class LibraryStore
         if (store is null) return 0;
 
         var proposals = new List<TagDiffProposal>();
+        int realAnalyzed = 0;
+        const int maxRealAnalysisPerBatch = 64;
+
         foreach (var t in tracks)
         {
             var snap = new TrackCurationSnapshot(
@@ -195,8 +347,10 @@ public sealed class LibraryStore
                 DjSceneJson: t.DjScene.Count > 0 ? JsonSerializer.Serialize(t.DjScene) : "[]"
             );
 
-            if (File.Exists(t.FullPath))
+            bool needsAcoustic = !t.TempoBpm.HasValue || t.DjScene.Count == 0 || string.IsNullOrWhiteSpace(t.DjVocals);
+            if (needsAcoustic && realAnalyzed < maxRealAnalysisPerBatch && File.Exists(t.FullPath))
             {
+                realAnalyzed++;
                 try
                 {
                     var inferred = Acoustic5DInferenceService.AnalyzeFileAndInfer5D(t.TrackUid, t.FullPath, t.IsClassical);

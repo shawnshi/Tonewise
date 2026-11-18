@@ -18,6 +18,7 @@ public sealed class DspSampleProvider : ISampleProvider
     private readonly TpdfDitherProcessor _dither = new();
 
     private double _preampLinear = 1.0;
+    private double _masterLinear = 1.0;
     private volatile bool _bypass;
 
     public DspSampleProvider(ISampleProvider source)
@@ -110,6 +111,24 @@ public sealed class DspSampleProvider : ISampleProvider
         }
     }
 
+    /// <summary>
+    /// Master digital volume stage (applied after preamp/ReplayGain). Muted forces silence.
+    /// </summary>
+    public void ConfigureMasterVolume(double attenuationDb, bool muted)
+    {
+        double clamped = Math.Clamp(attenuationDb, -60.0, 0.0);
+        double linear = muted ? 0.0 : (clamped >= -0.05 ? 1.0 : Math.Pow(10.0, clamped / 20.0));
+        lock (_dspLock)
+        {
+            _masterLinear = linear;
+        }
+    }
+
+    public double MasterLinearGain
+    {
+        get { lock (_dspLock) return _masterLinear; }
+    }
+
     public void ConfigureFirImpulse(double[]? leftIr, double[]? rightIr, double dryWetMix = 1.0, string? sourceLabel = null)
     {
         lock (_dspLock)
@@ -128,17 +147,20 @@ public sealed class DspSampleProvider : ISampleProvider
 
     public void ConfigureFirFromWav(string? wavPath, double dryWetMix = 1.0)
     {
-        lock (_dspLock)
+        if (string.IsNullOrWhiteSpace(wavPath) || !File.Exists(wavPath))
         {
-            if (string.IsNullOrWhiteSpace(wavPath) || !File.Exists(wavPath))
+            lock (_dspLock)
             {
                 _firConvolver.Clear();
             }
-            else
-            {
-                _firConvolver.DryWetMix = dryWetMix;
-                _firConvolver.LoadImpulseFromSofaOrWav(wavPath, normalizeEnergy: true);
-            }
+            return;
+        }
+
+        var (left, right) = PartitionedFirConvolver.ReadImpulseArraysFromSofaOrWav(wavPath);
+        lock (_dspLock)
+        {
+            _firConvolver.DryWetMix = dryWetMix;
+            _firConvolver.LoadImpulse(left, right, normalizeEnergy: true, sourceLabel: wavPath);
         }
     }
 
@@ -163,7 +185,7 @@ public sealed class DspSampleProvider : ISampleProvider
         lock (_dspLock)
         {
             bool anyEq = _biquadNode.TotalSpecCount > 0;
-            bool anyGain = Math.Abs(_preampLinear - 1.0) >= 1e-9;
+            bool anyGain = Math.Abs(_preampLinear * _masterLinear - 1.0) >= 1e-9;
             bool anyIso = _iso226.IsEnabled && _iso226.VolumeAttenuationDb < -0.5;
             bool anyFir = _firConvolver.IsEnabled && _firConvolver.LoadedTapCount > 0;
             bool anyVst3 = _vst3Bridge.ActiveSlotCount > 0 && _vst3Bridge.IsWorkerConnected;
@@ -174,6 +196,7 @@ public sealed class DspSampleProvider : ISampleProvider
             }
 
             double gain = _preampLinear;
+            double master = _masterLinear;
             for (int i = 0; i < read; i++)
             {
                 int ch = i % channels;
@@ -182,6 +205,7 @@ public sealed class DspSampleProvider : ISampleProvider
                 sample = _biquadNode.ProcessSample(sample, ch);
                 sample = _firConvolver.ProcessSample(sample, ch);
                 sample = _vst3Bridge.ProcessSample(sample, ch);
+                sample *= master;
                 sample = _dither.ProcessSample(sample);
                 buffer[offset + i] = (float)sample;
             }

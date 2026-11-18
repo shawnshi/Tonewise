@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Seek, SeekFrom};
 
+const FAST_HASH_THRESHOLD: u64 = 256 * 1024;
+const FAST_WINDOW_BYTES: u64 = 64 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioFrameFingerprint {
     pub audio_frame_blake3_hex: String,
@@ -17,6 +20,7 @@ struct AudioSpan {
 
 /// Computes `audio_frame_blake3` over pure audio frames while skipping metadata headers
 /// (ID3v2, FLAC metadata/padding blocks, MP4 non-`mdat` atoms, Ogg init/comment pages).
+/// Spans larger than 256 KB hash length + head/mid/tail 64 KB windows to bound I/O on lossless files.
 pub fn compute_audio_frame_fingerprint<R: Read + Seek>(
     reader: &mut R,
 ) -> io::Result<AudioFrameFingerprint> {
@@ -27,18 +31,15 @@ pub fn compute_audio_frame_fingerprint<R: Read + Seek>(
 
     let mut header_hasher = blake3::Hasher::new();
     if span.start > 0 {
-        reader.seek(SeekFrom::Start(0))?;
-        hash_exact_len(reader, &mut header_hasher, span.start)?;
+        hash_span_bounded(reader, &mut header_hasher, 0, span.start)?;
     }
     if span.end < file_size {
-        reader.seek(SeekFrom::Start(span.end))?;
-        hash_exact_len(reader, &mut header_hasher, file_size - span.end)?;
+        hash_span_bounded(reader, &mut header_hasher, span.end, file_size)?;
     }
 
     let mut audio_hasher = blake3::Hasher::new();
     if span.end > span.start {
-        reader.seek(SeekFrom::Start(span.start))?;
-        hash_exact_len(reader, &mut audio_hasher, span.end - span.start)?;
+        hash_span_bounded(reader, &mut audio_hasher, span.start, span.end)?;
     }
 
     Ok(AudioFrameFingerprint {
@@ -47,6 +48,31 @@ pub fn compute_audio_frame_fingerprint<R: Read + Seek>(
         header_size: span.start,
         file_size,
     })
+}
+
+fn hash_span_bounded<R: Read + Seek>(
+    reader: &mut R,
+    hasher: &mut blake3::Hasher,
+    start: u64,
+    end: u64,
+) -> io::Result<()> {
+    let span_len = end.saturating_sub(start);
+    if span_len == 0 {
+        return Ok(());
+    }
+    if span_len <= FAST_HASH_THRESHOLD {
+        reader.seek(SeekFrom::Start(start))?;
+        return hash_exact_len(reader, hasher, span_len);
+    }
+
+    hasher.update(&span_len.to_le_bytes());
+    let mid_start = start + (span_len / 2) - (FAST_WINDOW_BYTES / 2);
+    let tail_start = end - FAST_WINDOW_BYTES;
+    for offset in [start, mid_start, tail_start] {
+        reader.seek(SeekFrom::Start(offset))?;
+        hash_exact_len(reader, hasher, FAST_WINDOW_BYTES)?;
+    }
+    Ok(())
 }
 
 fn hash_exact_len<R: Read>(
@@ -324,5 +350,28 @@ mod tests {
         assert_ne!(fp1.header_blake3_hex, fp2.header_blake3_hex);
         assert_eq!(fp1.header_size, 10 + 6);
         assert_eq!(fp2.header_size, 10 + 17);
+    }
+
+    #[test]
+    fn large_audio_span_fingerprint_is_bounded_and_tag_invariant() {
+        let mut audio = vec![0x5Au8; 400 * 1024];
+        audio[0] = 0x11;
+        audio[200 * 1024] = 0x22;
+        audio[400 * 1024 - 1] = 0x33;
+
+        let v1 = build_synthetic_flac(b"ARTIST=Bach", 4096, &audio);
+        let v2 = build_synthetic_flac(b"ARTIST=Johann Sebastian Bach\0BPM=96", 2048, &audio);
+
+        let mut modified_audio = audio.clone();
+        modified_audio[200 * 1024] = 0x99;
+        let v3 = build_synthetic_flac(b"ARTIST=Bach", 4096, &modified_audio);
+
+        let fp1 = compute_audio_frame_fingerprint(&mut Cursor::new(&v1)).unwrap();
+        let fp2 = compute_audio_frame_fingerprint(&mut Cursor::new(&v2)).unwrap();
+        let fp3 = compute_audio_frame_fingerprint(&mut Cursor::new(&v3)).unwrap();
+
+        assert_eq!(fp1.audio_frame_blake3_hex, fp2.audio_frame_blake3_hex);
+        assert_ne!(fp1.header_blake3_hex, fp2.header_blake3_hex);
+        assert_ne!(fp1.audio_frame_blake3_hex, fp3.audio_frame_blake3_hex);
     }
 }

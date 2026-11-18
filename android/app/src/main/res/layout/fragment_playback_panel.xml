@@ -48,6 +48,19 @@
         app:layout_constraintVertical_chainStyle="packed">
 
         <TextView
+            android:id="@+id/playback_composer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:fallbackLineSpacing="false"
+            android:maxLines="1"
+            android:textColor="?attr/colorSecondary"
+            android:textSize="11sp"
+            android:visibility="gone"
+            tools:text="Johann Sebastian Bach"
+            tools:visibility="visible" />
+
+        <TextView
             android:id="@+id/playback_song"
             style="@style/Widget.Auxio.TextView.Primary.Compact"
             android:layout_width="match_parent"
@@ -69,6 +82,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:fallbackLineSpacing="false"
+            android:visibility="gone"
             tools:text="Album Name" />
 
         <TextView
@@ -79,7 +93,39 @@
             android:alpha="0.8"
             android:fallbackLineSpacing="false"
             android:textSize="11sp"
+            android:visibility="gone"
             tools:text="2024 • Genre • 3 plays" />
+
+        <TextView
+            android:id="@+id/playback_signal_pill"
+            style="@style/Widget.Auxio.TextView.Secondary.Compact"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:background="@drawable/bg_signal_pill"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="3dp"
+            android:textSize="11sp"
+            android:visibility="gone"
+            tools:text="● 64-bit DSP · 48kHz" />
+
+        <HorizontalScrollView
+            android:id="@+id/playback_capsule_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:overScrollMode="never"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/playback_capsule_row"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+
+        </HorizontalScrollView>
 
     </LinearLayout>
     <com.shawnshi.tonewise.playback.ui.ForcedLTRFrameLayout
@@ -97,7 +143,7 @@
         <com.shawnshi.tonewise.playback.ui.button.ScaledPlaybackButtonGroup
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:spacing="@dimen/spacing_tiny">
+            android:spacing="@dimen/spacing_small">
 
             <com.shawnshi.tonewise.playback.ui.button.ScaledPlaybackButton
                 android:id="@+id/playback_repeat"
@@ -106,7 +152,7 @@
                 android:layout_height="wrap_content"
                 android:contentDescription="@string/desc_change_repeat"
                 app:icon="@drawable/ic_repeat_off_24"
-                app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Medium" />
+                app:materialSizeOverlay="@style/SizeOverlay.Tonewise.Button.Playback.Toggle" />
 
             <com.shawnshi.tonewise.playback.ui.button.ScaledPlaybackButton
                 android:id="@+id/playback_skip_prev"
@@ -115,7 +161,7 @@
                 android:layout_height="wrap_content"
                 android:contentDescription="@string/desc_skip_prev"
                 app:icon="@drawable/ic_skip_prev_24"
-                app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Large.Narrow" />
+                app:materialSizeOverlay="@style/SizeOverlay.Tonewise.Button.Playback.Skip" />
 
             <com.shawnshi.tonewise.playback.ui.button.ScaledPlaybackButton
                 android:id="@+id/playback_play_pause"
@@ -124,7 +170,7 @@
                 android:layout_height="wrap_content"
                 android:contentDescription="@string/desc_play_pause"
                 app:icon="@drawable/sel_playing_state_24"
-                app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Large"
+                app:materialSizeOverlay="@style/SizeOverlay.Tonewise.Button.Playback.PlayPause"
                 tools:icon="@drawable/ic_play_24" />
 
             <com.shawnshi.tonewise.playback.ui.button.ScaledPlaybackButton
@@ -134,7 +180,7 @@
                 android:layout_height="wrap_content"
                 android:contentDescription="@string/desc_skip_next"
                 app:icon="@drawable/ic_skip_next_24"
-                app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Large.Narrow" />
+                app:materialSizeOverlay="@style/SizeOverlay.Tonewise.Button.Playback.Skip" />
 
             <com.shawnshi.tonewise.playback.ui.button.ScaledPlaybackButton
                 android:id="@+id/playback_shuffle"
@@ -143,8 +189,7 @@
                 android:layout_height="wrap_content"
                 android:contentDescription="@string/desc_shuffle"
                 app:icon="@drawable/sel_shuffle_state_24"
-                app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Medium"
-                app:tint="@color/sel_activatable_icon" />
+                app:materialSizeOverlay="@style/SizeOverlay.Tonewise.Button.Playback.Toggle" />
 
         </com.shawnshi.tonewise.playback.ui.button.ScaledPlaybackButtonGroup>
 

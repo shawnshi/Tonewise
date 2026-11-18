@@ -82,6 +82,12 @@ public sealed class PartitionedFirConvolver
 
     public void LoadImpulseFromWav(string wavPath, bool normalizeEnergy = true)
     {
+        var (left, right) = ReadImpulseArraysFromWav(wavPath);
+        LoadImpulse(left, right, normalizeEnergy, wavPath);
+    }
+
+    public static (double[] Left, double[] Right) ReadImpulseArraysFromWav(string wavPath)
+    {
         if (!File.Exists(wavPath))
         {
             throw new FileNotFoundException("FIR impulse file not found", wavPath);
@@ -107,7 +113,7 @@ public sealed class PartitionedFirConvolver
             }
         }
 
-        LoadImpulse(left.ToArray(), right.ToArray(), normalizeEnergy, wavPath);
+        return (left.ToArray(), right.ToArray());
     }
 
     /// <summary>
@@ -115,26 +121,35 @@ public sealed class PartitionedFirConvolver
     /// </summary>
     public void LoadImpulseFromSofaOrWav(string filePath, bool normalizeEnergy = true)
     {
+        var (left, right) = ReadImpulseArraysFromSofaOrWav(filePath);
+        LoadImpulse(left, right, normalizeEnergy, filePath);
+    }
+
+    public static (double[] Left, double[] Right) ReadImpulseArraysFromSofaOrWav(string filePath)
+    {
         if (!File.Exists(filePath))
             throw new FileNotFoundException("Impulse file not found", filePath);
 
         if (!filePath.EndsWith(".sofa", StringComparison.OrdinalIgnoreCase))
         {
-            LoadImpulseFromWav(filePath, normalizeEnergy);
-            return;
+            return ReadImpulseArraysFromWav(filePath);
         }
 
         byte[] raw = File.ReadAllBytes(filePath);
-        // 1. Compact TW-SOFA JSON envelope (`{ "left_ir": [...], "right_ir": [...] }`)
-        if (raw.Length > 0 && raw[0] == (byte)'{')
+        ReadOnlySpan<byte> jsonSpan = raw;
+        if (jsonSpan.Length >= 3 && jsonSpan[0] == 0xEF && jsonSpan[1] == 0xBB && jsonSpan[2] == 0xBF)
         {
-            using var doc = JsonDocument.Parse(raw);
+            jsonSpan = jsonSpan[3..];
+        }
+        // 1. Compact TW-SOFA JSON envelope (`{ "left_ir": [...], "right_ir": [...] }`)
+        if (jsonSpan.Length > 0 && jsonSpan[0] == (byte)'{')
+        {
+            using var doc = JsonDocument.Parse(jsonSpan.ToArray());
             double[] l = ReadJsonDoubleArray(doc.RootElement, "left_ir");
             double[] r = doc.RootElement.TryGetProperty("right_ir", out _)
                 ? ReadJsonDoubleArray(doc.RootElement, "right_ir")
                 : l;
-            LoadImpulse(l, r, normalizeEnergy, filePath);
-            return;
+            return (l, r);
         }
 
         // 2. Validate HDF5 SOFA signature (\x89HDF\r\n\x1a\n) or TW-SOFA binary impulse block
@@ -164,8 +179,7 @@ public sealed class PartitionedFirConvolver
                         r[i] = l[i];
                     }
                 }
-                LoadImpulse(l, r, normalizeEnergy, filePath);
-                return;
+                return (l, r);
             }
             throw new InvalidDataException("HDF5 .sofa dataset requires pre-extracted WAV or TWIR stereo impulse block");
         }

@@ -41,6 +41,10 @@
         android:icon="@drawable/ic_details_24"
         android:title="@string/lbl_song_detail" />
     <item
+        android:id="@+id/action_quick_tag"
+        android:icon="@drawable/ic_edit_24"
+        android:title="@string/lbl_quick_tag_menu" />
+    <item
         android:id="@+id/action_share"
         android:icon="@drawable/ic_share_24"
         android:title="@string/lbl_share" />

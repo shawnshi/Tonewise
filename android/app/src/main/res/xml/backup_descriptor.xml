@@ -4,4 +4,8 @@
     <exclude
         domain="database"
         path="music_cache.db" />
+    <!-- Exclude sensitive Last.fm API secrets and session keys from cloud backup -->
+    <exclude
+        domain="sharedpref"
+        path="tonewise_lastfm.xml" />
 </full-backup-content>

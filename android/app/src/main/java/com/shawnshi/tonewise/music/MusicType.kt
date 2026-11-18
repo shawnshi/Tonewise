@@ -30,6 +30,8 @@ enum class MusicType {
     SONGS,
     ALBUMS,
     ARTISTS,
+    COMPOSERS,
+    CONDUCTORS,
     GENRES,
     PLAYLISTS,
     SCENES;
@@ -45,6 +47,8 @@ enum class MusicType {
                 SONGS -> IntegerTable.MUSIC_MODE_SONGS
                 ALBUMS -> IntegerTable.MUSIC_MODE_ALBUMS
                 ARTISTS -> IntegerTable.MUSIC_MODE_ARTISTS
+                COMPOSERS -> IntegerTable.MUSIC_MODE_COMPOSERS
+                CONDUCTORS -> IntegerTable.MUSIC_MODE_CONDUCTORS
                 GENRES -> IntegerTable.MUSIC_MODE_GENRES
                 PLAYLISTS -> IntegerTable.MUSIC_MODE_PLAYLISTS
                 SCENES -> IntegerTable.MUSIC_MODE_SCENES
@@ -56,6 +60,8 @@ enum class MusicType {
                 SONGS -> R.string.lbl_songs
                 ALBUMS -> R.string.lbl_albums
                 ARTISTS -> R.string.lbl_artists
+                COMPOSERS -> R.string.lbl_composers
+                CONDUCTORS -> R.string.lbl_conductors
                 GENRES -> R.string.lbl_genres
                 PLAYLISTS -> R.string.lbl_playlists
                 SCENES -> R.string.lbl_scenes
@@ -74,6 +80,8 @@ enum class MusicType {
                 IntegerTable.MUSIC_MODE_SONGS -> SONGS
                 IntegerTable.MUSIC_MODE_ALBUMS -> ALBUMS
                 IntegerTable.MUSIC_MODE_ARTISTS -> ARTISTS
+                IntegerTable.MUSIC_MODE_COMPOSERS -> COMPOSERS
+                IntegerTable.MUSIC_MODE_CONDUCTORS -> CONDUCTORS
                 IntegerTable.MUSIC_MODE_GENRES -> GENRES
                 IntegerTable.MUSIC_MODE_PLAYLISTS -> PLAYLISTS
                 IntegerTable.MUSIC_MODE_SCENES -> SCENES

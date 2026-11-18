@@ -334,6 +334,49 @@ internal fun Metadata.moods(): List<String> =
         .distinct()
         .toList()
 
+internal fun Metadata.tempoBpm(): Float? {
+    val candidates =
+        (xiph["BPM"]
+            ?: xiph["TBPM"]
+            ?: xiph["TEMPO"]
+            ?: mp4["tmpo"]
+            ?: mp4["----:COM.APPLE.ITUNES:BPM"]
+            ?: id3v2["TBPM"]
+            ?: id3v2["TXXX:BPM"]
+            ?: id3v2["TXXX:TEMPO"])
+            .orEmpty()
+    for (raw in candidates) {
+        parseBpmValue(raw)?.let { return it }
+    }
+    return null
+}
+
+private val BPM_NUMBER_REGEX = Regex("([0-9]+(?:\\.[0-9]+)?)")
+
+private fun parseBpmValue(raw: String): Float? {
+    val cleaned = raw.trim()
+    if (cleaned.isEmpty()) return null
+    when (cleaned.lowercase()) {
+        "very slow",
+        "larghissimo",
+        "largo" -> return 55f
+        "slow",
+        "adagio",
+        "lento" -> return 76f
+        "moderate",
+        "andante",
+        "moderato" -> return 105f
+        "fast",
+        "allegro" -> return 132f
+        "very fast",
+        "presto",
+        "prestissimo" -> return 165f
+    }
+    val match = BPM_NUMBER_REGEX.find(cleaned) ?: return null
+    val value = match.groupValues[1].toFloatOrNull() ?: return null
+    return value.takeIf { it.isFinite() && it > 0f && it <= 400f }
+}
+
 // Compilation Flag
 internal fun Metadata.isCompilation() =
     // TCMP is a non-standard itunes extension

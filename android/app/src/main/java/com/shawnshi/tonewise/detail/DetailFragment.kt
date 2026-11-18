@@ -37,6 +37,7 @@ import com.shawnshi.tonewise.detail.list.DetailListAdapter
 import com.shawnshi.tonewise.list.ListFragment
 import com.shawnshi.tonewise.list.ListViewModel
 import com.shawnshi.tonewise.music.MusicViewModel
+import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.util.getDimenPixels
 import com.shawnshi.tonewise.util.systemBarInsetsCompat
@@ -184,6 +185,14 @@ abstract class DetailFragment<P : MusicParent, C : Music> :
             }
             R.id.action_shuffle -> {
                 onShuffleParent(parent)
+                true
+            }
+            R.id.action_focus_filter -> {
+                com.shawnshi.tonewise.home.focus.FocusFilterDialog.newInstance(
+                        scopeTitle = parent.name.resolve(requireContext()),
+                        scopedSongUids = ArrayList(parent.songs.map { it.uid.toString() }),
+                    )
+                    .show(parentFragmentManager, com.shawnshi.tonewise.home.focus.FocusFilterDialog.TAG)
                 true
             }
             else -> false

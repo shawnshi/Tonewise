@@ -96,6 +96,40 @@ constructor(
     val artistSort: Sort
         get() = listSettings.artistSort
 
+    private val _composerList = MutableStateFlow(listOf<Artist>())
+    /** A list of Composer [Artist]s to be shown in the Composers home tab. */
+    val composerList: StateFlow<List<Artist>>
+        get() = _composerList
+
+    /** Instructions for how to update [composerList] in the UI. */
+    val composerInstructions: Event<UpdateInstructions>
+        field = MutableEvent<UpdateInstructions>()
+
+    /** The current [Sort] used for [composerList]. */
+    val composerSort: Sort
+        get() = listSettings.composerSort
+
+    /** Whether a manual drag order is currently overriding [composerSort]. */
+    val hasCustomComposerOrder: Boolean
+        get() = homeGenerator.hasCustomComposerOrder()
+
+    private val _conductorList = MutableStateFlow(listOf<Artist>())
+    /** A list of Conductor [Artist]s to be shown in the Conductors home tab. */
+    val conductorList: StateFlow<List<Artist>>
+        get() = _conductorList
+
+    /** Instructions for how to update [conductorList] in the UI. */
+    val conductorInstructions: Event<UpdateInstructions>
+        field = MutableEvent<UpdateInstructions>()
+
+    /** The current [Sort] used for [conductorList]. */
+    val conductorSort: Sort
+        get() = listSettings.conductorSort
+
+    /** Whether a manual drag order is currently overriding [conductorSort]. */
+    val hasCustomConductorOrder: Boolean
+        get() = homeGenerator.hasCustomConductorOrder()
+
     /** A list of [Genre]s, sorted by the preferred [Sort], to be shown in the home view. */
     val genreList: StateFlow<List<Genre>>
         field = MutableStateFlow(listOf<Genre>())
@@ -180,6 +214,14 @@ constructor(
                 artistInstructions.put(instructions)
                 _artistList.value = homeGenerator.artists()
             }
+            MusicType.COMPOSERS -> {
+                composerInstructions.put(instructions)
+                _composerList.value = homeGenerator.composers()
+            }
+            MusicType.CONDUCTORS -> {
+                conductorInstructions.put(instructions)
+                _conductorList.value = homeGenerator.conductors()
+            }
             MusicType.GENRES -> {
                 genreInstructions.put(instructions)
                 genreList.value = homeGenerator.genres()
@@ -222,6 +264,46 @@ constructor(
      */
     fun applyArtistSort(sort: Sort) {
         listSettings.artistSort = sort
+    }
+
+    /**
+     * Apply a new [Sort] to [composerList], clearing any manual drag order.
+     *
+     * @param sort The [Sort] to apply.
+     */
+    fun applyComposerSort(sort: Sort) {
+        val unchanged = listSettings.composerSort == sort
+        homeGenerator.clearComposerOrder()
+        listSettings.composerSort = sort
+        if (unchanged) {
+            invalidateMusic(MusicType.COMPOSERS, UpdateInstructions.Replace(0))
+        }
+    }
+
+    /**
+     * Apply a new [Sort] to [conductorList], clearing any manual drag order.
+     *
+     * @param sort The [Sort] to apply.
+     */
+    fun applyConductorSort(sort: Sort) {
+        val unchanged = listSettings.conductorSort == sort
+        homeGenerator.clearConductorOrder()
+        listSettings.conductorSort = sort
+        if (unchanged) {
+            invalidateMusic(MusicType.CONDUCTORS, UpdateInstructions.Replace(0))
+        }
+    }
+
+    /** Persist the manually reordered composer list. */
+    fun commitComposerOrder(items: List<Artist>) {
+        homeGenerator.saveComposerOrder(items)
+        _composerList.value = items
+    }
+
+    /** Persist the manually reordered conductor list. */
+    fun commitConductorOrder(items: List<Artist>) {
+        homeGenerator.saveConductorOrder(items)
+        _conductorList.value = items
     }
 
     /**

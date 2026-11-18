@@ -115,7 +115,7 @@ fn print_usage() {
         "Tonewise Offline Curation & Sync CLI ({})
 
 USAGE:
-  tonewise-cli scan <MUSIC_DIR> [--out <TONEWISE_DIR>] [--threads <N>] [--write-tags]
+  tonewise-cli scan <MUSIC_DIR> [--out <TONEWISE_DIR>] [--threads <N>] [--write-tags] [--fast]
   tonewise-cli export-usb <PLAYLIST_OR_DIR> <DEST_DIR> [--music-root <SRC_ROOT>]",
         env!("CARGO_PKG_VERSION")
     );
@@ -126,6 +126,7 @@ fn cmd_scan(args: &[String]) -> Result<(), String> {
     let mut out_dir: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let mut write_tags = false;
+    let mut fast_mode = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -146,6 +147,7 @@ fn cmd_scan(args: &[String]) -> Result<(), String> {
                 threads = Some(n);
             }
             "--write-tags" => write_tags = true,
+            "--fast" => fast_mode = true,
             arg if !arg.starts_with('-') && music_dir.is_none() => {
                 music_dir = Some(PathBuf::from(arg));
             }
@@ -157,13 +159,16 @@ fn cmd_scan(args: &[String]) -> Result<(), String> {
     let music_root = music_dir.ok_or("missing <MUSIC_DIR>")?;
     let tonewise_dir = out_dir.unwrap_or_else(|| music_root.join(".tonewise"));
 
-    if let Some(n) = threads {
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(n.max(1))
-            .build_global();
-    }
+    let default_threads = std::thread::available_parallelism()
+        .map(|n| n.get() / 2)
+        .unwrap_or(4)
+        .clamp(2, 8);
+    let target_threads = threads.map(|n| n.max(1)).unwrap_or(default_threads);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(target_threads)
+        .build_global();
 
-    let summary = scan_library(&music_root, &tonewise_dir, write_tags)?;
+    let summary = scan_library_with_options(&music_root, &tonewise_dir, write_tags, fast_mode)?;
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
     Ok(())
 }
@@ -172,6 +177,15 @@ pub fn scan_library(
     music_root: &Path,
     tonewise_dir: &Path,
     write_tags: bool,
+) -> Result<ScanSummary, String> {
+    scan_library_with_options(music_root, tonewise_dir, write_tags, false)
+}
+
+pub fn scan_library_with_options(
+    music_root: &Path,
+    tonewise_dir: &Path,
+    write_tags: bool,
+    fast_mode: bool,
 ) -> Result<ScanSummary, String> {
     if !music_root.is_dir() {
         return Err(format!("music directory not found: {}", music_root.display()));
@@ -193,7 +207,7 @@ pub fn scan_library(
 
     let results: Vec<Result<ScannedTrackRecord, String>> = audio_files
         .par_iter()
-        .map(|path| process_single_track(music_root, path, write_tags))
+        .map(|path| process_single_track(music_root, path, write_tags, fast_mode))
         .collect();
 
     let mut tracks = Vec::with_capacity(results.len());
@@ -203,6 +217,9 @@ pub fn scan_library(
             Err(e) => eprintln!("warning: skipping file: {e}"),
         }
     }
+
+    let mut seen_uids = HashSet::with_capacity(tracks.len());
+    tracks.retain(|t| seen_uids.insert(t.audio_frame_blake3));
 
     fs::create_dir_all(tonewise_dir)
         .map_err(|e| format!("failed to create {}: {e}", tonewise_dir.display()))?;
@@ -217,19 +234,28 @@ pub fn scan_library(
     )
     .map_err(|e| format!("failed writing protocol_version.json: {e}"))?;
 
-    let waveform_entries: Vec<([u8; 32], [u8; 150])> = tracks
-        .iter()
-        .map(|t| {
-            let mut pts = [0u8; 150];
-            let len = t.analysis.waveform_150.len().min(150);
-            pts[..len].copy_from_slice(&t.analysis.waveform_150[..len]);
-            (t.audio_frame_blake3, pts)
-        })
-        .collect();
-    let waveforms_bin = WaveformArchive::encode(&waveform_entries);
-    let waveforms_bytes = waveforms_bin.len();
-    fs::write(tonewise_dir.join("waveforms.bin"), &waveforms_bin)
-        .map_err(|e| format!("failed writing waveforms.bin: {e}"))?;
+    let wf_path = tonewise_dir.join("waveforms.bin");
+    let waveforms_bytes = if fast_mode
+        && fs::metadata(&wf_path).map(|m| m.len() > 12).unwrap_or(false)
+    {
+        fs::metadata(&wf_path).map(|m| m.len() as usize).unwrap_or(0)
+    } else {
+        let waveform_entries: Vec<([u8; 32], [u8; 150])> = tracks
+            .iter()
+            .filter(|t| !t.analysis.waveform_150.is_empty())
+            .map(|t| {
+                let mut pts = [0u8; 150];
+                let len = t.analysis.waveform_150.len().min(150);
+                pts[..len].copy_from_slice(&t.analysis.waveform_150[..len]);
+                (t.audio_frame_blake3, pts)
+            })
+            .collect();
+        let waveforms_bin = WaveformArchive::encode(&waveform_entries);
+        let len = waveforms_bin.len();
+        fs::write(&wf_path, &waveforms_bin)
+            .map_err(|e| format!("failed writing waveforms.bin: {e}"))?;
+        len
+    };
 
     write_manifest_db(&tonewise_dir.join("manifest.db"), &tracks)?;
 
@@ -249,6 +275,7 @@ fn process_single_track(
     music_root: &Path,
     path: &Path,
     write_tags: bool,
+    fast_mode: bool,
 ) -> Result<ScannedTrackRecord, String> {
     let rel_path = path
         .strip_prefix(music_root)
@@ -256,13 +283,29 @@ fn process_single_track(
         .to_string_lossy()
         .replace('\\', "/");
 
-    let analysis = analyze_audio_file(path)
-        .map_err(|e| format!("{}: analysis failed: {e}", path.display()))?;
-
     let mut tagged = Probe::open(path)
         .map_err(|e| format!("{}: lofty open failed: {e}", path.display()))?
         .read()
         .map_err(|e| format!("{}: lofty read failed: {e}", path.display()))?;
+
+    let analysis = if fast_mode {
+        let props = tagged.properties();
+        AudioAnalysisResult {
+            codec: format!("{:?}", tagged.file_type()),
+            duration_ms: props.duration().as_millis() as u64,
+            sample_rate_hz: props.sample_rate().unwrap_or(44100),
+            bit_depth: props.bit_depth().map(|b| b as u32),
+            bitrate_kbps: props.audio_bitrate().or_else(|| props.overall_bitrate()),
+            waveform_150: Vec::new(),
+            estimated_bpm: None,
+            tempo_bucket: None,
+            replaygain_track_db: None,
+            peak_linear: 0.0,
+        }
+    } else {
+        analyze_audio_file(path)
+            .map_err(|e| format!("{}: analysis failed: {e}", path.display()))?
+    };
 
     let primary_tag = tagged.primary_tag().or_else(|| tagged.first_tag());
 
@@ -496,7 +539,7 @@ fn write_manifest_db(db_path: &Path, tracks: &[ScannedTrackRecord]) -> Result<()
     {
         let mut stmt = tx
             .prepare(
-                "INSERT INTO tracks (
+                "INSERT OR IGNORE INTO tracks (
                     track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
                     rel_path, file_size, mtime_ms, codec, sample_rate_hz, bit_depth, bitrate_kbps, duration_ms,
                     title, album, album_artist, artists_json, composers_json, conductors_json,
@@ -570,7 +613,11 @@ fn write_manifest_db(db_path: &Path, tracks: &[ScannedTrackRecord]) -> Result<()
                 if t.tempo_bpm.is_some() { now_ms } else { 0i64 },
                 serde_json::to_string(&t.moods).unwrap(),
                 if t.moods.is_empty() { 0i64 } else { now_ms },
-                (idx * 150) as i64,
+                if t.analysis.waveform_150.is_empty() {
+                    None::<i64>
+                } else {
+                    Some((idx * 150) as i64)
+                },
             ])
             .map_err(|e| format!("sqlite insert failed for {}: {e}", t.rel_path))?;
         }
@@ -858,6 +905,51 @@ mod tests {
         let text = String::from_utf8(exported_bytes).unwrap();
         assert_eq!(text, "#EXTM3U\nBach/01.flac\nJazz/02.flac\n");
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cli_scan_deduplicates_identical_audio_files_and_supports_fast_mode() {
+        let base = std::env::temp_dir().join("tw_cli_dedup_fast_test");
+        let _ = fs::remove_dir_all(&base);
+        let music = base.join("Music");
+        let album_a = music.join("AlbumA");
+        let album_b = music.join("AlbumB");
+        fs::create_dir_all(&album_a).unwrap();
+        fs::create_dir_all(&album_b).unwrap();
+
+        let wav_a = album_a.join("01_Dup.wav");
+        let wav_b = album_b.join("01_DupCopy.wav");
+        write_test_wav(&wav_a, 44100, 4);
+        fs::copy(&wav_a, &wav_b).unwrap();
+
+        let tonewise_dir = music.join(".tonewise");
+        let full_summary =
+            scan_library_with_options(&music, &tonewise_dir, false, false).expect("full scan dedups");
+        assert_eq!(full_summary.scanned_tracks, 1);
+
+        let conn = Connection::open(tonewise_dir.join("manifest.db")).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let fast_summary =
+            scan_library_with_options(&music, &tonewise_dir, false, true).expect("fast scan dedups");
+        assert_eq!(fast_summary.scanned_tracks, 1);
+        assert_eq!(fast_summary.tempo_backfilled, 0);
+
+        let (fast_count, wf_off): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM tracks), waveform_offset FROM tracks LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fast_count, 1);
+        assert_eq!(wf_off, None);
+
+        drop(conn);
         let _ = fs::remove_dir_all(&base);
     }
 }
