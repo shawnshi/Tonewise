@@ -199,7 +199,8 @@
             IsTitleBarAutoPaddingEnabled="False"
             AlwaysShowHeader="False"
             DisplayModeChanged="OnNavigationDisplayModeChanged"
-            ItemInvoked="OnNavigationItemInvoked">
+            ItemInvoked="OnNavigationItemInvoked"
+            SelectionChanged="OnNavigationSelectionChanged">
             <NavigationView.Resources>
                 <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground" Color="Transparent" />
                 <SolidColorBrush x:Key="NavigationViewTopPaneBackground" Color="Transparent" />
@@ -1094,8 +1095,10 @@
                                     <TextBlock Text="{x:Bind ViewModel.MusicRootDisplayPath, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFgE2E8F0Brush}" IsTextSelectionEnabled="True" />
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <Button Style="{StaticResource GoldActionButtonStyle}" Content="切换 / 打开本地音乐目录..." Click="OnOpenFolderClick" />
-                                        <Button Style="{StaticResource StudioChipButtonStyle}" Content="重建曲库索引" Command="{x:Bind ViewModel.RebuildLibraryManifestCommand}" />
+                                        <Button Style="{StaticResource StudioChipButtonStyle}" Content="重建曲库索引" Command="{x:Bind ViewModel.RebuildLibraryManifestCommand}" AutomationProperties.Name="重建曲库索引" />
+                                        <Button Style="{StaticResource StudioChipButtonStyle}" Content="文件夹整理" Command="{x:Bind ViewModel.OrganizeLibraryFoldersCommand}" AutomationProperties.Name="文件夹整理" ToolTipService.ToolTip="按 &lt;Album Artist&gt;\&lt;Album&gt;\&lt;Disc-Track#&gt; &lt;Title&gt; 整理散落与超长路径文件" />
                                     </StackPanel>
+                                    <TextBlock Text="{x:Bind ViewModel.StorageOrganizeStatus, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFg94A3B8Brush}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
 

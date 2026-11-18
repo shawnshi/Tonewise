@@ -31,13 +31,19 @@ public sealed class LibraryStore
 
     public bool ScanAndBuildManifestIfMissing(string musicRoot, bool forceRebuild = false, bool fastMode = true)
     {
-        if (string.IsNullOrWhiteSpace(musicRoot) || !Directory.Exists(musicRoot))
+        if (string.IsNullOrWhiteSpace(musicRoot) || !LongPathHelper.DirectoryExists(musicRoot))
             return false;
 
         string tonewiseDir = Path.Combine(musicRoot, ".tonewise");
         string dbPath = Path.Combine(tonewiseDir, "manifest.db");
         if (!forceRebuild && HasPopulatedManifest(dbPath))
             return false;
+
+        if (forceRebuild && HasPopulatedManifest(dbPath))
+        {
+            BuildManifestWithFfiFallback(musicRoot, dbPath, fastMode);
+            return HasPopulatedManifest(dbPath);
+        }
 
         string? cliExe = FindTonewiseCliExecutable();
         if (cliExe is not null)
@@ -68,13 +74,19 @@ public sealed class LibraryStore
         bool fastMode = true,
         CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(musicRoot) || !Directory.Exists(musicRoot))
+        if (string.IsNullOrWhiteSpace(musicRoot) || !LongPathHelper.DirectoryExists(musicRoot))
             return false;
 
         string tonewiseDir = Path.Combine(musicRoot, ".tonewise");
         string dbPath = Path.Combine(tonewiseDir, "manifest.db");
         if (!forceRebuild && HasPopulatedManifest(dbPath))
             return false;
+
+        if (forceRebuild && HasPopulatedManifest(dbPath))
+        {
+            await Task.Run(() => BuildManifestWithFfiFallback(musicRoot, dbPath, fastMode), ct).ConfigureAwait(false);
+            return HasPopulatedManifest(dbPath);
+        }
 
         string? cliExe = FindTonewiseCliExecutable();
         if (cliExe is not null)
@@ -414,7 +426,7 @@ public sealed class LibraryStore
         return null;
     }
 
-    private static void BuildManifestWithFfiFallback(string musicRoot, string dbPath)
+    private static void BuildManifestWithFfiFallback(string musicRoot, string dbPath, bool fastMode = true)
     {
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
@@ -473,58 +485,165 @@ public sealed class LibraryStore
             init.ExecuteNonQuery();
         }
 
+        var existingByRel = new Dictionary<string, (string Uid, long FileSize, long MtimeMs)>(StringComparer.OrdinalIgnoreCase);
+        using (var existingCmd = conn.CreateCommand())
+        {
+            existingCmd.CommandText = "SELECT track_uid, rel_path, file_size, mtime_ms FROM tracks;";
+            using var reader = existingCmd.ExecuteReader();
+            while (reader.Read())
+            {
+                existingByRel[reader.GetString(1)] = (reader.GetString(0), reader.GetInt64(2), reader.GetInt64(3));
+            }
+        }
+
+        var seenRelPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string cleanRoot = LongPathHelper.StripExtendedPrefix(Path.GetFullPath(musicRoot)).TrimEnd('\\', '/');
+
         using var tx = conn.BeginTransaction();
-        foreach (string file in Directory.EnumerateFiles(musicRoot, "*.*", SearchOption.AllDirectories))
+        foreach (string file in LongPathHelper.SafeEnumerateFiles(cleanRoot, "*.*", recursive: true, skipHiddenDirectories: true))
         {
             string ext = Path.GetExtension(file);
             if (!AudioExtensions.Contains(ext, StringComparer.OrdinalIgnoreCase)) continue;
-            if (file.Contains($"{Path.DirectorySeparatorChar}.", StringComparison.Ordinal)) continue;
 
             try
             {
-                var fp = TonewiseCoreClient.ComputeFingerprint(file);
-                var analysis = TonewiseCoreClient.AnalyzeAudioFile(file);
-                string rel = Path.GetRelativePath(musicRoot, file).Replace('\\', '/');
-                string title = Path.GetFileNameWithoutExtension(file);
-                string album = new DirectoryInfo(Path.GetDirectoryName(file)!).Name;
+                string cleanFile = LongPathHelper.StripExtendedPrefix(file);
+                string rel = Path.GetRelativePath(cleanRoot, cleanFile).Replace('\\', '/');
+                seenRelPaths.Add(rel);
+
+                string ioPath = LongPathHelper.ToExtendedIfLong(cleanFile);
+                var fi = new FileInfo(ioPath);
+                long fsz = fi.Length;
+                long mt = new DateTimeOffset(fi.LastWriteTimeUtc).ToUnixTimeMilliseconds();
+
+                if (existingByRel.TryGetValue(rel, out var prev))
+                {
+                    if (prev.FileSize != fsz || Math.Abs(prev.MtimeMs - mt) > 2000)
+                    {
+                        using var upd = conn.CreateCommand();
+                        upd.Transaction = tx;
+                        upd.CommandText = "UPDATE tracks SET file_size = $fsz, mtime_ms = $mt WHERE track_uid = $uid;";
+                        upd.Parameters.AddWithValue("$fsz", fsz);
+                        upd.Parameters.AddWithValue("$mt", mt);
+                        upd.Parameters.AddWithValue("$uid", prev.Uid);
+                        upd.ExecuteNonQuery();
+                    }
+                    continue;
+                }
+
+                byte[] audioHash;
+                byte[] headerHash;
+                long headerSize = 0;
+                string codec;
+                int sampleRateHz;
+                int? bitDepth = null;
+                int? bitrateKbps = null;
+                long durationMs;
+                double? rgTrack = null;
+                double? estBpm = null;
+                string? tempoBucket = null;
+
+                var embedded = LibraryFolderOrganizerService.ReadEmbeddedHeaderTags(cleanFile);
+                string title = !string.IsNullOrWhiteSpace(embedded.Title)
+                    ? embedded.Title!
+                    : Path.GetFileNameWithoutExtension(cleanFile);
+                string album = !string.IsNullOrWhiteSpace(embedded.Album)
+                    ? embedded.Album!
+                    : (Path.GetFileName(Path.GetDirectoryName(cleanFile) ?? "") is { Length: > 0 } dirName
+                        ? dirName
+                        : "Unknown Album");
+                string? albumArtist = !string.IsNullOrWhiteSpace(embedded.AlbumArtist) ? embedded.AlbumArtist : null;
+                string artistsJson = !string.IsNullOrWhiteSpace(embedded.Artist)
+                    ? JsonSerializer.Serialize(new[] { embedded.Artist! })
+                    : (!string.IsNullOrWhiteSpace(albumArtist)
+                        ? JsonSerializer.Serialize(new[] { albumArtist })
+                        : "[]");
+
+                if (fastMode)
+                {
+                    audioHash = ComputeFastAudioSampleHash(ioPath, fsz);
+                    headerHash = audioHash;
+                    codec = ext.TrimStart('.').ToLowerInvariant();
+                    sampleRateHz = 44100;
+                    durationMs = 0;
+                }
+                else
+                {
+                    var fp = TonewiseCoreClient.ComputeFingerprint(ioPath);
+                    var analysis = TonewiseCoreClient.AnalyzeAudioFile(ioPath);
+                    audioHash = Convert.FromHexString(fp.AudioFrameBlake3Hex);
+                    headerHash = Convert.FromHexString(fp.HeaderBlake3Hex);
+                    headerSize = (long)fp.HeaderSize;
+                    fsz = (long)fp.FileSize;
+                    codec = analysis.Codec;
+                    sampleRateHz = (int)analysis.SampleRateHz;
+                    bitDepth = analysis.BitDepth.HasValue ? (int)analysis.BitDepth.Value : null;
+                    bitrateKbps = analysis.BitrateKbps.HasValue ? (int)analysis.BitrateKbps.Value : null;
+                    durationMs = (long)analysis.DurationMs;
+                    rgTrack = analysis.ReplayGainTrackDb;
+                    estBpm = analysis.EstimatedBpm;
+                    tempoBucket = analysis.TempoBucket;
+                }
+
+                string trackUid = Convert.ToHexStringLower(audioHash);
 
                 using var ins = conn.CreateCommand();
                 ins.Transaction = tx;
                 ins.CommandText = """
-                    INSERT OR IGNORE INTO tracks (
+                    INSERT INTO tracks (
                         track_uid, audio_frame_blake3, header_size, header_blake3,
                         rel_path, file_size, mtime_ms, codec, sample_rate_hz, bit_depth,
-                        bitrate_kbps, duration_ms, title, album, replaygain_track_db,
-                        tempo_bpm, tempo_bucket
+                        bitrate_kbps, duration_ms, title, album, album_artist, artists_json,
+                        replaygain_track_db, tempo_bpm, tempo_bucket
                     ) VALUES (
                         $uid, $af, $hsz, $hb,
                         $rel, $fsz, $mt, $cdc, $sr, $bd,
-                        $br, $dur, $ti, $al, $rg,
-                        $bpm, $bkt
-                    );
+                        $br, $dur, $ti, $al, $aa, $ar,
+                        $rg, $bpm, $bkt
+                    )
+                    ON CONFLICT(track_uid) DO UPDATE SET
+                        rel_path = excluded.rel_path,
+                        file_size = excluded.file_size,
+                        mtime_ms = excluded.mtime_ms;
                     """;
-                ins.Parameters.AddWithValue("$uid", fp.AudioFrameBlake3Hex);
-                ins.Parameters.AddWithValue("$af", Convert.FromHexString(fp.AudioFrameBlake3Hex));
-                ins.Parameters.AddWithValue("$hsz", (long)fp.HeaderSize);
-                ins.Parameters.AddWithValue("$hb", Convert.FromHexString(fp.HeaderBlake3Hex));
+                ins.Parameters.AddWithValue("$uid", trackUid);
+                ins.Parameters.AddWithValue("$af", audioHash);
+                ins.Parameters.AddWithValue("$hsz", headerSize);
+                ins.Parameters.AddWithValue("$hb", headerHash);
                 ins.Parameters.AddWithValue("$rel", rel);
-                ins.Parameters.AddWithValue("$fsz", (long)fp.FileSize);
-                ins.Parameters.AddWithValue("$mt", new DateTimeOffset(File.GetLastWriteTimeUtc(file)).ToUnixTimeMilliseconds());
-                ins.Parameters.AddWithValue("$cdc", analysis.Codec);
-                ins.Parameters.AddWithValue("$sr", (int)analysis.SampleRateHz);
-                ins.Parameters.AddWithValue("$bd", analysis.BitDepth.HasValue ? (int)analysis.BitDepth.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$br", analysis.BitrateKbps.HasValue ? (int)analysis.BitrateKbps.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$dur", (long)analysis.DurationMs);
+                ins.Parameters.AddWithValue("$fsz", fsz);
+                ins.Parameters.AddWithValue("$mt", mt);
+                ins.Parameters.AddWithValue("$cdc", codec);
+                ins.Parameters.AddWithValue("$sr", sampleRateHz);
+                ins.Parameters.AddWithValue("$bd", bitDepth.HasValue ? bitDepth.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("$br", bitrateKbps.HasValue ? bitrateKbps.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("$dur", durationMs);
                 ins.Parameters.AddWithValue("$ti", title);
                 ins.Parameters.AddWithValue("$al", album);
-                ins.Parameters.AddWithValue("$rg", analysis.ReplayGainTrackDb.HasValue ? analysis.ReplayGainTrackDb.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$bpm", analysis.EstimatedBpm.HasValue ? analysis.EstimatedBpm.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$bkt", (object?)analysis.TempoBucket ?? DBNull.Value);
+                ins.Parameters.AddWithValue("$aa", (object?)albumArtist ?? DBNull.Value);
+                ins.Parameters.AddWithValue("$ar", artistsJson);
+                ins.Parameters.AddWithValue("$rg", rgTrack.HasValue ? rgTrack.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("$bpm", estBpm.HasValue ? estBpm.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("$bkt", (object?)tempoBucket ?? DBNull.Value);
                 ins.ExecuteNonQuery();
             }
             catch
             {
                 // Skip unreadable/corrupt individual audio file cleanly
+            }
+        }
+
+        foreach (var (rel, prev) in existingByRel)
+        {
+            if (seenRelPaths.Contains(rel)) continue;
+            string expectedFull = Path.Combine(cleanRoot, rel.Replace('/', Path.DirectorySeparatorChar));
+            if (!LongPathHelper.FileExists(expectedFull))
+            {
+                using var del = conn.CreateCommand();
+                del.Transaction = tx;
+                del.CommandText = "DELETE FROM tracks WHERE track_uid = $uid;";
+                del.Parameters.AddWithValue("$uid", prev.Uid);
+                del.ExecuteNonQuery();
             }
         }
         tx.Commit();
@@ -554,23 +673,23 @@ public sealed class LibraryStore
 
     private static string? FindFirstExisting(string dir, params string[] names)
     {
-        if (!Directory.Exists(dir)) return null;
+        if (!LongPathHelper.DirectoryExists(dir)) return null;
         foreach (string n in names)
         {
             string p = Path.Combine(dir, n);
-            if (File.Exists(p)) return p;
+            if (LongPathHelper.FileExists(p)) return p;
         }
         return null;
     }
 
     private static string? FindBookletPdf(string dir)
     {
-        if (!Directory.Exists(dir)) return null;
+        if (!LongPathHelper.DirectoryExists(dir)) return null;
         string? explicitBooklet = FindFirstExisting(dir, "booklet.pdf", "liner.pdf");
         if (explicitBooklet is not null) return explicitBooklet;
         try
         {
-            return Directory.EnumerateFiles(dir, "*.pdf").FirstOrDefault();
+            return LongPathHelper.SafeEnumerateFiles(dir, "*.pdf", recursive: false).FirstOrDefault();
         }
         catch
         {
@@ -588,5 +707,22 @@ public sealed class LibraryStore
         {
             return [];
         }
+    }
+
+    private static byte[] ComputeFastAudioSampleHash(string ioPath, long fileSize)
+    {
+        const int sampleBytes = 64 * 1024;
+        byte[] buf = new byte[sampleBytes + 8];
+        BitConverter.TryWriteBytes(buf.AsSpan(0, 8), fileSize);
+        int read = 0;
+        using (var fs = new FileStream(ioPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            if (fileSize > sampleBytes)
+            {
+                fs.Seek(Math.Max(0, (fileSize - sampleBytes) / 2), SeekOrigin.Begin);
+            }
+            read = fs.Read(buf, 8, sampleBytes);
+        }
+        return System.Security.Cryptography.SHA256.HashData(buf.AsSpan(0, 8 + Math.Max(0, read)));
     }
 }

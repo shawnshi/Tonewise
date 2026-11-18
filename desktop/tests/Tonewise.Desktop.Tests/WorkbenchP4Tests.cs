@@ -874,6 +874,190 @@ public sealed class WorkbenchP4Tests
         Assert.True(avgBpmStep <= 8.0, $"Expected smooth BPM transitions (avg step <= 8), got {avgBpmStep:0.00}");
     }
 
+    [Fact]
+    public void LibraryFolderOrganizer_MovesFlatAndUnprefixedAndOverlongFiles_ToCanonicalStructure_AndUpdatesDb()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "tw_p4_org_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        string dbPath = Path.Combine(tempDir, "manifest.db");
+
+        try
+        {
+            string schemaPath = FindSchemaSqlPath();
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var setup = conn.CreateCommand();
+                setup.CommandText = File.ReadAllText(schemaPath);
+                setup.ExecuteNonQuery();
+
+                void InsertTrack(string uid, byte hashByte, string relPath, string title, string? album, string? albumArtist, string artistsJson)
+                {
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = """
+                        INSERT INTO tracks (
+                            track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                            rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                            title, album, album_artist, artists_json
+                        ) VALUES (
+                            $uid, $af, 64, $hb, 0,
+                            $rel, 512, 1000, 'flac', 44100, 180000,
+                            $ti, $al, $aa, $ar
+                        );
+                        """;
+                    byte[] h = new byte[32];
+                    h[0] = hashByte;
+                    cmd.Parameters.AddWithValue("$uid", uid);
+                    cmd.Parameters.AddWithValue("$af", h);
+                    cmd.Parameters.AddWithValue("$hb", h);
+                    cmd.Parameters.AddWithValue("$rel", relPath);
+                    cmd.Parameters.AddWithValue("$ti", title);
+                    cmd.Parameters.AddWithValue("$al", (object?)album ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("$aa", (object?)albumArtist ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("$ar", artistsJson);
+                    cmd.ExecuteNonQuery();
+                }
+
+                // 1. Flat file in root with embedded FLAC Vorbis Comment (disc=1, track=1)
+                string flatPath = Path.Combine(tempDir, "Adele - Easy On Me.flac");
+                WriteMinimalFlacWithVorbisComments(flatPath, ("ALBUMARTIST", "Adele"), ("ALBUM", "30"), ("TITLE", "Easy On Me"), ("DISCNUMBER", "1"), ("TRACKNUMBER", "1"));
+                InsertTrack("u_flat", 1, "Adele - Easy On Me.flac", "Easy On Me", "30", null, "[\"Adele\"]");
+
+                // 2. 3-segment folder missing <Disc-Track#> prefix (has "15 ...")
+                string noDiscDir = Path.Combine(tempDir, "Various Artists", "Jazz Mix");
+                Directory.CreateDirectory(noDiscDir);
+                string noDiscPath = Path.Combine(noDiscDir, "15 When Will I See You Again.flac");
+                File.WriteAllBytes(noDiscPath, [0x66, 0x4C, 0x61, 0x43]);
+                InsertTrack("u_nodisc", 2, "Various Artists/Jazz Mix/15 When Will I See You Again.flac", "When Will I See You Again", "Jazz Mix", null, "[\"Tata\"]");
+
+                // 3. Already compliant file (must stay untouched)
+                string okDir = Path.Combine(tempDir, "The Beatles", "Abbey Road");
+                Directory.CreateDirectory(okDir);
+                string okPath = Path.Combine(okDir, "1-01 Come Together.flac");
+                File.WriteAllBytes(okPath, [0x66, 0x4C, 0x61, 0x43]);
+                InsertTrack("u_ok", 3, "The Beatles/Abbey Road/1-01 Come Together.flac", "Come Together", "Abbey Road", "The Beatles", "[\"The Beatles\"]");
+
+                // 4. Overlong path (>255 chars) condensed safely within 235 chars
+                string longArtist = "Yehudi Menuhin; Antonio Vivaldi; Antonin Dvorak; Claude Debussy; Cesar Franck; Felix Mendelssohn; Fritz Kreisler";
+                string longAlbum = "The Complete Legendary Violin Concertos and Sonatas Recorded in London and Paris";
+                string longFileName = "1-01 Violin Concerto in D Major Op 61 Movement I Allegro Ma Non Troppo Cadenza by Kreisler.flac";
+                string longRel = $"{longArtist}/{longAlbum}/{longFileName}";
+                string longFull = Path.Combine(tempDir, longArtist, longAlbum, longFileName);
+                Assert.True(longFull.Length > 250);
+                LongPathHelper.EnsureDirectory(Path.GetDirectoryName(longFull)!);
+                File.WriteAllBytes(LongPathHelper.ToExtendedPath(longFull), [0x66, 0x4C, 0x61, 0x43]);
+                InsertTrack("u_long", 4, longRel, "Violin Concerto in D Major Op. 61: I. Allegro Ma Non Troppo", longAlbum, longArtist, "[\"Yehudi Menuhin\"]");
+
+                // 5. Stale track missing from disk
+                InsertTrack("u_stale", 5, "Ghost/Missing/1-01 Gone.flac", "Gone", "Missing", "Ghost", "[\"Ghost\"]");
+            }
+
+            var summary = LibraryFolderOrganizerService.OrganizeLibraryFolders(tempDir, dbPath);
+            Assert.Equal(5, summary.TotalChecked);
+            Assert.Equal(3, summary.MovedCount);
+            Assert.Equal(1, summary.LongPathFixedCount);
+            Assert.Equal(1, summary.StaleRemovedCount);
+            Assert.Equal(1, summary.SkippedCount);
+
+            Assert.True(File.Exists(Path.Combine(tempDir, "Adele", "30", "1-01 Easy On Me.flac")));
+            Assert.True(File.Exists(Path.Combine(tempDir, "Various Artists", "Jazz Mix", "1-15 When Will I See You Again.flac")));
+            Assert.True(File.Exists(Path.Combine(tempDir, "The Beatles", "Abbey Road", "1-01 Come Together.flac")));
+            Assert.False(File.Exists(Path.Combine(tempDir, "Adele - Easy On Me.flac")));
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            {
+                conn.Open();
+                using var q1 = conn.CreateCommand();
+                q1.CommandText = "SELECT rel_path FROM tracks WHERE track_uid = 'u_flat';";
+                Assert.Equal("Adele/30/1-01 Easy On Me.flac", q1.ExecuteScalar()?.ToString());
+
+                using var q2 = conn.CreateCommand();
+                q2.CommandText = "SELECT rel_path FROM tracks WHERE track_uid = 'u_long';";
+                string newLongRel = q2.ExecuteScalar()?.ToString() ?? "";
+                Assert.True(Path.Combine(tempDir, newLongRel.Replace('/', '\\')).Length <= 235);
+                Assert.StartsWith("Yehudi Menuhin", newLongRel);
+
+                using var q3 = conn.CreateCommand();
+                q3.CommandText = "SELECT COUNT(*) FROM tracks WHERE track_uid = 'u_stale';";
+                Assert.Equal(0L, Convert.ToInt64(q3.ExecuteScalar()));
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(LongPathHelper.ToExtendedPath(tempDir)))
+                Directory.Delete(LongPathHelper.ToExtendedPath(tempDir), recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DspSampleProvider_SignalsReachedEndOfStream_WhenSourceReturnsZero()
+    {
+        var dsp = new DspSampleProvider(new FiniteSampleProvider(128));
+        float[] buf = new float[256];
+
+        int firstRead = dsp.Read(buf, 0, 128);
+        Assert.Equal(128, firstRead);
+        Assert.False(dsp.ReachedEndOfStream);
+
+        int eofRead = dsp.Read(buf, 0, 128);
+        Assert.Equal(0, eofRead);
+        Assert.True(dsp.ReachedEndOfStream);
+
+        dsp.ResetEndOfStream();
+        Assert.False(dsp.ReachedEndOfStream);
+    }
+
+    private static string FindSchemaSqlPath()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            string candidate = Path.Combine(dir.FullName, "protocol", "schemas", "manifest.sql");
+            if (File.Exists(candidate)) return candidate;
+            dir = dir.Parent;
+        }
+        throw new FileNotFoundException("Could not locate protocol/schemas/manifest.sql");
+    }
+
+    private static void WriteMinimalFlacWithVorbisComments(string path, params (string Key, string Value)[] entries)
+    {
+        using var ms = new MemoryStream();
+        ms.Write("fLaC"u8);
+
+        using var vc = new MemoryStream();
+        vc.Write([4, 0, 0, 0]);
+        vc.Write("test"u8);
+        vc.Write(BitConverter.GetBytes((uint)entries.Length));
+        foreach (var (k, v) in entries)
+        {
+            byte[] utf8 = Encoding.UTF8.GetBytes($"{k}={v}");
+            vc.Write(BitConverter.GetBytes((uint)utf8.Length));
+            vc.Write(utf8);
+        }
+        byte[] vcBytes = vc.ToArray();
+        ms.WriteByte(0x84); // Last metadata block + type 4 (VORBIS_COMMENT)
+        ms.WriteByte((byte)((vcBytes.Length >> 16) & 0xFF));
+        ms.WriteByte((byte)((vcBytes.Length >> 8) & 0xFF));
+        ms.WriteByte((byte)(vcBytes.Length & 0xFF));
+        ms.Write(vcBytes);
+        File.WriteAllBytes(path, ms.ToArray());
+    }
+
+    private sealed class FiniteSampleProvider(int totalSamples) : ISampleProvider
+    {
+        private int _remaining = totalSamples;
+        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(44100, 2);
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            if (_remaining <= 0) return 0;
+            int n = Math.Min(_remaining, count);
+            _remaining -= n;
+            return n;
+        }
+    }
+
     private sealed class StubPlaylistHttpHandler(string appleHtml, string billboardHtml, string kworbHtml) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

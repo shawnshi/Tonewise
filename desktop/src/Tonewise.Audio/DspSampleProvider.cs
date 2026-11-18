@@ -20,6 +20,7 @@ public sealed class DspSampleProvider : ISampleProvider
     private double _preampLinear = 1.0;
     private double _masterLinear = 1.0;
     private volatile bool _bypass;
+    private volatile bool _reachedEndOfStream;
 
     public DspSampleProvider(ISampleProvider source)
     {
@@ -29,6 +30,10 @@ public sealed class DspSampleProvider : ISampleProvider
     }
 
     public WaveFormat WaveFormat => _source.WaveFormat;
+
+    public bool ReachedEndOfStream => _reachedEndOfStream;
+
+    public void ResetEndOfStream() => _reachedEndOfStream = false;
 
     public bool IsBypassed
     {
@@ -176,7 +181,12 @@ public sealed class DspSampleProvider : ISampleProvider
     public int Read(float[] buffer, int offset, int count)
     {
         int read = _source.Read(buffer, offset, count);
-        if (read <= 0 || _bypass)
+        if (read <= 0)
+        {
+            _reachedEndOfStream = true;
+            return read;
+        }
+        if (_bypass)
         {
             return read;
         }

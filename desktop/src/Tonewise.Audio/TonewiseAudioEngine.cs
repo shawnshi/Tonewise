@@ -24,10 +24,12 @@ public sealed class TonewiseAudioEngine : IDisposable
 {
     private readonly Lock _engineLock = new();
     private IWavePlayer? _output;
+    private WaveStream? _sourceWaveStream;
     private ISampleProvider? _sourceSamples;
     private IDisposable? _sourceDisposable;
     private DspSampleProvider? _dsp;
     private MMDevice? _device;
+    private int _playbackEndedSignaled;
 
     private EqualizerApoProfile? _activeProfile;
     private double _activeReplayGainDb;
@@ -60,6 +62,7 @@ public sealed class TonewiseAudioEngine : IDisposable
             {
                 try
                 {
+                    if (_sourceWaveStream is not null) return _sourceWaveStream.CurrentTime;
                     return _sourceSamples switch
                     {
                         AudioFileReader afr => afr.CurrentTime,
@@ -83,6 +86,7 @@ public sealed class TonewiseAudioEngine : IDisposable
             {
                 try
                 {
+                    if (_sourceWaveStream is not null) return _sourceWaveStream.TotalTime;
                     return _sourceSamples switch
                     {
                         AudioFileReader afr => afr.TotalTime,
@@ -225,10 +229,12 @@ public sealed class TonewiseAudioEngine : IDisposable
         lock (_engineLock)
         {
             StopInternal();
+            Interlocked.Exchange(ref _playbackEndedSignaled, 0);
 
             string ext = Path.GetExtension(filePath).ToLowerInvariant();
             _isDsdSource = ext is ".dsf" or ".dff";
 
+            WaveStream? sourceWaveStream = null;
             ISampleProvider? sourceSamples = null;
             IDisposable? sourceDisposable = null;
             IWavePlayer? player = null;
@@ -240,15 +246,13 @@ public sealed class TonewiseAudioEngine : IDisposable
             {
                 if (_isDsdSource)
                 {
-                    var dsd = new DsdStreamReader(filePath);
+                    var dsd = new DsdStreamReader(ToExtendedPathIfLong(filePath));
                     sourceSamples = dsd;
                     sourceDisposable = dsd;
                 }
                 else
                 {
-                    var reader = new AudioFileReader(filePath);
-                    sourceSamples = reader;
-                    sourceDisposable = reader;
+                    (sourceWaveStream, sourceSamples, sourceDisposable) = OpenPcmSourceWithLongPathFallback(filePath);
                 }
 
                 var dsp = new DspSampleProvider(sourceSamples);
@@ -309,6 +313,8 @@ public sealed class TonewiseAudioEngine : IDisposable
                 dsp.IsBypassed = ShouldBypassDspLocked(exclusiveOk);
 
                 var capturedSource = sourceSamples;
+                var capturedWaveStream = sourceWaveStream;
+                var capturedDsp = dsp;
                 var capturedPlayer = player;
                 player.PlaybackStopped += (_, args) =>
                 {
@@ -321,26 +327,26 @@ public sealed class TonewiseAudioEngine : IDisposable
                         {
                             try
                             {
-                                finished = capturedSource switch
-                                {
-                                    AudioFileReader afr => afr.Position >= afr.Length - 1024,
-                                    DsdStreamReader dsd => dsd.CurrentTime >= dsd.TotalTime - TimeSpan.FromMilliseconds(50),
-                                    _ => false,
-                                };
+                                finished = capturedDsp.ReachedEndOfStream || (capturedWaveStream is { TotalTime.TotalSeconds: > 0 } ws
+                                    ? ws.CurrentTime >= ws.TotalTime - TimeSpan.FromMilliseconds(500)
+                                    : capturedSource is DsdStreamReader dsd
+                                      && dsd.TotalTime.TotalSeconds > 0
+                                      && dsd.CurrentTime >= dsd.TotalTime - TimeSpan.FromMilliseconds(500));
                             }
                             catch
                             {
-                                finished = false;
+                                finished = capturedDsp.ReachedEndOfStream;
                             }
                         }
                     }
-                    if (isActiveOutput && args.Exception is null && finished)
+                    if (isActiveOutput && args.Exception is null && finished && Interlocked.CompareExchange(ref _playbackEndedSignaled, 1, 0) == 0)
                     {
                         PlaybackEnded?.Invoke();
                     }
                 };
 
                 CurrentFilePath = filePath;
+                _sourceWaveStream = sourceWaveStream;
                 _sourceSamples = sourceSamples;
                 _sourceDisposable = sourceDisposable;
                 _dsp = dsp;
@@ -407,13 +413,14 @@ public sealed class TonewiseAudioEngine : IDisposable
     {
         try
         {
-            if (!File.Exists(filePath)) return;
+            string probePath = ToExtendedPathIfLong(filePath);
+            if (!File.Exists(filePath) && !File.Exists(probePath)) return;
             PlayFile(filePath);
             lock (_engineLock)
             {
-                if (_sourceSamples is AudioFileReader afr)
+                if (_sourceWaveStream is not null && _sourceWaveStream.TotalTime.TotalSeconds > 0)
                 {
-                    afr.CurrentTime = TimeSpan.FromSeconds(Math.Clamp(position.TotalSeconds, 0.0, afr.TotalTime.TotalSeconds));
+                    _sourceWaveStream.CurrentTime = TimeSpan.FromSeconds(Math.Clamp(position.TotalSeconds, 0.0, _sourceWaveStream.TotalTime.TotalSeconds));
                 }
                 else if (_sourceSamples is DsdStreamReader dsd && dsd.TotalTime.TotalSeconds > 0)
                 {
@@ -514,14 +521,28 @@ public sealed class TonewiseAudioEngine : IDisposable
         }
     }
 
+    public bool ConsumePendingNaturalEnd()
+    {
+        lock (_engineLock)
+        {
+            if (_dsp?.ReachedEndOfStream == true && !IsPlaying)
+            {
+                return Interlocked.CompareExchange(ref _playbackEndedSignaled, 1, 0) == 0;
+            }
+            return false;
+        }
+    }
+
     public void Seek(double fraction)
     {
         lock (_engineLock)
         {
+            _dsp?.ResetEndOfStream();
+            Interlocked.Exchange(ref _playbackEndedSignaled, 0);
             double clamped = Math.Clamp(fraction, 0.0, 1.0);
-            if (_sourceSamples is AudioFileReader afr)
+            if (_sourceWaveStream is not null && _sourceWaveStream.TotalTime.TotalSeconds > 0)
             {
-                afr.CurrentTime = TimeSpan.FromSeconds(afr.TotalTime.TotalSeconds * clamped);
+                _sourceWaveStream.CurrentTime = TimeSpan.FromSeconds(_sourceWaveStream.TotalTime.TotalSeconds * clamped);
             }
             else if (_sourceSamples is DsdStreamReader dsd)
             {
@@ -618,11 +639,66 @@ public sealed class TonewiseAudioEngine : IDisposable
         _output = null;
         _sourceDisposable?.Dispose();
         _sourceDisposable = null;
+        _sourceWaveStream = null;
         _sourceSamples = null;
         _dsp = null;
         _device?.Dispose();
         _device = null;
         _isAsioActive = false;
+    }
+
+    private static string ToExtendedPathIfLong(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.StartsWith(@"\\?\", StringComparison.Ordinal))
+            return path;
+        return Path.IsPathRooted(path) && path.Length >= 240 ? @"\\?\" + path : path;
+    }
+
+    private static (WaveStream Stream, ISampleProvider Samples, IDisposable Disposable) OpenPcmSourceWithLongPathFallback(string filePath)
+    {
+        if (filePath.Length < 240)
+        {
+            try
+            {
+                var reader = new AudioFileReader(filePath);
+                return (reader, reader, reader);
+            }
+            catch (Exception ex) when (ex is PathTooLongException or DirectoryNotFoundException or UnauthorizedAccessException or IOException)
+            {
+            }
+        }
+
+        string extPath = pathPrefixEnsure(filePath);
+        try
+        {
+            var reader = new AudioFileReader(extPath);
+            return (reader, reader, reader);
+        }
+        catch
+        {
+            var fs = new FileStream(extPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            try
+            {
+                var mf = new StreamMediaFoundationReader(fs);
+                return (mf, mf.ToSampleProvider(), new CompositeSourceDisposable(mf, fs));
+            }
+            catch
+            {
+                fs.Dispose();
+                throw;
+            }
+        }
+
+        static string pathPrefixEnsure(string raw) =>
+            raw.StartsWith(@"\\?\", StringComparison.Ordinal) ? raw : (Path.IsPathRooted(raw) ? @"\\?\" + raw : raw);
+    }
+
+    private sealed class CompositeSourceDisposable(IDisposable primary, IDisposable secondary) : IDisposable
+    {
+        public void Dispose()
+        {
+            try { primary.Dispose(); } finally { secondary.Dispose(); }
+        }
     }
 
     public void Dispose()

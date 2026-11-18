@@ -75,7 +75,7 @@
                 <SolidColorBrush x:Key="TwBgD9B372Brush" Color="#8D6726" />
                 <SolidColorBrush x:Key="TwBgDF11151EBrush" Color="#DFE1E5EE" />
                 <SolidColorBrush x:Key="TwFg10B981Brush" Color="#0FA976" />
-                <SolidColorBrush x:Key="TwFg131720Brush" Color="#445373" />
+                <SolidColorBrush x:Key="TwFg131720Brush" Color="#FFFFFF" />
                 <SolidColorBrush x:Key="TwFg34D399Brush" Color="#21976C" />
                 <SolidColorBrush x:Key="TwFg60A5FABrush" Color="#054A9F" />
                 <SolidColorBrush x:Key="TwFg64748BBrush" Color="#74849B" />

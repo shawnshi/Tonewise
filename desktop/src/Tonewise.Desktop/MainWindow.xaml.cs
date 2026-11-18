@@ -215,6 +215,7 @@ public sealed partial class MainWindow : Window
             if (MainNavigationView.SettingsItem is NavigationViewItem settingsItem)
             {
                 settingsItem.Content = "设置";
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(settingsItem, "NavItemSettings");
                 Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(settingsItem, "设置");
                 ToolTipService.SetToolTip(settingsItem, "设置 (Ctrl+,)：音频输出 / 存储 / 外观");
             }
@@ -1144,6 +1145,24 @@ public sealed partial class MainWindow : Window
             return;
         }
         if (args.InvokedItemContainer?.Tag is string spec && !string.IsNullOrWhiteSpace(spec))
+        {
+            string[] parts = spec.Split(':', 2, StringSplitOptions.TrimEntries);
+            if (parts.Length == 2)
+                ViewModel.NavigateToPrimary(parts[0], parts[1]);
+            else
+                ViewModel.NavigateToPrimary(spec);
+        }
+    }
+
+    private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    {
+        if (_syncingNavSelection) return;
+        if (args.IsSettingsSelected)
+        {
+            ViewModel.NavigateToPrimary("settings");
+            return;
+        }
+        if (args.SelectedItemContainer?.Tag is string spec && !string.IsNullOrWhiteSpace(spec))
         {
             string[] parts = spec.Split(':', 2, StringSplitOptions.TrimEntries);
             if (parts.Length == 2)

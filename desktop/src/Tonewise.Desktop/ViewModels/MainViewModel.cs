@@ -388,6 +388,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private bool _isSettingsStorageSubTab;
 
     [ObservableProperty]
+    private string _storageOrganizeStatus = "按 <Album Artist>\\<Album>\\<Disc-Track#> <Title> 规范自动整理散落曲目、补齐碟轨号并收敛超长路径。";
+
+    [ObservableProperty]
     private bool _isSettingsApisUiSubTab;
 
     [ObservableProperty]
@@ -2294,7 +2297,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         WaveformUpdated?.Invoke();
 
         PushEnginePreferences();
-        if (File.Exists(track.FullPath))
+        if (LongPathHelper.FileExists(track.FullPath))
         {
             try
             {
@@ -2476,6 +2479,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         int startIdx = CurrentTrack is null
             ? -1
             : source.Select((t, i) => (t, i)).FirstOrDefault(x => string.Equals(x.t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal), (null!, -1)).i;
+        if (startIdx < 0 && CurrentTrack is not null)
+        {
+            startIdx = source.Select((t, i) => (t, i)).FirstOrDefault(x => string.Equals(x.t.RelPath, CurrentTrack.RelPath, StringComparison.OrdinalIgnoreCase), (null!, -1)).i;
+        }
         for (int offset = 1; offset <= source.Count; offset++)
         {
             int rawIdx = startIdx + offset;
@@ -2584,6 +2591,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             CurrentTrackSpecsSubline = $"{TimeDisplay}{(string.IsNullOrEmpty(rg) || rg == "RG2 --" ? "" : $" · {rg}")}{queueInfo}";
         }
         IsPlaying = _engine.IsPlaying;
+        if (_engine.ConsumePendingNaturalEnd())
+        {
+            HandlePlaybackEnded();
+        }
     }
 
     [RelayCommand]
@@ -2853,10 +2864,55 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             ApplyFiveDimFilter();
             RefreshStagingProposals();
             StatusMessage = $"已重建指纹库并索引 {_allTracks.Count:N0} 首曲目。";
+            Notify($"曲库索引重建完成：共 {_allTracks.Count:N0} 首曲目。", "success");
         }
         catch (Exception ex)
         {
             StatusMessage = $"重建指纹库失败：{ex.Message}";
+            Notify(StatusMessage, "error");
+        }
+        finally
+        {
+            EndBusy();
+        }
+    }
+
+    [RelayCommand]
+    private async Task OrganizeLibraryFoldersAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot) || string.IsNullOrWhiteSpace(_store.ManifestDbPath))
+        {
+            StatusMessage = "请先打开曲库。";
+            Notify("请先打开曲库，再执行文件夹整理。", "warning");
+            return;
+        }
+
+        string root = _store.MusicRoot;
+        string dbPath = _store.ManifestDbPath;
+        BeginBusy("正在按 <Album Artist>\\<Album>\\<Disc-Track#> <Title> 整理曲库文件夹...");
+        try
+        {
+            var res = await Task.Run(() =>
+            {
+                using var _ = _engine.SuspendIfPlayingFile(_allTracks.Select(t => t.FullPath));
+                return LibraryFolderOrganizerService.OrganizeLibraryFolders(root, dbPath);
+            });
+
+            _allTracks = await Task.Run(() => _store.LoadFromMusicRoot(root).ToList());
+            ApplyFiveDimFilter();
+            RefreshStagingProposals();
+            RefreshPlaylists();
+
+            StorageOrganizeStatus =
+                $"整理完成：检查 {res.TotalChecked:N0} 首，迁移规范 {res.MovedCount:N0} 首（收敛超长路径 {res.LongPathFixedCount:N0} 首），清理失效索引 {res.StaleRemovedCount:N0} 条，已规范跳过 {res.SkippedCount:N0} 首。";
+            StatusMessage = StorageOrganizeStatus;
+            Notify(StorageOrganizeStatus, res.MovedCount > 0 || res.StaleRemovedCount > 0 ? "success" : "info");
+        }
+        catch (Exception ex)
+        {
+            StorageOrganizeStatus = $"文件夹整理失败：{ex.Message}";
+            StatusMessage = StorageOrganizeStatus;
+            Notify(StorageOrganizeStatus, "error");
         }
         finally
         {

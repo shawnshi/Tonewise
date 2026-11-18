@@ -33,5 +33,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>tonewise_core.dll</Link>
     </None>
+    <None Include="..\..\..\core\target\release\tonewise-cli.exe" Condition="Exists('..\..\..\core\target\release\tonewise-cli.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>tonewise-cli.exe</Link>
+    </None>
   </ItemGroup>
 </Project>
