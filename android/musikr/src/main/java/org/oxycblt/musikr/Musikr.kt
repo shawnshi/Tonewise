@@ -21,8 +21,12 @@ package org.oxycblt.musikr
 import android.content.Context
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import org.oxycblt.musikr.cache.CachedFile
+import org.oxycblt.musikr.covers.CoverResult
 import org.oxycblt.musikr.fs.Path
 import org.oxycblt.musikr.pipeline.EvaluateStep
 import org.oxycblt.musikr.pipeline.EvaluatedLibrary
@@ -30,6 +34,10 @@ import org.oxycblt.musikr.pipeline.ExploreStep
 import org.oxycblt.musikr.pipeline.Explored
 import org.oxycblt.musikr.pipeline.ExtractStep
 import org.oxycblt.musikr.pipeline.Extracted
+import org.oxycblt.musikr.pipeline.NotAudio
+import org.oxycblt.musikr.pipeline.RawPlaylist
+import org.oxycblt.musikr.pipeline.RawSong
+import org.oxycblt.musikr.util.mapParallel
 import org.oxycblt.musikr.util.merge
 import org.oxycblt.musikr.util.tryAsyncWith
 
@@ -55,6 +63,13 @@ interface Musikr {
      * @return A handle to the newly created library alongside further cleanup.
      */
     suspend fun run(onProgress: suspend (IndexingProgress) -> Unit = {}): LibraryResult
+
+    /**
+     * Reconstruct a cached [MutableLibrary] directly from SQLite metadata cache, stored covers,
+     * and stored playlists without traversing the filesystem. Returns null if the cache has no
+     * complete entries yet.
+     */
+    suspend fun hydrateFromCache(): MutableLibrary?
 
     companion object {
         /**
@@ -149,6 +164,58 @@ private class MusikrImpl(
         val evaluated = evaluateStep.evaluate(trackedExtractedChannel)
         merge(exploredTask, extractedTask, trackedExploredTask, trackedExtractedTask).await()
         LibraryResultImpl(config, evaluated)
+    }
+
+    override suspend fun hydrateFromCache(): MutableLibrary? = coroutineScope {
+        val cachedFiles = withContext(Dispatchers.IO) { config.storage.cache.readAll() }
+        if (cachedFiles.isEmpty()) return@coroutineScope null
+
+        val cachedChannel = Channel<CachedFile>(Channel.UNLIMITED)
+        val feedTask =
+            tryAsyncWith(cachedChannel, Dispatchers.IO) { ch ->
+                for (cf in cachedFiles) {
+                    ch.send(cf)
+                }
+            }
+
+        val songChannel = Channel<Extracted>(Channel.UNLIMITED)
+        val hydrateSongsTask =
+            mapParallel(HYDRATE_PARALLELISM, cachedChannel, songChannel, Dispatchers.IO) { cf ->
+                val audio = cf.audio ?: return@mapParallel NotAudio
+                val cover =
+                    audio.coverId?.let { id ->
+                        when (val result = config.storage.covers.obtain(id)) {
+                            is CoverResult.Hit -> result.cover
+                            is CoverResult.Miss -> null
+                        }
+                    }
+                RawSong(
+                    file = cf.file,
+                    properties = audio.properties,
+                    tags = audio.tags,
+                    cover = cover,
+                    addedMs = cf.addedMs,
+                )
+            }
+
+        val extractedChannel = Channel<Extracted>(Channel.UNLIMITED)
+        val mergeTask =
+            tryAsyncWith(extractedChannel, Dispatchers.IO) { out ->
+                for (songItem in songChannel) {
+                    out.send(songItem)
+                }
+                for (playlist in config.storage.storedPlaylists.read()) {
+                    out.send(RawPlaylist(playlist))
+                }
+            }
+
+        val evaluated = evaluateStep.evaluate(extractedChannel)
+        awaitAll(feedTask, hydrateSongsTask, mergeTask).forEach { it.getOrThrow() }
+        evaluated.library.takeIf { it.songs.isNotEmpty() }
+    }
+
+    private companion object {
+        const val HYDRATE_PARALLELISM = 8
     }
 }
 

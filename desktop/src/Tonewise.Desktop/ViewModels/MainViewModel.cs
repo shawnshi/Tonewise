@@ -22,6 +22,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly TonewiseAudioEngine _engine = new();
     private readonly SynchronizationContext? _uiContext;
     private SyncHostServer? _syncHost;
+    private SyncOutboxAndPairingStore? _syncStore;
     private LibraryFileWatcherService? _libraryWatcher;
     private List<TrackItem> _allTracks = [];
     private EqualizerApoProfile? _eqProfile;
@@ -40,11 +41,119 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public BulkObservableCollection<StagingProposalViewItem> StagingProposalItems { get; } = [];
     public ObservableCollection<TrackItem> AlternateRecordings { get; } = [];
     public ObservableCollection<SessionSlotDto> SessionSlots { get; } = [];
+    public ObservableCollection<QueueSlotChipItem> QueueSlotChips { get; } = [];
     public ObservableCollection<PlaylistSummary> Playlists { get; } = [];
     public ObservableCollection<SubTabOption> CurrentSubTabs { get; } = [];
     public BulkObservableCollection<EntityGroupItem> CurrentEntityGroups { get; } = [];
     public ObservableCollection<string> SearchSuggestions { get; } = [];
     public ObservableCollection<string> BreadcrumbItems { get; } = [];
+    public ObservableCollection<PairedDeviceViewItem> PairedDevices { get; } = [];
+    public ObservableCollection<SyncOutboxViewItem> SyncOutboxItems { get; } = [];
+
+    [ObservableProperty]
+    private string _lastFmAuthModeBadge = "未配置 Last.fm";
+
+    [ObservableProperty]
+    private bool _hasLastFmWriteSession;
+
+    [ObservableProperty]
+    private bool _currentTrackLoved;
+
+    [ObservableProperty]
+    private bool _hasCurrentTrack;
+
+    [ObservableProperty]
+    private string _replayGainMode = "dynamic";
+
+    [ObservableProperty]
+    private double _replayGainPreAmpWithTagDb;
+
+    [ObservableProperty]
+    private double _replayGainPreAmpWithoutTagDb;
+
+    [ObservableProperty]
+    private string _dspPresetId = "Flat";
+
+    [ObservableProperty]
+    private bool _isDspEnabled;
+
+    [ObservableProperty]
+    private bool _isGainMatchedBypass;
+
+    [ObservableProperty]
+    private bool _isCrossfeedEnabled;
+
+    [ObservableProperty]
+    private double _crossfeedCutoffHz = 700.0;
+
+    [ObservableProperty]
+    private double _crossfeedFeedDb = 4.5;
+
+    [ObservableProperty]
+    private double _dspBalanceDb;
+
+    [ObservableProperty]
+    private bool _isMonoFoldEnabled;
+
+    [ObservableProperty]
+    private bool _isLimiterEnabled = true;
+
+    [ObservableProperty]
+    private double _dspPreampDb;
+
+    [ObservableProperty]
+    private double _eqBand0Db;
+
+    [ObservableProperty]
+    private double _eqBand1Db;
+
+    [ObservableProperty]
+    private double _eqBand2Db;
+
+    [ObservableProperty]
+    private double _eqBand3Db;
+
+    [ObservableProperty]
+    private double _eqBand4Db;
+
+    [ObservableProperty]
+    private double _eqBand5Db;
+
+    [ObservableProperty]
+    private double _eqBand6Db;
+
+    [ObservableProperty]
+    private double _eqBand7Db;
+
+    [ObservableProperty]
+    private double _eqBand8Db;
+
+    [ObservableProperty]
+    private double _eqBand9Db;
+
+    [ObservableProperty]
+    private bool _rewindOnPrevious = true;
+
+    [ObservableProperty]
+    private bool _rememberPauseOnSkip;
+
+    [ObservableProperty]
+    private bool _pauseOnSingleRepeat;
+
+    [ObservableProperty]
+    private int _exclusiveIdleReleaseMinutes = 15;
+
+    [ObservableProperty]
+    private bool _isDjFreezeActive;
+
+    [ObservableProperty]
+    private string _currentFreezeCapsuleLabel = "";
+
+    [ObservableProperty]
+    private bool _hasFreezeCapsule;
+
+    [ObservableProperty]
+    private int _activeSessionSlotIndex;
 
     [ObservableProperty]
     private PlaylistSummary? _selectedPlaylist;
@@ -192,6 +301,24 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private string _lanSyncStatus = "局域网同步服务：未开启";
+
+    [ObservableProperty]
+    private string _lanHostUrlsText = "服务启动后将显示本机局域网地址（端口 45820）";
+
+    [ObservableProperty]
+    private string _lanPairingCode = "------";
+
+    [ObservableProperty]
+    private string _lanOutboxSummaryText = "发送队列为空（在曲目、歌单、流派或艺人卡片上右键「发送到手机」）";
+
+    [ObservableProperty]
+    private bool _hasLanOutboxItems;
+
+    [ObservableProperty]
+    private bool _hasPairedDevices;
+
+    [ObservableProperty]
+    private bool _hasSelectedEntityGroup;
 
     [ObservableProperty]
     private string _lastFmLedgerStatus = "Last.fm 记录：空闲";
@@ -515,8 +642,25 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private bool _isArcRediscovery;
 
     private readonly List<TrackItem> _playbackHistory = [];
+    private List<TrackItem> _unshuffledQueueSnapshot = [];
+    private (List<TrackItem> Queue, string QueueTitle, string FreezeToken)? _djFreezeBackup;
+    private string _currentFreezeToken = "";
     private readonly Random _shuffleRandom = new();
     private readonly HashSet<string> _autoSyncedLastFmRoots = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, DesktopDspChainConfig> _deviceDspProfiles = new(StringComparer.OrdinalIgnoreCase);
+    private bool _suppressDspSync;
+    private bool _usingExternalEqFile;
+
+    // Live Last.fm Scrobble & Exclusive Idle state
+    private TrackItem? _scrobbleTrack;
+    private long _scrobbleStartedUtcSec;
+    private double _accumulatedPlayMs;
+    private DateTime? _lastProgressSampleUtc;
+    private bool _scrobbledCurrentTrack;
+    private readonly SemaphoreSlim _lastFmPushGate = new(1, 1);
+    private double _pendingRestorePositionSec;
+    private DateTime _lastSessionSavedUtc = DateTime.MinValue;
+    private DateTime? _pausedSinceUtc;
 
     public event Action? WaveformUpdated;
     public event Action<TrackItem?>? TrackChanged;
@@ -537,6 +681,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     SignalPurityColorHex = "#A855F7";
                     SignalPurityLabel = "Bit-Perfect 无损直通";
                 }
+                else if (state.GainMatchedBypass)
+                {
+                    SignalPurityColorHex = "#38BDF8";
+                    SignalPurityLabel = "等响度 A/B 盲测旁路";
+                }
                 else if (state.HasSystemApoConflict || !state.IsExclusive)
                 {
                     SignalPurityColorHex = "#F59E0B";
@@ -552,7 +701,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     + $"{state.SampleRateHz / 1000.0:0.#} kHz · {state.BitsPerSample}-bit · "
                     + (state.DspBypassed
                         ? "DSP Bypassed (Bit-Perfect)"
-                        : $"64-bit DSP ({state.BiquadCount} PEQ, FIR {state.FirTapCount} taps, ISO226={(state.Iso226Active ? "On" : "Off")}, TPDF={(state.TpdfDitherActive ? "24b" : "Off")}, Preamp {state.EffectivePreampDb:+0.0;-0.0;0.0} dB)");
+                        : (state.GainMatchedBypass
+                            ? $"Gain-Matched A/B Bypass (RG/Preamp {state.EffectivePreampDb:+0.0;-0.0;0.0} dB)"
+                            : $"64-bit DSP ({state.BiquadCount} PEQ, FIR {state.FirTapCount} taps, Crossfeed={(state.CrossfeedActive ? "On" : "Off")}, ISO226={(state.Iso226Active ? "On" : "Off")}, Limiter={(state.LimiterActive ? "On" : "Off")}, TPDF={(state.TpdfDitherActive ? "24b" : "Off")}, Preamp {state.EffectivePreampDb:+0.0;-0.0;0.0} dB)"));
             }
             if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
                 _uiContext.Post(_ => ApplyState(), null);
@@ -565,6 +716,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 _uiContext.Post(_ => HandlePlaybackEnded(), null);
             else
                 HandlePlaybackEnded();
+        };
+        _engine.GaplessTrackAdvanced += nextPath =>
+        {
+            if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
+                _uiContext.Post(_ => HandleGaplessTrackAdvanced(nextPath), null);
+            else
+                HandleGaplessTrackAdvanced(nextPath);
         };
         PlaybackQueue.CollectionChanged += (_, _) => UpdatePlaybackQueueSummary();
         UpdatePlaybackModeLabels();
@@ -586,6 +744,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         var saved = DesktopSettingsStore.Load(_settingsFilePath);
         _suppressSettingsSave = true;
+        _suppressDspSync = true;
         try
         {
             PreferWasapiExclusive = saved.PreferWasapiExclusive;
@@ -600,6 +759,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             IsShuffleEnabled = saved.IsShuffleEnabled;
             RepeatMode = saved.RepeatMode is "one" or "off" ? saved.RepeatMode : "all";
             EnableAutoWatchLibrary = saved.EnableAutoWatchLibrary;
+            ReplayGainMode = saved.ReplayGainMode is "off" or "track" or "album" or "dynamic" ? saved.ReplayGainMode : "dynamic";
+            ReplayGainPreAmpWithTagDb = Math.Clamp(saved.ReplayGainPreAmpWithTagDb, -15.0, 15.0);
+            ReplayGainPreAmpWithoutTagDb = Math.Clamp(saved.ReplayGainPreAmpWithoutTagDb, -15.0, 15.0);
+            RewindOnPrevious = saved.RewindOnPrevious;
+            RememberPauseOnSkip = saved.RememberPauseOnSkip;
+            PauseOnSingleRepeat = saved.PauseOnSingleRepeat;
+            ExclusiveIdleReleaseMinutes = saved.ExclusiveIdleReleaseMinutes is 0 or 5 or 15 or 30 ? saved.ExclusiveIdleReleaseMinutes : 15;
+            _deviceDspProfiles = DesktopDspChainConfig.DeserializeDeviceProfileMap(saved.DeviceDspProfilesJson);
 
             if (!string.IsNullOrWhiteSpace(saved.SelectedEndpointId))
             {
@@ -612,6 +779,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             }
 
             IsDacHardwareLocked = saved.IsDacHardwareLocked;
+
+            LoadDspConfigForCurrentEndpoint(fallbackAutoFileRoot: null);
 
             if (!string.IsNullOrWhiteSpace(saved.ActiveEqFilePath) && File.Exists(saved.ActiveEqFilePath))
             {
@@ -639,6 +808,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         finally
         {
+            _suppressDspSync = false;
             _suppressSettingsSave = false;
         }
 
@@ -676,7 +846,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             VolumeAttenuationDb: VolumeAttenuationDb,
             IsTpdfDitherEnabled: IsTpdfDitherEnabled,
             FirDryWetMix: FirDryWetMix,
-            ActiveEqFilePath: _activeEqFilePath,
+            ActiveEqFilePath: _usingExternalEqFile ? _activeEqFilePath : null,
             FirImpulseFilePath: _firImpulseFilePath,
             AlwaysExpandClassicalSubItems: AlwaysExpandClassicalSubItems,
             IsSidebarExpanded: IsSidebarExpanded,
@@ -684,7 +854,15 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             AppTheme: AppTheme,
             IsShuffleEnabled: IsShuffleEnabled,
             RepeatMode: RepeatMode,
-            EnableAutoWatchLibrary: EnableAutoWatchLibrary);
+            EnableAutoWatchLibrary: EnableAutoWatchLibrary,
+            ReplayGainMode: ReplayGainMode,
+            ReplayGainPreAmpWithTagDb: ReplayGainPreAmpWithTagDb,
+            ReplayGainPreAmpWithoutTagDb: ReplayGainPreAmpWithoutTagDb,
+            RewindOnPrevious: RewindOnPrevious,
+            RememberPauseOnSkip: RememberPauseOnSkip,
+            PauseOnSingleRepeat: PauseOnSingleRepeat,
+            ExclusiveIdleReleaseMinutes: ExclusiveIdleReleaseMinutes,
+            DeviceDspProfilesJson: DesktopDspChainConfig.SerializeDeviceProfileMap(_deviceDspProfiles));
 
         try
         {
@@ -747,16 +925,26 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         if (!string.IsNullOrWhiteSpace(SelectedEndpoint?.FriendlyName))
         {
-            string? autoEq = _engine.TryAutoLoadDeviceDspProfile(musicRoot, SelectedEndpoint.FriendlyName);
-            if (autoEq is not null)
+            string key = GetCurrentDspProfileKey();
+            if (!_deviceDspProfiles.ContainsKey(key) && !_usingExternalEqFile)
             {
-                ActiveEqSummary = $"Auto EQ: {Path.GetFileName(autoEq)}";
+                string? autoEq = _engine.TryAutoLoadDeviceDspProfile(musicRoot, SelectedEndpoint.FriendlyName);
+                if (autoEq is not null)
+                {
+                    _usingExternalEqFile = true;
+                    _activeEqFilePath = autoEq;
+                    ActiveEqSummary = $"Auto EQ: {Path.GetFileName(autoEq)}";
+                }
             }
         }
 
         SaveUserSettings();
+        _syncStore = new SyncOutboxAndPairingStore(musicRoot);
+        RefreshLanSyncUiState();
         StatusMessage = $"已加载 {_allTracks.Count:N0} 首曲目（{musicRoot}）";
         RestartLibraryFileWatcher(musicRoot);
+        RestoreSavedPlaybackSession(musicRoot);
+        RefreshLastFmAuthStatus();
 
         if (_uiContext is not null && _autoSyncedLastFmRoots.Add(musicRoot))
         {
@@ -788,6 +976,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         string text = File.ReadAllText(filePath);
         _eqProfile = EqualizerApoProfile.Parse(text);
         _activeEqFilePath = filePath;
+        _usingExternalEqFile = true;
         if (_eqProfile.EnableIso226) IsIso226Enabled = true;
         if (!string.IsNullOrWhiteSpace(_eqProfile.FirImpulsePath))
         {
@@ -867,11 +1056,20 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     partial void OnIsShuffleEnabledChanged(bool value)
     {
         UpdatePlaybackModeLabels();
+        if (!_suppressSettingsSave && PlaybackQueue.Count > 1)
+        {
+            ApplyShuffleModeToActiveQueue(value);
+        }
         SaveUserSettings();
     }
     partial void OnRepeatModeChanged(string value)
     {
         UpdatePlaybackModeLabels();
+        if (!_suppressSettingsSave)
+        {
+            PreloadNextGaplessTrack();
+            PersistPlaybackSessionSnapshot(force: true);
+        }
         SaveUserSettings();
     }
     partial void OnSearchQueryChanged(string value) => TriggerFilterRefresh();
@@ -887,8 +1085,264 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
     partial void OnSelectedEndpointChanged(AudioOutputEndpoint? value)
     {
+        if (!_suppressDspSync)
+        {
+            LoadDspConfigForCurrentEndpoint(_store.MusicRoot);
+        }
         PushEnginePreferences();
         SaveUserSettings();
+    }
+    partial void OnReplayGainModeChanged(string value)
+    {
+        if (_suppressSettingsSave) return;
+        PushEnginePreferences();
+        PreloadNextGaplessTrack();
+        SaveUserSettings();
+    }
+    partial void OnReplayGainPreAmpWithTagDbChanged(double value)
+    {
+        if (_suppressSettingsSave) return;
+        PushEnginePreferences();
+        SaveUserSettings();
+    }
+    partial void OnReplayGainPreAmpWithoutTagDbChanged(double value)
+    {
+        if (_suppressSettingsSave) return;
+        PushEnginePreferences();
+        SaveUserSettings();
+    }
+    partial void OnRewindOnPreviousChanged(bool value) => SaveUserSettings();
+    partial void OnRememberPauseOnSkipChanged(bool value) => SaveUserSettings();
+    partial void OnPauseOnSingleRepeatChanged(bool value) => SaveUserSettings();
+    public string ExclusiveIdleReleaseTag
+    {
+        get => ExclusiveIdleReleaseMinutes.ToString();
+        set
+        {
+            if (int.TryParse(value, out int minutes) && minutes != ExclusiveIdleReleaseMinutes)
+            {
+                ExclusiveIdleReleaseMinutes = minutes;
+            }
+        }
+    }
+
+    partial void OnExclusiveIdleReleaseMinutesChanged(int value)
+    {
+        OnPropertyChanged(nameof(ExclusiveIdleReleaseTag));
+        SaveUserSettings();
+    }
+
+    partial void OnIsDspEnabledChanged(bool value) => OnBuiltInDspChanged(markCustomEq: false);
+    partial void OnIsGainMatchedBypassChanged(bool value) => OnBuiltInDspChanged(markCustomEq: false);
+    partial void OnIsCrossfeedEnabledChanged(bool value) => OnBuiltInDspChanged(markCustomEq: false);
+    partial void OnCrossfeedCutoffHzChanged(double value) => OnBuiltInDspChanged(markCustomEq: false);
+    partial void OnCrossfeedFeedDbChanged(double value) => OnBuiltInDspChanged(markCustomEq: false);
+    partial void OnDspBalanceDbChanged(double value) => OnBuiltInDspChanged(markCustomEq: false);
+    partial void OnIsMonoFoldEnabledChanged(bool value) => OnBuiltInDspChanged(markCustomEq: false);
+    partial void OnIsLimiterEnabledChanged(bool value) => OnBuiltInDspChanged(markCustomEq: false);
+    partial void OnDspPreampDbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand0DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand1DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand2DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand3DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand4DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand5DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand6DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand7DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand8DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnEqBand9DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+
+    partial void OnCurrentTrackChanged(TrackItem? value)
+    {
+        HasCurrentTrack = value is not null;
+        CurrentTrackLoved = value?.IsLoved ?? false;
+        RefreshCurrentFreezeCapsule();
+    }
+
+    private string GetCurrentDspProfileKey()
+    {
+        string raw = SelectedEndpoint?.FriendlyName ?? SelectedEndpoint?.Id ?? "Default";
+        return raw.Trim();
+    }
+
+    private void OnBuiltInDspChanged(bool markCustomEq)
+    {
+        if (_suppressDspSync) return;
+        _suppressDspSync = true;
+        try
+        {
+            if (markCustomEq)
+            {
+                _usingExternalEqFile = false;
+                _activeEqFilePath = null;
+                DspPresetId = "Custom";
+                if (!IsDspEnabled) IsDspEnabled = true;
+            }
+            var cfg = BuildCurrentExtendedDspConfig();
+            if (!_usingExternalEqFile)
+            {
+                _eqProfile = IsDspEnabled ? cfg.ToEqualizerApoProfile() : null;
+                ActiveEqSummary = IsDspEnabled
+                    ? $"内置 DSP ({DspPresetId}, {_eqProfile?.Filters.Count ?? 0} 段, Preamp {DspPreampDb:+0.0;-0.0;0.0} dB)"
+                    : "EQ: Flat (已旁路)";
+            }
+            _deviceDspProfiles[GetCurrentDspProfileKey()] = cfg;
+        }
+        finally
+        {
+            _suppressDspSync = false;
+        }
+        PushEnginePreferences();
+        SaveUserSettings();
+    }
+
+    [RelayCommand]
+    public void SelectDspPreset(string presetName)
+    {
+        if (!Enum.TryParse<DesktopDspPresetId>(presetName, ignoreCase: true, out var preset))
+        {
+            preset = DesktopDspPresetId.Flat;
+        }
+
+        var cfg = DesktopDspChainConfig.CreatePreset(preset);
+        _suppressDspSync = true;
+        try
+        {
+            _usingExternalEqFile = false;
+            _activeEqFilePath = null;
+            ApplyDspChainConfigToViewModel(cfg);
+            _eqProfile = cfg.Enabled ? cfg.ToEqualizerApoProfile() : null;
+            ActiveEqSummary = cfg.Enabled
+                ? $"内置 DSP ({cfg.PresetId}, {_eqProfile?.Filters.Count ?? 0} 段, Preamp {cfg.PreampDb:+0.0;-0.0;0.0} dB)"
+                : "EQ: Flat (已旁路)";
+            _deviceDspProfiles[GetCurrentDspProfileKey()] = cfg;
+        }
+        finally
+        {
+            _suppressDspSync = false;
+        }
+        PushEnginePreferences();
+        SaveUserSettings();
+        Notify($"已切换 DSP 预设：{cfg.PresetId}", "info");
+    }
+
+    [RelayCommand]
+    private void ResetTenBandEq()
+    {
+        _suppressDspSync = true;
+        try
+        {
+            _usingExternalEqFile = false;
+            _activeEqFilePath = null;
+            EqBand0Db = 0; EqBand1Db = 0; EqBand2Db = 0; EqBand3Db = 0; EqBand4Db = 0;
+            EqBand5Db = 0; EqBand6Db = 0; EqBand7Db = 0; EqBand8Db = 0; EqBand9Db = 0;
+            DspPreampDb = 0.0;
+            DspPresetId = "Flat";
+            var cfg = BuildCurrentExtendedDspConfig();
+            _eqProfile = IsDspEnabled ? cfg.ToEqualizerApoProfile() : null;
+            ActiveEqSummary = "EQ: Flat (已归零)";
+            _deviceDspProfiles[GetCurrentDspProfileKey()] = cfg;
+        }
+        finally
+        {
+            _suppressDspSync = false;
+        }
+        PushEnginePreferences();
+        SaveUserSettings();
+    }
+
+    private void ApplyDspChainConfigToViewModel(DesktopDspChainConfig cfg)
+    {
+        DspPresetId = cfg.PresetId.ToString();
+        IsDspEnabled = cfg.Enabled;
+        IsGainMatchedBypass = cfg.GainMatchedBypass;
+        DspPreampDb = cfg.PreampDb;
+        IsCrossfeedEnabled = cfg.CrossfeedEnabled;
+        CrossfeedCutoffHz = cfg.CrossfeedCutoffHz;
+        CrossfeedFeedDb = cfg.CrossfeedFeedDb;
+        DspBalanceDb = cfg.BalanceDb;
+        IsMonoFoldEnabled = cfg.MonoFold;
+        IsLimiterEnabled = cfg.LimiterEnabled;
+
+        var bands = cfg.EffectiveBands;
+        double BandGain(int idx) => idx < bands.Count ? bands[idx].GainDb : 0.0;
+        EqBand0Db = BandGain(0);
+        EqBand1Db = BandGain(1);
+        EqBand2Db = BandGain(2);
+        EqBand3Db = BandGain(3);
+        EqBand4Db = BandGain(4);
+        EqBand5Db = BandGain(5);
+        EqBand6Db = BandGain(6);
+        EqBand7Db = BandGain(7);
+        EqBand8Db = BandGain(8);
+        EqBand9Db = BandGain(9);
+    }
+
+    private DesktopDspChainConfig BuildCurrentExtendedDspConfig()
+    {
+        Enum.TryParse<DesktopDspPresetId>(DspPresetId, ignoreCase: true, out var preset);
+        var template = DesktopDspChainConfig.CreatePreset(preset).EffectiveBands;
+        double[] gains = [EqBand0Db, EqBand1Db, EqBand2Db, EqBand3Db, EqBand4Db, EqBand5Db, EqBand6Db, EqBand7Db, EqBand8Db, EqBand9Db];
+        var bands = new List<DesktopPeqBand>(10);
+        for (int i = 0; i < 10; i++)
+        {
+            var t = i < template.Count
+                ? template[i]
+                : new DesktopPeqBand(BiquadKind.Peaking, DesktopDspChainConfig.StandardTenBandFrequencies[i], 0.0);
+            bands.Add(t with { GainDb = Math.Clamp(gains[i], -12.0, 12.0) });
+        }
+        return new DesktopDspChainConfig(
+            PresetId: preset,
+            Enabled: IsDspEnabled,
+            GainMatchedBypass: IsGainMatchedBypass,
+            PreampDb: Math.Clamp(DspPreampDb, -15.0, 6.0),
+            Bands: bands,
+            CrossfeedEnabled: IsCrossfeedEnabled,
+            CrossfeedCutoffHz: Math.Clamp(CrossfeedCutoffHz, 450.0, 950.0),
+            CrossfeedFeedDb: Math.Clamp(CrossfeedFeedDb, 1.5, 9.5),
+            CrossfeedDelayMs: 0.28,
+            BalanceDb: Math.Clamp(DspBalanceDb, -6.0, 6.0),
+            MonoFold: IsMonoFoldEnabled,
+            LimiterEnabled: IsLimiterEnabled,
+            LimiterCeilingDb: -0.2);
+    }
+
+    private void LoadDspConfigForCurrentEndpoint(string? fallbackAutoFileRoot)
+    {
+        string key = GetCurrentDspProfileKey();
+        if (_deviceDspProfiles.TryGetValue(key, out var cfg))
+        {
+            bool prevSup = _suppressDspSync;
+            _suppressDspSync = true;
+            try
+            {
+                ApplyDspChainConfigToViewModel(cfg);
+                if (!_usingExternalEqFile)
+                {
+                    _eqProfile = cfg.Enabled ? cfg.ToEqualizerApoProfile() : null;
+                    ActiveEqSummary = cfg.Enabled
+                        ? $"内置 DSP ({cfg.PresetId}, {_eqProfile?.Filters.Count ?? 0} 段, {key})"
+                        : $"EQ: Flat ({key})";
+                }
+            }
+            finally
+            {
+                _suppressDspSync = prevSup;
+            }
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(fallbackAutoFileRoot)
+            && !string.IsNullOrWhiteSpace(SelectedEndpoint?.FriendlyName))
+        {
+            string? autoEq = _engine.TryAutoLoadDeviceDspProfile(fallbackAutoFileRoot, SelectedEndpoint.FriendlyName);
+            if (autoEq is not null)
+            {
+                _usingExternalEqFile = true;
+                _activeEqFilePath = autoEq;
+                ActiveEqSummary = $"Auto EQ: {Path.GetFileName(autoEq)}";
+            }
+        }
     }
     partial void OnIsIso226EnabledChanged(bool value)
     {
@@ -1076,6 +1530,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     partial void OnIsPlayingChanged(bool value)
     {
         PlayPauseLabel = value ? "Pause" : "Play";
+        if (value)
+        {
+            _pausedSinceUtc = null;
+        }
+        else if (CurrentTrack is not null)
+        {
+            _pausedSinceUtc ??= DateTime.UtcNow;
+        }
     }
 
     private void RunBatchFilterUpdate(Action update)
@@ -1293,6 +1755,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public void SelectEntityGroup(EntityGroupItem? group)
     {
         SelectedEntityGroup = group;
+        HasSelectedEntityGroup = group is not null;
         if (group is not null)
         {
             FilteredTracks.ReplaceAll(group.Tracks);
@@ -2189,12 +2652,21 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         PlaybackQueue.Clear();
         _playbackHistory.Clear();
+        _djFreezeBackup = null;
+        _currentFreezeToken = "";
+        IsDjFreezeActive = false;
+
         foreach (var item in FilteredTracks)
         {
             if (!string.IsNullOrWhiteSpace(item.FullPath))
             {
                 PlaybackQueue.Add(item);
             }
+        }
+        _unshuffledQueueSnapshot = [.. PlaybackQueue];
+        if (IsShuffleEnabled && PlaybackQueue.Count > 1)
+        {
+            ApplyWorkAwareShuffleToQueue(track);
         }
         PlaybackQueueTitle = CurrentViewHeader;
         UpdatePlaybackQueueSummary();
@@ -2204,29 +2676,52 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public void PlayQueueItem(TrackItem track)
     {
         if (track is null) return;
-        PlayTrack(track);
+        bool shouldPause = !IsPlaying && RememberPauseOnSkip;
+        PlayTrack(track, startPaused: shouldPause);
     }
 
     public void RemoveQueueItem(TrackItem track)
     {
         if (track is null) return;
         PlaybackQueue.Remove(track);
+        _unshuffledQueueSnapshot.Remove(track);
         UpdatePlaybackQueueSummary();
+        PreloadNextGaplessTrack();
+        PersistPlaybackSessionSnapshot(force: true);
+    }
+
+    public void OnPlaybackQueueReordered()
+    {
+        if (!IsShuffleEnabled)
+        {
+            _unshuffledQueueSnapshot = [.. PlaybackQueue];
+        }
+        PreloadNextGaplessTrack();
+        PersistPlaybackSessionSnapshot(force: true);
     }
 
     [RelayCommand]
     private void ClearPlaybackQueue()
     {
         PlaybackQueue.Clear();
+        _unshuffledQueueSnapshot.Clear();
         _playbackHistory.Clear();
+        _djFreezeBackup = null;
+        _currentFreezeToken = "";
+        IsDjFreezeActive = false;
         PlaybackQueueTitle = "播放队列为空";
+        _engine.ClearPreloadedNext();
         UpdatePlaybackQueueSummary();
+        PersistPlaybackSessionSnapshot(force: true);
     }
 
     [RelayCommand]
     private void LoadCurrentViewToQueue()
     {
         PlaybackQueue.Clear();
+        _djFreezeBackup = null;
+        _currentFreezeToken = "";
+        IsDjFreezeActive = false;
         foreach (var item in FilteredTracks)
         {
             if (!string.IsNullOrWhiteSpace(item.FullPath))
@@ -2234,8 +2729,15 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 PlaybackQueue.Add(item);
             }
         }
+        _unshuffledQueueSnapshot = [.. PlaybackQueue];
+        if (IsShuffleEnabled && PlaybackQueue.Count > 1)
+        {
+            ApplyWorkAwareShuffleToQueue(CurrentTrack);
+        }
         PlaybackQueueTitle = CurrentViewHeader;
         UpdatePlaybackQueueSummary();
+        PreloadNextGaplessTrack();
+        PersistPlaybackSessionSnapshot(force: true);
         Notify($"已将当前列表 {PlaybackQueue.Count} 首加入播放队列。", "success");
     }
 
@@ -2258,9 +2760,60 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Notify($"循环模式已切换为：{RepeatModeLabel}", "info");
     }
 
+    private void ApplyShuffleModeToActiveQueue(bool enabled)
+    {
+        if (PlaybackQueue.Count <= 1) return;
+        if (enabled)
+        {
+            _unshuffledQueueSnapshot = [.. PlaybackQueue];
+            ApplyWorkAwareShuffleToQueue(CurrentTrack);
+        }
+        else if (_unshuffledQueueSnapshot.Count > 0)
+        {
+            var currentSet = PlaybackQueue.ToHashSet();
+            var restored = _unshuffledQueueSnapshot.Where(currentSet.Contains).ToList();
+            foreach (var extra in PlaybackQueue)
+            {
+                if (!restored.Contains(extra)) restored.Add(extra);
+            }
+            ReplaceQueueItems(restored);
+        }
+        PreloadNextGaplessTrack();
+        PersistPlaybackSessionSnapshot(force: true);
+    }
+
+    private void ApplyWorkAwareShuffleToQueue(TrackItem? anchorTrack)
+    {
+        if (PlaybackQueue.Count <= 1) return;
+        var list = PlaybackQueue.ToList();
+        int anchorIdx = anchorTrack is null
+            ? -1
+            : list.FindIndex(t => string.Equals(t.TrackUid, anchorTrack.TrackUid, StringComparison.Ordinal));
+        var descriptors = list.Select(t => new ShuffleTrackDescriptor(
+            t.TrackUid,
+            t.Album,
+            t.WorkName,
+            t.MovementNumber,
+            t.RelPath)).ToList();
+        int[] order = WorkAwareShuffleEngine.BuildWorkAwareOrder(descriptors, anchorIdx, _shuffleRandom);
+        var reordered = new List<TrackItem>(order.Length);
+        foreach (int idx in order) reordered.Add(list[idx]);
+        ReplaceQueueItems(reordered);
+    }
+
+    private void ReplaceQueueItems(IReadOnlyList<TrackItem> items)
+    {
+        PlaybackQueue.Clear();
+        foreach (var item in items)
+        {
+            PlaybackQueue.Add(item);
+        }
+        UpdatePlaybackQueueSummary();
+    }
+
     private void UpdatePlaybackModeLabels()
     {
-        ShuffleModeLabel = IsShuffleEnabled ? "随机播放" : "顺序播放";
+        ShuffleModeLabel = IsShuffleEnabled ? "随机播放(整部)" : "顺序播放";
         RepeatModeLabel = RepeatMode switch
         {
             "one" => "单曲循环",
@@ -2274,11 +2827,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         PlaybackQueueSummary = $"播放列表 ({PlaybackQueue.Count})";
     }
 
-    public void EnqueueTrackNext(TrackItem track)
+    public void EnqueueTrackNext(TrackItem track) => EnqueueTracksNext([track]);
+
+    public void EnqueueTracksNext(IReadOnlyList<TrackItem> tracks)
     {
-        if (string.IsNullOrWhiteSpace(track.FullPath))
+        var playable = tracks.Where(t => !string.IsNullOrWhiteSpace(t.FullPath)).ToList();
+        if (playable.Count == 0)
         {
-            StatusMessage = $"未匹配本地音频，无法加入队列: {track.Title}";
+            StatusMessage = "未匹配本地音频，无法加入下一首播放。";
             return;
         }
 
@@ -2288,23 +2844,61 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             {
                 PlaybackQueue.Add(CurrentTrack);
             }
-            PlaybackQueue.Add(track);
+            foreach (var t in playable) PlaybackQueue.Add(t);
+            _unshuffledQueueSnapshot = [.. PlaybackQueue];
             PlaybackQueueTitle = "自定义播放队列";
         }
         else
         {
-            int curIdx = CurrentTrack is null ? -1 : PlaybackQueue.IndexOf(CurrentTrack);
+            int curIdx = CurrentTrack is null ? -1 : FindQueueIndex(PlaybackQueue, CurrentTrack);
             int insertIdx = curIdx >= 0 ? Math.Min(curIdx + 1, PlaybackQueue.Count) : 0;
-            PlaybackQueue.Insert(insertIdx, track);
+            for (int i = 0; i < playable.Count; i++)
+            {
+                PlaybackQueue.Insert(insertIdx + i, playable[i]);
+            }
+            if (!IsShuffleEnabled) _unshuffledQueueSnapshot = [.. PlaybackQueue];
         }
 
-        StatusMessage = $"已加入下一首播放: {track.Title} (队列 {PlaybackQueue.Count} 首)";
+        PreloadNextGaplessTrack();
+        PersistPlaybackSessionSnapshot(force: true);
+        StatusMessage = playable.Count == 1
+            ? $"已加入下一首播放: {playable[0].Title} (队列 {PlaybackQueue.Count} 首)"
+            : $"已插入 {playable.Count} 首到下一首播放 (队列 {PlaybackQueue.Count} 首)";
     }
 
-    public void PlayTrack(TrackItem track, double initialSeekFraction = 0.0)
+    public void EnqueueTracksToEnd(IReadOnlyList<TrackItem> tracks)
     {
+        var playable = tracks.Where(t => !string.IsNullOrWhiteSpace(t.FullPath)).ToList();
+        if (playable.Count == 0)
+        {
+            StatusMessage = "未匹配本地音频，无法追加到队列。";
+            return;
+        }
+
+        if (PlaybackQueue.Count == 0 && CurrentTrack is not null && !string.IsNullOrWhiteSpace(CurrentTrack.FullPath))
+        {
+            PlaybackQueue.Add(CurrentTrack);
+            PlaybackQueueTitle = "自定义播放队列";
+        }
+        foreach (var t in playable)
+        {
+            PlaybackQueue.Add(t);
+        }
+        if (!IsShuffleEnabled) _unshuffledQueueSnapshot = [.. PlaybackQueue];
+        PreloadNextGaplessTrack();
+        PersistPlaybackSessionSnapshot(force: true);
+        StatusMessage = playable.Count == 1
+            ? $"已追加到队尾: {playable[0].Title} (队列 {PlaybackQueue.Count} 首)"
+            : $"已追加 {playable.Count} 首到队尾 (队列 {PlaybackQueue.Count} 首)";
+    }
+
+    public void PlayTrack(TrackItem track, double initialSeekFraction = 0.0, bool startPaused = false)
+    {
+        EvaluateAndCommitPlayCountIfQualified(completedNaturally: false);
+
         var previousTrack = CurrentTrack;
         CurrentTrack = track;
+        _pendingRestorePositionSec = 0.0;
         CurrentWaveform = _store.LoadWaveform(track);
         if (InspectedTrack is null || ReferenceEquals(InspectedTrack, previousTrack) || InspectedTrack.TrackUid == previousTrack?.TrackUid)
         {
@@ -2322,7 +2916,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 {
                     _engine.Seek(Math.Clamp(initialSeekFraction, 0.0, 0.99));
                 }
-                IsPlaying = true;
+                if (startPaused)
+                {
+                    _engine.Pause();
+                    IsPlaying = false;
+                    _pausedSinceUtc = DateTime.UtcNow;
+                }
+                else
+                {
+                    IsPlaying = true;
+                    _pausedSinceUtc = null;
+                }
+
+                ResetScrobbleSession(track);
                 if (previousTrack is not null
                     && !string.Equals(previousTrack.TrackUid, track.TrackUid, StringComparison.Ordinal)
                     && (_playbackHistory.Count == 0 || !string.Equals(_playbackHistory[^1].TrackUid, previousTrack.TrackUid, StringComparison.Ordinal)))
@@ -2330,7 +2936,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     _playbackHistory.Add(previousTrack);
                     if (_playbackHistory.Count > 200) _playbackHistory.RemoveAt(0);
                 }
-                StatusMessage = $"正在播放：{track.Title}";
+
+                if (!startPaused)
+                {
+                    StatusMessage = $"正在播放：{track.Title}";
+                    SendNowPlayingInBackground(track);
+                }
+                PreloadNextGaplessTrack();
+                PersistPlaybackSessionSnapshot(force: true);
             }
             catch (Exception ex)
             {
@@ -2443,18 +3056,95 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void TogglePlayPause()
     {
+        if (_engine.CurrentFilePath is null && CurrentTrack is not null)
+        {
+            double durSec = CurrentTrack.DurationMs / 1000.0;
+            double frac = durSec > 0 && _pendingRestorePositionSec > 0
+                ? Math.Clamp(_pendingRestorePositionSec / durSec, 0.0, 0.99)
+                : 0.0;
+            PlayTrack(CurrentTrack, initialSeekFraction: frac, startPaused: false);
+            return;
+        }
+
+        if (_engine.IsPlaying)
+        {
+            AccumulateListeningTime();
+            EvaluateAndCommitPlayCountIfQualified(completedNaturally: false);
+        }
         _engine.TogglePlayPause();
         IsPlaying = _engine.IsPlaying;
+        if (IsPlaying)
+        {
+            _lastProgressSampleUtc = DateTime.UtcNow;
+            _pausedSinceUtc = null;
+        }
+        else
+        {
+            _lastProgressSampleUtc = null;
+            _pausedSinceUtc = DateTime.UtcNow;
+            PersistPlaybackSessionSnapshot(force: true);
+        }
     }
 
     private void HandlePlaybackEnded()
     {
+        EvaluateAndCommitPlayCountIfQualified(completedNaturally: true);
         if (RepeatMode == "one" && CurrentTrack is not null)
         {
-            PlayTrack(CurrentTrack);
+            PlayTrack(CurrentTrack, startPaused: PauseOnSingleRepeat);
             return;
         }
         NextTrack(autoAdvance: true);
+    }
+
+    private void HandleGaplessTrackAdvanced(string nextPath)
+    {
+        EvaluateAndCommitPlayCountIfQualified(completedNaturally: true);
+
+        IList<TrackItem> source = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
+        int curIdx = CurrentTrack is null ? -1 : FindQueueIndex(source, CurrentTrack);
+        TrackItem? nextTrack = null;
+        if (curIdx >= 0)
+        {
+            for (int offset = 1; offset <= source.Count; offset++)
+            {
+                var cand = source[(curIdx + offset) % source.Count];
+                if (string.Equals(cand.FullPath, nextPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    nextTrack = cand;
+                    break;
+                }
+            }
+        }
+        nextTrack ??= source.FirstOrDefault(t => string.Equals(t.FullPath, nextPath, StringComparison.OrdinalIgnoreCase))
+                      ?? _allTracks.FirstOrDefault(t => string.Equals(t.FullPath, nextPath, StringComparison.OrdinalIgnoreCase));
+        if (nextTrack is null) return;
+
+        var previousTrack = CurrentTrack;
+        CurrentTrack = nextTrack;
+        _pendingRestorePositionSec = 0.0;
+        ResetScrobbleSession(nextTrack);
+        if (previousTrack is not null && !string.Equals(previousTrack.TrackUid, nextTrack.TrackUid, StringComparison.Ordinal))
+        {
+            _playbackHistory.Add(previousTrack);
+            if (_playbackHistory.Count > 200) _playbackHistory.RemoveAt(0);
+        }
+
+        CurrentWaveform = _store.LoadWaveform(nextTrack);
+        if (InspectedTrack is null || ReferenceEquals(InspectedTrack, previousTrack) || InspectedTrack.TrackUid == previousTrack?.TrackUid)
+        {
+            InspectTrack(nextTrack);
+        }
+        else
+        {
+            TrackChanged?.Invoke(nextTrack);
+        }
+        WaveformUpdated?.Invoke();
+        IsPlaying = _engine.IsPlaying;
+        StatusMessage = $"正在播放：{nextTrack.Title}";
+        SendNowPlayingInBackground(nextTrack);
+        PersistPlaybackSessionSnapshot(force: true);
+        PreloadNextGaplessTrack();
     }
 
     [RelayCommand]
@@ -2465,86 +3155,139 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         IList<TrackItem> source = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
         if (source.Count == 0) return;
 
-        var playable = source.Where(t => !string.IsNullOrEmpty(t.FullPath)).ToList();
-        if (playable.Count == 0)
+        bool shouldPause = !autoAdvance && !IsPlaying && RememberPauseOnSkip;
+        TrackItem? candidate = ResolveNextCandidate(source, autoAdvance, allowReshuffle: true);
+        if (candidate is null)
         {
-            StatusMessage = "当前队列无可播放的本地曲目。";
+            EvaluateAndCommitPlayCountIfQualified(completedNaturally: autoAdvance);
+            IsPlaying = false;
+            _engine.ClearPreloadedNext();
+            PersistPlaybackSessionSnapshot(force: true);
+            StatusMessage = "当前列表已顺序播放完毕。";
             return;
         }
+        PlayTrack(candidate, startPaused: shouldPause);
+    }
 
-        if (IsShuffleEnabled)
-        {
-            if (playable.Count == 1)
-            {
-                if (autoAdvance && RepeatMode == "off")
-                {
-                    IsPlaying = false;
-                    return;
-                }
-                PlayTrack(playable[0]);
-                return;
-            }
-            var pool = CurrentTrack is null
-                ? playable
-                : playable.Where(t => !string.Equals(t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal)).ToList();
-            if (pool.Count == 0) pool = playable;
-            PlayTrack(pool[_shuffleRandom.Next(pool.Count)]);
-            return;
-        }
+    private TrackItem? ResolveNextCandidate(IList<TrackItem> source, bool autoAdvance, bool allowReshuffle)
+    {
+        if (source.Count == 0) return null;
+        int startIdx = CurrentTrack is null ? -1 : FindQueueIndex(source, CurrentTrack);
 
-        int startIdx = CurrentTrack is null
-            ? -1
-            : source.Select((t, i) => (t, i)).FirstOrDefault(x => string.Equals(x.t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal), (null!, -1)).i;
-        if (startIdx < 0 && CurrentTrack is not null)
-        {
-            startIdx = source.Select((t, i) => (t, i)).FirstOrDefault(x => string.Equals(x.t.RelPath, CurrentTrack.RelPath, StringComparison.OrdinalIgnoreCase), (null!, -1)).i;
-        }
         for (int offset = 1; offset <= source.Count; offset++)
         {
             int rawIdx = startIdx + offset;
-            if (rawIdx >= source.Count && autoAdvance && RepeatMode == "off")
+            if (rawIdx >= source.Count)
             {
-                IsPlaying = false;
-                StatusMessage = "当前列表已顺序播放完毕。";
-                return;
+                if (autoAdvance && RepeatMode == "off")
+                {
+                    return null;
+                }
+                if (IsShuffleEnabled && PlaybackQueue.Count > 1)
+                {
+                    if (!allowReshuffle) return null;
+                    var list = PlaybackQueue.ToList();
+                    var descriptors = list.Select(t => new ShuffleTrackDescriptor(
+                        t.TrackUid, t.Album, t.WorkName, t.MovementNumber, t.RelPath)).ToList();
+                    int[] order = WorkAwareShuffleEngine.BuildWorkAwareOrder(descriptors, -1, _shuffleRandom);
+                    var reshuffled = order.Select(i => list[i]).ToList();
+                    if (CurrentTrack is not null && reshuffled.Count > 1
+                        && string.Equals(reshuffled[0].TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal))
+                    {
+                        (reshuffled[0], reshuffled[^1]) = (reshuffled[^1], reshuffled[0]);
+                    }
+                    ReplaceQueueItems(reshuffled);
+                    return reshuffled.FirstOrDefault(t => !string.IsNullOrEmpty(t.FullPath));
+                }
             }
-            int idx = rawIdx % source.Count;
-            var candidate = source[idx];
-            if (!string.IsNullOrEmpty(candidate.FullPath))
+            int idx = ((rawIdx % source.Count) + source.Count) % source.Count;
+            var cand = source[idx];
+            if (!string.IsNullOrEmpty(cand.FullPath))
             {
-                PlayTrack(candidate);
-                return;
+                return cand;
             }
         }
-        StatusMessage = "当前队列无可播放的本地曲目。";
+        return null;
+    }
+
+    private void PreloadNextGaplessTrack()
+    {
+        if (RepeatMode == "one" || CurrentTrack is null || _engine.CurrentFilePath is null)
+        {
+            _engine.ClearPreloadedNext();
+            return;
+        }
+        IList<TrackItem> source = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
+        var next = ResolveNextCandidate(source, autoAdvance: true, allowReshuffle: false);
+        if (next is null || string.IsNullOrWhiteSpace(next.FullPath))
+        {
+            _engine.ClearPreloadedNext();
+            return;
+        }
+
+        string nextPath = next.FullPath;
+        double nextRg = ResolveReplayGainForTrack(next);
+        _ = Task.Run(() => _engine.PreloadNextFile(nextPath, nextRg));
+    }
+
+    private static int FindQueueIndex(IList<TrackItem> source, TrackItem track)
+    {
+        for (int i = 0; i < source.Count; i++)
+        {
+            if (string.Equals(source[i].TrackUid, track.TrackUid, StringComparison.Ordinal))
+                return i;
+        }
+        for (int i = 0; i < source.Count; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(track.RelPath)
+                && string.Equals(source[i].RelPath, track.RelPath, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+        return -1;
     }
 
     [RelayCommand]
     public void PreviousTrack()
     {
-        if (IsShuffleEnabled && _playbackHistory.Count > 0)
+        double currentPosSec = _engine.CurrentFilePath is not null
+            ? _engine.Position.TotalSeconds
+            : _pendingRestorePositionSec;
+        if (RewindOnPrevious && CurrentTrack is not null && currentPosSec > 3.0)
         {
-            var prev = _playbackHistory[^1];
-            _playbackHistory.RemoveAt(_playbackHistory.Count - 1);
-            if (!string.IsNullOrEmpty(prev.FullPath))
+            if (_engine.CurrentFilePath is not null)
             {
-                PlayTrack(prev);
-                return;
+                SeekFraction(0.0);
             }
+            else
+            {
+                _pendingRestorePositionSec = 0.0;
+                PlaybackPositionSeconds = 0.0;
+                PlaybackProgress = 0.0;
+            }
+            return;
         }
 
+        bool shouldPause = !IsPlaying && RememberPauseOnSkip;
         IList<TrackItem> source = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
-        if (source.Count == 0) return;
-        int startIdx = CurrentTrack is null
-            ? 0
-            : Math.Max(0, source.Select((t, i) => (t, i)).FirstOrDefault(x => string.Equals(x.t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal), (null!, 0)).i);
+        if (source.Count == 0)
+        {
+            if (_playbackHistory.Count > 0)
+            {
+                var prev = _playbackHistory[^1];
+                _playbackHistory.RemoveAt(_playbackHistory.Count - 1);
+                if (!string.IsNullOrEmpty(prev.FullPath)) PlayTrack(prev, startPaused: shouldPause);
+            }
+            return;
+        }
+
+        int startIdx = CurrentTrack is null ? 0 : Math.Max(0, FindQueueIndex(source, CurrentTrack));
         for (int offset = 1; offset <= source.Count; offset++)
         {
             int idx = ((startIdx - offset) % source.Count + source.Count) % source.Count;
             var candidate = source[idx];
             if (!string.IsNullOrEmpty(candidate.FullPath))
             {
-                PlayTrack(candidate);
+                PlayTrack(candidate, startPaused: shouldPause);
                 return;
             }
         }
@@ -2573,12 +3316,33 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public void SeekFraction(double fraction)
     {
+        if (_engine.CurrentFilePath is null && CurrentTrack is not null)
+        {
+            double durSec = CurrentTrack.DurationMs / 1000.0;
+            _pendingRestorePositionSec = Math.Clamp(fraction, 0.0, 1.0) * durSec;
+            PlaybackPositionSeconds = _pendingRestorePositionSec;
+            PlaybackProgress = Math.Clamp(fraction, 0.0, 1.0);
+            PersistPlaybackSessionSnapshot(force: true);
+            return;
+        }
         _engine.Seek(fraction);
         RefreshProgress();
     }
 
     public void SeekToSeconds(double seconds)
     {
+        if (_engine.CurrentFilePath is null && CurrentTrack is not null)
+        {
+            double totalSec = CurrentTrack.DurationMs / 1000.0;
+            if (totalSec > 0)
+            {
+                _pendingRestorePositionSec = Math.Clamp(seconds, 0.0, totalSec);
+                PlaybackPositionSeconds = _pendingRestorePositionSec;
+                PlaybackProgress = Math.Clamp(_pendingRestorePositionSec / totalSec, 0.0, 1.0);
+                PersistPlaybackSessionSnapshot(force: true);
+            }
+            return;
+        }
         double dur = _engine.Duration.TotalSeconds;
         if (dur <= 0) return;
         _engine.Seek(Math.Clamp(seconds / dur, 0.0, 0.995));
@@ -2588,6 +3352,24 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public void RefreshProgress()
     {
+        if (_engine.CurrentFilePath is null && CurrentTrack is not null)
+        {
+            double totalSec = Math.Max(0.0, CurrentTrack.DurationMs / 1000.0);
+            PlaybackDurationSeconds = totalSec;
+            PlaybackPositionSeconds = Math.Clamp(_pendingRestorePositionSec, 0.0, totalSec);
+            PlaybackProgress = totalSec > 0 ? Math.Clamp(PlaybackPositionSeconds / totalSec, 0.0, 1.0) : 0.0;
+            var pTs = TimeSpan.FromSeconds(PlaybackPositionSeconds);
+            var dTs = TimeSpan.FromSeconds(totalSec);
+            TimeDisplay = totalSec > 0
+                ? $"{(int)pTs.TotalMinutes}:{pTs.Seconds:D2} / {(int)dTs.TotalMinutes}:{dTs.Seconds:D2}"
+                : "";
+            string rgRest = CurrentTrack.ReplayGainBadge;
+            string qRest = PlaybackQueue.Count > 0 ? $" · 队列 {PlaybackQueue.Count} 首" : "";
+            CurrentTrackSpecsSubline = $"{TimeDisplay}{(rgRest == "RG2 --" ? "" : $" · {rgRest}")}{qRest}";
+            IsPlaying = false;
+            return;
+        }
+
         var dur = _engine.Duration;
         var pos = _engine.Position;
         PlaybackDurationSeconds = Math.Max(0.0, dur.TotalSeconds);
@@ -2606,11 +3388,417 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             string queueInfo = PlaybackQueue.Count > 0 ? $" · 队列 {PlaybackQueue.Count} 首" : "";
             CurrentTrackSpecsSubline = $"{TimeDisplay}{(string.IsNullOrEmpty(rg) || rg == "RG2 --" ? "" : $" · {rg}")}{queueInfo}";
         }
+
         IsPlaying = _engine.IsPlaying;
+        AccumulateListeningTime();
+        if (IsPlaying && _scrobbleTrack is not null && !_scrobbledCurrentTrack)
+        {
+            int curDurMs = _scrobbleTrack.DurationMs > 0 ? _scrobbleTrack.DurationMs : (int)(PlaybackDurationSeconds * 1000.0);
+            if (PlaybackScrobbleEvaluator.ShouldCommitPlay(curDurMs, _accumulatedPlayMs, completedNaturally: false))
+            {
+                EvaluateAndCommitPlayCountIfQualified(completedNaturally: false);
+            }
+        }
+
+        if (IsPlaying && CurrentTrack is not null && (DateTime.UtcNow - _lastSessionSavedUtc).TotalSeconds >= 5.0)
+        {
+            PersistPlaybackSessionSnapshot(force: false);
+        }
+
+        if (!IsPlaying
+            && CurrentTrack is not null
+            && _engine.CurrentFilePath is not null
+            && _engine.CurrentSignalPath.IsExclusive
+            && ExclusiveIdleReleaseMinutes > 0
+            && _pausedSinceUtc.HasValue
+            && (DateTime.UtcNow - _pausedSinceUtc.Value).TotalMinutes >= ExclusiveIdleReleaseMinutes)
+        {
+            _pendingRestorePositionSec = PlaybackPositionSeconds;
+            _engine.ClearPreloadedNext();
+            _engine.Stop();
+            _pausedSinceUtc = null;
+            PersistPlaybackSessionSnapshot(force: true);
+            StatusMessage = $"WASAPI 独占已空闲释放（暂停超 {ExclusiveIdleReleaseMinutes} 分钟），点击播放即可从当前位置续播。";
+        }
+
         if (_engine.ConsumePendingNaturalEnd())
         {
             HandlePlaybackEnded();
         }
+    }
+
+    private void ResetScrobbleSession(TrackItem track)
+    {
+        _scrobbleTrack = track;
+        _scrobbleStartedUtcSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        _accumulatedPlayMs = 0.0;
+        _lastProgressSampleUtc = _engine.IsPlaying ? DateTime.UtcNow : null;
+        _scrobbledCurrentTrack = false;
+    }
+
+    private void AccumulateListeningTime()
+    {
+        if (_scrobbleTrack is null) return;
+        var now = DateTime.UtcNow;
+        if (_engine.IsPlaying)
+        {
+            if (_lastProgressSampleUtc.HasValue)
+            {
+                double delta = Math.Clamp((now - _lastProgressSampleUtc.Value).TotalMilliseconds, 0.0, 15_000.0);
+                _accumulatedPlayMs += delta;
+            }
+            _lastProgressSampleUtc = now;
+        }
+        else
+        {
+            _lastProgressSampleUtc = null;
+        }
+    }
+
+    private void EvaluateAndCommitPlayCountIfQualified(bool completedNaturally)
+    {
+        var track = _scrobbleTrack;
+        if (track is null || _scrobbledCurrentTrack) return;
+        AccumulateListeningTime();
+
+        int durMs = track.DurationMs > 0 ? track.DurationMs : (int)(PlaybackDurationSeconds * 1000.0);
+        if (!PlaybackScrobbleEvaluator.ShouldCommitPlay(durMs, _accumulatedPlayMs, completedNaturally))
+            return;
+
+        _scrobbledCurrentTrack = true;
+        bool scrobbleEligible = PlaybackScrobbleEvaluator.IsEligibleForLastFmScrobble(durMs, _accumulatedPlayMs, completedNaturally);
+        long playedAtSec = _scrobbleStartedUtcSec > 0 ? _scrobbleStartedUtcSec : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        IncrementTrackPlayCountInMemory(track.TrackUid, playedAtSec * 1000L);
+
+        string? musicRoot = _store.MusicRoot;
+        string? manifestDb = _store.ManifestDbPath;
+        if (string.IsNullOrWhiteSpace(musicRoot)) return;
+        string tonewiseDir = Path.Combine(musicRoot, ".tonewise");
+
+        _ = Task.Run(async () =>
+        {
+            await _lastFmPushGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                LastFmLedgerService.RecordLocalPlaybackEvent(
+                    manifestDbPath: manifestDb ?? "",
+                    tonewiseDir: tonewiseDir,
+                    trackUid: track.TrackUid,
+                    artist: track.ArtistsDisplay,
+                    title: track.Title,
+                    album: track.Album,
+                    playedAtUnixSec: playedAtSec,
+                    scrobbleEligible: scrobbleEligible);
+
+                var cfg = LastFmAccountConfig.Load(tonewiseDir);
+                if (cfg is { HasWriteSession: true } && scrobbleEligible && !string.IsNullOrWhiteSpace(manifestDb))
+                {
+                    var client = new LastFmWebApiClient();
+                    int pushed = await client.FlushPendingScrobblesAsync(manifestDb, tonewiseDir, cfg).ConfigureAwait(false);
+                    if (pushed > 0 && _uiContext is not null)
+                    {
+                        _uiContext.Post(_ => LastFmLedgerStatus = $"Last.fm 实时同步（@{cfg.Username}）：已自动上报 {pushed} 条播放记录（最近：{track.Title}）", null);
+                    }
+                }
+            }
+            catch
+            {
+                // Keep queued in history.desktop.jsonl for 14-day retry
+            }
+            finally
+            {
+                _lastFmPushGate.Release();
+            }
+        });
+    }
+
+    private void SendNowPlayingInBackground(TrackItem track)
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot)) return;
+        string tonewiseDir = Path.Combine(_store.MusicRoot, ".tonewise");
+        var cfg = LastFmAccountConfig.Load(tonewiseDir);
+        if (cfg is not { HasWriteSession: true }) return;
+
+        int durSec = track.DurationMs > 0 ? Math.Max(30, track.DurationMs / 1000) : 0;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var client = new LastFmWebApiClient();
+                await client.UpdateNowPlayingAsync(
+                    cfg.ApiKey,
+                    cfg.ApiSecret,
+                    cfg.SessionKey,
+                    track.ArtistsDisplay,
+                    track.Title,
+                    track.Album,
+                    durSec).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Non-fatal NowPlaying update
+            }
+        });
+    }
+
+    private void IncrementTrackPlayCountInMemory(string trackUid, long playedTsMs)
+    {
+        TrackItem? updated = null;
+        for (int i = 0; i < _allTracks.Count; i++)
+        {
+            if (string.Equals(_allTracks[i].TrackUid, trackUid, StringComparison.Ordinal))
+            {
+                updated = _allTracks[i] with
+                {
+                    EffectivePlayCount = _allTracks[i].EffectivePlayCount + 1,
+                    LastPlayedTsMs = Math.Max(_allTracks[i].LastPlayedTsMs, playedTsMs),
+                };
+                _allTracks[i] = updated;
+                break;
+            }
+        }
+        if (updated is null) return;
+
+        for (int i = 0; i < PlaybackQueue.Count; i++)
+        {
+            if (string.Equals(PlaybackQueue[i].TrackUid, trackUid, StringComparison.Ordinal))
+                PlaybackQueue[i] = updated;
+        }
+        for (int i = 0; i < FilteredTracks.Count; i++)
+        {
+            if (string.Equals(FilteredTracks[i].TrackUid, trackUid, StringComparison.Ordinal))
+                FilteredTracks[i] = updated;
+        }
+        if (CurrentTrack is not null && string.Equals(CurrentTrack.TrackUid, trackUid, StringComparison.Ordinal))
+            CurrentTrack = updated;
+        if (InspectedTrack is not null && string.Equals(InspectedTrack.TrackUid, trackUid, StringComparison.Ordinal))
+            InspectedTrack = updated;
+    }
+
+    [RelayCommand]
+    public void ToggleCurrentTrackLoved()
+    {
+        if (CurrentTrack is null) return;
+        bool nextLoved = !CurrentTrack.IsLoved;
+        ApplyLexiconTagsToTracks([CurrentTrack], new Dictionary<string, string?>
+        {
+            ["rating"] = nextLoved ? "5" : "0",
+        });
+        Notify(nextLoved ? $"已喜爱「{CurrentTrack.Title}」（将同步至 Last.fm）" : $"已取消喜爱「{CurrentTrack.Title}」", "success");
+    }
+
+    public void ToggleLovedForTracks(IReadOnlyList<TrackItem> tracks)
+    {
+        if (tracks.Count == 0) return;
+        bool nextLoved = !tracks[0].IsLoved;
+        ApplyLexiconTagsToTracks(tracks, new Dictionary<string, string?>
+        {
+            ["rating"] = nextLoved ? "5" : "0",
+        });
+        Notify(nextLoved ? $"已标记 {tracks.Count} 首为喜爱" : $"已取消 {tracks.Count} 首喜爱标记", "success");
+    }
+
+    public void NavigateToCurrentTrackArtist()
+    {
+        if (CurrentTrack is null || string.IsNullOrWhiteSpace(CurrentTrack.ArtistsDisplay)) return;
+        string primary = PlaybackScrobbleEvaluator.ExtractPrimaryArtist(CurrentTrack.ArtistsDisplay);
+        FilterByCreditEntity(primary);
+    }
+
+    public void NavigateToCurrentTrackAlbum()
+    {
+        if (CurrentTrack is null || string.IsNullOrWhiteSpace(CurrentTrack.Album)) return;
+        FilterByCreditEntity(CurrentTrack.Album);
+    }
+
+    private void RefreshCurrentFreezeCapsule()
+    {
+        var track = CurrentTrack;
+        if (track is null)
+        {
+            HasFreezeCapsule = false;
+            CurrentFreezeCapsuleLabel = "";
+            return;
+        }
+
+        if (track.DjScene.Count > 0)
+        {
+            string sc = track.DjScene[0].Trim();
+            string label = sc.ToLowerInvariant() switch
+            {
+                "focus" => "专注",
+                "coding" => "编程",
+                "relax" => "放松",
+                "energy" => "活力",
+                "pop" => "流行",
+                _ => sc,
+            };
+            _currentFreezeToken = $"scene:{sc}";
+            CurrentFreezeCapsuleLabel = IsDjFreezeActive ? $"❄ 已冻结 · {ActiveDjFreezeLabel}" : $"❄ 同场景：{label}";
+            HasFreezeCapsule = true;
+            return;
+        }
+
+        if (track.Moods.Count > 0)
+        {
+            string mood = track.Moods[0].Trim();
+            _currentFreezeToken = $"mood:{mood}";
+            CurrentFreezeCapsuleLabel = IsDjFreezeActive ? $"❄ 已冻结 · {ActiveDjFreezeLabel}" : $"❄ 同情绪：{mood}";
+            HasFreezeCapsule = true;
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(track.DjVocals) && !string.Equals(track.DjVocals, "unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            string vocals = track.DjVocals.Trim();
+            string label = vocals.Equals("instrumental", StringComparison.OrdinalIgnoreCase) ? "纯器乐" : "含人声";
+            _currentFreezeToken = $"vocals:{vocals}";
+            CurrentFreezeCapsuleLabel = IsDjFreezeActive ? $"❄ 已冻结 · {ActiveDjFreezeLabel}" : $"❄ {label}";
+            HasFreezeCapsule = true;
+            return;
+        }
+
+        HasFreezeCapsule = false;
+        CurrentFreezeCapsuleLabel = "";
+    }
+
+    [ObservableProperty]
+    private string _activeDjFreezeLabel = "";
+
+    [RelayCommand]
+    public void ToggleDjFreeze()
+    {
+        if (CurrentTrack is null || string.IsNullOrWhiteSpace(_currentFreezeToken)) return;
+
+        if (IsDjFreezeActive && _djFreezeBackup is not null)
+        {
+            var backup = _djFreezeBackup.Value;
+            _djFreezeBackup = null;
+            IsDjFreezeActive = false;
+            ActiveDjFreezeLabel = "";
+            PlaybackQueueTitle = backup.QueueTitle;
+            ReplaceQueueItems(backup.Queue);
+            PreloadNextGaplessTrack();
+            PersistPlaybackSessionSnapshot(force: true);
+            RefreshCurrentFreezeCapsule();
+            Notify("已退出氛围冻结，恢复原播放队列（当前播放不中断）。", "info");
+            return;
+        }
+
+        var parts = _currentFreezeToken.Split(':', 2);
+        string kind = parts[0];
+        string val = parts.Length > 1 ? parts[1] : "";
+        var matches = _allTracks
+            .Where(t => !string.IsNullOrWhiteSpace(t.FullPath)
+                        && !string.Equals(t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal)
+                        && (kind switch
+                        {
+                            "scene" => t.DjScene.Any(s => string.Equals(s.Trim(), val, StringComparison.OrdinalIgnoreCase)),
+                            "mood" => t.Moods.Any(m => string.Equals(m.Trim(), val, StringComparison.OrdinalIgnoreCase)),
+                            "vocals" => string.Equals(t.DjVocals?.Trim(), val, StringComparison.OrdinalIgnoreCase),
+                            _ => false,
+                        }))
+            .OrderBy(_ => _shuffleRandom.Next())
+            .Take(80)
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            Notify("未找到更多匹配该氛围标签的本地曲目。", "warning");
+            return;
+        }
+
+        _djFreezeBackup = ([.. PlaybackQueue], PlaybackQueueTitle, _currentFreezeToken);
+        var frozenQueue = new List<TrackItem>(matches.Count + 1) { CurrentTrack };
+        frozenQueue.AddRange(matches);
+
+        IsDjFreezeActive = true;
+        ActiveDjFreezeLabel = val;
+        PlaybackQueueTitle = $"❄ 氛围冻结 · {val}";
+        ReplaceQueueItems(frozenQueue);
+        PreloadNextGaplessTrack();
+        PersistPlaybackSessionSnapshot(force: true);
+        RefreshCurrentFreezeCapsule();
+        Notify($"已锁定氛围队列（共 {frozenQueue.Count} 首，当前播放不中断），再点即可恢复原队列。", "success");
+    }
+
+    private void PersistPlaybackSessionSnapshot(bool force)
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot)) return;
+        var now = DateTime.UtcNow;
+        if (!force && (now - _lastSessionSavedUtc).TotalSeconds < 4.5) return;
+        _lastSessionSavedUtc = now;
+
+        var uids = PlaybackQueue.Select(t => t.TrackUid).Where(u => !string.IsNullOrWhiteSpace(u)).ToList();
+        if (uids.Count == 0 && CurrentTrack is not null)
+        {
+            uids = [CurrentTrack.TrackUid];
+        }
+        if (uids.Count == 0) return;
+
+        double posSec = _engine.CurrentFilePath is not null
+            ? Math.Max(0.0, _engine.Position.TotalSeconds)
+            : _pendingRestorePositionSec;
+
+        var snap = new PlaybackSessionSnapshot(
+            QueueTrackUids: uids,
+            CurrentTrackUid: CurrentTrack?.TrackUid,
+            PositionSeconds: posSec,
+            QueueTitle: PlaybackQueueTitle,
+            IsShuffled: IsShuffleEnabled,
+            RepeatMode: RepeatMode,
+            ActiveSlotIndex: ActiveSessionSlotIndex,
+            SavedAtUnixMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+
+        string root = _store.MusicRoot;
+        _ = Task.Run(() =>
+        {
+            try { PlaybackSessionStore.Save(root, snap); } catch { }
+        });
+    }
+
+    private void RestoreSavedPlaybackSession(string musicRoot)
+    {
+        var snap = PlaybackSessionStore.Load(musicRoot);
+        if (snap is null || _allTracks.Count == 0) return;
+
+        var trackByUid = _allTracks.ToDictionary(t => t.TrackUid, StringComparer.Ordinal);
+        var restoredQueue = new List<TrackItem>(snap.QueueTrackUids.Count);
+        foreach (string uid in snap.QueueTrackUids)
+        {
+            if (trackByUid.TryGetValue(uid, out var item) && !string.IsNullOrWhiteSpace(item.FullPath))
+            {
+                restoredQueue.Add(item);
+            }
+        }
+        if (restoredQueue.Count == 0) return;
+
+        ReplaceQueueItems(restoredQueue);
+        _unshuffledQueueSnapshot = [.. restoredQueue];
+        PlaybackQueueTitle = string.IsNullOrWhiteSpace(snap.QueueTitle) ? "恢复的上次队列" : snap.QueueTitle;
+        ActiveSessionSlotIndex = snap.ActiveSlotIndex;
+
+        var curTrack = (!string.IsNullOrWhiteSpace(snap.CurrentTrackUid) && trackByUid.TryGetValue(snap.CurrentTrackUid, out var exact))
+            ? exact
+            : restoredQueue[0];
+
+        CurrentTrack = curTrack;
+        _pendingRestorePositionSec = Math.Max(0.0, snap.PositionSeconds);
+        double totalSec = Math.Max(0.0, curTrack.DurationMs / 1000.0);
+        PlaybackDurationSeconds = totalSec;
+        PlaybackPositionSeconds = totalSec > 0 ? Math.Clamp(_pendingRestorePositionSec, 0.0, totalSec) : _pendingRestorePositionSec;
+        PlaybackProgress = totalSec > 0 ? Math.Clamp(PlaybackPositionSeconds / totalSec, 0.0, 1.0) : 0.0;
+        var pTs = TimeSpan.FromSeconds(PlaybackPositionSeconds);
+        var dTs = TimeSpan.FromSeconds(totalSec);
+        TimeDisplay = totalSec > 0
+            ? $"{(int)pTs.TotalMinutes}:{pTs.Seconds:D2} / {(int)dTs.TotalMinutes}:{dTs.Seconds:D2}"
+            : "";
+        CurrentTrackSpecsSubline = $"{TimeDisplay} · 已恢复队列 ({restoredQueue.Count} 首 · 点击播放续播)";
+        CurrentWaveform = _store.LoadWaveform(curTrack);
+        InspectTrack(curTrack);
+        WaveformUpdated?.Invoke();
+        ReloadQueueSlotChips();
     }
 
     [RelayCommand]
@@ -3084,6 +4272,51 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         return LastFmAccountConfig.Load(Path.Combine(_store.MusicRoot, ".tonewise"));
     }
 
+    public void RefreshLastFmAuthStatus()
+    {
+        var cfg = GetSavedLastFmConfig();
+        if (cfg is null || string.IsNullOrWhiteSpace(cfg.ApiKey) || string.IsNullOrWhiteSpace(cfg.Username))
+        {
+            HasLastFmWriteSession = false;
+            LastFmAuthModeBadge = "未配置（本地记录保留 14 天待补传）";
+            return;
+        }
+        if (cfg.HasWriteSession)
+        {
+            HasLastFmWriteSession = true;
+            LastFmAuthModeBadge = $"双向读写已授权（@{cfg.Username} · 实时 NowPlaying / Scrobble / Loved 自动推送）";
+            return;
+        }
+        HasLastFmWriteSession = false;
+        LastFmAuthModeBadge = $"仅只读拉取（@{cfg.Username} · 缺少 SessionKey，无法上报播放/红心，请使用浏览器授权）";
+    }
+
+    public async Task SaveLastFmSessionAndSyncAsync(
+        string apiKey,
+        string apiSecret,
+        string username,
+        string sessionKey)
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot) || string.IsNullOrWhiteSpace(_store.ManifestDbPath))
+        {
+            LastFmLedgerStatus = "请先打开曲库。";
+            Notify(LastFmLedgerStatus, "warning");
+            return;
+        }
+
+        string tonewiseDir = Path.Combine(_store.MusicRoot, ".tonewise");
+        var existing = LastFmAccountConfig.Load(tonewiseDir);
+        var config = new LastFmAccountConfig(
+            apiKey.Trim(),
+            apiSecret.Trim(),
+            username.Trim(),
+            sessionKey.Trim(),
+            existing?.LastPullUnixSec ?? 0);
+        LastFmAccountConfig.Save(tonewiseDir, config);
+        RefreshLastFmAuthStatus();
+        await SyncLastFmLedgerInternalAsync(silentIfOffline: false);
+    }
+
     public async Task ConfigureAndSyncLastFmAsync(
         string apiKey,
         string apiSecret,
@@ -3127,12 +4360,86 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         var config = new LastFmAccountConfig(cleanKey, cleanSecret, cleanUser, sessionKey, existing?.LastPullUnixSec ?? 0);
         LastFmAccountConfig.Save(tonewiseDir, config);
+        RefreshLastFmAuthStatus();
 
         await SyncLastFmLedgerInternalAsync(silentIfOffline: false);
     }
 
     [RelayCommand]
     private Task SyncLastFmLedgerAsync() => SyncLastFmLedgerInternalAsync(silentIfOffline: false);
+
+    [RelayCommand]
+    private async Task BackfillLocalLovedToLastFmAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot) || string.IsNullOrWhiteSpace(_store.ManifestDbPath))
+        {
+            Notify("请先打开曲库。", "warning");
+            return;
+        }
+
+        string tonewiseDir = Path.Combine(_store.MusicRoot, ".tonewise");
+        var cfg = LastFmAccountConfig.Load(tonewiseDir);
+        if (cfg is null || !cfg.HasWriteSession)
+        {
+            Notify("当前未获得 Last.fm 写入授权（缺少 SessionKey），请先在「配置 Last.fm 账号」中使用浏览器授权。", "warning");
+            return;
+        }
+
+        string dbPath = _store.ManifestDbPath;
+        int enqueued = await Task.Run(() => LastFmLedgerService.EnqueueAllLocalFiveStarAsLoved(dbPath, tonewiseDir));
+        if (enqueued == 0)
+        {
+            Notify("本地曲库暂无 5 星喜爱曲目需要回推。", "info");
+            return;
+        }
+
+        BeginBusy($"正在将 {enqueued} 首本地 5 星曲目推送至 Last.fm Loved tracks...");
+        try
+        {
+            var client = new LastFmWebApiClient();
+            var (loved, unloved) = await client.FlushPendingLoveOpsAsync(tonewiseDir, cfg);
+            LastFmLedgerStatus = $"Last.fm 喜爱回推完成（@{cfg.Username}）：已推送 Loved {loved} 首（取消 {unloved} 首）。";
+            Notify(LastFmLedgerStatus, "success");
+        }
+        catch (Exception ex)
+        {
+            LastFmLedgerStatus = $"Last.fm 喜爱回推中断（剩余待传已保留在队列）：{ex.Message}";
+            Notify(LastFmLedgerStatus, "warning");
+        }
+        finally
+        {
+            EndBusy();
+        }
+    }
+
+    private void FlushPendingLoveOpsInBackground(string musicRoot)
+    {
+        string tonewiseDir = Path.Combine(musicRoot, ".tonewise");
+        var cfg = LastFmAccountConfig.Load(tonewiseDir);
+        if (cfg is not { HasWriteSession: true }) return;
+
+        _ = Task.Run(async () =>
+        {
+            await _lastFmPushGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var client = new LastFmWebApiClient();
+                var (loved, unloved) = await client.FlushPendingLoveOpsAsync(tonewiseDir, cfg).ConfigureAwait(false);
+                if ((loved > 0 || unloved > 0) && _uiContext is not null)
+                {
+                    _uiContext.Post(_ => LastFmLedgerStatus = $"Last.fm 实时同步（@{cfg.Username}）：已自动推送 Loved +{loved} / Unloved -{unloved}", null);
+                }
+            }
+            catch
+            {
+                // Retain pending ops in lastfm_loved_outbox.json for next retry
+            }
+            finally
+            {
+                _lastFmPushGate.Release();
+            }
+        });
+    }
 
     private async Task SyncLastFmLedgerInternalAsync(bool silentIfOffline)
     {
@@ -3143,6 +4450,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
 
         string tonewiseDir = Path.Combine(_store.MusicRoot, ".tonewise");
+        RefreshLastFmAuthStatus();
         var cfg = LastFmAccountConfig.Load(tonewiseDir);
         if (cfg is not null && !string.IsNullOrWhiteSpace(cfg.ApiKey) && !string.IsNullOrWhiteSpace(cfg.Username))
         {
@@ -3151,10 +4459,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 LastFmLedgerStatus = $"正在与 Last.fm 同步（@{cfg.Username}）…";
                 var client = new LastFmWebApiClient();
                 var summary = await client.RunFullBidirectionalSyncAsync(_store.ManifestDbPath, tonewiseDir, cfg);
+                string lovePushNote = (summary.PushedLoved > 0 || summary.PushedUnloved > 0)
+                    ? $"、推送喜爱 +{summary.PushedLoved}/-{summary.PushedUnloved}"
+                    : "";
+                string readOnlyHint = cfg.HasWriteSession ? "" : "（当前为只读模式：需浏览器授权才可自动推送）";
                 LastFmLedgerStatus =
-                    $"Last.fm 已同步（@{cfg.Username}）：拉取播放次数 {summary.TopPlayCountsUpdated} 首、近期记录 {summary.PulledCloudPlays} 次，更新喜爱 {summary.LovedTracksUpdated} 首，上报 {summary.PushedScrobbles} 条，归档 {summary.ExpiredArchivedCount} 条。";
+                    $"Last.fm 已同步（@{cfg.Username}）：拉取播放次数 {summary.TopPlayCountsUpdated} 首、近期记录 {summary.PulledCloudPlays} 次，更新喜爱 {summary.LovedTracksUpdated} 首，上报 {summary.PushedScrobbles} 条{lovePushNote}，归档 {summary.ExpiredArchivedCount} 条{readOnlyHint}。";
                 string musicRoot = _store.MusicRoot;
                 _allTracks = await Task.Run(() => _store.LoadFromMusicRoot(musicRoot).ToList());
+                if (CurrentTrack is not null)
+                {
+                    var curRefreshed = _allTracks.FirstOrDefault(t => string.Equals(t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal));
+                    if (curRefreshed is not null) CurrentTrack = curRefreshed;
+                }
                 TriggerFilterRefresh();
                 if (!silentIfOffline)
                 {
@@ -3475,36 +4792,83 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public void SaveCurrentToSessionSlot(int slotIndex)
     {
         if (string.IsNullOrWhiteSpace(_store.SessionsJsonPath)) return;
-        var uids = FilteredTracks.Select(t => t.TrackUid).ToList();
-        int curIdx = CurrentTrack is null ? 0 : Math.Max(0, FilteredTracks.IndexOf(CurrentTrack));
-        ulong posMs = (ulong)Math.Max(0, _engine.Position.TotalMilliseconds);
+        IList<TrackItem> source = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
+        var uids = source.Select(t => t.TrackUid).Where(u => !string.IsNullOrWhiteSpace(u)).ToList();
+        int curIdx = CurrentTrack is null ? 0 : Math.Max(0, FindQueueIndex(source, CurrentTrack));
+        ulong posMs = _engine.CurrentFilePath is not null
+            ? (ulong)Math.Max(0, _engine.Position.TotalMilliseconds)
+            : (ulong)Math.Max(0, _pendingRestorePositionSec * 1000.0);
         ulong nowMs = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        string name = SessionSlots.FirstOrDefault(s => s.SlotIndex == slotIndex)?.Name ?? $"Slot {slotIndex}";
-        var dto = new SessionSlotDto(slotIndex, name, FilterScene, nowMs, uids, curIdx, posMs);
+        string existingName = SessionSlots.FirstOrDefault(s => s.SlotIndex == slotIndex)?.Name ?? $"槽位 {slotIndex}";
+        string autoName = string.IsNullOrWhiteSpace(PlaybackQueueTitle) || PlaybackQueueTitle.StartsWith("队列未激活", StringComparison.Ordinal)
+            ? existingName
+            : PlaybackQueueTitle;
+        var dto = new SessionSlotDto(slotIndex, autoName, FilterScene, nowMs, uids, curIdx, posMs);
 
         var updated = SessionSlotStore.SaveSlot(_store.SessionsJsonPath, dto);
         SessionSlots.Clear();
         foreach (var s in updated) SessionSlots.Add(s);
-        StatusMessage = $"已保存 {uids.Count} 首到会话槽 {slotIndex}（{name}）。";
+        ActiveSessionSlotIndex = slotIndex;
+        ReloadQueueSlotChips();
+        PersistPlaybackSessionSnapshot(force: true);
+        StatusMessage = $"已保存 {uids.Count} 首到场景槽 #{slotIndex}（{autoName}）。";
+    }
+
+    public void QuickSwitchOrSaveSessionSlot(int slotIndex)
+    {
+        if (ActiveSessionSlotIndex > 0 && ActiveSessionSlotIndex != slotIndex && PlaybackQueue.Count > 0)
+        {
+            SaveCurrentToSessionSlot(ActiveSessionSlotIndex);
+        }
+
+        if (ActiveSessionSlotIndex == slotIndex)
+        {
+            SaveCurrentToSessionSlot(slotIndex);
+            return;
+        }
+
+        var slot = SessionSlots.FirstOrDefault(s => s.SlotIndex == slotIndex);
+        if (slot is null || slot.QueueTrackUids.Count == 0)
+        {
+            SaveCurrentToSessionSlot(slotIndex);
+            return;
+        }
+        RestoreSessionSlot(slotIndex);
     }
 
     public void RestoreSessionSlot(int slotIndex)
     {
         var slot = SessionSlots.FirstOrDefault(s => s.SlotIndex == slotIndex);
         if (slot is null) return;
-        if (!string.IsNullOrWhiteSpace(slot.SceneId)) FilterScene = slot.SceneId;
-        if (slot.QueueTrackUids.Count > 0 && slot.CurrentIndex < slot.QueueTrackUids.Count)
+        if (!string.IsNullOrWhiteSpace(slot.SceneId) && slot.SceneId != "all")
         {
-            string targetUid = slot.QueueTrackUids[slot.CurrentIndex];
-            var match = _allTracks.FirstOrDefault(t => t.TrackUid == targetUid);
-            if (match is not null)
-            {
-                double frac = match.DurationMs > 0 ? slot.PositionMs / (double)match.DurationMs : 0.0;
-                PlayTrack(match, frac);
-                return;
-            }
+            FilterScene = slot.SceneId;
         }
-        StatusMessage = $"已切换到会话槽 {slotIndex}（{slot.Name}）。";
+
+        var byUid = _allTracks.ToDictionary(t => t.TrackUid, StringComparer.Ordinal);
+        var resolvedQueue = slot.QueueTrackUids
+            .Select(uid => byUid.TryGetValue(uid, out var tr) ? tr : null)
+            .Where(tr => tr is not null && !string.IsNullOrWhiteSpace(tr.FullPath))
+            .Cast<TrackItem>()
+            .ToList();
+
+        if (resolvedQueue.Count == 0)
+        {
+            Notify($"场景槽 #{slotIndex} 暂无可恢复的本地曲目。", "warning");
+            return;
+        }
+
+        ActiveSessionSlotIndex = slotIndex;
+        ReplaceQueueItems(resolvedQueue);
+        _unshuffledQueueSnapshot = [.. resolvedQueue];
+        PlaybackQueueTitle = string.IsNullOrWhiteSpace(slot.Name) ? $"场景槽 #{slotIndex}" : slot.Name;
+
+        int targetIdx = Math.Clamp(slot.CurrentIndex, 0, resolvedQueue.Count - 1);
+        var targetTrack = resolvedQueue[targetIdx];
+        double frac = targetTrack.DurationMs > 0 ? slot.PositionMs / (double)targetTrack.DurationMs : 0.0;
+        PlayTrack(targetTrack, frac);
+        ReloadQueueSlotChips();
+        StatusMessage = $"已切换到场景槽 #{slotIndex}（{PlaybackQueueTitle} · {resolvedQueue.Count} 首）。";
     }
 
     private void ReloadSessionSlots()
@@ -3514,6 +4878,24 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         foreach (var s in SessionSlotStore.LoadOrInitializeDefault(path))
         {
             SessionSlots.Add(s);
+        }
+        ReloadQueueSlotChips();
+    }
+
+    private void ReloadQueueSlotChips()
+    {
+        QueueSlotChips.Clear();
+        for (int idx = 1; idx <= 5; idx++)
+        {
+            var slot = SessionSlots.FirstOrDefault(s => s.SlotIndex == idx);
+            int count = slot?.QueueTrackUids.Count ?? 0;
+            bool populated = count > 0;
+            bool active = ActiveSessionSlotIndex == idx;
+            string label = populated ? $"#{idx} ({count})" : $"+ #{idx}";
+            string tip = populated
+                ? $"#{idx} {slot!.Name}（{count} 首）— 点击切换（同号点击覆写保存）"
+                : $"空槽位 #{idx} — 点击保存当前队列";
+            QueueSlotChips.Add(new QueueSlotChipItem(idx, label, tip, active, populated));
         }
     }
 
@@ -3630,6 +5012,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        var prevLovedByUid = tracks
+            .Where(t => !string.IsNullOrWhiteSpace(t.TrackUid))
+            .GroupBy(t => t.TrackUid, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().IsLoved, StringComparer.Ordinal);
+
         CurationCommitResult result;
         using (_engine.SuspendIfPlayingFile(tracks.Select(t => t.FullPath)))
         {
@@ -3640,6 +5027,32 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             LastCommittedBatchId = result.BatchId;
             if (!string.IsNullOrWhiteSpace(_store.MusicRoot))
             {
+                string tonewiseDir = Path.Combine(_store.MusicRoot, ".tonewise");
+                if (updates.TryGetValue("rating", out string? rawRating))
+                {
+                    bool newLoved = int.TryParse(rawRating?.Trim(), out int rv) && rv >= 5;
+                    bool queuedAnyLoveChange = false;
+                    foreach (var tr in tracks)
+                    {
+                        if (string.IsNullOrWhiteSpace(tr.TrackUid) || !uids.Contains(tr.TrackUid, StringComparer.Ordinal)) continue;
+                        bool oldLoved = prevLovedByUid.TryGetValue(tr.TrackUid, out bool prev) && prev;
+                        if (oldLoved != newLoved)
+                        {
+                            LastFmLedgerService.EnqueueLoveChange(
+                                tonewiseDir,
+                                tr.TrackUid,
+                                tr.ArtistsDisplay,
+                                tr.Title,
+                                newLoved);
+                            queuedAnyLoveChange = true;
+                        }
+                    }
+                    if (queuedAnyLoveChange)
+                    {
+                        FlushPendingLoveOpsInBackground(_store.MusicRoot);
+                    }
+                }
+
                 var prevPlaylist = SelectedPlaylist;
                 bool wasPlaylist = IsViewingPlaylist;
                 string? inspectedUid = InspectedTrack?.TrackUid;
@@ -3649,6 +5062,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     if (refreshedMap.TryGetValue(_allTracks[i].TrackUid, out var updatedItem))
                     {
                         _allTracks[i] = updatedItem;
+                    }
+                }
+                for (int i = 0; i < PlaybackQueue.Count; i++)
+                {
+                    if (refreshedMap.TryGetValue(PlaybackQueue[i].TrackUid, out var updatedQ))
+                    {
+                        PlaybackQueue[i] = updatedQ;
                     }
                 }
                 if (CurrentTrack is not null && refreshedMap.TryGetValue(CurrentTrack.TrackUid, out var refreshedCurrent))
@@ -3679,13 +5099,46 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         StatusMessage = $"元数据编辑已写入 {uids.Count} 首曲目 ({result.CommittedCount} 项字段 · 物理文件更新 {result.PhysicalFilesUpdated} 个 · 批次 {result.BatchId})";
     }
 
+    private bool IsCurrentQueueSingleAlbum()
+    {
+        if (CurrentTrack is null || string.IsNullOrWhiteSpace(CurrentTrack.Album)) return false;
+        IList<TrackItem> q = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
+        if (q.Count <= 1) return !IsShuffleEnabled;
+        string album = CurrentTrack.Album.Trim();
+        int sameAlbum = 0;
+        int sampleCap = Math.Min(q.Count, 12);
+        for (int i = 0; i < sampleCap; i++)
+        {
+            if (string.Equals(q[i].Album?.Trim(), album, StringComparison.OrdinalIgnoreCase))
+                sameAlbum++;
+        }
+        return !IsShuffleEnabled && sameAlbum >= sampleCap;
+    }
+
+    private double ResolveReplayGainForTrack(TrackItem? track)
+    {
+        if (track is null) return 0.0;
+        return ReplayGainResolver.ResolveGainDb(
+            ReplayGainMode,
+            track.ReplayGainTrackDb,
+            track.ReplayGainAlbumDb,
+            IsCurrentQueueSingleAlbum(),
+            ReplayGainPreAmpWithTagDb,
+            ReplayGainPreAmpWithoutTagDb);
+    }
+
     private void PushEnginePreferences()
     {
+        var extDsp = BuildCurrentExtendedDspConfig();
+        _engine.SetExtendedDsp(extDsp);
+        var activeProfile = _usingExternalEqFile
+            ? _eqProfile
+            : (extDsp.Enabled ? extDsp.ToEqualizerApoProfile() : null);
         _engine.SetPreferences(
             PreferWasapiExclusive,
             SelectedEndpoint?.Id,
-            _eqProfile,
-            CurrentTrack?.ReplayGainTrackDb ?? 0.0
+            activeProfile,
+            ResolveReplayGainForTrack(CurrentTrack)
         );
         PushAcousticPipeline();
     }
@@ -3701,25 +5154,267 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         );
     }
 
+    private SyncOutboxAndPairingStore? EnsureSyncStore()
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot)) return null;
+        return _syncStore ??= new SyncOutboxAndPairingStore(_store.MusicRoot);
+    }
+
     [RelayCommand]
     private async Task ToggleLanSyncHostAsync()
     {
         if (_syncHost is not null)
         {
+            _syncHost.SyncStateChanged -= OnSyncHostStateChanged;
             await _syncHost.DisposeAsync();
             _syncHost = null;
             LanSyncStatus = "局域网同步服务：未开启";
+            LanHostUrlsText = "服务启动后将显示本机局域网地址（端口 45820）";
+            LanPairingCode = "------";
             return;
         }
+        await EnsureLanSyncHostRunningAsync();
+    }
+
+    public async Task<bool> EnsureLanSyncHostRunningAsync()
+    {
         if (string.IsNullOrWhiteSpace(_store.MusicRoot))
         {
-            LanSyncStatus = "请先打开曲库";
+            Notify("请先打开曲库，再开启局域网同步服务。", "warning");
+            return false;
+        }
+        if (_syncHost is { IsRunning: true })
+        {
+            RefreshLanSyncUiState();
+            return true;
+        }
+
+        try
+        {
+            var store = EnsureSyncStore()!;
+            var host = new SyncHostServer(_store.MusicRoot, store: store);
+            host.SyncStateChanged += OnSyncHostStateChanged;
+            int port = await host.StartAsync(45820, enableMdns: true);
+            _syncHost = host;
+            var urls = SyncOutboxAndPairingStore.GetLocalLanUrls(port);
+            LanHostUrlsText = urls.Count > 0 ? string.Join("   |   ", urls) : $"http://127.0.0.1:{port}";
+            LanPairingCode = store.CurrentPairingCode;
+            LanSyncStatus = $"局域网同步服务：已开启，端口 {port}（mDNS _tonewise._tcp）";
+            RefreshLanSyncUiState();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LanSyncStatus = $"局域网同步服务启动失败：{ex.Message}";
+            Notify(LanSyncStatus, "error");
+            return false;
+        }
+    }
+
+    private void OnSyncHostStateChanged()
+    {
+        if (_uiContext is not null)
+            _uiContext.Post(_ => RefreshLanSyncUiState(), null);
+        else
+            RefreshLanSyncUiState();
+    }
+
+    public void RefreshLanSyncUiState()
+    {
+        var store = EnsureSyncStore();
+        if (store is null)
+        {
+            PairedDevices.Clear();
+            SyncOutboxItems.Clear();
+            HasPairedDevices = false;
+            HasLanOutboxItems = false;
+            LanOutboxSummaryText = "请先打开曲库";
             return;
         }
-        var host = new SyncHostServer(_store.MusicRoot);
-        int port = await host.StartAsync(45820, enableMdns: true);
-        _syncHost = host;
-        LanSyncStatus = $"局域网同步服务：已开启，端口 {port}（mDNS _tonewise._tcp）";
+
+        if (_syncHost is { IsRunning: true })
+        {
+            LanPairingCode = store.CurrentPairingCode;
+            var urls = SyncOutboxAndPairingStore.GetLocalLanUrls(_syncHost.ListeningPort);
+            LanHostUrlsText = urls.Count > 0 ? string.Join("   |   ", urls) : $"http://127.0.0.1:{_syncHost.ListeningPort}";
+        }
+
+        PairedDevices.Clear();
+        var devices = store.GetPairedDevices();
+        foreach (var d in devices)
+        {
+            string syncText = d.LastSyncMs > 0
+                ? $"最近同步：{DateTimeOffset.FromUnixTimeMilliseconds(d.LastSyncMs).LocalDateTime:MM-dd HH:mm}"
+                : $"已配对（{DateTimeOffset.FromUnixTimeMilliseconds(d.PairedAtMs).LocalDateTime:MM-dd HH:mm} · 尚未同步）";
+            PairedDevices.Add(new PairedDeviceViewItem(d.DeviceId, d.DeviceName, syncText));
+        }
+        HasPairedDevices = PairedDevices.Count > 0;
+
+        SyncOutboxItems.Clear();
+        var items = store.GetOutboxItems();
+        foreach (var item in items)
+        {
+            string kindLabel = item.Kind.ToLowerInvariant() switch
+            {
+                "playlist" => "歌单",
+                "genre" => "流派",
+                "artist" => "艺人",
+                "tracks" => "曲目",
+                _ => item.Kind,
+            };
+            string modeBadge = string.Equals(item.Mode, "subscribe", StringComparison.OrdinalIgnoreCase) ? "订阅" : "单次";
+            string detail = item.TrackUids.Count > 0
+                ? $"{item.TrackUids.Count} 首 · 添加于 {DateTimeOffset.FromUnixTimeMilliseconds(item.CreatedAtMs).LocalDateTime:MM-dd HH:mm}"
+                : $"添加于 {DateTimeOffset.FromUnixTimeMilliseconds(item.CreatedAtMs).LocalDateTime:MM-dd HH:mm}";
+            SyncOutboxItems.Add(new SyncOutboxViewItem(item.Id, kindLabel, item.DisplayName, modeBadge, detail));
+        }
+        HasLanOutboxItems = SyncOutboxItems.Count > 0;
+
+        if (items.Count == 0)
+        {
+            LanOutboxSummaryText = "发送队列为空（可在曲目表、歌单或流派/艺人卡片右键「发送到手机」）";
+            return;
+        }
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var summary = store.GetOutboxSummary();
+                string mbText = $"{summary.TotalBytes / (1024.0 * 1024.0):F1} MB";
+                string text = $"待同步：{summary.ItemCount} 项 · 解析后共 {summary.TrackCount:N0} 首曲目 · {mbText}";
+                if (_uiContext is not null)
+                    _uiContext.Post(_ => LanOutboxSummaryText = text, null);
+                else
+                    LanOutboxSummaryText = text;
+            }
+            catch
+            {
+                // Ignore background outbox summary errors
+            }
+        });
+    }
+
+    [RelayCommand]
+    private void RegenerateLanPairingCode()
+    {
+        var store = EnsureSyncStore();
+        if (store is null)
+        {
+            Notify("请先打开曲库。", "warning");
+            return;
+        }
+        LanPairingCode = store.RegeneratePairingCode();
+        Notify($"已刷新 6 位配对码：{LanPairingCode}", "info");
+    }
+
+    public void UnpairLanDevice(string deviceId)
+    {
+        var store = EnsureSyncStore();
+        if (store is not null && store.UnpairDevice(deviceId))
+        {
+            RefreshLanSyncUiState();
+            Notify("已解除该手机设备的配对授权。", "info");
+        }
+    }
+
+    public void RemoveLanOutboxItem(string id)
+    {
+        var store = EnsureSyncStore();
+        if (store is not null && store.RemoveOutboxItem(id))
+        {
+            RefreshLanSyncUiState();
+        }
+    }
+
+    [RelayCommand]
+    private void ClearLanOutbox()
+    {
+        var store = EnsureSyncStore();
+        if (store is null) return;
+        store.ClearOutbox();
+        RefreshLanSyncUiState();
+        Notify("已清空手机同步发送队列。", "info");
+    }
+
+    public async Task SendTracksToPhoneAsync(IReadOnlyList<TrackItem> tracks)
+    {
+        var uids = tracks.Select(t => t.TrackUid).Where(u => !string.IsNullOrWhiteSpace(u)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (uids.Count == 0)
+        {
+            Notify("请先选择要发送到手机的曲目。", "warning");
+            return;
+        }
+        var store = EnsureSyncStore();
+        if (store is null)
+        {
+            Notify("请先打开曲库。", "warning");
+            return;
+        }
+        string label = tracks.Count == 1 ? $"{tracks[0].ArtistsDisplay} - {tracks[0].Title}".Trim(' ', '-') : $"自选 {uids.Count} 首曲目";
+        store.EnqueueTracks(uids, label, mode: "copy");
+        await EnsureLanSyncHostRunningAsync();
+        var summary = await Task.Run(() => store.GetOutboxSummary());
+        RefreshLanSyncUiState();
+        Notify($"已将「{label}」加入手机同步队列（单次 · 共 {summary.TrackCount} 首 · {summary.TotalBytes / (1024.0 * 1024.0):F1} MB）", "success");
+    }
+
+    public async Task SendPlaylistToPhoneAsync(PlaylistSummary? playlist)
+    {
+        if (playlist is null)
+        {
+            Notify("请先选择要发送的歌单。", "warning");
+            return;
+        }
+        var store = EnsureSyncStore();
+        if (store is null)
+        {
+            Notify("请先打开曲库。", "warning");
+            return;
+        }
+        store.EnqueuePlaylist(playlist.Name, mode: "subscribe");
+        await EnsureLanSyncHostRunningAsync();
+        var summary = await Task.Run(() => store.GetOutboxSummary());
+        RefreshLanSyncUiState();
+        Notify($"已将歌单「{playlist.Name}」加入手机同步队列（订阅 · 共 {summary.TrackCount} 首 · {summary.TotalBytes / (1024.0 * 1024.0):F1} MB）", "success");
+    }
+
+    public async Task SendEntityGroupToPhoneAsync(EntityGroupItem? group)
+    {
+        if (group is null)
+        {
+            Notify("请先选择一个分组卡片。", "warning");
+            return;
+        }
+        var store = EnsureSyncStore();
+        if (store is null)
+        {
+            Notify("请先打开曲库。", "warning");
+            return;
+        }
+
+        string modeBadge;
+        if ((PrimaryNavId, SecondarySubTab) == ("library", "genres"))
+        {
+            store.EnqueueGenre(group.Key, mode: "subscribe");
+            modeBadge = "订阅流派";
+        }
+        else if (PrimaryNavId == "artists" || (PrimaryNavId, SecondarySubTab) is ("classical", "composers") or ("classical", "conductors") or ("classical", "ensembles"))
+        {
+            store.EnqueueArtist(group.Key, mode: "subscribe");
+            modeBadge = "订阅艺人";
+        }
+        else
+        {
+            var uids = group.Tracks.Select(t => t.TrackUid).Where(u => !string.IsNullOrWhiteSpace(u)).Distinct().ToList();
+            store.EnqueueTracks(uids, $"{group.Subtitle}：{group.Title}", mode: "copy");
+            modeBadge = "单次专辑/分组";
+        }
+
+        await EnsureLanSyncHostRunningAsync();
+        var summary = await Task.Run(() => store.GetOutboxSummary());
+        RefreshLanSyncUiState();
+        Notify($"已将「{group.Title}」加入手机同步队列（{modeBadge} · 队列共 {summary.TrackCount} 首 · {summary.TotalBytes / (1024.0 * 1024.0):F1} MB）", "success");
     }
 
     public IReadOnlyList<LocalLibraryTrackRef> GetLibraryRefs() =>
@@ -3963,6 +5658,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        AccumulateListeningTime();
+        EvaluateAndCommitPlayCountIfQualified(completedNaturally: false);
+        PersistPlaybackSessionSnapshot(force: true);
         Interlocked.Exchange(ref _libraryWatcher, null)?.Dispose();
         var host = Interlocked.Exchange(ref _syncHost, null);
         if (host is not null)

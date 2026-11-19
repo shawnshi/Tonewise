@@ -41,6 +41,12 @@ interface Cache {
      * @return a [CacheResult] representing the result of the operation.
      */
     suspend fun read(file: File): CacheResult
+
+    /**
+     * Return a snapshot of all complete cached entries that can be hydrated without walking the
+     * filesystem. Implementations that do not support instant offline hydration return an empty list.
+     */
+    suspend fun readAll(): List<CachedFile> = emptyList()
 }
 
 /**

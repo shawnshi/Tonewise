@@ -291,6 +291,22 @@ public sealed class BiquadFilter64
         return y;
     }
 
+    public double MagnitudeAtHz(double freqHz, int sampleRateHz)
+    {
+        double w = 2.0 * Math.PI * freqHz / Math.Max(sampleRateHz, 8000);
+        double cw = Math.Cos(w);
+        double sw = Math.Sin(w);
+        double c2w = Math.Cos(2.0 * w);
+        double s2w = Math.Sin(2.0 * w);
+        double numRe = _b0 + _b1 * cw + _b2 * c2w;
+        double numIm = -(_b1 * sw + _b2 * s2w);
+        double denRe = 1.0 + _a1 * cw + _a2 * c2w;
+        double denIm = -(_a1 * sw + _a2 * s2w);
+        double numMag = Math.Sqrt(numRe * numRe + numIm * numIm);
+        double denMag = Math.Sqrt(denRe * denRe + denIm * denIm);
+        return denMag > 1e-12 ? numMag / denMag : 1.0;
+    }
+
     public void Reset()
     {
         Array.Clear(_z1);

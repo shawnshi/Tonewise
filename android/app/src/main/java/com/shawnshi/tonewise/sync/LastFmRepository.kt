@@ -35,13 +35,17 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import com.shawnshi.tonewise.BuildConfig
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import org.json.JSONArray
 import org.json.JSONObject
 import org.oxycblt.musikr.Song
+import org.oxycblt.musikr.core.TonewiseCore
 import org.oxycblt.musikr.tag.Name
 import timber.log.Timber as L
 
@@ -55,6 +59,7 @@ data class LastFmState(
     val pendingCount: Int = 0,
     val syncedPlayCountTotal: Int = 0,
     val statusMessage: String = "Last.fm ready (system scrobble broadcast enabled)",
+    val pendingLoveCount: Int = 0,
 ) {
     val hasValidApiSession: Boolean
         get() = apiKey.isNotBlank() && sharedSecret.isNotBlank() && sessionKey.isNotBlank()
@@ -69,9 +74,18 @@ data class ScrobbleEntry(
     val timestampSec: Long,
 )
 
+data class PendingLoveOp(
+    val songUid: String,
+    val artist: String,
+    val track: String,
+    val loved: Boolean,
+    val updatedAtMs: Long,
+)
+
 /**
  * Manages Last.fm Web API v2.0 authentication, live Now Playing & Scrobble submission, Android
- * system scrobbler broadcast intents (`com.adam.aslfms`), and bulk local play-history sync.
+ * system scrobbler broadcast intents (`com.adam.aslfms`), Loved track push (`track.love` /
+ * `track.unlove`), and bidirectional play-history sync.
  */
 @Singleton
 class LastFmRepository
@@ -85,7 +99,10 @@ constructor(
     private val syncDb: TonewiseSyncDatabase by lazy { TonewiseSyncDatabase.getInstance(context) }
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    private val scrobbleFlushMutex = Mutex()
+    private val loveFlushMutex = Mutex()
     private val pendingQueue = loadPendingQueue().toMutableList()
+    private val pendingLoveOps = loadPendingLoveOps().toMutableList()
     private val syncedCounts = loadSyncedCounts().toMutableMap()
     private val pulledCloudCounts = loadPulledCloudCounts().toMutableMap()
     private val seenCloudStamps = loadSeenCloudStamps().toMutableSet()
@@ -93,6 +110,24 @@ constructor(
 
     private val _state = MutableStateFlow(snapshotState("Ready"))
     val state: StateFlow<LastFmState> = _state
+
+    init {
+        triggerBackgroundFlushIfNeeded()
+    }
+
+    fun triggerBackgroundFlushIfNeeded() {
+        val current = _state.value
+        val hasPending =
+            synchronized(this) {
+                pendingQueue.isNotEmpty() || pendingLoveOps.isNotEmpty()
+            }
+        if (current.apiEnabled && current.hasValidApiSession && hasPending) {
+            ioScope.launch {
+                flushPendingLoveOps()
+                flushPendingScrobbles()
+            }
+        }
+    }
 
     @Synchronized
     fun updateConfig(
@@ -103,12 +138,21 @@ constructor(
         username: String,
         sessionKey: String,
     ) {
+        val hadValidSession = _state.value.hasValidApiSession
         val cleanKey = apiKey.trim()
         val cleanSecret = sharedSecret.trim()
         val cleanUser = username.trim()
         val cleanSk = sessionKey.trim()
+        val hasValidSession =
+            cleanKey.isNotEmpty() && cleanSecret.isNotEmpty() && cleanSk.isNotEmpty()
+        val effectiveApiEnabled =
+            resolveAutoEnabledApiFlag(
+                requestedApiEnabled = apiEnabled,
+                hadValidSession = hadValidSession,
+                hasValidSession = hasValidSession,
+            )
         prefs.edit {
-            putBoolean(KEY_API_ENABLED, apiEnabled)
+            putBoolean(KEY_API_ENABLED, effectiveApiEnabled)
             putBoolean(KEY_BROADCAST_ENABLED, broadcastEnabled)
             putString(KEY_API_KEY, cleanKey)
             putString(KEY_SHARED_SECRET, cleanSecret)
@@ -117,12 +161,18 @@ constructor(
         }
         val msg =
             when {
-                apiEnabled && cleanKey.isNotEmpty() && cleanSecret.isNotEmpty() && cleanSk.isNotEmpty() ->
+                effectiveApiEnabled && hasValidSession ->
                     "Last.fm API active (${cleanUser.ifEmpty { "session" }})"
                 broadcastEnabled -> "Android Scrobble broadcast active"
                 else -> "Last.fm sync paused"
             }
         _state.value = snapshotState(msg)
+        if (effectiveApiEnabled && hasValidSession) {
+            ioScope.launch {
+                flushPendingLoveOps()
+                flushPendingScrobbles()
+            }
+        }
     }
 
     suspend fun authenticateMobileSession(
@@ -307,49 +357,146 @@ constructor(
             sendAslfmsBroadcast(ASLFMS_STATE_COMPLETE, entry)
         }
 
-        synchronized(this) {
-            val uid = song.uid.toString()
-            val localTotal = playCountRepository.getPlayCount(song)
-            syncedCounts[uid] = maxOf(syncedCounts[uid] ?: 0, localTotal)
-            saveSyncedCounts()
-
-            if (current.apiEnabled) {
-                pendingQueue.add(entry)
-                savePendingQueue()
-                _state.value = snapshotState("Queued scrobble: ${entry.track}")
-            } else {
-                _state.value = snapshotState(current.statusMessage)
-            }
+        if (!current.apiEnabled || !current.hasValidApiSession) {
+            return
+        }
+        if (!shouldScrobbleTrack(song.durationMs)) {
+            L.d("Skipping Last.fm Web API scrobble for short track (<30s): ${entry.track}")
+            return
         }
 
-        if (current.apiEnabled && current.hasValidApiSession) {
-            ioScope.launch { flushPendingScrobbles() }
+        ioScope.launch {
+            val queued =
+                synchronized(this@LastFmRepository) {
+                    val key = normalizeTrackKey(entry.artist, entry.track)
+                    val tail = pendingQueue.lastOrNull()
+                    if (
+                        tail != null &&
+                            normalizeTrackKey(tail.artist, tail.track) == key &&
+                            abs(tail.timestampSec - entry.timestampSec) <= 5L
+                    ) {
+                        false
+                    } else {
+                        val uid = song.uid.toString()
+                        val localTotal = playCountRepository.getPlayCount(song)
+                        syncedCounts[uid] = maxOf(syncedCounts[uid] ?: 0, localTotal)
+                        saveSyncedCounts()
+                        pendingQueue.add(entry)
+                        savePendingQueue()
+                        _state.value = snapshotState("Queued scrobble: ${entry.track}")
+                        true
+                    }
+                }
+            if (queued) {
+                flushPendingLoveOps()
+                flushPendingScrobbles()
+            }
+        }
+    }
+
+    fun onLovedChanged(song: Song, loved: Boolean) {
+        val current = _state.value
+        if (!current.apiEnabled || !current.hasValidApiSession) {
+            return
+        }
+        val artist = extractPrimaryArtist(song)
+        val track = song.name.raw
+        if (artist.isBlank() || track.isBlank()) {
+            return
+        }
+        val op =
+            PendingLoveOp(
+                songUid = song.uid.toString(),
+                artist = artist,
+                track = track,
+                loved = loved,
+                updatedAtMs = System.currentTimeMillis(),
+            )
+        ioScope.launch {
+            synchronized(this@LastFmRepository) {
+                upsertPendingLoveOp(pendingLoveOps, op)
+                savePendingLoveOps()
+                _state.value =
+                    snapshotState(
+                        if (loved) "Queued love: ${op.track}" else "Queued unlove: ${op.track}"
+                    )
+            }
+            flushPendingLoveOps()
         }
     }
 
     /**
      * Bidirectional Last.fm ledger sync (A4):
-     * 1. Pull `user.getrecenttracks` & `user.getlovedtracks` when username + apiKey are configured,
+     * 1. Flush any pending local love/unlove operations before cloud pull so local unloves are not
+     *    overwritten by stale `user.getlovedtracks` state.
+     * 2. Pull `user.getrecenttracks` & `user.getlovedtracks` when username + apiKey are configured,
      *    updating high-water-mark play counts (`max(local, pulled)`) and Loved status.
-     * 2. Compute unsynced local deltas, enforce Last.fm's 14-day scrobble window & ±120s cloud
+     * 3. Backfill any local Loved tracks missing from Last.fm cloud Loved tracks.
+     * 4. Compute unsynced local play deltas, enforce Last.fm's 14-day scrobble window & ±120s cloud
      *    deduplication, and upload pending batches of 50.
      */
     suspend fun syncLocalPlayHistory(): Int =
         withContext(Dispatchers.IO) {
             val songs = musicRepository.library?.songs.orEmpty()
             val nowSec = System.currentTimeMillis() / 1000L
-            val current = _state.value
+            val initial = _state.value
 
-            var pulledMatched = 0
-            var lovedMatched = 0
+            var totalPushedLoves = 0
+            if (initial.apiEnabled && initial.hasValidApiSession) {
+                totalPushedLoves += flushPendingLoveOps()
+            }
+
+            var pullOutcome = CloudPullOutcome(0, 0, emptySet(), lovedPullSucceeded = false)
+            val current = _state.value
             if (current.apiKey.isNotBlank() && current.username.isNotBlank()) {
-                val pullOutcome = pullCloudHistoryAndLoved(current, songs)
-                pulledMatched = pullOutcome.first
-                lovedMatched = pullOutcome.second
+                pullOutcome = pullCloudHistoryAndLoved(current, songs)
+            }
+            val pulledMatched = pullOutcome.pulledMatched
+            val lovedMatched = pullOutcome.lovedMatched
+
+            val afterPull = _state.value
+            if (
+                afterPull.apiEnabled &&
+                    afterPull.hasValidApiSession &&
+                    pullOutcome.lovedPullSucceeded &&
+                    songs.isNotEmpty()
+            ) {
+                var backfilledLoves = 0
+                synchronized(this@LastFmRepository) {
+                    val pendingKeys =
+                        pendingLoveOps
+                            .mapTo(HashSet()) { normalizeTrackKey(it.artist, it.track) }
+                    for (song in songs) {
+                        if (!playCountRepository.isLoved(song)) continue
+                        val artist = extractPrimaryArtist(song)
+                        val title = song.name.raw
+                        if (artist.isBlank() || title.isBlank()) continue
+                        val key = normalizeTrackKey(artist, title)
+                        if (key !in pullOutcome.cloudLovedKeys && key !in pendingKeys) {
+                            upsertPendingLoveOp(
+                                pendingLoveOps,
+                                PendingLoveOp(
+                                    songUid = song.uid.toString(),
+                                    artist = artist,
+                                    track = title,
+                                    loved = true,
+                                    updatedAtMs = System.currentTimeMillis(),
+                                ),
+                            )
+                            backfilledLoves++
+                        }
+                    }
+                    if (backfilledLoves > 0) {
+                        savePendingLoveOps()
+                    }
+                }
+                if (backfilledLoves > 0) {
+                    totalPushedLoves += flushPendingLoveOps()
+                }
             }
 
             val newlyQueued = mutableListOf<ScrobbleEntry>()
-            val afterPull = _state.value
+            val afterLoved = _state.value
             synchronized(this@LastFmRepository) {
                 var syntheticOffsetSec = 30L
                 for (song in songs) {
@@ -365,14 +512,18 @@ constructor(
                             (nowSec - syntheticOffsetSec).coerceAtLeast(
                                 nowSec - MAX_BACKFILL_WINDOW_SEC
                             )
-                        newlyQueued.add(song.toScrobbleEntry(ts))
+                        if (shouldScrobbleTrack(song.durationMs)) {
+                            newlyQueued.add(song.toScrobbleEntry(ts))
+                        }
                         syntheticOffsetSec += trackSpacing
                     }
-                    syncedCounts[uid] = totalLocal
+                    if (afterLoved.hasValidApiSession || afterLoved.broadcastEnabled) {
+                        syncedCounts[uid] = totalLocal
+                    }
                 }
                 if (newlyQueued.isNotEmpty()) {
                     saveSyncedCounts()
-                    if (afterPull.apiEnabled || afterPull.hasValidApiSession) {
+                    if (afterLoved.apiEnabled || afterLoved.hasValidApiSession) {
                         val filtered =
                             filterAndDedupPendingScrobbles(
                                 newlyQueued,
@@ -387,8 +538,8 @@ constructor(
                 }
             }
 
-            if (afterPull.apiEnabled || afterPull.hasValidApiSession) {
-                if (!afterPull.hasValidApiSession) {
+            if (afterLoved.apiEnabled || afterLoved.hasValidApiSession) {
+                if (!afterLoved.hasValidApiSession) {
                     _state.value =
                         snapshotState(
                             "Pulled $pulledMatched plays / $lovedMatched loved · ${pendingQueue.size} pending (configure Session Key to upload)"
@@ -396,39 +547,49 @@ constructor(
                     return@withContext pulledMatched + newlyQueued.size
                 }
                 val uploaded = flushPendingScrobbles()
-                if (uploaded == 0 && (pulledMatched > 0 || lovedMatched > 0)) {
+                if (uploaded == 0 && (pulledMatched > 0 || lovedMatched > 0 || totalPushedLoves > 0)) {
                     _state.value =
                         snapshotState(
-                            "Last.fm synced OK: pulled $pulledMatched plays, $lovedMatched loved"
+                            "Last.fm synced: ↑$totalPushedLoves loved · ↓$pulledMatched plays / $lovedMatched loved"
+                        )
+                } else if (uploaded == 0 && totalPushedLoves == 0 && pulledMatched == 0 && lovedMatched == 0) {
+                    _state.value = snapshotState("No new local or cloud plays or loved tracks to sync")
+                } else if (totalPushedLoves > 0) {
+                    _state.value =
+                        snapshotState(
+                            "Last.fm synced: ↑$uploaded plays / $totalPushedLoves loved · ↓$pulledMatched plays / $lovedMatched loved"
                         )
                 }
-                return@withContext pulledMatched + uploaded
-            } else if (afterPull.broadcastEnabled && newlyQueued.isNotEmpty()) {
+                return@withContext pulledMatched + uploaded + totalPushedLoves
+            } else if (afterLoved.broadcastEnabled && newlyQueued.isNotEmpty()) {
                 for (entry in newlyQueued) {
                     sendAslfmsBroadcast(ASLFMS_STATE_COMPLETE, entry)
                 }
                 _state.value =
                     snapshotState("Broadcast ${newlyQueued.size} local plays via Android Scrobbler")
                 return@withContext newlyQueued.size
-            } else if (pulledMatched > 0 || lovedMatched > 0) {
+            } else if (pulledMatched > 0 || lovedMatched > 0 || totalPushedLoves > 0) {
                 _state.value =
                     snapshotState("Pulled $pulledMatched cloud plays, $lovedMatched loved")
-                return@withContext pulledMatched
+                return@withContext pulledMatched + totalPushedLoves
             } else {
                 _state.value = snapshotState("No new local or cloud plays to sync")
                 return@withContext 0
             }
         }
 
-    private fun pullCloudHistoryAndLoved(cfg: LastFmState, songs: Collection<Song>): Pair<Int, Int> {
+    private data class CloudPullOutcome(
+        val pulledMatched: Int,
+        val lovedMatched: Int,
+        val cloudLovedKeys: Set<String>,
+        val lovedPullSucceeded: Boolean,
+    )
+
+    private fun pullCloudHistoryAndLoved(cfg: LastFmState, songs: Collection<Song>): CloudPullOutcome {
         return try {
             val songsByKey = HashMap<String, MutableList<Song>>()
             for (song in songs) {
-                val primaryArtist =
-                    song.artists
-                        .mapNotNull { (it.name as? Name.Known)?.raw }
-                        .firstOrNull { it.isNotBlank() }
-                        ?: "Unknown Artist"
+                val primaryArtist = extractPrimaryArtist(song)
                 val key = normalizeTrackKey(primaryArtist, song.name.raw)
                 songsByKey.getOrPut(key) { mutableListOf() }.add(song)
             }
@@ -480,9 +641,18 @@ constructor(
                 "$LASTFM_API_URL?method=user.getlovedtracks&user=${URLEncoder.encode(cfg.username, "UTF-8")}&api_key=${URLEncoder.encode(cfg.apiKey, "UTF-8")}&limit=200&format=json"
             val lovedRaw = httpGetString(lovedUrl)
             val lovedList = parseLovedTracksJson(lovedRaw)
+            val cloudLovedKeys =
+                lovedList.mapTo(HashSet(lovedList.size)) { normalizeTrackKey(it.artist, it.title) }
+            val pendingUnloveKeys =
+                synchronized(this@LastFmRepository) {
+                    pendingLoveOps
+                        .filter { !it.loved }
+                        .mapTo(HashSet()) { normalizeTrackKey(it.artist, it.track) }
+                }
             var lovedMatched = 0
             for (loved in lovedList) {
                 val key = normalizeTrackKey(loved.artist, loved.title)
+                if (key in pendingUnloveKeys) continue
                 val matches = songsByKey[key] ?: continue
                 for (song in matches) {
                     if (!playCountRepository.isLoved(song)) {
@@ -491,59 +661,110 @@ constructor(
                     lovedMatched++
                 }
             }
-            pulledMatched to lovedMatched
+            CloudPullOutcome(
+                pulledMatched = pulledMatched,
+                lovedMatched = lovedMatched,
+                cloudLovedKeys = cloudLovedKeys,
+                lovedPullSucceeded = true,
+            )
         } catch (e: Exception) {
             L.w(e, "Last.fm cloud pull failed")
-            0 to 0
+            CloudPullOutcome(0, 0, emptySet(), lovedPullSucceeded = false)
         }
     }
 
+    suspend fun flushPendingLoveOps(): Int =
+        withContext(Dispatchers.IO) {
+            loveFlushMutex.withLock {
+                val cfg = _state.value
+                if (!cfg.hasValidApiSession) return@withLock 0
+
+                var totalSent = 0
+                while (true) {
+                    val op =
+                        synchronized(this@LastFmRepository) { pendingLoveOps.firstOrNull() }
+                            ?: break
+                    val ok = postLoveOp(cfg, op)
+                    if (!ok) break
+
+                    synchronized(this@LastFmRepository) {
+                        val key = normalizeTrackKey(op.artist, op.track)
+                        val idx =
+                            pendingLoveOps.indexOfFirst {
+                                normalizeTrackKey(it.artist, it.track) == key &&
+                                    it.updatedAtMs == op.updatedAtMs
+                            }
+                        if (idx >= 0) {
+                            pendingLoveOps.removeAt(idx)
+                            savePendingLoveOps()
+                        }
+                    }
+                    totalSent++
+                }
+
+                if (totalSent > 0) {
+                    synchronized(this@LastFmRepository) {
+                        _state.value =
+                            snapshotState(
+                                "Synced $totalSent loved updates (${pendingLoveOps.size} pending)"
+                            )
+                    }
+                }
+                totalSent
+            }
+        }
+
     suspend fun flushPendingScrobbles(): Int =
         withContext(Dispatchers.IO) {
-            val cfg = _state.value
-            if (!cfg.hasValidApiSession) return@withContext 0
+            scrobbleFlushMutex.withLock {
+                val cfg = _state.value
+                if (!cfg.hasValidApiSession) return@withLock 0
 
-            val nowSec = System.currentTimeMillis() / 1000L
-            var expiredDropped = 0
-            var dedupDropped = 0
-            synchronized(this@LastFmRepository) {
-                val res = filterAndDedupPendingScrobbles(pendingQueue, recentCloudPlaysCache, nowSec)
-                expiredDropped = res.expiredSkipped
-                dedupDropped = res.deduplicatedSkipped
-                if (expiredDropped > 0 || dedupDropped > 0) {
-                    pendingQueue.clear()
-                    pendingQueue.addAll(res.eligible)
-                    savePendingQueue()
-                }
-            }
-
-            var totalSent = 0
-            while (true) {
-                val batch: List<ScrobbleEntry> =
-                    synchronized(this@LastFmRepository) {
-                        if (pendingQueue.isEmpty()) return@synchronized emptyList()
-                        pendingQueue.take(MAX_BATCH_SIZE)
-                    }
-                if (batch.isEmpty()) break
-
-                val ok = postScrobbleBatch(cfg, batch)
-                if (!ok) break
-
+                val nowSec = System.currentTimeMillis() / 1000L
+                var expiredDropped = 0
+                var dedupDropped = 0
                 synchronized(this@LastFmRepository) {
-                    val removeCount = minOf(batch.size, pendingQueue.size)
-                    repeat(removeCount) { pendingQueue.removeAt(0) }
-                    savePendingQueue()
+                    val res =
+                        filterAndDedupPendingScrobbles(pendingQueue, recentCloudPlaysCache, nowSec)
+                    expiredDropped = res.expiredSkipped
+                    dedupDropped = res.deduplicatedSkipped
+                    if (expiredDropped > 0 || dedupDropped > 0) {
+                        pendingQueue.clear()
+                        pendingQueue.addAll(res.eligible)
+                        savePendingQueue()
+                    }
                 }
-                totalSent += batch.size
-            }
 
-            if (totalSent > 0 || expiredDropped > 0 || dedupDropped > 0) {
-                _state.value =
-                    snapshotState(
-                        "Synced $totalSent scrobbles (${pendingQueue.size} pending · dedup $dedupDropped · expired $expiredDropped)"
-                    )
+                var totalSent = 0
+                while (true) {
+                    val batch: List<ScrobbleEntry> =
+                        synchronized(this@LastFmRepository) {
+                            if (pendingQueue.isEmpty()) return@synchronized emptyList()
+                            pendingQueue.take(MAX_BATCH_SIZE)
+                        }
+                    if (batch.isEmpty()) break
+
+                    val ok = postScrobbleBatch(cfg, batch)
+                    if (!ok) break
+
+                    synchronized(this@LastFmRepository) {
+                        val removeCount = minOf(batch.size, pendingQueue.size)
+                        repeat(removeCount) { pendingQueue.removeAt(0) }
+                        savePendingQueue()
+                    }
+                    totalSent += batch.size
+                }
+
+                if (totalSent > 0 || expiredDropped > 0 || dedupDropped > 0) {
+                    synchronized(this@LastFmRepository) {
+                        _state.value =
+                            snapshotState(
+                                "Synced $totalSent scrobbles (${pendingQueue.size} pending · dedup $dedupDropped · expired $expiredDropped)"
+                            )
+                    }
+                }
+                totalSent
             }
-            totalSent
         }
 
     private fun submitNowPlaying(cfg: LastFmState, entry: ScrobbleEntry) {
@@ -564,9 +785,61 @@ constructor(
                 put("api_sig", sig)
                 put("format", "json")
             }
-            postForm(LASTFM_API_URL, body)
+            val raw = postForm(LASTFM_API_URL, body)
+            val json = JSONObject(raw)
+            if (json.has("error")) {
+                val code = json.optInt("error", -1)
+                val msg = json.optString("message", "API error $code")
+                L.w("Last.fm NowPlaying error $code: $msg")
+                if (code == 9 || code == 13) {
+                    val hint =
+                        when (code) {
+                            13 ->
+                                "Last.fm upload error 13: Invalid method signature — verify 32-char Shared Secret"
+                            else ->
+                                "Last.fm upload error 9: Session expired/invalid — re-authenticate via Browser Auth"
+                        }
+                    _state.value = snapshotState(hint)
+                }
+            }
         } catch (e: Exception) {
             L.d("NowPlaying update failed: ${e.message}")
+        }
+    }
+
+    private fun postLoveOp(cfg: LastFmState, op: PendingLoveOp): Boolean {
+        return try {
+            val body =
+                buildLoveRequestParams(
+                    apiKey = cfg.apiKey,
+                    sharedSecret = cfg.sharedSecret,
+                    sessionKey = cfg.sessionKey,
+                    artist = op.artist,
+                    track = op.track,
+                    loved = op.loved,
+                )
+            val raw = postForm(LASTFM_API_URL, body)
+            val json = JSONObject(raw)
+            if (json.has("error")) {
+                val code = json.optInt("error", -1)
+                val msg = json.optString("message", "API error $code")
+                val hint =
+                    when (code) {
+                        13 ->
+                            "Last.fm love sync error 13: Invalid method signature — verify 32-char Shared Secret"
+                        9 ->
+                            "Last.fm love sync error 9: Session expired/invalid — re-authenticate via Browser Auth"
+                        else -> "Last.fm love sync error${if (code > 0) " $code" else ""}: $msg"
+                    }
+                _state.value = snapshotState(hint)
+                false
+            } else {
+                true
+            }
+        } catch (e: Exception) {
+            L.w(e, "Last.fm love push failed")
+            _state.value = snapshotState("Last.fm love push network error (kept pending): ${e.message}")
+            false
         }
     }
 
@@ -639,7 +912,7 @@ constructor(
                 connectTimeout = 8_000
                 readTimeout = 15_000
                 requestMethod = "GET"
-                setRequestProperty("User-Agent", "Tonewise/4.1.5 Android")
+                setRequestProperty("User-Agent", "Tonewise/${BuildConfig.VERSION_NAME} Android")
             }
         return try {
             val stream =
@@ -662,7 +935,7 @@ constructor(
                 requestMethod = "POST"
                 doOutput = true
                 setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
-                setRequestProperty("User-Agent", "Tonewise/4.1.5 Android")
+                setRequestProperty("User-Agent", "Tonewise/${BuildConfig.VERSION_NAME} Android")
             }
         return try {
             conn.outputStream.use { it.write(encoded.toByteArray(Charsets.UTF_8)) }
@@ -674,12 +947,14 @@ constructor(
         }
     }
 
+    private fun extractPrimaryArtist(song: Song): String =
+        song.artists
+            .mapNotNull { (it.name as? Name.Known)?.raw }
+            .firstOrNull { it.isNotBlank() }
+            ?: "Unknown Artist"
+
     private fun Song.toScrobbleEntry(timestampSec: Long): ScrobbleEntry {
-        val artistName =
-            artists
-                .mapNotNull { (it.name as? Name.Known)?.raw }
-                .firstOrNull { it.isNotBlank() }
-                ?: "Unknown Artist"
+        val artistName = extractPrimaryArtist(this)
         val albumName = (album.name as? Name.Known)?.raw ?: album.name.resolve(context)
         return ScrobbleEntry(
             songUid = uid.toString(),
@@ -693,18 +968,43 @@ constructor(
 
     private fun Song.durationSecCompat(): Long = (durationMs / 1000L).coerceAtLeast(30L)
 
-    private fun snapshotState(statusMessage: String): LastFmState =
-        LastFmState(
-            apiEnabled = prefs.getBoolean(KEY_API_ENABLED, false),
+    private fun snapshotState(statusMessage: String): LastFmState {
+        val apiKey = prefs.getString(KEY_API_KEY, "") ?: ""
+        val sharedSecret = prefs.getString(KEY_SHARED_SECRET, "") ?: ""
+        val username = prefs.getString(KEY_USERNAME, "") ?: ""
+        val sessionKey = prefs.getString(KEY_SESSION_KEY, "") ?: ""
+        val hasValidSession =
+            apiKey.isNotBlank() && sharedSecret.isNotBlank() && sessionKey.isNotBlank()
+        val apiEnabled =
+            if (!prefs.contains(KEY_API_ENABLED) && hasValidSession) {
+                true
+            } else {
+                prefs.getBoolean(KEY_API_ENABLED, false)
+            }
+        return LastFmState(
+            apiEnabled = apiEnabled,
             broadcastEnabled = prefs.getBoolean(KEY_BROADCAST_ENABLED, true),
-            apiKey = prefs.getString(KEY_API_KEY, "") ?: "",
-            sharedSecret = prefs.getString(KEY_SHARED_SECRET, "") ?: "",
-            username = prefs.getString(KEY_USERNAME, "") ?: "",
-            sessionKey = prefs.getString(KEY_SESSION_KEY, "") ?: "",
+            apiKey = apiKey,
+            sharedSecret = sharedSecret,
+            username = username,
+            sessionKey = sessionKey,
             pendingCount = pendingQueue.size,
             syncedPlayCountTotal = syncedCounts.values.sum(),
             statusMessage = statusMessage,
+            pendingLoveCount = pendingLoveOps.size,
         )
+    }
+
+    private fun savePendingLoveOps() {
+        syncDb.syncKvDao()
+            .putValue(SyncKvEntity(KEY_PENDING_LOVE_JSON, serializePendingLoveOps(pendingLoveOps)))
+    }
+
+    private fun loadPendingLoveOps(): List<PendingLoveOp> =
+        runCatching {
+                deserializePendingLoveOps(syncDb.syncKvDao().getValue(KEY_PENDING_LOVE_JSON))
+            }
+            .getOrDefault(emptyList())
 
     private fun savePendingQueue() {
         val dao = syncDb.lastFmLedgerDao()
@@ -819,6 +1119,117 @@ constructor(
         private const val KEY_SEEN_CLOUD_STAMPS_JSON = "seen_cloud_stamps_json"
         private const val KEY_LAST_PULL_FROM_SEC = "last_pull_from_sec"
         private const val KEY_PENDING_AUTH_TOKEN = "pending_auth_token"
+        private const val KEY_PENDING_LOVE_JSON = "lastfm_pending_love_ops_v1"
+        private const val MIN_SCROBBLE_DURATION_MS = 30_000L
+
+        fun shouldScrobbleTrack(durationMs: Long): Boolean = durationMs >= MIN_SCROBBLE_DURATION_MS
+
+        fun resolveAutoEnabledApiFlag(
+            requestedApiEnabled: Boolean,
+            hadValidSession: Boolean,
+            hasValidSession: Boolean,
+        ): Boolean =
+            if (!hadValidSession && hasValidSession && !requestedApiEnabled) {
+                true
+            } else {
+                requestedApiEnabled
+            }
+
+        fun upsertPendingLoveOp(ops: MutableList<PendingLoveOp>, op: PendingLoveOp) {
+            val key = normalizeTrackKey(op.artist, op.track)
+            ops.removeAll { normalizeTrackKey(it.artist, it.track) == key }
+            ops.add(op)
+        }
+
+        fun serializePendingLoveOps(ops: List<PendingLoveOp>): String =
+            buildString {
+                append('[')
+                ops.forEachIndexed { index, op ->
+                    if (index > 0) append(',')
+                    append('{')
+                    append("\"songUid\":")
+                    appendJsonString(op.songUid)
+                    append(",\"artist\":")
+                    appendJsonString(op.artist)
+                    append(",\"track\":")
+                    appendJsonString(op.track)
+                    append(",\"loved\":")
+                    append(op.loved)
+                    append(",\"updatedAtMs\":")
+                    append(op.updatedAtMs)
+                    append('}')
+                }
+                append(']')
+            }
+
+        fun deserializePendingLoveOps(raw: String?): List<PendingLoveOp> {
+            if (raw.isNullOrBlank()) return emptyList()
+            return runCatching {
+                    @Suppress("UNCHECKED_CAST")
+                    val arr = TonewiseCore.parseJson(raw) as? List<Any?> ?: return emptyList()
+                    arr.mapNotNull { item ->
+                        @Suppress("UNCHECKED_CAST")
+                        val map = item as? Map<String, Any?> ?: return@mapNotNull null
+                        val artist = map["artist"]?.toString()?.trim().orEmpty()
+                        val track = map["track"]?.toString()?.trim().orEmpty()
+                        val loved = map["loved"] as? Boolean ?: return@mapNotNull null
+                        if (artist.isEmpty() || track.isEmpty()) return@mapNotNull null
+                        PendingLoveOp(
+                            songUid = map["songUid"]?.toString().orEmpty(),
+                            artist = artist,
+                            track = track,
+                            loved = loved,
+                            updatedAtMs = (map["updatedAtMs"] as? Number)?.toLong() ?: 0L,
+                        )
+                    }
+                }
+                .getOrDefault(emptyList())
+        }
+
+        fun buildLoveRequestParams(
+            apiKey: String,
+            sharedSecret: String,
+            sessionKey: String,
+            artist: String,
+            track: String,
+            loved: Boolean,
+        ): Map<String, String> {
+            val signed =
+                sortedMapOf(
+                    "api_key" to apiKey,
+                    "artist" to artist,
+                    "method" to if (loved) "track.love" else "track.unlove",
+                    "sk" to sessionKey,
+                    "track" to track,
+                )
+            val sig = buildApiSignature(signed, sharedSecret)
+            return signed.toMutableMap().apply {
+                put("api_sig", sig)
+                put("format", "json")
+            }
+        }
+
+        private fun StringBuilder.appendJsonString(value: String) {
+            append('"')
+            for (ch in value) {
+                when (ch) {
+                    '"' -> append("\\\"")
+                    '\\' -> append("\\\\")
+                    '\b' -> append("\\b")
+                    '\u000C' -> append("\\f")
+                    '\n' -> append("\\n")
+                    '\r' -> append("\\r")
+                    '\t' -> append("\\t")
+                    else ->
+                        if (ch < ' ') {
+                            append("\\u%04x".format(ch.code))
+                        } else {
+                            append(ch)
+                        }
+                }
+            }
+            append('"')
+        }
 
         fun validateCredentialsFormat(apiKey: String, sharedSecret: String): String? {
             val k = apiKey.trim()

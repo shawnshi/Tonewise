@@ -48,6 +48,7 @@ data class TrackPlayLedgerEntity(
     val loved: Boolean = false,
     val syncedCount: Int = 0,
     val pulledCloudCount: Int = 0,
+    val lanSyncedCount: Int = 0,
 )
 
 @Entity(tableName = "lww_overrides", primaryKeys = ["trackUid", "field"])
@@ -104,6 +105,17 @@ data class AudioFingerprintCacheEntity(
     val headerBlake3Hex: String,
     val headerSize: Long,
     val updatedAtMs: Long,
+)
+
+@Entity(tableName = "synced_tracks")
+data class SyncedTrackEntity(
+    @PrimaryKey val trackUid: String,
+    val relativePath: String,
+    val documentUri: String? = null,
+    val fileSize: Long = 0L,
+    val mtimeMs: Long = 0L,
+    val sourceOutboxIdsJson: String = "[]",
+    val syncedAtMs: Long = 0L,
 )
 
 @Dao
@@ -205,6 +217,24 @@ interface AudioFingerprintDao {
     fun upsert(entity: AudioFingerprintCacheEntity)
 }
 
+@Dao
+interface SyncedTrackDao {
+    @Query("SELECT * FROM synced_tracks")
+    fun getAll(): List<SyncedTrackEntity>
+
+    @Query("SELECT * FROM synced_tracks WHERE trackUid = :uid LIMIT 1")
+    fun getByUid(uid: String): SyncedTrackEntity?
+
+    @Query("SELECT * FROM synced_tracks WHERE relativePath = :relPath LIMIT 1")
+    fun getByRelativePath(relPath: String): SyncedTrackEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun upsert(entity: SyncedTrackEntity)
+
+    @Query("DELETE FROM synced_tracks WHERE trackUid = :uid")
+    fun deleteByUid(uid: String)
+}
+
 @Database(
     entities = [
         TrackPlayLedgerEntity::class,
@@ -215,8 +245,9 @@ interface AudioFingerprintDao {
         BioCacheEntity::class,
         SyncKvEntity::class,
         AudioFingerprintCacheEntity::class,
+        SyncedTrackEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class TonewiseSyncDatabase : RoomDatabase() {
@@ -231,6 +262,8 @@ abstract class TonewiseSyncDatabase : RoomDatabase() {
     abstract fun syncKvDao(): SyncKvDao
 
     abstract fun audioFingerprintDao(): AudioFingerprintDao
+
+    abstract fun syncedTrackDao(): SyncedTrackDao
 
     companion object {
         private const val KEY_MIGRATED_PREFS_V1 = "migrated_prefs_v1"
@@ -255,6 +288,29 @@ abstract class TonewiseSyncDatabase : RoomDatabase() {
                 }
             }
 
+        private val MIGRATION_2_3 =
+            object : Migration(2, 3) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "ALTER TABLE `track_play_ledger` ADD COLUMN `lanSyncedCount` INTEGER NOT NULL DEFAULT 0"
+                    )
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS `synced_tracks` (
+                            `trackUid` TEXT NOT NULL,
+                            `relativePath` TEXT NOT NULL,
+                            `documentUri` TEXT,
+                            `fileSize` INTEGER NOT NULL,
+                            `mtimeMs` INTEGER NOT NULL,
+                            `sourceOutboxIdsJson` TEXT NOT NULL,
+                            `syncedAtMs` INTEGER NOT NULL,
+                            PRIMARY KEY(`trackUid`)
+                        )
+                        """.trimIndent()
+                    )
+                }
+            }
+
         @Volatile private var instance: TonewiseSyncDatabase? = null
 
         fun getInstance(context: Context): TonewiseSyncDatabase {
@@ -266,7 +322,7 @@ abstract class TonewiseSyncDatabase : RoomDatabase() {
                             TonewiseSyncDatabase::class.java,
                             "tonewise_sync.db",
                         )
-                        .addMigrations(MIGRATION_1_2)
+                        .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                         .allowMainThreadQueries()
                         .build()
                         .also { db ->

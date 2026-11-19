@@ -20,6 +20,10 @@
     <ProjectReference Include="..\..\src\Tonewise.SyncHost\Tonewise.SyncHost.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="..\..\src\Tonewise.Desktop\Models\TrackItem.cs" Link="Linked\TrackItem.cs" />
+    <Compile Include="..\..\src\Tonewise.Desktop\Services\LibraryStore.cs" Link="Linked\LibraryStore.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="..\..\..\core\target\release\tonewise_core.dll" Condition="Exists('..\..\..\core\target\release\tonewise_core.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>tonewise_core.dll</Link>

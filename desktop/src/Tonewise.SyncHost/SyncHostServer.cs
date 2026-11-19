@@ -34,6 +34,20 @@ public sealed record MutationsPushRequest(
     [property: JsonPropertyName("mutations")] List<JsonElement> Mutations
 );
 
+public sealed record PairApiRequest(
+    [property: JsonPropertyName("code")] string Code,
+    [property: JsonPropertyName("device_id")] string DeviceId,
+    [property: JsonPropertyName("device_name")] string? DeviceName
+);
+
+public sealed record ReportApiRequest(
+    [property: JsonPropertyName("device_id")] string? DeviceId,
+    [property: JsonPropertyName("play_events")] List<JsonElement>? PlayEvents,
+    [property: JsonPropertyName("mutations")] List<JsonElement>? Mutations,
+    [property: JsonPropertyName("completed_outbox_ids")] List<string>? CompletedOutboxIds,
+    [property: JsonPropertyName("handoff_slots")] List<SessionSlotDto>? HandoffSlots
+);
+
 public sealed class SyncHostServer : IAsyncDisposable
 {
     private readonly string _musicRoot;
@@ -42,15 +56,23 @@ public sealed class SyncHostServer : IAsyncDisposable
     private readonly Lock _fileLock = new();
     private WebApplication? _app;
     private MdnsAdvertiser? _mdns;
+    private string? _manifestHashPath;
+    private long _manifestHashLen;
+    private long _manifestHashWriteTicks;
+    private string? _manifestHashHex;
+
+    public SyncOutboxAndPairingStore Store { get; }
+    public event Action? SyncStateChanged;
 
     public int ListeningPort { get; private set; }
     public bool IsRunning => _app is not null;
 
-    public SyncHostServer(string musicRoot, string? deviceId = null)
+    public SyncHostServer(string musicRoot, string? deviceId = null, SyncOutboxAndPairingStore? store = null)
     {
         _musicRoot = musicRoot;
         _tonewiseDir = Path.Combine(musicRoot, ".tonewise");
         _deviceId = deviceId ?? Environment.MachineName;
+        Store = store ?? new SyncOutboxAndPairingStore(musicRoot);
     }
 
     public async Task<int> StartAsync(int port = 45820, bool enableMdns = true)
@@ -107,7 +129,7 @@ public sealed class SyncHostServer : IAsyncDisposable
                 has_waveforms = File.Exists(wfPath),
                 has_encyclopedia = File.Exists(encPath),
                 waveforms_bytes = File.Exists(wfPath) ? new FileInfo(wfPath).Length : 0L,
-                manifest_sha256 = File.Exists(dbPath) ? ComputeSha256Hex(dbPath) : null,
+                manifest_sha256 = File.Exists(dbPath) ? GetCachedManifestSha256Hex(dbPath) : null,
             });
         });
 
@@ -228,13 +250,44 @@ public sealed class SyncHostServer : IAsyncDisposable
             if (body is null || string.IsNullOrWhiteSpace(body.PlaylistName))
                 return Results.BadRequest(new { error = "invalid playlist merge payload" });
 
-            var result = TonewiseCoreClient.MergeM3u8(body.Base, body.Ours, body.Theirs);
+            string playlistsDir = Path.Combine(_musicRoot, "Playlists");
+            string safeName = Path.GetFileNameWithoutExtension(body.PlaylistName) + ".m3u8";
+            string outPath = Path.Combine(playlistsDir, safeName);
+
+            List<string> normalizedBase = body.Base
+                .Select(NormalizePlaylistRelPath)
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToList();
+            List<string> normalizedTheirs = body.Theirs
+                .Select(NormalizePlaylistRelPath)
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToList();
+
+            List<string> effectiveOurs;
+            lock (_fileLock)
+            {
+                if (File.Exists(outPath))
+                {
+                    effectiveOurs = File.ReadAllLines(outPath, Encoding.UTF8)
+                        .Select(l => l.Trim())
+                        .Where(l => !string.IsNullOrEmpty(l) && !l.StartsWith('#'))
+                        .Select(NormalizePlaylistRelPath)
+                        .Where(s => !string.IsNullOrEmpty(s))
+                        .ToList();
+                }
+                else
+                {
+                    effectiveOurs = body.Ours
+                        .Select(NormalizePlaylistRelPath)
+                        .Where(s => !string.IsNullOrEmpty(s))
+                        .ToList();
+                }
+            }
+
+            var result = TonewiseCoreClient.MergeM3u8(normalizedBase, effectiveOurs, normalizedTheirs);
             if (result.Conflicts.Count == 0)
             {
-                string playlistsDir = Path.Combine(_musicRoot, "Playlists");
                 Directory.CreateDirectory(playlistsDir);
-                string safeName = Path.GetFileNameWithoutExtension(body.PlaylistName) + ".m3u8";
-                string outPath = Path.Combine(playlistsDir, safeName);
                 string m3uText = "#EXTM3U\n" + string.Join("\n", result.Merged) + "\n";
                 lock (_fileLock)
                 {
@@ -253,7 +306,7 @@ public sealed class SyncHostServer : IAsyncDisposable
             string safeDevice = SanitizeId(body.DeviceId);
             string histPath = Path.Combine(_tonewiseDir, $"history.{safeDevice}.jsonl");
             var lines = body.Events.Select(e => e.GetRawText()).ToList();
-            int mergedTracks = 0;
+            IncomingHistoryMergeResult mergeResult = new(0, new Dictionary<string, int>(StringComparer.Ordinal), []);
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
 
             lock (_fileLock)
@@ -261,10 +314,16 @@ public sealed class SyncHostServer : IAsyncDisposable
                 File.AppendAllLines(histPath, lines, new UTF8Encoding(false));
                 if (File.Exists(dbPath))
                 {
-                    mergedTracks = LastFmLedgerService.MergeIncomingHistoryEvents(dbPath, body.Events);
+                    mergeResult = LastFmLedgerService.MergeIncomingHistoryEventsDetailed(dbPath, body.Events, safeDevice);
                 }
             }
-            return Results.Json(new { accepted = lines.Count, merged_tracks = mergedTracks });
+            return Results.Json(new
+            {
+                accepted = lines.Count,
+                merged_tracks = mergeResult.MergedTracks,
+                effective_counts = mergeResult.EffectiveCounts,
+                loved_uids = mergeResult.LovedUids,
+            });
         });
 
         app.MapPost("/api/v1/mutations/push", async (HttpRequest request) =>
@@ -276,17 +335,23 @@ public sealed class SyncHostServer : IAsyncDisposable
             string safeDevice = SanitizeId(body.DeviceId);
             string mutPath = Path.Combine(_tonewiseDir, $"mutations.{safeDevice}.jsonl");
             var lines = body.Mutations.Select(m => m.GetRawText()).ToList();
-            int appliedCount = 0;
+            LwwApplyResult applyResult = new(0, [], []);
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
             lock (_fileLock)
             {
                 File.AppendAllLines(mutPath, lines, new UTF8Encoding(false));
                 if (File.Exists(dbPath) && body.Mutations.Count > 0)
                 {
-                    appliedCount = ApplyLwwMutationsToManifest(dbPath, body.Mutations);
+                    applyResult = ApplyLwwMutationsToManifest(dbPath, body.Mutations);
                 }
             }
-            return Results.Json(new { accepted = lines.Count, applied_count = appliedCount });
+            return Results.Json(new
+            {
+                accepted = lines.Count,
+                applied_count = applyResult.AppliedCount,
+                acknowledged_keys = applyResult.AcknowledgedKeys,
+                unmatched_uids = applyResult.UnmatchedUids,
+            });
         });
 
         app.MapGet("/api/v1/handoff", () =>
@@ -309,7 +374,263 @@ public sealed class SyncHostServer : IAsyncDisposable
             }
             return Results.Json(merged);
         });
+
+        // === v2 LAN Sync Content & Auth Endpoints ===
+
+        app.MapGet("/api/v2/ping", () => Results.Json(new
+        {
+            schema_version = 2,
+            host_name = _deviceId,
+            port = ListeningPort,
+            requires_pairing = true,
+            paired_device_count = Store.GetPairedDevices().Count,
+        }));
+
+        app.MapPost("/api/v2/pair", async (HttpRequest request) =>
+        {
+            PairApiRequest? body;
+            try
+            {
+                body = await JsonSerializer.DeserializeAsync<PairApiRequest>(request.Body);
+            }
+            catch
+            {
+                return Results.BadRequest(new { error = "invalid pairing payload" });
+            }
+
+            if (body is null || string.IsNullOrWhiteSpace(body.Code) || string.IsNullOrWhiteSpace(body.DeviceId))
+                return Results.BadRequest(new { error = "code and device_id are required" });
+
+            if (!Store.TryPair(body.Code, body.DeviceId, body.DeviceName, out string? issuedToken, out var device) || device is null)
+            {
+                return Results.Json(new { error = "invalid_pairing_code" }, statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            SyncStateChanged?.Invoke();
+            return Results.Json(new
+            {
+                token = issuedToken,
+                host_name = _deviceId,
+                device_id = device.DeviceId,
+                device_name = device.DeviceName,
+                paired_at_ms = device.PairedAtMs,
+            });
+        });
+
+        app.MapGet("/api/v2/outbox", (HttpRequest request) =>
+        {
+            if (!TryAuthenticateV2(request, out var device, out var errorResult))
+                return errorResult!;
+
+            var payload = Store.ResolveOutbox(device!.DeviceId, _deviceId);
+            return Results.Json(payload);
+        });
+
+        app.MapGet("/api/v2/catalog", (HttpRequest request, string? kind) =>
+        {
+            if (!TryAuthenticateV2(request, out _, out var errorResult))
+                return errorResult!;
+
+            string resolvedKind = string.IsNullOrWhiteSpace(kind) ? "playlists" : kind.Trim().ToLowerInvariant();
+            var entries = Store.GetCatalog(resolvedKind);
+            return Results.Json(new { kind = resolvedKind, items = entries });
+        });
+
+        app.MapGet("/api/v2/tracks/{trackUid}/file", (HttpRequest request, string trackUid) =>
+        {
+            if (!TryAuthenticateV2(request, out _, out var errorResult))
+                return errorResult!;
+
+            if (!Store.TryResolveTrackPhysicalPath(trackUid, out string fullPath, out _))
+                return Results.NotFound();
+
+            string ioPath = LongPathHelper.ToExtendedIfLong(fullPath);
+            var stream = new FileStream(
+                ioPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                bufferSize: 64 * 1024,
+                options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return Results.File(
+                stream,
+                contentType: ResolveAudioMimeType(fullPath),
+                fileDownloadName: Path.GetFileName(fullPath),
+                enableRangeProcessing: true);
+        });
+
+        app.MapGet("/api/v2/tracks/{trackUid}/cover", (HttpRequest request, string trackUid) =>
+        {
+            if (!TryAuthenticateV2(request, out _, out var errorResult))
+                return errorResult!;
+
+            if (!Store.TryResolveTrackCoverPath(trackUid, out string coverPath))
+                return Results.NotFound();
+
+            string ioPath = LongPathHelper.ToExtendedIfLong(coverPath);
+            string mime = coverPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/jpeg";
+            var stream = new FileStream(
+                ioPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                bufferSize: 32 * 1024,
+                options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return Results.File(stream, contentType: mime);
+        });
+
+        app.MapPost("/api/v2/report", async (HttpRequest request) =>
+        {
+            if (!TryAuthenticateV2(request, out var device, out var errorResult))
+                return errorResult!;
+
+            ReportApiRequest? body;
+            try
+            {
+                body = await JsonSerializer.DeserializeAsync<ReportApiRequest>(request.Body);
+            }
+            catch
+            {
+                return Results.BadRequest(new { error = "invalid report payload" });
+            }
+            if (body is null) return Results.BadRequest(new { error = "empty report payload" });
+
+            string effectiveDeviceId = device!.DeviceId;
+            string safeDevice = SanitizeId(effectiveDeviceId);
+            string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
+            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            IncomingHistoryMergeResult histResult = new(0, new Dictionary<string, int>(StringComparer.Ordinal), []);
+            LwwApplyResult mutResult = new(0, [], []);
+            int completedOutbox = 0;
+            List<SessionSlotDto> mergedSlots;
+
+            lock (_fileLock)
+            {
+                Store.TouchDeviceSync(effectiveDeviceId, nowMs);
+
+                if (body.PlayEvents is { Count: > 0 })
+                {
+                    string deltaLogPath = Path.Combine(_tonewiseDir, $"lan_reports.{safeDevice}.jsonl");
+                    File.AppendAllLines(deltaLogPath, body.PlayEvents.Select(e => e.GetRawText()), new UTF8Encoding(false));
+                    if (File.Exists(dbPath))
+                    {
+                        histResult = LastFmLedgerService.MergeIncomingHistoryEventsDetailed(dbPath, body.PlayEvents, effectiveDeviceId);
+                    }
+                }
+                else if (File.Exists(dbPath))
+                {
+                    var (counts, loved) = LastFmLedgerService.ReadEffectiveCountsAndLoved(dbPath);
+                    histResult = new IncomingHistoryMergeResult(0, counts, loved);
+                }
+
+                if (body.Mutations is { Count: > 0 })
+                {
+                    string mutPath = Path.Combine(_tonewiseDir, $"mutations.{safeDevice}.jsonl");
+                    File.AppendAllLines(mutPath, body.Mutations.Select(m => m.GetRawText()), new UTF8Encoding(false));
+                    if (File.Exists(dbPath))
+                    {
+                        mutResult = ApplyLwwMutationsToManifest(dbPath, body.Mutations);
+                    }
+                }
+
+                if (body.CompletedOutboxIds is { Count: > 0 })
+                {
+                    completedOutbox = Store.MarkCopyItemsCompleted(effectiveDeviceId, body.CompletedOutboxIds);
+                }
+
+                var currentSlots = ReadSessions();
+                if (body.HandoffSlots is { Count: > 0 })
+                {
+                    mergedSlots = TonewiseCoreClient.MergeSessions(currentSlots, body.HandoffSlots);
+                    WriteSessions(mergedSlots);
+                }
+                else
+                {
+                    mergedSlots = currentSlots;
+                }
+            }
+
+            SyncStateChanged?.Invoke();
+            return Results.Json(new
+            {
+                ok = true,
+                merged_tracks = histResult.MergedTracks,
+                effective_counts = histResult.EffectiveCounts,
+                loved_uids = histResult.LovedUids,
+                applied_mutations = mutResult.AppliedCount,
+                acknowledged_mutation_keys = mutResult.AcknowledgedKeys,
+                unmatched_mutation_uids = mutResult.UnmatchedUids,
+                completed_outbox_count = completedOutbox,
+                handoff_slots = mergedSlots,
+            });
+        });
     }
+
+    private bool TryAuthenticateV2(HttpRequest request, out PairedDeviceRecord? device, out IResult? errorResult)
+    {
+        string? auth = request.Headers.Authorization.FirstOrDefault();
+        if (Store.ValidateBearerToken(auth, out device))
+        {
+            errorResult = null;
+            return true;
+        }
+        errorResult = Results.Json(new { error = "unauthorized", requires_pairing = true }, statusCode: StatusCodes.Status401Unauthorized);
+        return false;
+    }
+
+    private string? GetCachedManifestSha256Hex(string dbPath)
+    {
+        lock (_fileLock)
+        {
+            if (!File.Exists(dbPath)) return null;
+            var fi = new FileInfo(dbPath);
+            long ticks = fi.LastWriteTimeUtc.Ticks;
+            if (string.Equals(_manifestHashPath, dbPath, StringComparison.OrdinalIgnoreCase)
+                && _manifestHashLen == fi.Length
+                && _manifestHashWriteTicks == ticks
+                && _manifestHashHex is not null)
+            {
+                return _manifestHashHex;
+            }
+
+            string hex = ComputeSha256Hex(dbPath);
+            _manifestHashPath = dbPath;
+            _manifestHashLen = fi.Length;
+            _manifestHashWriteTicks = ticks;
+            _manifestHashHex = hex;
+            return hex;
+        }
+    }
+
+    private static string NormalizePlaylistRelPath(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        string p = raw.Trim().Replace('\\', '/');
+        while (p.StartsWith("./", StringComparison.Ordinal))
+            p = p[2..];
+        p = p.TrimStart('/');
+        if (p.StartsWith("../Tracks/", StringComparison.OrdinalIgnoreCase))
+            p = p["../Tracks/".Length..];
+        if (p.StartsWith("Music/Tonewise/", StringComparison.OrdinalIgnoreCase))
+            p = p["Music/Tonewise/".Length..];
+        else if (p.StartsWith("Tonewise/", StringComparison.OrdinalIgnoreCase))
+            p = p["Tonewise/".Length..];
+        return p;
+    }
+
+    private static string ResolveAudioMimeType(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+    {
+        ".flac" => "audio/flac",
+        ".mp3" => "audio/mpeg",
+        ".m4a" or ".alac" or ".aac" or ".mp4" => "audio/mp4",
+        ".wav" => "audio/wav",
+        ".ogg" => "audio/ogg",
+        ".opus" => "audio/opus",
+        ".aiff" or ".aif" => "audio/aiff",
+        ".dsf" or ".dff" => "application/octet-stream",
+        _ => "application/octet-stream",
+    };
 
     private List<SessionSlotDto> ReadSessions()
     {
@@ -348,18 +669,28 @@ public sealed class SyncHostServer : IAsyncDisposable
         }
     }
 
-    private static int ApplyLwwMutationsToManifest(string dbPath, IReadOnlyList<JsonElement> mutations)
+    private sealed record LwwApplyResult(
+        int AppliedCount,
+        List<string> AcknowledgedKeys,
+        List<string> UnmatchedUids
+    );
+
+    private static LwwApplyResult ApplyLwwMutationsToManifest(string dbPath, IReadOnlyList<JsonElement> mutations)
     {
         int applied = 0;
+        var acknowledged = new List<string>();
+        var unmatched = new List<string>();
+
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
+        var resolver = LastFmLedgerService.TrackUidResolver.Build(conn);
         using var tx = conn.BeginTransaction();
 
         foreach (var m in mutations)
         {
             if (m.ValueKind != JsonValueKind.Object) continue;
 
-            string? trackUid = m.TryGetProperty("track_uid", out var uidEl) ? uidEl.GetString() : null;
+            string rawUid = m.TryGetProperty("track_uid", out var uidEl) ? (uidEl.GetString() ?? "") : "";
             string? rawField = m.TryGetProperty("field", out var fEl) ? fEl.GetString()
                 : (m.TryGetProperty("field_name", out var fnEl) ? fnEl.GetString() : null);
 
@@ -368,19 +699,39 @@ public sealed class SyncHostServer : IAsyncDisposable
             else if (m.TryGetProperty("ts_ms", out var ts2El) && ts2El.TryGetInt64(out long t2)) incomingTs = t2;
             else if (m.TryGetProperty("updated_at_ms", out var ts3El) && ts3El.TryGetInt64(out long t3)) incomingTs = t3;
 
-            if (string.IsNullOrWhiteSpace(trackUid) || string.IsNullOrWhiteSpace(rawField) || incomingTs <= 0)
+            if (string.IsNullOrWhiteSpace(rawField) || incomingTs <= 0)
                 continue;
 
             if (!LwwFieldColumnMap.TryGetValue(rawField.Trim(), out var mapping))
                 continue;
+
+            string mutationKey = m.TryGetProperty("mutation_key", out var mkEl) && mkEl.ValueKind == JsonValueKind.String
+                ? (mkEl.GetString() ?? "")
+                : $"{rawUid}|{rawField.Trim()}|{incomingTs}";
+
+            string? resolvedUid = resolver.ResolveFromJson(m);
+            if (string.IsNullOrWhiteSpace(resolvedUid))
+            {
+                if (!string.IsNullOrWhiteSpace(rawUid)) unmatched.Add(rawUid);
+                continue;
+            }
 
             object dbVal = DBNull.Value;
             if (m.TryGetProperty("value", out var valEl) && valEl.ValueKind != JsonValueKind.Null && valEl.ValueKind != JsonValueKind.Undefined)
             {
                 if (mapping.ValCol is "dj_scene_json" or "mood_json")
                 {
-                    dbVal = valEl.ValueKind == JsonValueKind.Array ? valEl.GetRawText()
-                        : (valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "[]") : "[]");
+                    if (valEl.ValueKind == JsonValueKind.Array)
+                    {
+                        dbVal = valEl.GetRawText();
+                    }
+                    else
+                    {
+                        string str = valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "") : valEl.ToString();
+                        dbVal = str.TrimStart().StartsWith('[')
+                            ? str
+                            : JsonSerializer.Serialize(str.Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                    }
                 }
                 else if (mapping.ValCol == "rating")
                 {
@@ -406,9 +757,13 @@ public sealed class SyncHostServer : IAsyncDisposable
             {
                 checkCmd.Transaction = tx;
                 checkCmd.CommandText = $"SELECT {mapping.TsCol} FROM tracks WHERE track_uid = $uid;";
-                checkCmd.Parameters.AddWithValue("$uid", trackUid);
+                checkCmd.Parameters.AddWithValue("$uid", resolvedUid);
                 object? existing = checkCmd.ExecuteScalar();
-                if (existing is null || existing == DBNull.Value) continue;
+                if (existing is null || existing == DBNull.Value)
+                {
+                    if (!string.IsNullOrWhiteSpace(rawUid)) unmatched.Add(rawUid);
+                    continue;
+                }
                 currentTs = Convert.ToInt64(existing);
             }
 
@@ -419,13 +774,16 @@ public sealed class SyncHostServer : IAsyncDisposable
                 updCmd.CommandText = $"UPDATE tracks SET {mapping.ValCol} = $val, {mapping.TsCol} = $ts WHERE track_uid = $uid;";
                 updCmd.Parameters.AddWithValue("$val", dbVal);
                 updCmd.Parameters.AddWithValue("$ts", incomingTs);
-                updCmd.Parameters.AddWithValue("$uid", trackUid);
+                updCmd.Parameters.AddWithValue("$uid", resolvedUid);
                 applied += updCmd.ExecuteNonQuery();
             }
+
+            // Track matched in DB: acknowledge both applied and superseded writes so client clears them
+            acknowledged.Add(mutationKey);
         }
 
         tx.Commit();
-        return applied;
+        return new LwwApplyResult(applied, acknowledged, unmatched);
     }
 
     private static readonly IReadOnlyDictionary<string, (string ValCol, string TsCol)> LwwFieldColumnMap =

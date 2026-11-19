@@ -37,7 +37,7 @@ import org.oxycblt.musikr.tag.Date
 import org.oxycblt.musikr.util.correctWhitespace
 import org.oxycblt.musikr.util.splitEscaped
 
-@Database(entities = [CachedFileData::class], version = 74, exportSchema = false)
+@Database(entities = [CachedFileData::class], version = 75, exportSchema = false)
 internal abstract class CacheDatabase : RoomDatabase() {
     abstract fun readDao(): CacheReadDao
 
@@ -63,13 +63,21 @@ internal abstract class CacheDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE CachedFileData ADD COLUMN tempoBpm REAL")
             }
 
+        val MIGRATION_74_75 =
+            Migration(74, 75) { db ->
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN filePathVolume TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN filePathComponents TEXT")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN fileSize INTEGER")
+                db.execSQL("ALTER TABLE CachedFileData ADD COLUMN fileMimeType TEXT")
+            }
+
         fun from(context: Context) =
             Room.databaseBuilder(
                     context.applicationContext,
                     CacheDatabase::class.java,
                     "music_cache.db",
                 )
-                .addMigrations(MIGRATION_70_73, MIGRATION_73_74)
+                .addMigrations(MIGRATION_70_73, MIGRATION_73_74, MIGRATION_74_75)
                 .fallbackToDestructiveMigration(true)
                 .build()
     }
@@ -143,6 +151,10 @@ internal data class CachedFileData(
     val musicBrainzWorkId: String? = null,
     val moods: List<String>? = null,
     val tempoBpm: Float? = null,
+    val filePathVolume: String? = null,
+    val filePathComponents: String? = null,
+    val fileSize: Long? = null,
+    val fileMimeType: String? = null,
 ) {
     object Converters {
         @TypeConverter

@@ -267,8 +267,11 @@ sealed interface IndexingState {
      * Music loading is on-going.
      *
      * @param progress The current progress of the music loading.
+     * @param isBackground Whether cached data has already been hydrated and this refresh is running
+     *   silently in the background.
      */
-    data class Indexing(val progress: IndexingProgress) : IndexingState
+    data class Indexing(val progress: IndexingProgress, val isBackground: Boolean = false) :
+        IndexingState
 
     /**
      * Music loading has completed.
@@ -475,9 +478,33 @@ constructor(
         val storage = Storage(cache, covers, storedPlaylists)
         val interpretation = Interpretation(nameFactory, separators)
         val config = Config(fs, storage, interpretation)
-        L.d("Running index...")
+        val musikr = Musikr.new(context, config)
+        val canHydrateCache =
+            withCache &&
+                this.library == null &&
+                currentRevision != null &&
+                !(musicSettings.locationMode == LocationMode.SAF &&
+                    musicSettings.safQuery.source.isEmpty())
+        if (canHydrateCache) {
+            val hydrateStart = System.currentTimeMillis()
+            val cachedLibrary =
+                runCatching { musikr.hydrateFromCache() }
+                    .onFailure {
+                        L.w(it, "Cached library hydration failed, falling back to full index")
+                    }
+                    .getOrNull()
+            if (cachedLibrary != null) {
+                L.d(
+                    "Hydrated cached library (${cachedLibrary.songs.size} songs, ${cachedLibrary.playlists.size} playlists) in ${System.currentTimeMillis() - hydrateStart}ms"
+                )
+                emitLibrary(cachedLibrary)
+            }
+        }
+        val isBackgroundRefresh = withCache && this.library != null
+        L.d("Running index [background=$isBackgroundRefresh]...")
         val start = System.currentTimeMillis()
-        val result = Musikr.new(context, config).run(::emitIndexingProgress)
+        val result =
+            musikr.run { progress -> emitIndexingProgress(progress, isBackgroundRefresh) }
         L.d("Index finished in ${System.currentTimeMillis() - start}ms")
         val finalLibrary = autoPlaylistImporter.sync(result.library, result.discoveredPlaylists)
         // Music loading completed, update the revision right now so we re-use this work
@@ -497,10 +524,13 @@ constructor(
         emitIndexingCompletion(null)
     }
 
-    private suspend fun emitIndexingProgress(progress: IndexingProgress) {
+    private suspend fun emitIndexingProgress(
+        progress: IndexingProgress,
+        isBackground: Boolean = false,
+    ) {
         yield()
         synchronized(this) {
-            currentIndexingState = IndexingState.Indexing(progress)
+            currentIndexingState = IndexingState.Indexing(progress, isBackground)
             for (listener in indexingListeners) {
                 listener.onIndexingStateChanged()
             }

@@ -368,7 +368,15 @@ public sealed record DesktopUserSettings(
     string AppTheme = "dark",
     bool IsShuffleEnabled = false,
     string RepeatMode = "all",
-    bool EnableAutoWatchLibrary = true
+    bool EnableAutoWatchLibrary = true,
+    string ReplayGainMode = "dynamic",
+    double ReplayGainPreAmpWithTagDb = 0.0,
+    double ReplayGainPreAmpWithoutTagDb = 0.0,
+    bool RewindOnPrevious = true,
+    bool RememberPauseOnSkip = false,
+    bool PauseOnSingleRepeat = false,
+    int ExclusiveIdleReleaseMinutes = 15,
+    string? DeviceDspProfilesJson = null
 );
 
 public static class DesktopSettingsStore
@@ -892,5 +900,178 @@ public static class AutoDjPlaylistGenerator
             }
             if (!improved) break;
         }
+    }
+}
+
+public sealed record PlaybackSessionSnapshot(
+    IReadOnlyList<string> QueueTrackUids,
+    string? CurrentTrackUid,
+    double PositionSeconds,
+    string QueueTitle,
+    bool IsShuffled,
+    string RepeatMode,
+    int ActiveSlotIndex,
+    long SavedAtUnixMs
+);
+
+public static class PlaybackSessionStore
+{
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
+    public static string GetSessionFilePath(string musicRoot) =>
+        Path.Combine(musicRoot, ".tonewise", "desktop_playback_session.json");
+
+    public static PlaybackSessionSnapshot? Load(string musicRoot)
+    {
+        if (string.IsNullOrWhiteSpace(musicRoot)) return null;
+        string path = GetSessionFilePath(musicRoot);
+        if (!File.Exists(path)) return null;
+        try
+        {
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            var parsed = JsonSerializer.Deserialize<PlaybackSessionSnapshot>(json, JsonOptions);
+            return parsed is not null && parsed.QueueTrackUids is { Count: > 0 } ? parsed : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static void Save(string musicRoot, PlaybackSessionSnapshot snapshot)
+    {
+        if (string.IsNullOrWhiteSpace(musicRoot)) return;
+        string path = GetSessionFilePath(musicRoot);
+        string? dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(dir)) Directory.CreateDirectory(dir);
+        string tmp = path + ".tmp." + Guid.NewGuid().ToString("N")[..6];
+        string json = JsonSerializer.Serialize(snapshot, JsonOptions);
+        File.WriteAllText(tmp, json + "\n", new UTF8Encoding(false));
+        File.Move(tmp, path, overwrite: true);
+    }
+
+    public static void Clear(string musicRoot)
+    {
+        if (string.IsNullOrWhiteSpace(musicRoot)) return;
+        string path = GetSessionFilePath(musicRoot);
+        if (File.Exists(path))
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+}
+
+public sealed record ShuffleTrackDescriptor(
+    string TrackUid,
+    string Album,
+    string WorkName,
+    int? MovementNumber,
+    string RelPath
+);
+
+/// <summary>
+/// Work-preserving deterministic/Fisher-Yates shuffle engine matching Android `WorkShuffleOrder`.
+/// Classical works (`WorkName` on the same `Album`) stay grouped and movement-ordered as atomic blocks.
+/// </summary>
+public static class WorkAwareShuffleEngine
+{
+    public static int[] BuildWorkAwareOrder(
+        IReadOnlyList<ShuffleTrackDescriptor> tracks,
+        int anchorIndex,
+        Random? random = null)
+    {
+        if (tracks.Count == 0) return [];
+        var rng = random ?? Random.Shared;
+
+        var blockOrder = new List<string>();
+        var blocksByKey = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        for (int i = 0; i < tracks.Count; i++)
+        {
+            var t = tracks[i];
+            string work = t.WorkName?.Trim().ToLowerInvariant() ?? "";
+            string key = string.IsNullOrEmpty(work)
+                ? $"track::{i}"
+                : $"work::{(t.Album ?? "").Trim().ToLowerInvariant()}::{work}";
+            if (!blocksByKey.TryGetValue(key, out var list))
+            {
+                list = [];
+                blocksByKey[key] = list;
+                blockOrder.Add(key);
+            }
+            list.Add(i);
+        }
+
+        var orderedBlocks = new List<List<int>>(blockOrder.Count);
+        foreach (string key in blockOrder)
+        {
+            var indices = blocksByKey[key];
+            if (indices.Count > 1)
+            {
+                indices.Sort((a, b) =>
+                {
+                    int ma = tracks[a].MovementNumber ?? int.MaxValue;
+                    int mb = tracks[b].MovementNumber ?? int.MaxValue;
+                    int cmp = ma.CompareTo(mb);
+                    if (cmp != 0) return cmp;
+                    cmp = string.Compare(tracks[a].RelPath, tracks[b].RelPath, StringComparison.OrdinalIgnoreCase);
+                    return cmp != 0 ? cmp : a.CompareTo(b);
+                });
+            }
+            orderedBlocks.Add(indices);
+        }
+
+        List<int>? anchorBlock = null;
+        if (anchorIndex >= 0 && anchorIndex < tracks.Count)
+        {
+            int anchorBlockIdx = orderedBlocks.FindIndex(b => b.Contains(anchorIndex));
+            if (anchorBlockIdx >= 0)
+            {
+                anchorBlock = orderedBlocks[anchorBlockIdx];
+                orderedBlocks.RemoveAt(anchorBlockIdx);
+            }
+        }
+
+        for (int i = orderedBlocks.Count - 1; i > 0; i--)
+        {
+            int j = rng.Next(i + 1);
+            (orderedBlocks[i], orderedBlocks[j]) = (orderedBlocks[j], orderedBlocks[i]);
+        }
+
+        var flattened = new List<int>(tracks.Count);
+        if (anchorBlock is not null)
+        {
+            flattened.AddRange(anchorBlock);
+        }
+        foreach (var block in orderedBlocks)
+        {
+            flattened.AddRange(block);
+        }
+        return [.. flattened];
+    }
+}
+
+public static class ReplayGainResolver
+{
+    public static double ResolveGainDb(
+        string? mode,
+        double? trackDb,
+        double? albumDb,
+        bool isAlbumContext,
+        double preAmpWithTagDb = 0.0,
+        double preAmpWithoutTagDb = 0.0)
+    {
+        string normalized = (mode ?? "dynamic").Trim().ToLowerInvariant();
+        if (normalized == "off") return 0.0;
+
+        double? resolved = normalized switch
+        {
+            "track" => trackDb ?? albumDb,
+            "album" => albumDb ?? trackDb,
+            _ => isAlbumContext ? (albumDb ?? trackDb) : (trackDb ?? albumDb),
+        };
+
+        return resolved.HasValue
+            ? resolved.Value + preAmpWithTagDb
+            : preAmpWithoutTagDb;
     }
 }

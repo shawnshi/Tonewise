@@ -331,6 +331,12 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                 }
             }
             is IndexingState.Indexing -> {
+                if (state.isBackground) {
+                    binding.homeIndexingContainer.isInvisible = true
+                    binding.homeIndexingProgress.isInvisible = true
+                    binding.homeIndexingError.isInvisible = true
+                    return
+                }
                 binding.homeIndexingContainer.isInvisible = false
                 binding.homeIndexingProgress.apply {
                     isInvisible = false

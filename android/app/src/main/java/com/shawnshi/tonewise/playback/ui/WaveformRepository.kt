@@ -114,6 +114,9 @@ constructor(
         return TonewiseCore.lookupWaveformPath(synced.absolutePath, blake3Hex)
     }
 
+    fun getOrComputeAudioFrameBlake3(song: Song): String? =
+        runCatching { getOrComputeBlake3(song) }.getOrNull()
+
     private fun getOrComputeBlake3(song: Song): String? {
         fingerprintCache.get(song.uid)?.let { return it }
         ensureFpLoaded()

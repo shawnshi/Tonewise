@@ -32,11 +32,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -59,6 +61,7 @@ import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.activityViewModels
@@ -100,16 +103,22 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val hosts by lanSyncRepository.discoveredHosts.collectAsStateWithLifecycle()
+                val pairedHost by lanSyncRepository.pairedHost.collectAsStateWithLifecycle()
                 val syncStatus by lanSyncRepository.syncStatus.collectAsStateWithLifecycle()
+                val syncProgress by lanSyncRepository.syncProgress.collectAsStateWithLifecycle()
                 val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
                 val lastFmState by lastFmRepository.state.collectAsStateWithLifecycle()
 
                 TonewiseComposeTheme {
                     SyncHubSheet(
                         discoveredHosts = hosts,
+                        pairedHost = pairedHost,
                         syncStatus = syncStatus,
+                        syncProgress = syncProgress,
                         sessionSlots = slots,
                         lastFmState = lastFmState,
+                        onPairHost = { url, code -> lanSyncRepository.pairWithHost(url, code) },
+                        onUnpairHost = { lanSyncRepository.unpairHost() },
                         onSaveSlot = { slotIndex ->
                             val queue = playbackModel.pagerQueue.value
                             val uids = queue.queue.map { it.uid.toString() }
@@ -192,9 +201,13 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
 @Composable
 private fun SyncHubSheet(
     discoveredHosts: List<DiscoveredSyncHost>,
+    pairedHost: PairedHostInfo?,
     syncStatus: String,
+    syncProgress: SyncProgressState,
     sessionSlots: List<SessionSlotItem>,
     lastFmState: LastFmState,
+    onPairHost: suspend (String, String) -> Boolean,
+    onUnpairHost: () -> Unit,
     onSaveSlot: (Int) -> Unit,
     onRestoreSlot: (SessionSlotItem) -> Unit,
     onSyncUrl: suspend (String) -> Unit,
@@ -205,7 +218,12 @@ private fun SyncHubSheet(
     onSyncLastFmHistory: suspend () -> Int,
 ) {
     val scope = rememberCoroutineScope()
-    var manualUrl by remember { mutableStateOf("http://192.168.1.100:45820") }
+    var manualUrl by
+        remember(pairedHost?.baseUrl) {
+            mutableStateOf(pairedHost?.baseUrl ?: discoveredHosts.firstOrNull()?.baseUrl ?: "")
+        }
+    var pairingCode by remember { mutableStateOf("") }
+    var showRepairPanel by remember(pairedHost) { mutableStateOf(pairedHost == null) }
     var apiEnabled by remember(lastFmState.apiEnabled) { mutableStateOf(lastFmState.apiEnabled) }
     var broadcastEnabled by remember(lastFmState.broadcastEnabled) {
         mutableStateOf(lastFmState.broadcastEnabled)
@@ -223,6 +241,11 @@ private fun SyncHubSheet(
     LaunchedEffect(lastFmState.sessionKey) {
         if (lastFmState.sessionKey.isNotEmpty()) {
             password = ""
+        }
+    }
+    LaunchedEffect(discoveredHosts) {
+        if (manualUrl.isBlank() && discoveredHosts.isNotEmpty()) {
+            manualUrl = discoveredHosts.first().baseUrl
         }
     }
 
@@ -435,20 +458,72 @@ private fun SyncHubSheet(
             }
             Text(
                 text =
-                    "${stringResource(R.string.fmt_lastfm_stats, lastFmState.pendingCount, lastFmState.syncedPlayCountTotal)} · ${lastFmState.statusMessage}",
+                    if (lastFmState.pendingLoveCount > 0) {
+                        "${stringResource(R.string.fmt_lastfm_stats_with_loved, lastFmState.pendingCount, lastFmState.pendingLoveCount, lastFmState.syncedPlayCountTotal)} · ${lastFmState.statusMessage}"
+                    } else {
+                        "${stringResource(R.string.fmt_lastfm_stats, lastFmState.pendingCount, lastFmState.syncedPlayCountTotal)} · ${lastFmState.statusMessage}"
+                    },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             HorizontalDivider()
 
-            // 3. LAN SyncHost Discovery & Incremental Sync
+            // 3. LAN SyncHost Discovery, Pairing & Content Sync
             Text(
                 text = stringResource(R.string.lbl_lan_sync),
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
+
+            if (pairedHost != null) {
+                ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "${stringResource(R.string.lbl_lan_sync_paired_host)}：${pairedHost.hostName}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    text = pairedHost.baseUrl,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Button(
+                                enabled = !syncProgress.isRunning,
+                                onClick = { scope.launch { onSyncUrl(pairedHost.baseUrl) } },
+                            ) {
+                                Text(stringResource(R.string.lbl_sync_now))
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            TextButton(onClick = { showRepairPanel = !showRepairPanel }) {
+                                Text(stringResource(R.string.lbl_lan_sync_re_pair))
+                            }
+                            TextButton(enabled = !syncProgress.isRunning, onClick = onUnpairHost) {
+                                Text(stringResource(R.string.lbl_lan_sync_unpair))
+                            }
+                        }
+                    }
+                }
+            }
+
             for (host in discoveredHosts) {
+                val isPairedToThis =
+                    pairedHost?.baseUrl?.equals(host.baseUrl, ignoreCase = true) == true
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -463,26 +538,104 @@ private fun SyncHubSheet(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        Button(onClick = { scope.launch { onSyncUrl(host.baseUrl) } }) {
-                            Text(stringResource(R.string.lbl_sync_now))
+                        Button(
+                            enabled = !syncProgress.isRunning,
+                            onClick = {
+                                if (isPairedToThis) {
+                                    scope.launch { onSyncUrl(host.baseUrl) }
+                                } else {
+                                    manualUrl = host.baseUrl
+                                    showRepairPanel = true
+                                }
+                            },
+                        ) {
+                            Text(
+                                if (isPairedToThis) {
+                                    stringResource(R.string.lbl_sync_now)
+                                } else {
+                                    stringResource(R.string.lbl_lan_sync_pair)
+                                }
+                            )
                         }
                     }
                 }
             }
 
-            OutlinedTextField(
-                value = manualUrl,
-                onValueChange = { manualUrl = it },
-                label = { Text(stringResource(R.string.lbl_sync_host_url)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Button(
-                onClick = { scope.launch { onSyncUrl(manualUrl) } },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(stringResource(R.string.lbl_sync_now))
+            if (pairedHost == null || showRepairPanel) {
+                OutlinedTextField(
+                    value = manualUrl,
+                    onValueChange = { manualUrl = it },
+                    label = { Text(stringResource(R.string.lbl_sync_host_url)) },
+                    placeholder = { Text(stringResource(R.string.hint_lan_sync_url)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = pairingCode,
+                        onValueChange = { input ->
+                            pairingCode = input.filter { it.isDigit() }.take(6)
+                        },
+                        label = { Text(stringResource(R.string.lbl_lan_sync_pairing_code)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Button(
+                        enabled =
+                            !syncProgress.isRunning &&
+                                manualUrl.isNotBlank() &&
+                                pairingCode.length == 6,
+                        onClick = {
+                            scope.launch {
+                                val ok = onPairHost(manualUrl, pairingCode)
+                                if (ok) {
+                                    pairingCode = ""
+                                    showRepairPanel = false
+                                }
+                            }
+                        },
+                    ) {
+                        Text(stringResource(R.string.lbl_lan_sync_pair))
+                    }
+                }
             }
+
+            if (syncProgress.isRunning) {
+                if (syncProgress.totalBytes > 0L) {
+                    val fraction =
+                        (syncProgress.downloadedBytes.toFloat() / syncProgress.totalBytes.toFloat())
+                            .coerceIn(0f, 1f)
+                    LinearProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                val progressDetail =
+                    buildString {
+                        append(syncProgress.phase)
+                        if (syncProgress.currentTrackTitle.isNotBlank()) {
+                            append(" · ").append(syncProgress.currentTrackTitle)
+                        }
+                        if (syncProgress.totalBytes > 0L) {
+                            val downMb = syncProgress.downloadedBytes / (1024.0 * 1024.0)
+                            val totalMb = syncProgress.totalBytes / (1024.0 * 1024.0)
+                            append(String.format(" (%.1f / %.1f MB)", downMb, totalMb))
+                        }
+                    }
+                Text(
+                    text = progressDetail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
             Text(
                 text = syncStatus,
                 style = MaterialTheme.typography.bodySmall,

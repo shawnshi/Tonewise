@@ -50,9 +50,12 @@ public sealed record TrackItem(
     int EffectivePlayCount = 0,
     string AlbumDirectory = "",
     string? CoverArtPath = null,
-    string? BookletPdfPath = null
+    string? BookletPdfPath = null,
+    int? MovementNumber = null,
+    double? ReplayGainAlbumDb = null
 )
 {
+    public bool IsLoved => Rating >= 5;
     public static bool IsClassicalGenre(string? genre)
     {
         if (string.IsNullOrWhiteSpace(genre)) return false;
@@ -204,4 +207,26 @@ public sealed record SubTabOption(
     string Id,
     string Label,
     bool IsActive
+);
+
+public sealed record PairedDeviceViewItem(
+    string DeviceId,
+    string DeviceName,
+    string LastSyncDisplay
+);
+
+public sealed record SyncOutboxViewItem(
+    string Id,
+    string KindLabel,
+    string DisplayName,
+    string ModeBadge,
+    string DetailText
+);
+
+public sealed record QueueSlotChipItem(
+    int SlotIndex,
+    string Label,
+    string TooltipText,
+    bool IsActive,
+    bool IsPopulated
 );

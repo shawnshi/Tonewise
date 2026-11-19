@@ -19,6 +19,7 @@
 package com.shawnshi.tonewise.detail
 
 import android.content.Context
+import com.shawnshi.tonewise.BuildConfig
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
@@ -509,7 +510,7 @@ constructor(
                     connectTimeout = 4000
                     readTimeout = 4000
                     setRequestProperty("Accept", "application/json")
-                    setRequestProperty("User-Agent", "Tonewise/4.1.5 (Android)")
+                    setRequestProperty("User-Agent", "Tonewise/${BuildConfig.VERSION_NAME} (Android)")
                 }
             if (conn.responseCode != HttpURLConnection.HTTP_OK) {
                 return null

@@ -15,6 +15,7 @@ using Tonewise.Desktop.Models;
 using Tonewise.Desktop.Services;
 using Tonewise.Desktop.ViewModels;
 using Tonewise.SyncHost.Curation;
+using Tonewise.SyncHost.Ledger;
 using Tonewise.SyncHost.Playlists;
 using Windows.Data.Pdf;
 using Windows.Media;
@@ -87,6 +88,31 @@ public sealed partial class MainWindow : Window
 
     public Visibility NonEmptyVisibility(string? value) =>
         string.IsNullOrWhiteSpace(value) ? Visibility.Collapsed : Visibility.Visible;
+
+    public string FormatDb(double db) => $"{db:+0.0;-0.0;0.0}";
+
+    public string HeartGlyph(bool isLoved) => isLoved ? "\uEB52" : "\uEB51";
+
+    public SolidColorBrush HeartForeground(bool isLoved)
+    {
+        if (isLoved) return new SolidColorBrush(Color.FromArgb(0xFF, 0xD9, 0x6B, 0x52));
+        bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
+        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x64, 0x74, 0x8B) : Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8));
+    }
+
+    public SolidColorBrush FreezePillBackground(bool active)
+    {
+        bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
+        if (active) return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xE0, 0xF2, 0xFE) : Color.FromArgb(0xFF, 0x1F, 0x35, 0x45));
+        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xEF, 0xF4, 0xFA) : Color.FromArgb(0xFF, 0x14, 0x1A, 0x26));
+    }
+
+    public SolidColorBrush FreezePillBorder(bool active)
+    {
+        bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
+        if (active) return new SolidColorBrush(Color.FromArgb(0xFF, 0x38, 0xBD, 0xF8));
+        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xCB, 0xD5, 0xE1) : Color.FromArgb(0xFF, 0x29, 0x34, 0x48));
+    }
 
     public MainWindow()
     {
@@ -195,6 +221,7 @@ public sealed partial class MainWindow : Window
         {
             UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
             UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
+            RefreshQueuePlayingHighlights();
             await UpdateSmtcMetadataAsync(ViewModel.CurrentTrack);
             await LoadBookletForTrackAsync(track);
         };
@@ -506,37 +533,100 @@ public sealed partial class MainWindow : Window
         var apiKeyBox = new TextBox
         {
             Header = "Last.fm API Key",
-            PlaceholderText = "Web API v2.0 必填",
+            PlaceholderText = "32 位 Web API Key (last.fm/api/account)",
             Text = saved?.ApiKey ?? "",
         };
         var secretBox = new PasswordBox
         {
-            Header = "API Secret（配置只读拉取或更换账号时填写）",
+            Header = "Shared Secret (API Secret)",
+            PlaceholderText = "双向读写推送必填（Scrobble / Loved / 浏览器 OAuth）",
             Password = saved?.ApiSecret ?? "",
         };
         var userBox = new TextBox
         {
-            Header = "用户名",
-            PlaceholderText = "Last.fm 用户名",
+            Header = "Last.fm 用户名",
+            PlaceholderText = "使用浏览器授权时可留空自动识别",
             Text = saved?.Username ?? "",
         };
+
+        string? pendingToken = null;
+        var oauthStatusText = new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(saved?.SessionKey)
+                ? "推荐使用浏览器一键授权（兼容二步验证与谷歌登录），即可自动推送播放记录与 Loved tracks。"
+                : "当前已配置 SessionKey（读写已就绪）。若推送异常，可重新执行浏览器授权刷新会话。",
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8)),
+        };
+
+        var openBrowserAuthBtn = new Button
+        {
+            Content = "1. 打开浏览器授权 (推荐)",
+        };
+        openBrowserAuthBtn.Click += async (_, _) =>
+        {
+            string k = apiKeyBox.Text.Trim();
+            string s = secretBox.Password.Trim();
+            if (string.IsNullOrWhiteSpace(k) || string.IsNullOrWhiteSpace(s))
+            {
+                oauthStatusText.Text = "请先填写上方的 API Key 与 Shared Secret。";
+                return;
+            }
+            try
+            {
+                openBrowserAuthBtn.IsEnabled = false;
+                oauthStatusText.Text = "正在向 Last.fm 申请授权令牌…";
+                var client = new LastFmWebApiClient();
+                var (token, url) = await client.RequestAuthTokenAsync(k, s);
+                pendingToken = token;
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                oauthStatusText.Text = "已在浏览器打开 Last.fm 授权页面：点击「Yes, allow access」后，回到本窗口点击下方「保存 / 完成授权并同步」。";
+            }
+            catch (Exception ex)
+            {
+                oauthStatusText.Text = $"申请浏览器授权失败：{ex.Message}";
+            }
+            finally
+            {
+                openBrowserAuthBtn.IsEnabled = true;
+            }
+        };
+
         var passwordBox = new PasswordBox
         {
-            Header = string.IsNullOrWhiteSpace(saved?.SessionKey)
-                ? "Last.fm 密码（可选：留空则仅自动拉取云端播放次数与喜爱）"
-                : "Last.fm 密码（已有 SessionKey，留空沿用当前会话并立即同步）",
+            Header = "备选：密码登录或手动 SessionKey（无需浏览器）",
+            PlaceholderText = "留空则保留当前 SessionKey 或仅只读拉取",
         };
-        var panel = new StackPanel { Spacing = 8 };
+        var rawSessionCheck = new CheckBox
+        {
+            Content = "上述输入框填写的是已有 SessionKey 原文",
+            IsChecked = false,
+        };
+        var fallbackExpander = new Expander
+        {
+            Header = "备选方式：密码登录 / 手动 SessionKey",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Content = new StackPanel
+            {
+                Spacing = 8,
+                Children = { passwordBox, rawSessionCheck },
+            },
+        };
+
+        var panel = new StackPanel { Spacing = 10, MinWidth = 420 };
         panel.Children.Add(apiKeyBox);
         panel.Children.Add(secretBox);
         panel.Children.Add(userBox);
-        panel.Children.Add(passwordBox);
+        panel.Children.Add(openBrowserAuthBtn);
+        panel.Children.Add(oauthStatusText);
+        panel.Children.Add(fallbackExpander);
 
         var dialog = new ContentDialog
         {
-            Title = "配置并同步 Last.fm",
+            Title = "配置并授权 Last.fm",
             Content = panel,
-            PrimaryButtonText = "保存并同步",
+            PrimaryButtonText = "保存 / 完成授权并同步",
             CloseButtonText = "取消",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = RootWorkbench.XamlRoot,
@@ -547,12 +637,25 @@ public sealed partial class MainWindow : Window
         {
             try
             {
-                await ViewModel.ConfigureAndSyncLastFmAsync(
-                    apiKeyBox.Text,
-                    secretBox.Password,
-                    userBox.Text,
-                    passwordBox.Password
-                );
+                if (!string.IsNullOrWhiteSpace(pendingToken) && string.IsNullOrWhiteSpace(passwordBox.Password))
+                {
+                    var client = new LastFmWebApiClient();
+                    var (sk, returnedUser) = await client.ExchangeAuthTokenForSessionAsync(
+                        apiKeyBox.Text.Trim(),
+                        secretBox.Password.Trim(),
+                        pendingToken);
+                    string finalUser = !string.IsNullOrWhiteSpace(returnedUser) ? returnedUser : userBox.Text.Trim();
+                    await ViewModel.SaveLastFmSessionAndSyncAsync(apiKeyBox.Text, secretBox.Password, finalUser, sk);
+                }
+                else
+                {
+                    await ViewModel.ConfigureAndSyncLastFmAsync(
+                        apiKeyBox.Text,
+                        secretBox.Password,
+                        userBox.Text,
+                        passwordBox.Password,
+                        isRawSessionKey: rawSessionCheck.IsChecked == true);
+                }
             }
             catch (Exception ex)
             {
@@ -626,6 +729,33 @@ public sealed partial class MainWindow : Window
             {
                 ViewModel.SelectPlaylist(match);
             }
+        }
+    }
+
+    private async void OnSendPlaylistToPhoneClick(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.SendPlaylistToPhoneAsync(ViewModel.SelectedPlaylist);
+    }
+
+    private async void OnContextSendPlaylistCardToPhoneClick(object sender, RoutedEventArgs e)
+    {
+        var pl = (sender as FrameworkElement)?.DataContext as PlaylistSummary ?? ViewModel.SelectedPlaylist;
+        await ViewModel.SendPlaylistToPhoneAsync(pl);
+    }
+
+    private void OnRemoveLanOutboxItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string id })
+        {
+            ViewModel.RemoveLanOutboxItem(id);
+        }
+    }
+
+    private void OnUnpairLanDeviceClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string deviceId })
+        {
+            ViewModel.UnpairLanDevice(deviceId);
         }
     }
 
@@ -1353,6 +1483,7 @@ public sealed partial class MainWindow : Window
     }
 
     private bool _syncingEntitySelection;
+    private EntityGroupItem? _rightClickedEntityGroup;
 
     private void OnEntityGroupSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -1370,6 +1501,30 @@ public sealed partial class MainWindow : Window
                 _syncingEntitySelection = false;
             }
         }
+    }
+
+    private void OnEntityBrowserRightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if ((e.OriginalSource as FrameworkElement)?.DataContext is EntityGroupItem rightClicked)
+        {
+            _rightClickedEntityGroup = rightClicked;
+            if (!ReferenceEquals(EntityBrowserListView.SelectedItem, rightClicked))
+            {
+                EntityBrowserListView.SelectedItem = rightClicked;
+            }
+        }
+    }
+
+    private async void OnSendSelectedEntityGroupToPhoneClick(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.SendEntityGroupToPhoneAsync(ViewModel.SelectedEntityGroup);
+    }
+
+    private async void OnContextSendEntityGroupToPhoneClick(object sender, RoutedEventArgs e)
+    {
+        var group = _rightClickedEntityGroup ?? ViewModel.SelectedEntityGroup;
+        _rightClickedEntityGroup = null;
+        await ViewModel.SendEntityGroupToPhoneAsync(group);
     }
 
     private void RootWorkbench_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -1503,6 +1658,94 @@ public sealed partial class MainWindow : Window
     private void OnOpenPlaybackQueueClick(object sender, RoutedEventArgs e)
     {
         PlaybackQueueFlyout.ShowAt(PlaybackQueueButton);
+        RefreshQueuePlayingHighlights();
+        if (ViewModel.CurrentTrack is not null && PlaybackQueueListView is not null)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    var match = ViewModel.PlaybackQueue.FirstOrDefault(t =>
+                        string.Equals(t.TrackUid, ViewModel.CurrentTrack?.TrackUid, StringComparison.Ordinal));
+                    if (match is not null) PlaybackQueueListView.ScrollIntoView(match);
+                }
+                catch { }
+            });
+        }
+    }
+
+    private void OnQuickQueueSlotChipClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: int slotIndex })
+        {
+            ViewModel.QuickSwitchOrSaveSessionSlot(slotIndex);
+            RefreshQueuePlayingHighlights();
+        }
+    }
+
+    private void OnPlaybackQueueDragItemsCompleted(ListViewBase sender, DragItemsCompletedEventArgs args)
+    {
+        ViewModel.OnPlaybackQueueReordered();
+        RefreshQueuePlayingHighlights();
+    }
+
+    private void OnQueueListContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.ItemContainer is ListViewItem container)
+        {
+            ApplyQueueRowHighlight(container, args.Item as TrackItem);
+        }
+    }
+
+    private void RefreshQueuePlayingHighlights()
+    {
+        if (PlaybackQueueListView is null) return;
+        for (int i = 0; i < ViewModel.PlaybackQueue.Count; i++)
+        {
+            if (PlaybackQueueListView.ContainerFromIndex(i) is ListViewItem container)
+            {
+                ApplyQueueRowHighlight(container, ViewModel.PlaybackQueue[i]);
+            }
+        }
+    }
+
+    private void ApplyQueueRowHighlight(ListViewItem container, TrackItem? track)
+    {
+        if (container.ContentTemplateRoot is not FrameworkElement root) return;
+        bool isPlayingRow = track is not null
+            && ViewModel.CurrentTrack is not null
+            && string.Equals(track.TrackUid, ViewModel.CurrentTrack.TrackUid, StringComparison.Ordinal);
+
+        if (root.FindName("QueuePlayingGlyph") is FrameworkElement glyph)
+        {
+            glyph.Visibility = isPlayingRow ? Visibility.Visible : Visibility.Collapsed;
+        }
+        if (root.FindName("QueueTitleText") is TextBlock titleText)
+        {
+            if (isPlayingRow)
+            {
+                titleText.Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xD9, 0xB3, 0x72));
+            }
+            else
+            {
+                bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
+                titleText.Foreground = new SolidColorBrush(isLight
+                    ? Color.FromArgb(0xFF, 0x1E, 0x29, 0x3B)
+                    : Color.FromArgb(0xFF, 0xE2, 0xE8, 0xF0));
+            }
+        }
+    }
+
+    private void OnTransportTrackInfoClick(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.CurrentTrack is null) return;
+        ViewModel.InspectTrack(ViewModel.CurrentTrack);
+        SetInspectorOpen(true);
+    }
+
+    private void OnTransportArtistClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.NavigateToCurrentTrackArtist();
     }
 
     private void OnPlayQueueTrackClick(object sender, RoutedEventArgs e)
@@ -1739,9 +1982,28 @@ public sealed partial class MainWindow : Window
 
     private void OnContextEnqueueNextClick(object sender, RoutedEventArgs e)
     {
-        if (ResolveContextTrack(sender) is TrackItem track)
+        var targets = ResolveTargetTracksForAction(sender);
+        if (targets.Count > 0)
         {
-            ViewModel.EnqueueTrackNext(track);
+            ViewModel.EnqueueTracksNext(targets);
+        }
+    }
+
+    private void OnContextEnqueueEndClick(object sender, RoutedEventArgs e)
+    {
+        var targets = ResolveTargetTracksForAction(sender);
+        if (targets.Count > 0)
+        {
+            ViewModel.EnqueueTracksToEnd(targets);
+        }
+    }
+
+    private void OnContextToggleLovedClick(object sender, RoutedEventArgs e)
+    {
+        var targets = ResolveTargetTracksForAction(sender);
+        if (targets.Count > 0)
+        {
+            ViewModel.ToggleLovedForTracks(targets);
         }
     }
 
@@ -1791,6 +2053,16 @@ public sealed partial class MainWindow : Window
     private void OnContextF2BasicMetadataClick(object sender, RoutedEventArgs e)
     {
         FocusInlineInspectorEditor(ResolveTargetTracksForAction(sender));
+    }
+
+    private async void OnToolbarSendToPhoneClick(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.SendTracksToPhoneAsync(ResolveTargetTracksForAction(sender));
+    }
+
+    private async void OnContextSendTracksToPhoneClick(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.SendTracksToPhoneAsync(ResolveTargetTracksForAction(sender));
     }
 
     private void OnOpenLexiconTagShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)

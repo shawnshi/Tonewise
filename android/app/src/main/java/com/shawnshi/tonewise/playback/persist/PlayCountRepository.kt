@@ -54,6 +54,12 @@ interface PlayCountRepository {
 
     fun mergeHighWaterMarkCount(songUid: String, remoteCount: Int): Int
 
+    fun getLanSyncedCount(songUid: String): Int
+
+    fun markLanSyncedCount(songUid: String, syncedCount: Int)
+
+    fun mergeRemotePlayCountAndSync(songUid: String, remoteCount: Int): Int
+
     fun getLastPlayedMs(song: Song): Long
 
     fun isLoved(song: Song): Boolean
@@ -138,6 +144,42 @@ constructor(@ApplicationContext private val context: Context) : PlayCountReposit
             ioScope.launch { syncDb.playLedgerDao().upsert(updated) }
         }
         return merged
+    }
+
+    override fun getLanSyncedCount(songUid: String): Int {
+        ensureCacheLoaded()
+        return ledgerCache[songUid]?.lanSyncedCount ?: 0
+    }
+
+    @Synchronized
+    override fun markLanSyncedCount(songUid: String, syncedCount: Int) {
+        ensureCacheLoaded()
+        val clean = syncedCount.coerceAtLeast(0)
+        val current = ledgerCache[songUid] ?: TrackPlayLedgerEntity(trackUid = songUid)
+        if (clean > current.lanSyncedCount) {
+            val updated = current.copy(lanSyncedCount = clean)
+            ledgerCache[songUid] = updated
+            ioScope.launch { syncDb.playLedgerDao().upsert(updated) }
+        }
+    }
+
+    @Synchronized
+    override fun mergeRemotePlayCountAndSync(songUid: String, remoteCount: Int): Int {
+        ensureCacheLoaded()
+        val cleanRemote = remoteCount.coerceAtLeast(0)
+        val current = ledgerCache[songUid] ?: TrackPlayLedgerEntity(trackUid = songUid)
+        val mergedCount = maxOf(current.playCount, cleanRemote)
+        val nextLanSynced = maxOf(current.lanSyncedCount, cleanRemote)
+        if (mergedCount != current.playCount || nextLanSynced != current.lanSyncedCount) {
+            val updated = current.copy(playCount = mergedCount, lanSyncedCount = nextLanSynced)
+            ledgerCache[songUid] = updated
+            staticPlayCountCache[songUid] = mergedCount
+            if (mergedCount != current.playCount) {
+                _updates.value += 1
+            }
+            ioScope.launch { syncDb.playLedgerDao().upsert(updated) }
+        }
+        return mergedCount
     }
 
     override fun getLastPlayedMs(song: Song): Long {

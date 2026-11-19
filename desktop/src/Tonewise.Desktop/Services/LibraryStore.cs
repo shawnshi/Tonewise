@@ -64,7 +64,7 @@ public sealed class LibraryStore
 
         // Fallback: in-process Rust FFI scan + minimal SQLite manifest build
         Directory.CreateDirectory(tonewiseDir);
-        BuildManifestWithFfiFallback(musicRoot, dbPath);
+        BuildManifestWithFfiFallback(musicRoot, dbPath, fastMode);
         return HasPopulatedManifest(dbPath);
     }
 
@@ -116,7 +116,7 @@ public sealed class LibraryStore
         await Task.Run(() =>
         {
             Directory.CreateDirectory(tonewiseDir);
-            BuildManifestWithFfiFallback(musicRoot, dbPath);
+            BuildManifestWithFfiFallback(musicRoot, dbPath, fastMode);
         }, ct).ConfigureAwait(false);
         return HasPopulatedManifest(dbPath);
     }
@@ -228,6 +228,8 @@ public sealed class LibraryStore
     {
         bool hasPublisher = cols.Contains("publisher");
         bool hasPlayCountTotal = cols.Contains("play_count_total");
+        bool hasMovementNumber = cols.Contains("movement_number");
+        bool hasReplayGainAlbum = cols.Contains("replaygain_album_db");
         bool hasLedgerCols = cols.Contains("legacy_play_count")
                              && cols.Contains("lastfm_pulled_count")
                              && cols.Contains("local_unsynced_expired_count");
@@ -243,7 +245,9 @@ public sealed class LibraryStore
                 {(hasPlayCountTotal ? "play_count_total" : "0")} AS play_count_total,
                 {(hasLedgerCols ? "legacy_play_count" : "0")} AS legacy_play_count,
                 {(hasLedgerCols ? "lastfm_pulled_count" : "0")} AS lastfm_pulled_count,
-                {(hasLedgerCols ? "local_unsynced_expired_count" : "0")} AS local_unsynced_expired_count
+                {(hasLedgerCols ? "local_unsynced_expired_count" : "0")} AS local_unsynced_expired_count,
+                {(hasMovementNumber ? "movement_number" : "NULL")} AS movement_number,
+                {(hasReplayGainAlbum ? "replaygain_album_db" : "NULL")} AS replaygain_album_db
             FROM tracks
             {tailClause}
             """;
@@ -294,6 +298,8 @@ public sealed class LibraryStore
             int pulled = reader.IsDBNull(26) ? 0 : reader.GetInt32(26);
             int expired = reader.IsDBNull(27) ? 0 : reader.GetInt32(27);
             int effectiveCount = Math.Max(total, LastFmLedgerService.ComputeEffectivePlayCount(legacy, pulled, expired));
+            int? movementNumber = reader.IsDBNull(28) ? null : reader.GetInt32(28);
+            double? rgAlbumDb = reader.IsDBNull(29) ? null : reader.GetDouble(29);
 
             items.Add(
                 new TrackItem(
@@ -326,7 +332,9 @@ public sealed class LibraryStore
                     EffectivePlayCount: effectiveCount,
                     AlbumDirectory: albumDir,
                     CoverArtPath: assets.Cover,
-                    BookletPdfPath: assets.Booklet
+                    BookletPdfPath: assets.Booklet,
+                    MovementNumber: movementNumber,
+                    ReplayGainAlbumDb: rgAlbumDb
                 )
             );
         }
@@ -561,8 +569,11 @@ public sealed class LibraryStore
 
                 if (fastMode)
                 {
-                    audioHash = ComputeFastAudioSampleHash(ioPath, fsz);
-                    headerHash = audioHash;
+                    var fp = TonewiseCoreClient.ComputeFingerprint(ioPath);
+                    audioHash = Convert.FromHexString(fp.AudioFrameBlake3Hex);
+                    headerHash = Convert.FromHexString(fp.HeaderBlake3Hex);
+                    headerSize = (long)fp.HeaderSize;
+                    fsz = (long)fp.FileSize;
                     codec = ext.TrimStart('.').ToLowerInvariant();
                     sampleRateHz = 44100;
                     durationMs = 0;
@@ -707,22 +718,5 @@ public sealed class LibraryStore
         {
             return [];
         }
-    }
-
-    private static byte[] ComputeFastAudioSampleHash(string ioPath, long fileSize)
-    {
-        const int sampleBytes = 64 * 1024;
-        byte[] buf = new byte[sampleBytes + 8];
-        BitConverter.TryWriteBytes(buf.AsSpan(0, 8), fileSize);
-        int read = 0;
-        using (var fs = new FileStream(ioPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-        {
-            if (fileSize > sampleBytes)
-            {
-                fs.Seek(Math.Max(0, (fileSize - sampleBytes) / 2), SeekOrigin.Begin);
-            }
-            read = fs.Read(buf, 8, sampleBytes);
-        }
-        return System.Security.Cryptography.SHA256.HashData(buf.AsSpan(0, 8 + Math.Max(0, read)));
     }
 }

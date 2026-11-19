@@ -73,6 +73,7 @@ import com.shawnshi.tonewise.playback.state.RepeatMode
 import com.shawnshi.tonewise.playback.state.ShuffleMode
 import com.shawnshi.tonewise.playback.state.StateAck
 import com.shawnshi.tonewise.sync.LastFmRepository
+import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.MusicParent
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L
@@ -107,6 +108,8 @@ class ExoPlaybackStateHolder(
     private var activePlaySong: Song? = null
     private var accumulatedPlayMs = 0L
     private var playStartElapsedMs: Long? = null
+    private var activePlayStartEpochSec: Long? = null
+    private var lastNowPlayingUid: Music.UID? = null
     private var countedCurrentPlay = false
     private var currentDecoderName: String? = null
     private val analyticsListener =
@@ -477,6 +480,10 @@ class ExoPlaybackStateHolder(
             sendNewPlaybackEvent = true
         }
         if (rawQueue != resolveQueue()) {
+            val wasPlaying =
+                player.playWhenReady &&
+                    player.playbackState != Player.STATE_IDLE &&
+                    player.playbackState != Player.STATE_ENDED
             player.setMediaItems(rawQueue.heap.map { it.buildMediaItem() })
             if (rawQueue.isShuffled) {
                 player.shuffleModeEnabled = true
@@ -486,7 +493,11 @@ class ExoPlaybackStateHolder(
             }
             player.seekTo(rawQueue.heapIndex, C.TIME_UNSET)
             player.prepare()
-            player.pause()
+            if (wasPlaying) {
+                player.play()
+            } else {
+                player.pause()
+            }
             sendNewPlaybackEvent = true
             shouldSeek = true
         }
@@ -553,10 +564,19 @@ class ExoPlaybackStateHolder(
                 activePlaySong = song
                 accumulatedPlayMs = 0L
                 countedCurrentPlay = false
+                activePlayStartEpochSec = System.currentTimeMillis() / 1000L
+            }
+            if (activePlayStartEpochSec == null) {
+                activePlayStartEpochSec = System.currentTimeMillis() / 1000L
             }
             if (playStartElapsedMs == null) {
                 playStartElapsedMs = SystemClock.elapsedRealtime()
             }
+            if (song != null && lastNowPlayingUid != song.uid) {
+                lastNowPlayingUid = song.uid
+                lastFmRepository.onNowPlaying(song)
+            }
+            lastFmRepository.triggerBackgroundFlushIfNeeded()
         } else {
             flushActivePlayTime()
             commitPlayCountIfQualified(completedNaturally = false)
@@ -583,15 +603,21 @@ class ExoPlaybackStateHolder(
                 reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
         commitPlayCountIfQualified(completedNaturally = completedNaturally)
 
-        activePlaySong = mediaItem?.song
+        val nextSong = mediaItem?.song
+        activePlaySong = nextSong
         accumulatedPlayMs = 0L
         countedCurrentPlay = false
         playStartElapsedMs = if (player.isPlaying) SystemClock.elapsedRealtime() else null
+        activePlayStartEpochSec = if (player.isPlaying) System.currentTimeMillis() / 1000L else null
+        lastNowPlayingUid = null
 
         super.onMediaItemTransition(mediaItem, reason)
 
-        syncSignalPath(mediaItem?.song)
-        mediaItem?.song?.let { lastFmRepository.onNowPlaying(it) }
+        syncSignalPath(nextSong)
+        if (nextSong != null && (player.isPlaying || player.playWhenReady)) {
+            lastNowPlayingUid = nextSong.uid
+            lastFmRepository.onNowPlaying(nextSong)
+        }
 
         if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
             playbackManager.ack(this, StateAck.IndexMoved)
@@ -648,7 +674,10 @@ class ExoPlaybackStateHolder(
             }
         if (qualified) {
             playCountRepository.incrementPlayCount(song)
-            lastFmRepository.onSongPlayed(song)
+            lastFmRepository.onSongPlayed(
+                song = song,
+                timestampSec = activePlayStartEpochSec ?: (System.currentTimeMillis() / 1000L),
+            )
             countedCurrentPlay = true
         }
     }

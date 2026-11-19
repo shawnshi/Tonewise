@@ -36,6 +36,7 @@ import com.shawnshi.tonewise.music.locations.LocationMode
 import com.shawnshi.tonewise.playback.state.PlaybackStateManager
 import com.shawnshi.tonewise.util.getSystemServiceCompat
 import org.oxycblt.musikr.MusicParent
+import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.fs.mediastore.MediaStore
 import org.oxycblt.musikr.fs.saf.SAF
 import timber.log.Timber as L
@@ -153,8 +154,23 @@ private constructor(
     override fun onMusicChanges(changes: MusicRepository.Changes) {
         val library = musicRepository.library ?: return
         L.d("Music changed, updating shared objects")
-        // Wipe possibly-invalidated outdated covers
-        imageLoader.memoryCache?.clear()
+        if (changes.deviceLibrary) {
+            // Wipe possibly-invalidated outdated covers
+            imageLoader.memoryCache?.clear()
+        }
+        if (!changes.deviceLibrary && changes.userLibrary) {
+            val savedState = playbackManager.toSavedState() ?: return
+            if (savedState.parent !is Playlist) {
+                return
+            }
+            playbackManager.applySavedState(
+                savedState.copy(
+                    parent = savedState.parent.let { musicRepository.find(it.uid) as? MusicParent? }
+                ),
+                true,
+            )
+            return
+        }
         // Clear invalid models from PlaybackStateManager. This is not connected
         // to a listener as it is bad practice for a shared object to attach to
         // the listener system of another.

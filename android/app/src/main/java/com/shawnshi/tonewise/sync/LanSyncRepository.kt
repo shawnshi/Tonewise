@@ -29,7 +29,9 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -57,6 +59,23 @@ data class DiscoveredSyncHost(val serviceName: String, val host: String, val por
     val baseUrl: String
         get() = "http://$host:$port"
 }
+
+data class PairedHostInfo(
+    val baseUrl: String,
+    val hostName: String,
+    val deviceId: String,
+    val token: String,
+)
+
+data class SyncProgressState(
+    val isRunning: Boolean = false,
+    val phase: String = "",
+    val completedTracks: Int = 0,
+    val totalTracks: Int = 0,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+    val currentTrackTitle: String = "",
+)
 
 data class SceneBanner(
     val id: String,
@@ -116,19 +135,28 @@ constructor(
     private val sessionSlotStore: SessionSlotStore,
     private val waveformRepository: WaveformRepository,
     private val musicBioRepository: MusicBioRepository,
+    private val managedSyncStorage: ManagedSyncStorage,
+    private val lastFmRepository: LastFmRepository,
 ) {
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val syncDb: TonewiseSyncDatabase by lazy { TonewiseSyncDatabase.getInstance(context) }
     private var activeDiscoveryListener: NsdManager.DiscoveryListener? = null
+    private val syncInFlight = AtomicBoolean(false)
 
     private val _discoveredHosts = MutableStateFlow<List<DiscoveredSyncHost>>(emptyList())
     val discoveredHosts: StateFlow<List<DiscoveredSyncHost>> = _discoveredHosts
 
+    private val _pairedHost = MutableStateFlow(loadPairedHost())
+    val pairedHost: StateFlow<PairedHostInfo?> = _pairedHost
+
     private val _scenes = MutableStateFlow(loadCachedOrDefaultScenes())
     val scenes: StateFlow<List<SceneBanner>> = _scenes
 
-    private val _syncStatus = MutableStateFlow("Ready for LAN Sync (_tonewise._tcp)")
+    private val _syncStatus = MutableStateFlow("局域网同步就绪（正在发现同一 Wi-Fi 下的电脑…）")
     val syncStatus: StateFlow<String> = _syncStatus
+
+    private val _syncProgress = MutableStateFlow(SyncProgressState())
+    val syncProgress: StateFlow<SyncProgressState> = _syncProgress
 
     private val pendingMutationsList = loadPendingMutations().toMutableList()
     private val lwwOverrides = ConcurrentHashMap<String, String>(loadLwwOverrides())
@@ -242,57 +270,289 @@ constructor(
         runCatching { nsdManager?.stopServiceDiscovery(listener) }
     }
 
+    suspend fun pairWithHost(baseUrl: String, pairingCode: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val cleanBase = normalizeBaseUrl(baseUrl)
+            if (cleanBase.isBlank() || pairingCode.trim().length != 6) {
+                _syncStatus.value = "请输入正确的电脑地址和 6 位配对码"
+                return@withContext false
+            }
+            _syncStatus.value = "正在与 $cleanBase 配对…"
+            try {
+                val deviceId = getOrCreateStableDeviceId()
+                val deviceName = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android Phone"
+                val pairResp = LanSyncV2Client.pair(cleanBase, pairingCode.trim(), deviceId, deviceName)
+                val info =
+                    PairedHostInfo(
+                        baseUrl = cleanBase,
+                        hostName = pairResp.hostName,
+                        deviceId = pairResp.deviceId,
+                        token = pairResp.token,
+                    )
+                savePairedHost(info)
+                _pairedHost.value = info
+                _syncStatus.value = "配对成功：已绑定「${pairResp.hostName}」，可以开始同步"
+                true
+            } catch (e: LanSyncAuthException) {
+                _syncStatus.value = "配对失败：6 位配对码不正确"
+                false
+            } catch (e: Exception) {
+                L.w(e, "Pairing failed")
+                _syncStatus.value = "连接失败：${e.message ?: "请检查网络与 Windows 防火墙端口 45820"}"
+                false
+            }
+        }
+
+    fun unpairHost() {
+        clearPairedHost()
+        _pairedHost.value = null
+        _syncStatus.value = "已解除电脑配对"
+    }
+
     suspend fun syncWithHost(baseUrl: String) {
         withContext(Dispatchers.IO) {
-            val cleanBase = baseUrl.trim().trimEnd('/')
-            _syncStatus.value = "Connecting to $cleanBase ..."
+            if (!syncInFlight.compareAndSet(false, true)) {
+                return@withContext
+            }
+            val cleanBase = normalizeBaseUrl(baseUrl)
+            if (cleanBase.isBlank()) {
+                _syncStatus.value = "请先选择或填写电脑同步地址"
+                syncInFlight.set(false)
+                return@withContext
+            }
+
+            val paired = _pairedHost.value
+            val token =
+                paired
+                    ?.takeIf { it.baseUrl.equals(cleanBase, ignoreCase = true) }
+                    ?.token
+                    ?.takeIf { it.isNotBlank() }
+            if (token == null) {
+                _syncStatus.value = "该电脑尚未配对：请先输入电脑端显示的 6 位配对码"
+                syncInFlight.set(false)
+                return@withContext
+            }
+
+            _syncStatus.value = "正在连接 $cleanBase 获取同步清单…"
+            _syncProgress.value =
+                SyncProgressState(isRunning = true, phase = "正在连接电脑并检查发送队列…")
             try {
-                // 1. Check host status
-                val statusJson = httpGetString("$cleanBase/api/v1/status")
-                val statusObj = JSONObject(statusJson)
+                val outbox = LanSyncV2Client.fetchOutbox(cleanBase, token)
 
-                // 2. Pull scenes_5d.json
-                val scenesRaw = httpGetString("$cleanBase/api/v1/scenes")
-                cacheFile("scenes_5d.json", scenesRaw.toByteArray(Charsets.UTF_8))
-                _scenes.value = applySceneOrder(parseScenesJson(scenesRaw))
+                val existingSynced = syncDb.syncedTrackDao().getAll().associateBy { it.trackUid }
+                val songsSnapshot = musicRepository.library?.songs.orEmpty()
+                val songsByRelSuffix = buildSongsByRelSuffixMap(songsSnapshot)
 
-                // 3. Pull waveforms.bin if available
-                var wfMessage = "no waveforms"
-                if (statusObj.optBoolean("has_waveforms", false)) {
-                    val wfBytes = httpGetBytes("$cleanBase/api/v1/waveforms")
-                    cacheFile("waveforms.bin", wfBytes)
-                    waveformRepository.invalidateArchiveCache()
-                    wfMessage = "${wfBytes.size / 1024} KB waveforms"
+                val pendingDownloads = ArrayList<OutboxTrackDto>()
+                var skippedExisting = 0
+
+                for (track in outbox.tracks) {
+                    val outboxJson = JSONArray(track.sourceOutboxIds).toString()
+                    val recorded = existingSynced[track.trackUid]
+                    if (recorded != null && managedSyncStorage.existsInManagedStorage(recorded)) {
+                        if (recorded.sourceOutboxIdsJson != outboxJson) {
+                            syncDb.syncedTrackDao().upsert(recorded.copy(sourceOutboxIdsJson = outboxJson))
+                        }
+                        skippedExisting++
+                        continue
+                    }
+
+                    val existingLocalSong = findMatchingSongByRelPath(track.targetRelPath, songsByRelSuffix)
+                    if (existingLocalSong != null &&
+                        (track.fileSize <= 0L || existingLocalSong.size == track.fileSize)
+                    ) {
+                        syncDb.syncedTrackDao().upsert(
+                            SyncedTrackEntity(
+                                trackUid = track.trackUid,
+                                relativePath = track.targetRelPath,
+                                documentUri = existingLocalSong.uri.toString(),
+                                fileSize = existingLocalSong.size,
+                                mtimeMs = track.mtimeMs,
+                                sourceOutboxIdsJson = outboxJson,
+                                syncedAtMs = System.currentTimeMillis(),
+                            )
+                        )
+                        cacheFingerprintAlias(existingLocalSong, track.trackUid)
+                        skippedExisting++
+                        continue
+                    }
+
+                    pendingDownloads.add(track)
                 }
 
-                // 4. Pull offline encyclopedia biographies
-                var encCount = 0
-                if (statusObj.optBoolean("has_encyclopedia", false)) {
+                val partsDir = File(context.cacheDir, "lan_sync_parts")
+                val totalDownloadBytes = pendingDownloads.sumOf { it.fileSize.coerceAtLeast(0L) }
+                var completedBytesBeforeCurrent = 0L
+                var downloadedCount = 0
+                val failedTrackUids = HashSet<String>()
+                var firstDownloadError: String? = null
+
+                for ((index, track) in pendingDownloads.withIndex()) {
+                    _syncProgress.value =
+                        SyncProgressState(
+                            isRunning = true,
+                            phase = "正在下载曲目 (${index + 1}/${pendingDownloads.size})",
+                            completedTracks = index,
+                            totalTracks = pendingDownloads.size,
+                            downloadedBytes = completedBytesBeforeCurrent,
+                            totalBytes = totalDownloadBytes,
+                            currentTrackTitle = track.title,
+                        )
+                    val partFile = File(partsDir, "${sanitizeKey(track.trackUid)}.part")
+                    try {
+                        val fileUrl = LanSyncV2Client.buildTrackFileUrl(cleanBase, track.trackUid)
+                        LanSyncV2Client.downloadFileResumable(
+                            url = fileUrl,
+                            token = token,
+                            partFile = partFile,
+                            expectedSize = track.fileSize,
+                        ) { trackDownloaded, _ ->
+                            _syncProgress.value =
+                                SyncProgressState(
+                                    isRunning = true,
+                                    phase = "正在下载曲目 (${index + 1}/${pendingDownloads.size})",
+                                    completedTracks = index,
+                                    totalTracks = pendingDownloads.size,
+                                    downloadedBytes = completedBytesBeforeCurrent + trackDownloaded,
+                                    totalBytes = totalDownloadBytes,
+                                    currentTrackTitle = track.title,
+                                )
+                        }
+
+                        val committed = managedSyncStorage.commitAudioFile(track, partFile)
+                        syncDb.syncedTrackDao().upsert(
+                            SyncedTrackEntity(
+                                trackUid = track.trackUid,
+                                relativePath = committed.relativePath,
+                                documentUri = committed.documentUri,
+                                fileSize = committed.fileSize,
+                                mtimeMs = track.mtimeMs,
+                                sourceOutboxIdsJson = JSONArray(track.sourceOutboxIds).toString(),
+                                syncedAtMs = System.currentTimeMillis(),
+                            )
+                        )
+                        downloadedCount++
+                        completedBytesBeforeCurrent += track.fileSize.coerceAtLeast(0L)
+                    } catch (authErr: LanSyncAuthException) {
+                        throw authErr
+                    } catch (dlErr: Exception) {
+                        L.w(dlErr, "Track download paused/failed for ${track.title} (${track.trackUid})")
+                        failedTrackUids.add(track.trackUid)
+                        if (firstDownloadError == null) {
+                            firstDownloadError = dlErr.message
+                        }
+                    }
+                }
+
+                // Download missing album covers once per album directory
+                val attemptedCoverDirs = HashSet<String>()
+                for (track in outbox.tracks) {
+                    if (!track.hasCover || track.trackUid in failedTrackUids) continue
+                    val dirKey = track.targetRelPath.substringBeforeLast('/', "")
+                    if (!attemptedCoverDirs.add(dirKey)) continue
                     runCatching {
-                        val encJson = httpGetString("$cleanBase/api/v1/encyclopedia")
-                        encCount = musicBioRepository.importSyncedEncyclopediaJson(encJson)
-                    }.onFailure { L.w(it, "Encyclopedia pull failed") }
+                        val coverUrl = LanSyncV2Client.buildTrackCoverUrl(cleanBase, track.trackUid)
+                        val bytes = LanSyncV2Client.downloadCoverIfPresent(coverUrl, token)
+                        if (bytes != null && bytes.isNotEmpty()) {
+                            managedSyncStorage.commitAlbumCoverIfMissing(track.targetRelPath, bytes)
+                        }
+                    }.onFailure { L.w(it, "Album cover fetch skipped for $dirKey") }
                 }
 
-                // 5. Push local play-count snapshot events & merge remote high-water-mark counts
-                val pushedCount = pushLocalPlayCounts(cleanBase)
+                // Commit playlists received from PC outbox
+                for (pl in outbox.playlists) {
+                    managedSyncStorage.commitPlaylistM3u8(pl.name, pl.relPaths)
+                    savePlaylistMergeBase(pl.name, pl.relPaths)
+                }
 
-                // 6. Push pending LWW tag / Loved mutations
-                val pushedMutations = pushPendingMutations(cleanBase)
+                _syncProgress.value =
+                    _syncProgress.value.copy(phase = "正在双向同步播放记录、评分与歌单…")
 
-                // 7. 3-way merge local .m3u8 playlists with host
+                // Best-effort v1 metadata assets (scenes / waveforms / encyclopedia)
+                runCatching {
+                    val statusObj = JSONObject(httpGetString("$cleanBase/api/v1/status"))
+                    val scenesRaw = httpGetString("$cleanBase/api/v1/scenes")
+                    cacheFile("scenes_5d.json", scenesRaw.toByteArray(Charsets.UTF_8))
+                    _scenes.value = applySceneOrder(parseScenesJson(scenesRaw))
+
+                    if (statusObj.optBoolean("has_waveforms", false)) {
+                        val remoteBytes = statusObj.optLong("waveforms_bytes", 0L)
+                        val localWf = File(context.filesDir, ".tonewise/waveforms.bin")
+                        if (!localWf.isFile || (remoteBytes > 0L && localWf.length() != remoteBytes)) {
+                            val wfBytes = httpGetBytes("$cleanBase/api/v1/waveforms")
+                            cacheFile("waveforms.bin", wfBytes)
+                            waveformRepository.invalidateArchiveCache()
+                        }
+                    }
+                    if (statusObj.optBoolean("has_encyclopedia", false)) {
+                        val encJson = httpGetString("$cleanBase/api/v1/encyclopedia")
+                        musicBioRepository.importSyncedEncyclopediaJson(encJson)
+                    }
+                }.onFailure { L.w(it, "Optional v1 metadata sync partial skip") }
+
+                // Unified S0-fixed /api/v2/report push & pull
+                val completedCopyOutboxIds =
+                    outbox.items
+                        .filter { item ->
+                            item.mode.equals("copy", ignoreCase = true) &&
+                                outbox.tracks
+                                    .filter { item.id in it.sourceOutboxIds }
+                                    .none { it.trackUid in failedTrackUids }
+                        }
+                        .map { it.id }
+
+                val (pushedCounts, pushedMutations) =
+                    pushV2ReportAndApplyCounts(
+                        cleanBase = cleanBase,
+                        token = token,
+                        deviceId = paired.deviceId,
+                        completedOutboxIds = completedCopyOutboxIds,
+                    )
+
+                // Sync local .m3u8 playlists (3-way merge using PC's real ours) & handoff slots
                 val mergedPlaylists = syncPlaylistsWithHost(cleanBase)
+                runCatching {
+                    val mergedSlotsJson =
+                        httpPostJson("$cleanBase/api/v1/handoff", sessionSlotStore.exportSlotsJson())
+                    sessionSlotStore.mergeRemoteJson(mergedSlotsJson)
+                }
 
-                // 8. Merge 5-slot Handoff sessions
-                val mergedSlotsJson =
-                    httpPostJson("$cleanBase/api/v1/handoff", sessionSlotStore.exportSlotsJson())
-                val mergedSlots = sessionSlotStore.mergeRemoteJson(mergedSlotsJson)
+                // Trigger Musikr rescan so downloaded files and playlists appear in mobile library
+                if (downloadedCount > 0 || outbox.playlists.isNotEmpty()) {
+                    musicRepository.requestIndex(withCache = true)
+                    applyOutboxPlaylistsIfAlreadyIndexed(outbox.playlists)
+                }
 
                 _syncStatus.value =
-                    "Synced OK: ${_scenes.value.size} scenes · $wfMessage · $encCount bios · $pushedCount counts · $pushedMutations edits · $mergedPlaylists m3u8 · ${mergedSlots.size} slots"
+                    buildString {
+                        if (failedTrackUids.isEmpty()) {
+                            append("同步完成（").append(outbox.hostName).append("）：")
+                        } else {
+                            append("部分完成（").append(failedTrackUids.size).append(" 首待续传）：")
+                        }
+                        append("新增 ").append(downloadedCount).append(" 首")
+                        if (skippedExisting > 0) {
+                            append(" · 已有 ").append(skippedExisting).append(" 首")
+                        }
+                        if (outbox.playlists.isNotEmpty()) {
+                            append(" · 歌单 ").append(outbox.playlists.size).append(" 个")
+                        }
+                        append(" · 上报播放 ").append(pushedCounts).append(" 首 · 标签 ")
+                            .append(pushedMutations).append(" 条 · 合并歌单 ").append(mergedPlaylists).append(" 个")
+                        if (firstDownloadError != null) {
+                            append("（").append(firstDownloadError).append("）")
+                        }
+                    }
+            } catch (authErr: LanSyncAuthException) {
+                L.w(authErr, "LAN Sync v2 unauthorized")
+                unpairHost()
+                _syncStatus.value = "配对已失效，请重新输入电脑端 6 位配对码配对"
             } catch (e: Exception) {
                 L.w(e, "LAN sync failed")
-                _syncStatus.value = "Sync failed: ${e.message}"
+                _syncStatus.value = "同步失败：${e.message ?: "无法连接到电脑"}"
+            } finally {
+                _syncProgress.value = SyncProgressState()
+                syncInFlight.set(false)
             }
         }
     }
@@ -390,7 +650,9 @@ constructor(
 
         if (cleanField == "rating") {
             val ratingNum = cleanValue.toIntOrNull() ?: 4
-            playCountRepository.setLovedByUid(uid, ratingNum >= 5)
+            val isNowLoved = ratingNum >= 5
+            playCountRepository.setLovedByUid(uid, isNowLoved)
+            lastFmRepository.onLovedChanged(song, isNowLoved)
         }
 
         val pendingSize =
@@ -415,6 +677,7 @@ constructor(
         writeBackScope.launch {
             syncDb.lwwMutationDao().upsertOverride(overrideEntity)
             syncDb.lwwMutationDao().upsertPendingMutation(mutationEntity)
+            waveformRepository.getOrComputeAudioFrameBlake3(song)
         }
     }
 
@@ -563,55 +826,158 @@ constructor(
         return tracksJson.toString()
     }
 
-    private fun pushLocalPlayCounts(baseUrl: String): Int {
-        val songs = musicRepository.library?.songs ?: return 0
-        val events = JSONArray()
-        val now = System.currentTimeMillis()
-        for (song in songs) {
-            val count = playCountRepository.getPlayCount(song)
-            if (count > 0) {
-                val primaryArtist =
-                    song.artists
-                        .mapNotNull { (it.name as? Name.Known)?.raw }
-                        .firstOrNull { it.isNotBlank() }
-                        ?: ""
-                val albumName = (song.album.name as? Name.Known)?.raw ?: ""
-                events.put(
-                    JSONObject()
-                        .put("track_uid", song.uid.toString())
-                        .put("artist", primaryArtist)
-                        .put("title", song.name.raw)
-                        .put("album", albumName)
-                        .put("utc_ts_ms", now)
-                        .put("played_at_unix_sec", now / 1000L)
-                        .put("device_id", Build.MODEL ?: "android")
-                        .put("listened_ms", song.durationMs)
-                        .put("completed", true)
-                )
-            }
+    private fun pushV2ReportAndApplyCounts(
+        cleanBase: String,
+        token: String,
+        deviceId: String,
+        completedOutboxIds: List<String>,
+    ): Pair<Int, Int> {
+        val songs = musicRepository.library?.songs.orEmpty()
+        val songsByUid = songs.associateBy { it.uid.toString() }
+        val fpByLocalUid =
+            syncDb.audioFingerprintDao().getAll().associateBy { it.trackUid }.toMutableMap()
+        val syncedAll = syncDb.syncedTrackDao().getAll()
+        val syncedByPcUid = syncedAll.associateBy { it.trackUid }
+        val songByPcUid = HashMap<String, Song>()
+
+        // Reverse map already cached blake3 & synced relative paths -> local Song
+        for ((localUid, fp) in fpByLocalUid) {
+            val s = songsByUid[localUid] ?: continue
+            songByPcUid[fp.audioFrameBlake3Hex.lowercase()] = s
         }
-        if (events.length() == 0) return 0
-        val payload =
-            JSONObject()
-                .put("device_id", Build.MODEL ?: "android")
-                .put("events", events)
-                .toString()
-        val responseRaw = httpPostJson("$baseUrl/api/v1/history/push", payload)
-        runCatching {
-            val respObj = JSONObject(responseRaw)
-            val countsObj = respObj.optJSONObject("effective_counts")
-            if (countsObj != null) {
-                val keys = countsObj.keys()
-                while (keys.hasNext()) {
-                    val uid = keys.next()
-                    val remoteCount = countsObj.optInt(uid, 0)
-                    if (remoteCount > 0) {
-                        playCountRepository.mergeHighWaterMarkCount(uid, remoteCount)
-                    }
+        val songsByRel = buildSongsByRelSuffixMap(songs)
+        for (synced in syncedAll) {
+            val match = findMatchingSongByRelPath(synced.relativePath, songsByRel) ?: continue
+            songByPcUid.putIfAbsent(synced.trackUid.lowercase(), match)
+            cacheFingerprintAlias(match, synced.trackUid)
+        }
+
+        fun resolvePcUid(song: Song): String? {
+            val localUid = song.uid.toString()
+            fpByLocalUid[localUid]?.audioFrameBlake3Hex?.takeIf { it.length == 64 }?.let {
+                return it
+            }
+            val songRel = song.path.components.components.joinToString("/").replace('\\', '/').lowercase()
+            for (synced in syncedAll) {
+                val syncedRel = synced.relativePath.replace('\\', '/').lowercase()
+                if (songRel == syncedRel || songRel.endsWith("/$syncedRel")) {
+                    return synced.trackUid
                 }
             }
+            return waveformRepository.getOrComputeAudioFrameBlake3(song)?.also { b3 ->
+                songByPcUid[b3.lowercase()] = song
+                syncDb.audioFingerprintDao().getByUid(localUid)?.let { fpByLocalUid[localUid] = it }
+            }
         }
-        return events.length()
+
+        // 1. Delta-only play counts (never send 0 delta, never fake current time for historical counts)
+        val playDeltas = ArrayList<PlayDeltaPayload>()
+        val pushedWatermarks = ArrayList<Pair<String, Int>>()
+        for (song in songs) {
+            val localUid = song.uid.toString()
+            val snap = playCountRepository.getSnapshot(song)
+            val alreadySynced = playCountRepository.getLanSyncedCount(localUid)
+            val delta = snap.playCount - alreadySynced
+            if (delta <= 0) continue
+
+            val pcUid = resolvePcUid(song) ?: localUid
+            val primaryArtist =
+                song.artists
+                    .mapNotNull { (it.name as? Name.Known)?.raw }
+                    .firstOrNull { it.isNotBlank() }
+                    ?: ""
+            val albumName = (song.album.name as? Name.Known)?.raw ?: ""
+            playDeltas.add(
+                PlayDeltaPayload(
+                    eventId = "$deviceId:$localUid:${snap.playCount}:${snap.lastPlayedMs}",
+                    trackUid = pcUid,
+                    artist = primaryArtist,
+                    title = song.name.raw,
+                    album = albumName,
+                    playCountDelta = delta,
+                    lastPlayedTsMs = snap.lastPlayedMs,
+                    deviceId = deviceId,
+                )
+            )
+            pushedWatermarks.add(localUid to snap.playCount)
+        }
+
+        // 2. Pending LWW mutations keyed by blake3 + ack key
+        val batch = snapshotPendingMutations()
+        val keyByRecord = HashMap<TagMutationRecord, String>(batch.size)
+        val mutPayloads = ArrayList<MutationPayload>(batch.size)
+        for (m in batch) {
+            val song = songsByUid[m.trackUid]
+            val pcUid =
+                when {
+                    isHex64(m.trackUid) -> m.trackUid
+                    song != null -> resolvePcUid(song) ?: m.trackUid
+                    else -> m.trackUid
+                }
+            val mutKey = "${m.trackUid}|${m.field}|${m.updatedAtMs}"
+            keyByRecord[m] = mutKey
+            val artist =
+                song?.artists?.mapNotNull { (it.name as? Name.Known)?.raw }?.firstOrNull().orEmpty()
+            val title = song?.name?.raw.orEmpty()
+            mutPayloads.add(
+                MutationPayload(
+                    mutationKey = mutKey,
+                    trackUid = pcUid,
+                    artist = artist,
+                    title = title,
+                    field = m.field,
+                    value = m.value,
+                    updatedAtMs = m.updatedAtMs,
+                    deviceId = m.deviceId,
+                )
+            )
+        }
+
+        val reportResp =
+            LanSyncV2Client.postReport(
+                baseUrl = cleanBase,
+                token = token,
+                deviceId = deviceId,
+                playDeltas = playDeltas,
+                mutations = mutPayloads,
+                completedOutboxIds = completedOutboxIds,
+            )
+
+        // Advance LAN play high-water marks for pushed songs
+        for ((localUid, pushedCount) in pushedWatermarks) {
+            playCountRepository.markLanSyncedCount(localUid, pushedCount)
+        }
+
+        // Only remove mutations explicitly acknowledged by PC (never silent loss!)
+        val acknowledged =
+            LanSyncV2Client.filterAcknowledgedMutations(
+                batch = batch,
+                keyByRecord = keyByRecord,
+                ackKeys = reportResp.acknowledgedMutationKeys,
+            )
+        if (acknowledged.isNotEmpty()) {
+            removeSyncedMutations(acknowledged)
+        }
+
+        // Merge returned PC effective play counts & loved stars back into mobile ledger
+        for ((pcUid, remoteCount) in reportResp.effectiveCounts) {
+            if (remoteCount <= 0) continue
+            val matchedSong = songByPcUid[pcUid.lowercase()] ?: songsByUid[pcUid]
+            val localUid = matchedSong?.uid?.toString()
+            if (localUid != null) {
+                playCountRepository.mergeRemotePlayCountAndSync(localUid, remoteCount)
+            } else if (syncedByPcUid.containsKey(pcUid)) {
+                playCountRepository.mergeRemotePlayCountAndSync(pcUid, remoteCount)
+            }
+        }
+        for (lovedPcUid in reportResp.lovedUids) {
+            val matchedSong = songByPcUid[lovedPcUid.lowercase()] ?: songsByUid[lovedPcUid]
+            if (matchedSong != null && !playCountRepository.isLoved(matchedSong)) {
+                playCountRepository.setLoved(matchedSong, true)
+            }
+        }
+
+        return playDeltas.size to acknowledged.size
     }
 
     @Synchronized
@@ -623,30 +989,6 @@ constructor(
         pendingMutationsList.removeAll(synced.toSet())
         savePendingMutations()
         _pendingMutationCount.value = pendingMutationsList.size
-    }
-
-    private fun pushPendingMutations(baseUrl: String): Int {
-        val batch = snapshotPendingMutations()
-        if (batch.isEmpty()) return 0
-        val arr = JSONArray()
-        for (m in batch) {
-            arr.put(
-                JSONObject()
-                    .put("track_uid", m.trackUid)
-                    .put("field", m.field)
-                    .put("value", m.value)
-                    .put("updated_at_ms", m.updatedAtMs)
-                    .put("device_id", m.deviceId)
-            )
-        }
-        val payload =
-            JSONObject()
-                .put("device_id", Build.MODEL ?: "android")
-                .put("mutations", arr)
-                .toString()
-        httpPostJson("$baseUrl/api/v1/mutations/push", payload)
-        removeSyncedMutations(batch)
-        return batch.size
     }
 
     private fun syncPlaylistsWithHost(baseUrl: String): Int {
@@ -662,8 +1004,13 @@ constructor(
                     file.readLines(Charsets.UTF_8)
                         .map { it.trim() }
                         .filter { it.isNotEmpty() && !it.startsWith("#") }
+                        .map(::normalizePlaylistEntryForPc)
+                        .filter { it.isNotEmpty() }
                 if (localEntries.isEmpty()) return@runCatching
-                val baseEntries = loadPlaylistMergeBase(name)
+                val baseEntries =
+                    loadPlaylistMergeBase(name)
+                        .map(::normalizePlaylistEntryForPc)
+                        .filter { it.isNotEmpty() }
                 val reqJson =
                     JSONObject()
                         .put("playlist_name", name)
@@ -677,25 +1024,7 @@ constructor(
                 if (conflicts == null || conflicts.length() == 0) {
                     val mergedArr = respObj.optJSONArray("merged") ?: JSONArray()
                     val mergedPaths = List(mergedArr.length()) { idx -> mergedArr.getString(idx) }
-                    val rebuilt =
-                        buildString {
-                            append("#EXTM3U\n")
-                            for (line in mergedPaths) {
-                                append(line).append('\n')
-                            }
-                        }
-                    file.writeText(rebuilt, Charsets.UTF_8)
-                    runCatching {
-                        @Suppress("DEPRECATION")
-                        val musicDir =
-                            Environment.getExternalStoragePublicDirectory(
-                                Environment.DIRECTORY_MUSIC
-                            )
-                        val extDir = File(musicDir, ".tonewise/playlists")
-                        if (extDir.exists() || extDir.mkdirs()) {
-                            File(extDir, "$name.m3u8").writeText(rebuilt, Charsets.UTF_8)
-                        }
-                    }
+                    managedSyncStorage.commitPlaylistM3u8(name, mergedPaths)
                     savePlaylistMergeBase(name, mergedPaths)
                     syncedCount++
                 }
@@ -703,6 +1032,134 @@ constructor(
         }
         return syncedCount
     }
+
+    private suspend fun applyOutboxPlaylistsIfAlreadyIndexed(playlists: List<OutboxPlaylistDto>) {
+        if (playlists.isEmpty()) return
+        val lib = musicRepository.library ?: return
+        val songsByRel = buildSongsByRelSuffixMap(lib.songs)
+        for (pl in playlists) {
+            runCatching {
+                val matchedSongs =
+                    pl.relPaths.mapNotNull { rel -> findMatchingSongByRelPath(rel, songsByRel) }
+                if (matchedSongs.isEmpty()) return@runCatching
+                val existing = musicRepository.library?.findPlaylistByName(pl.name)
+                if (existing == null) {
+                    musicRepository.createPlaylist(pl.name, matchedSongs)
+                } else if (existing.songs.map { it.uid } != matchedSongs.map { it.uid }) {
+                    musicRepository.rewritePlaylist(existing, matchedSongs)
+                }
+            }.onFailure { L.w(it, "Direct playlist apply skipped for ${pl.name}") }
+        }
+    }
+
+    private fun buildSongsByRelSuffixMap(songs: Collection<Song>): List<Pair<String, Song>> =
+        songs.map { song ->
+            val pathStr =
+                song.path.components.components.joinToString("/").replace('\\', '/').lowercase()
+            pathStr to song
+        }
+
+    private fun findMatchingSongByRelPath(
+        targetRelPath: String,
+        indexedSongs: List<Pair<String, Song>>,
+    ): Song? {
+        val cleanRel =
+            LanSyncV2Client.sanitizeRelativePathSegments(targetRelPath)
+                .joinToString("/")
+                .lowercase()
+        if (cleanRel.isEmpty()) return null
+        return indexedSongs.firstOrNull { (fullRel, _) ->
+            fullRel == cleanRel ||
+                fullRel == "tonewise/$cleanRel" ||
+                fullRel.endsWith("/tonewise/$cleanRel") ||
+                fullRel.endsWith("/$cleanRel")
+        }?.second
+    }
+
+    private fun cacheFingerprintAlias(song: Song, blake3Hex: String) {
+        if (!isHex64(blake3Hex)) return
+        val localUid = song.uid.toString()
+        if (syncDb.audioFingerprintDao().getByUid(localUid) != null) return
+        syncDb.audioFingerprintDao().upsert(
+            AudioFingerprintCacheEntity(
+                trackUid = localUid,
+                fileSize = song.size,
+                audioFrameBlake3Hex = blake3Hex.lowercase(),
+                headerBlake3Hex = "",
+                headerSize = 0L,
+                updatedAtMs = System.currentTimeMillis(),
+            )
+        )
+    }
+
+    private fun normalizePlaylistEntryForPc(raw: String): String {
+        val s = raw.trim().replace('\\', '/')
+        val lower = s.lowercase()
+        val tonewiseMarker = "/tonewise/"
+        val markerIdx = lower.indexOf(tonewiseMarker)
+        if (markerIdx >= 0) {
+            return s.substring(markerIdx + tonewiseMarker.length).trimStart('/')
+        }
+        if (lower.startsWith("tonewise/")) {
+            return s.substring("tonewise/".length).trimStart('/')
+        }
+        val musicMarker = "/music/"
+        val musicIdx = lower.indexOf(musicMarker)
+        if (musicIdx >= 0) {
+            return s.substring(musicIdx + musicMarker.length).trimStart('/')
+        }
+        return s.trimStart('/')
+    }
+
+    private fun loadPairedHost(): PairedHostInfo? {
+        val kv = syncDb.syncKvDao()
+        val url = kv.getValue(KEY_PAIRED_HOST_URL)?.takeIf { it.isNotBlank() } ?: return null
+        val token = kv.getValue(KEY_PAIRED_TOKEN)?.takeIf { it.isNotBlank() } ?: return null
+        val hostName = kv.getValue(KEY_PAIRED_HOST_NAME) ?: url
+        val deviceId = kv.getValue(KEY_PAIRED_DEVICE_ID) ?: getOrCreateStableDeviceId()
+        return PairedHostInfo(url, hostName, deviceId, token)
+    }
+
+    private fun savePairedHost(info: PairedHostInfo) {
+        val kv = syncDb.syncKvDao()
+        kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_URL, info.baseUrl))
+        kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_NAME, info.hostName))
+        kv.putValue(SyncKvEntity(KEY_PAIRED_DEVICE_ID, info.deviceId))
+        kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, info.token))
+    }
+
+    private fun clearPairedHost() {
+        val kv = syncDb.syncKvDao()
+        kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, ""))
+    }
+
+    private fun getOrCreateStableDeviceId(): String {
+        val kv = syncDb.syncKvDao()
+        kv.getValue(KEY_STABLE_DEVICE_ID)?.takeIf { it.isNotBlank() }?.let { return it }
+        val modelPrefix =
+            (Build.MODEL ?: "android").replace(Regex("[^A-Za-z0-9._-]+"), "-").take(20)
+        val generated = "${modelPrefix}_${UUID.randomUUID().toString().replace("-", "").take(10)}"
+        kv.putValue(SyncKvEntity(KEY_STABLE_DEVICE_ID, generated))
+        return generated
+    }
+
+    private fun normalizeBaseUrl(raw: String): String {
+        val trimmed = raw.trim().trimEnd('/')
+        if (trimmed.isEmpty()) return ""
+        return if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true)
+        ) {
+            trimmed
+        } else {
+            "http://$trimmed"
+        }
+    }
+
+    private fun sanitizeKey(uid: String): String =
+        uid.replace(Regex("[^A-Za-z0-9._-]+"), "_").take(80)
+
+    private fun isHex64(s: String): Boolean =
+        s.length == 64 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 
     private fun overrideKey(uid: String, field: String): String = "$uid||$field"
 
@@ -909,6 +1366,11 @@ constructor(
         private const val KEY_SCENE_ORDER = "scene_order_ids"
         private const val KEY_LWW_OVERRIDES = "lww_overrides"
         private const val KEY_PENDING_MUTATIONS = "pending_mutations"
+        private const val KEY_PAIRED_HOST_URL = "lan_v2_host_url"
+        private const val KEY_PAIRED_HOST_NAME = "lan_v2_host_name"
+        private const val KEY_PAIRED_DEVICE_ID = "lan_v2_device_id"
+        private const val KEY_PAIRED_TOKEN = "lan_v2_token"
+        private const val KEY_STABLE_DEVICE_ID = "lan_v2_stable_device_id"
 
         private fun escapeJson(value: String): String =
             buildString {
