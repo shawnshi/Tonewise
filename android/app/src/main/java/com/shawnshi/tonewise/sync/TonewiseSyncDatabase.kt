@@ -23,6 +23,7 @@ import androidx.core.content.edit
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
@@ -40,7 +41,10 @@ import javax.inject.Singleton
 import org.json.JSONArray
 import org.json.JSONObject
 
-@Entity(tableName = "track_play_ledger")
+@Entity(
+    tableName = "track_play_ledger",
+    indices = [Index(value = ["audioFrameBlake3Hex"], name = "index_track_play_ledger_audioFrameBlake3Hex")],
+)
 data class TrackPlayLedgerEntity(
     @PrimaryKey val trackUid: String,
     val playCount: Int = 0,
@@ -49,16 +53,27 @@ data class TrackPlayLedgerEntity(
     val syncedCount: Int = 0,
     val pulledCloudCount: Int = 0,
     val lanSyncedCount: Int = 0,
+    val audioFrameBlake3Hex: String = "",
 )
 
-@Entity(tableName = "lww_overrides", primaryKeys = ["trackUid", "field"])
+@Entity(
+    tableName = "lww_overrides",
+    primaryKeys = ["trackUid", "field"],
+    indices = [Index(value = ["audioFrameBlake3Hex"], name = "index_lww_overrides_audioFrameBlake3Hex")],
+)
 data class LwwOverrideEntity(
     val trackUid: String,
     val field: String,
     val value: String,
+    val updatedAtMs: Long = 0L,
+    val audioFrameBlake3Hex: String = "",
 )
 
-@Entity(tableName = "pending_tag_mutations", primaryKeys = ["trackUid", "field"])
+@Entity(
+    tableName = "pending_tag_mutations",
+    primaryKeys = ["trackUid", "field"],
+    indices = [Index(value = ["updatedAtMs"], name = "index_pending_tag_mutations_updatedAtMs")],
+)
 data class PendingTagMutationEntity(
     val trackUid: String,
     val field: String,
@@ -67,7 +82,10 @@ data class PendingTagMutationEntity(
     val deviceId: String,
 )
 
-@Entity(tableName = "pending_scrobbles")
+@Entity(
+    tableName = "pending_scrobbles",
+    indices = [Index(value = ["timestampSec"], name = "index_pending_scrobbles_timestampSec")],
+)
 data class PendingScrobbleEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
     val songUid: String,
@@ -78,7 +96,10 @@ data class PendingScrobbleEntity(
     val timestampSec: Long,
 )
 
-@Entity(tableName = "seen_cloud_stamps")
+@Entity(
+    tableName = "seen_cloud_stamps",
+    indices = [Index(value = ["createdAtMs"], name = "index_seen_cloud_stamps_createdAtMs")],
+)
 data class SeenCloudStampEntity(
     @PrimaryKey val stamp: String,
     val createdAtMs: Long,
@@ -97,7 +118,10 @@ data class SyncKvEntity(
     val value: String,
 )
 
-@Entity(tableName = "audio_fingerprint_cache")
+@Entity(
+    tableName = "audio_fingerprint_cache",
+    indices = [Index(value = ["audioFrameBlake3Hex"], name = "index_audio_fingerprint_cache_audioFrameBlake3Hex")],
+)
 data class AudioFingerprintCacheEntity(
     @PrimaryKey val trackUid: String,
     val fileSize: Long,
@@ -105,9 +129,16 @@ data class AudioFingerprintCacheEntity(
     val headerBlake3Hex: String,
     val headerSize: Long,
     val updatedAtMs: Long,
+    val mtimeMs: Long = 0L,
 )
 
-@Entity(tableName = "synced_tracks")
+@Entity(
+    tableName = "synced_tracks",
+    indices = [
+        Index(value = ["relativePath"], name = "index_synced_tracks_relativePath"),
+        Index(value = ["audioFrameBlake3Hex"], name = "index_synced_tracks_audioFrameBlake3Hex"),
+    ],
+)
 data class SyncedTrackEntity(
     @PrimaryKey val trackUid: String,
     val relativePath: String,
@@ -116,6 +147,8 @@ data class SyncedTrackEntity(
     val mtimeMs: Long = 0L,
     val sourceOutboxIdsJson: String = "[]",
     val syncedAtMs: Long = 0L,
+    val headerBlake3Hex: String = "",
+    val audioFrameBlake3Hex: String = "",
 )
 
 @Dao
@@ -134,6 +167,42 @@ interface TrackPlayLedgerDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun upsertAll(entities: List<TrackPlayLedgerEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    fun insertIfAbsent(entity: TrackPlayLedgerEntity)
+
+    @Query("UPDATE track_play_ledger SET playCount = :playCount, lastPlayedMs = :lastPlayedMs WHERE trackUid = :uid")
+    fun updatePlayCount(uid: String, playCount: Int, lastPlayedMs: Long)
+
+    @Query("UPDATE track_play_ledger SET playCount = :playCount WHERE trackUid = :uid")
+    fun updatePlayCountOnly(uid: String, playCount: Int)
+
+    @Query("UPDATE track_play_ledger SET lanSyncedCount = :lanSyncedCount WHERE trackUid = :uid")
+    fun updateLanSyncedCount(uid: String, lanSyncedCount: Int)
+
+    @Query("UPDATE track_play_ledger SET playCount = :playCount, lanSyncedCount = :lanSyncedCount WHERE trackUid = :uid")
+    fun updatePlayCountAndLanSynced(uid: String, playCount: Int, lanSyncedCount: Int)
+
+    @Query("UPDATE track_play_ledger SET playCount = :playCount, lanSyncedCount = :lanSyncedCount, syncedCount = :syncedCount WHERE trackUid = :uid")
+    fun updatePlayCountAndSyncWatermarks(uid: String, playCount: Int, lanSyncedCount: Int, syncedCount: Int)
+
+    @Query("UPDATE track_play_ledger SET loved = :loved WHERE trackUid = :uid")
+    fun updateLoved(uid: String, loved: Boolean)
+
+    @Query("UPDATE track_play_ledger SET syncedCount = :syncedCount WHERE trackUid = :uid")
+    fun updateSyncedCount(uid: String, syncedCount: Int)
+
+    @Query("UPDATE track_play_ledger SET pulledCloudCount = :pulledCloudCount WHERE trackUid = :uid")
+    fun updatePulledCloudCount(uid: String, pulledCloudCount: Int)
+
+    @Query("SELECT * FROM track_play_ledger WHERE audioFrameBlake3Hex = :hex")
+    fun findByAudioFrameBlake3Hex(hex: String): List<TrackPlayLedgerEntity>
+
+    @Query("UPDATE track_play_ledger SET audioFrameBlake3Hex = :hex WHERE trackUid = :uid")
+    fun updateAudioFrameBlake3Hex(uid: String, hex: String)
+
+    @Query("DELETE FROM track_play_ledger WHERE trackUid = :uid")
+    fun deleteByUid(uid: String)
 }
 
 @Dao
@@ -141,11 +210,20 @@ interface LwwMutationDao {
     @Query("SELECT * FROM lww_overrides")
     fun getAllOverrides(): List<LwwOverrideEntity>
 
+    @Query("SELECT * FROM lww_overrides WHERE trackUid = :uid")
+    fun getOverridesForUid(uid: String): List<LwwOverrideEntity>
+
+    @Query("SELECT * FROM lww_overrides WHERE audioFrameBlake3Hex = :hex")
+    fun findOverridesByAudioFrameBlake3Hex(hex: String): List<LwwOverrideEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun upsertOverride(entity: LwwOverrideEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun upsertOverrides(entities: List<LwwOverrideEntity>)
+
+    @Query("UPDATE lww_overrides SET audioFrameBlake3Hex = :hex WHERE trackUid = :uid")
+    fun updateOverrideAudioFrameBlake3Hex(uid: String, hex: String)
 
     @Query("SELECT * FROM pending_tag_mutations ORDER BY updatedAtMs ASC")
     fun getAllPendingMutations(): List<PendingTagMutationEntity>
@@ -158,6 +236,12 @@ interface LwwMutationDao {
 
     @Query("DELETE FROM pending_tag_mutations WHERE trackUid = :uid AND field = :field")
     fun deletePendingMutation(uid: String, field: String)
+
+    @Query("DELETE FROM lww_overrides WHERE trackUid = :uid AND field = :field")
+    fun deleteOverride(uid: String, field: String)
+
+    @Query("DELETE FROM lww_overrides WHERE trackUid = :uid")
+    fun deleteAllOverridesForUid(uid: String)
 }
 
 @Dao
@@ -203,6 +287,9 @@ interface SyncKvDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun putValue(entity: SyncKvEntity)
+
+    @Query("DELETE FROM sync_kv WHERE `key` = :key")
+    fun deleteKey(key: String)
 }
 
 @Dao
@@ -247,8 +334,8 @@ interface SyncedTrackDao {
         AudioFingerprintCacheEntity::class,
         SyncedTrackEntity::class,
     ],
-    version = 3,
-    exportSchema = false,
+    version = 7,
+    exportSchema = true,
 )
 abstract class TonewiseSyncDatabase : RoomDatabase() {
     abstract fun playLedgerDao(): TrackPlayLedgerDao
@@ -264,6 +351,74 @@ abstract class TonewiseSyncDatabase : RoomDatabase() {
     abstract fun audioFingerprintDao(): AudioFingerprintDao
 
     abstract fun syncedTrackDao(): SyncedTrackDao
+
+    fun reanchorTrackByFingerprint(newLocalUid: String, audioFrameBlake3Hex: String): Boolean {
+        val cleanUid = newLocalUid.trim()
+        val cleanHex = audioFrameBlake3Hex.trim().lowercase()
+        if (cleanUid.isEmpty() || cleanHex.length != 64) return false
+
+        var changed = false
+        runInTransaction {
+            val ledgerDao = playLedgerDao()
+            val lwwDao = lwwMutationDao()
+
+            val ledgerMatches = ledgerDao.findByAudioFrameBlake3Hex(cleanHex)
+            val curLedger = ledgerDao.getByUid(cleanUid)
+            val orphanLedgers = ledgerMatches.filter { it.trackUid != cleanUid }
+            if (orphanLedgers.isNotEmpty()) {
+                var merged =
+                    (curLedger ?: TrackPlayLedgerEntity(trackUid = cleanUid)).copy(
+                        audioFrameBlake3Hex = cleanHex
+                    )
+                for (old in orphanLedgers) {
+                    merged =
+                        merged.copy(
+                            playCount = maxOf(merged.playCount, old.playCount),
+                            lastPlayedMs = maxOf(merged.lastPlayedMs, old.lastPlayedMs),
+                            loved = merged.loved || old.loved,
+                            syncedCount = maxOf(merged.syncedCount, old.syncedCount),
+                            pulledCloudCount = maxOf(merged.pulledCloudCount, old.pulledCloudCount),
+                            lanSyncedCount = maxOf(merged.lanSyncedCount, old.lanSyncedCount),
+                        )
+                }
+                ledgerDao.upsert(merged)
+                for (old in orphanLedgers) {
+                    ledgerDao.deleteByUid(old.trackUid)
+                }
+                changed = true
+            } else if (curLedger != null && curLedger.audioFrameBlake3Hex != cleanHex) {
+                ledgerDao.updateAudioFrameBlake3Hex(cleanUid, cleanHex)
+            }
+
+            val curOverrides = lwwDao.getOverridesForUid(cleanUid)
+            val overrideMatches = lwwDao.findOverridesByAudioFrameBlake3Hex(cleanHex)
+            val orphanOverrides = overrideMatches.filter { it.trackUid != cleanUid }
+            if (orphanOverrides.isNotEmpty()) {
+                val byField = HashMap<String, LwwOverrideEntity>()
+                for (o in curOverrides) {
+                    byField[o.field] = o.copy(audioFrameBlake3Hex = cleanHex)
+                }
+                for (old in orphanOverrides) {
+                    val existing = byField[old.field]
+                    if (existing == null || old.updatedAtMs > existing.updatedAtMs) {
+                        byField[old.field] =
+                            old.copy(trackUid = cleanUid, audioFrameBlake3Hex = cleanHex)
+                    }
+                }
+                if (byField.isNotEmpty()) {
+                    lwwDao.upsertOverrides(byField.values.toList())
+                }
+                val staleUids = orphanOverrides.mapTo(HashSet()) { it.trackUid }
+                for (staleUid in staleUids) {
+                    lwwDao.deleteAllOverridesForUid(staleUid)
+                }
+                changed = true
+            } else if (curOverrides.any { it.audioFrameBlake3Hex != cleanHex }) {
+                lwwDao.updateOverrideAudioFrameBlake3Hex(cleanUid, cleanHex)
+            }
+        }
+        return changed
+    }
 
     companion object {
         private const val KEY_MIGRATED_PREFS_V1 = "migrated_prefs_v1"
@@ -311,6 +466,92 @@ abstract class TonewiseSyncDatabase : RoomDatabase() {
                 }
             }
 
+        private val MIGRATION_3_4 =
+            object : Migration(3, 4) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "ALTER TABLE `synced_tracks` ADD COLUMN `headerBlake3Hex` TEXT NOT NULL DEFAULT ''"
+                    )
+                    db.execSQL(
+                        "ALTER TABLE `synced_tracks` ADD COLUMN `audioFrameBlake3Hex` TEXT NOT NULL DEFAULT ''"
+                    )
+                }
+            }
+
+        private val MIGRATION_4_5 =
+            object : Migration(4, 5) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "ALTER TABLE `lww_overrides` ADD COLUMN `updatedAtMs` INTEGER NOT NULL DEFAULT 0"
+                    )
+                }
+            }
+
+        private val MIGRATION_5_6 =
+            object : Migration(5, 6) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "ALTER TABLE `audio_fingerprint_cache` ADD COLUMN `mtimeMs` INTEGER NOT NULL DEFAULT 0"
+                    )
+                }
+            }
+
+        internal val MIGRATION_6_7 =
+            object : Migration(6, 7) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "ALTER TABLE `track_play_ledger` ADD COLUMN `audioFrameBlake3Hex` TEXT NOT NULL DEFAULT ''"
+                    )
+                    db.execSQL(
+                        "ALTER TABLE `lww_overrides` ADD COLUMN `audioFrameBlake3Hex` TEXT NOT NULL DEFAULT ''"
+                    )
+                    db.execSQL(
+                        """
+                        UPDATE `track_play_ledger`
+                        SET `audioFrameBlake3Hex` = COALESCE(
+                            (SELECT lower(`audioFrameBlake3Hex`) FROM `audio_fingerprint_cache` WHERE `audio_fingerprint_cache`.`trackUid` = `track_play_ledger`.`trackUid` LIMIT 1),
+                            ''
+                        )
+                        WHERE `audioFrameBlake3Hex` = ''
+                        """.trimIndent()
+                    )
+                    db.execSQL(
+                        """
+                        UPDATE `lww_overrides`
+                        SET `audioFrameBlake3Hex` = COALESCE(
+                            (SELECT lower(`audioFrameBlake3Hex`) FROM `audio_fingerprint_cache` WHERE `audio_fingerprint_cache`.`trackUid` = `lww_overrides`.`trackUid` LIMIT 1),
+                            ''
+                        )
+                        WHERE `audioFrameBlake3Hex` = ''
+                        """.trimIndent()
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_track_play_ledger_audioFrameBlake3Hex` ON `track_play_ledger` (`audioFrameBlake3Hex`)"
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_lww_overrides_audioFrameBlake3Hex` ON `lww_overrides` (`audioFrameBlake3Hex`)"
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_pending_tag_mutations_updatedAtMs` ON `pending_tag_mutations` (`updatedAtMs`)"
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_pending_scrobbles_timestampSec` ON `pending_scrobbles` (`timestampSec`)"
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_seen_cloud_stamps_createdAtMs` ON `seen_cloud_stamps` (`createdAtMs`)"
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_audio_fingerprint_cache_audioFrameBlake3Hex` ON `audio_fingerprint_cache` (`audioFrameBlake3Hex`)"
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_synced_tracks_relativePath` ON `synced_tracks` (`relativePath`)"
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_synced_tracks_audioFrameBlake3Hex` ON `synced_tracks` (`audioFrameBlake3Hex`)"
+                    )
+                }
+            }
+
         @Volatile private var instance: TonewiseSyncDatabase? = null
 
         fun getInstance(context: Context): TonewiseSyncDatabase {
@@ -322,15 +563,31 @@ abstract class TonewiseSyncDatabase : RoomDatabase() {
                             TonewiseSyncDatabase::class.java,
                             "tonewise_sync.db",
                         )
-                        .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
-                        .allowMainThreadQueries()
+                        .addMigrations(
+                            MIGRATION_1_2,
+                            MIGRATION_2_3,
+                            MIGRATION_3_4,
+                            MIGRATION_4_5,
+                            MIGRATION_5_6,
+                            MIGRATION_6_7,
+                        )
                         .build()
-                        .also { db ->
-                            db.migrateLegacyPrefsIfNeeded(context.applicationContext)
-                            db.migrateLegacySessionSlotsIfNeeded(context.applicationContext)
-                            instance = db
-                        }
+                        .also { db -> instance = db }
             }
+        }
+    }
+
+    @Volatile private var legacyMigrationDone = false
+    private val legacyMigrationLock = Any()
+
+    fun ensureLegacyMigrated(context: Context) {
+        if (legacyMigrationDone) return
+        synchronized(legacyMigrationLock) {
+            if (legacyMigrationDone) return
+            val appContext = context.applicationContext
+            migrateLegacyPrefsIfNeeded(appContext)
+            migrateLegacySessionSlotsIfNeeded(appContext)
+            legacyMigrationDone = true
         }
     }
 

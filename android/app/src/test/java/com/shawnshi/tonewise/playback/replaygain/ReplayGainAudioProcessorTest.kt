@@ -54,11 +54,13 @@ import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.MusicParent
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.covers.Cover
+import org.oxycblt.musikr.covers.CoverCollection
 import org.oxycblt.musikr.fs.Format
 import org.oxycblt.musikr.fs.Path
 import org.oxycblt.musikr.tag.Date
 import org.oxycblt.musikr.tag.Disc
 import org.oxycblt.musikr.tag.Name
+import org.oxycblt.musikr.tag.ReleaseType
 import org.oxycblt.musikr.tag.ReplayGainAdjustment
 
 @OptIn(UnstableApi::class)
@@ -204,6 +206,183 @@ class ReplayGainAudioProcessorTest {
         assertEquals((-0.25f).toRawBits(), bypassOut.getFloat().toRawBits())
     }
 
+    @Test
+    fun setBypassed_resetsStateOnAudioThread_andTogglesSafelyConcurrently() {
+        val crossConfig =
+            DspChainConfig.preset(DspPresetId.CLASSICAL_CROSSFEED).copy(
+                crossfeedEnabled = true,
+                limiterEnabled = true,
+                limiterCeilingDb = -0.2,
+            )
+        val processor =
+            ReplayGainAudioProcessor(
+                FakePlaybackStateManager(FakeSong(ReplayGainAdjustment(track = 0f, album = null))),
+                FakePlaybackSettings(ReplayGainMode.OFF),
+                FakeDspConfigSource(crossConfig),
+            ).apply { onIndexMoved(0) }
+
+        val fmt = AudioProcessor.AudioFormat(48000, 2, C.ENCODING_PCM_FLOAT)
+        processor.configure(fmt)
+        processor.flush()
+
+        val frames = 128
+        val blockBytes = frames * 8
+        val warmIn = ByteBuffer.allocateDirect(blockBytes).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until frames) {
+            val s = (0.85 * sin(2.0 * Math.PI * 330.0 * i / 48000.0)).toFloat()
+            warmIn.putFloat(s)
+            warmIn.putFloat(-s * 0.5f)
+        }
+        warmIn.flip()
+        processor.queueInput(warmIn)
+        val warmOut = processor.output.order(ByteOrder.LITTLE_ENDIAN)
+        while (warmOut.remaining() >= 4) {
+            assertTrue(warmOut.getFloat().isFinite())
+        }
+
+        // Toggle bypass on/off without external flush() and verify clean passthrough & DSP recovery.
+        processor.setBypassed(true)
+        val passthroughIn = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN)
+        passthroughIn.putFloat(0.625f)
+        passthroughIn.putFloat(-0.375f)
+        passthroughIn.flip()
+        processor.queueInput(passthroughIn)
+        val passthroughOut = processor.output.order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(0.625f.toRawBits(), passthroughOut.getFloat().toRawBits())
+        assertEquals((-0.375f).toRawBits(), passthroughOut.getFloat().toRawBits())
+
+        processor.setBypassed(false)
+        warmIn.rewind()
+        processor.queueInput(warmIn)
+        val resumedOut = processor.output.order(ByteOrder.LITTLE_ENDIAN)
+        while (resumedOut.remaining() >= 4) {
+            assertTrue(resumedOut.getFloat().isFinite())
+        }
+
+        // Concurrent UI toggle vs audio-thread queueInput stress (200 blocks).
+        val error = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val startGate = java.util.concurrent.CountDownLatch(1)
+        val stopFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+        val toggleThread =
+            java.lang.Thread {
+                try {
+                    startGate.await()
+                    var flag = false
+                    while (!stopFlag.get()) {
+                        flag = !flag
+                        processor.setBypassed(flag)
+                    }
+                } catch (t: Throwable) {
+                    error.compareAndSet(null, t)
+                }
+            }
+        toggleThread.start()
+        startGate.countDown()
+
+        val loopBuf = ByteBuffer.allocateDirect(blockBytes).order(ByteOrder.LITTLE_ENDIAN)
+        try {
+            for (block in 0 until 200) {
+                loopBuf.clear()
+                for (i in 0 until frames) {
+                    val sample = (0.6 * sin(2.0 * Math.PI * 440.0 * (block * frames + i) / 48000.0)).toFloat()
+                    loopBuf.putFloat(sample)
+                    loopBuf.putFloat(sample * 0.5f)
+                }
+                loopBuf.flip()
+                processor.queueInput(loopBuf)
+                val out = processor.output.order(ByteOrder.LITTLE_ENDIAN)
+                while (out.remaining() >= 4) {
+                    assertTrue(out.getFloat().isFinite())
+                }
+            }
+        } finally {
+            stopFlag.set(true)
+            toggleThread.join(5000)
+        }
+        assertEquals(null, error.get())
+    }
+
+    @Test
+    fun replayGainOff_ignoresNonZeroPreAmpWithout_andPassesThroughBitExact() {
+        val song = FakeSong(ReplayGainAdjustment(track = -5f, album = -7f))
+        val settings =
+            FakePlaybackSettings(
+                replayGainMode = ReplayGainMode.OFF,
+                replayGainPreAmp = ReplayGainPreAmp(with = -2f, without = -6f),
+            )
+        val processor =
+            ReplayGainAudioProcessor(FakePlaybackStateManager(song), settings).apply {
+                onIndexMoved(0)
+            }
+        assertEquals(0f, processor.currentAdjustmentDb, 1e-6f)
+
+        processor.configure(AudioProcessor.AudioFormat(48000, 1, C.ENCODING_PCM_FLOAT))
+        processor.flush()
+        val input = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN)
+        input.putFloat(0.65f)
+        input.flip()
+
+        processor.queueInput(input)
+        val out = processor.output.order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(0.65f.toRawBits(), out.getFloat().toRawBits())
+    }
+
+    @Test
+    fun dynamicMode_respectsAlbumParentAndShuffle_andFallsBackWhenTrackMissing() {
+        val albumA = FakeAlbum()
+        val albumB = FakeAlbum()
+        val song = FakeSong(ReplayGainAdjustment(track = -2.0f, album = -8.0f), songAlbum = albumA)
+        val manager = FakePlaybackStateManager(song, parent = albumA, isShuffled = false)
+        val processor =
+            ReplayGainAudioProcessor(manager, FakePlaybackSettings(ReplayGainMode.DYNAMIC)).apply {
+                onNewPlayback(albumA, listOf(song), 0, isShuffled = false)
+            }
+        assertEquals(-8.0f, processor.currentAdjustmentDb, 1e-6f)
+
+        // Enabling shuffle in Dynamic mode switches from album gain to track gain
+        manager.isShuffled = true
+        processor.onQueueReordered(listOf(song), 0, isShuffled = true)
+        assertEquals(-2.0f, processor.currentAdjustmentDb, 1e-6f)
+
+        // Playing from another parent uses track gain
+        manager.isShuffled = false
+        manager.parent = albumB
+        processor.onNewPlayback(albumB, listOf(song), 0, isShuffled = false)
+        assertEquals(-2.0f, processor.currentAdjustmentDb, 1e-6f)
+
+        // If track gain is null outside album context, falls back to album gain
+        val albumOnlySong = FakeSong(ReplayGainAdjustment(track = null, album = -6.5f), songAlbum = albumA)
+        manager.currentSong = albumOnlySong
+        processor.onIndexMoved(0)
+        assertEquals(-6.5f, processor.currentAdjustmentDb, 1e-6f)
+    }
+
+    @Test
+    fun positiveReplayGainFastPath_appliesZeroLatencySoftLimiterWhenEnabled() {
+        val song = FakeSong(ReplayGainAdjustment(track = 6.0f, album = null))
+        val cfg = DspChainConfig(enabled = false, limiterEnabled = true, limiterCeilingDb = -0.2)
+        val processor =
+            ReplayGainAudioProcessor(
+                FakePlaybackStateManager(song),
+                FakePlaybackSettings(ReplayGainMode.TRACK),
+                FakeDspConfigSource(cfg),
+            ).apply { onIndexMoved(0) }
+
+        processor.configure(AudioProcessor.AudioFormat(48000, 1, C.ENCODING_PCM_FLOAT))
+        processor.flush()
+
+        val input = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN)
+        input.putFloat(0.9f) // 0.9 * ~2.0x boost = ~1.8 -> must be soft-limited <= ceiling (< 1.0)
+        input.flip()
+
+        processor.queueInput(input)
+        val out = processor.output.order(ByteOrder.LITTLE_ENDIAN)
+        val limited = out.getFloat()
+        val ceiling = 10.0.pow(-0.2 / 20.0).toFloat()
+        assertTrue("Expected positive sample after boost: $limited", limited > 0.7f)
+        assertTrue("Expected soft-limited below ceiling ($ceiling), got $limited", limited <= ceiling + 1e-5f)
+    }
+
     private class FakeDspConfigSource(initial: DspChainConfig) : DspConfigSource {
         override val config: StateFlow<DspChainConfig> = MutableStateFlow(initial)
     }
@@ -228,11 +407,12 @@ class ReplayGainAudioProcessorTest {
         return ReplayGainAudioProcessor(manager, settings).apply { onIndexMoved(0) }
     }
 
-    private class FakePlaybackSettings(override val replayGainMode: ReplayGainMode) :
-        PlaybackSettings {
+    private class FakePlaybackSettings(
+        override val replayGainMode: ReplayGainMode,
+        override var replayGainPreAmp: ReplayGainPreAmp = ReplayGainPreAmp(0f, 0f),
+    ) : PlaybackSettings {
         override val barAction = ActionMode.NEXT
         override val headsetAutoplay = false
-        override var replayGainPreAmp = ReplayGainPreAmp(0f, 0f)
         override val playInListWith = PlaySong.FromAll
         override val inParentPlaybackMode: PlaySong? = null
         override val keepShuffle = true
@@ -250,14 +430,17 @@ class ReplayGainAudioProcessorTest {
         override fun unregisterListener(listener: PlaybackSettings.Listener) {}
     }
 
-    private class FakePlaybackStateManager(override val currentSong: Song?) : PlaybackStateManager {
+    private class FakePlaybackStateManager(
+        override var currentSong: Song?,
+        override var parent: MusicParent? = null,
+        override var isShuffled: Boolean = false,
+    ) : PlaybackStateManager {
         override val progression: Progression
             get() = error("unused")
         override val repeatMode = RepeatMode.NONE
-        override val parent: MusicParent? = null
-        override val queue: List<Song> = listOfNotNull(currentSong)
+        override val queue: List<Song>
+            get() = listOfNotNull(currentSong)
         override val index = 0
-        override val isShuffled = false
         override val currentAudioSessionId: Int? = null
 
         override fun addListener(listener: PlaybackStateManager.Listener) {}
@@ -308,7 +491,10 @@ class ReplayGainAudioProcessorTest {
         ) {}
     }
 
-    private class FakeSong(override val replayGainAdjustment: ReplayGainAdjustment) : Song {
+    private class FakeSong(
+        override val replayGainAdjustment: ReplayGainAdjustment,
+        private val songAlbum: Album? = null,
+    ) : Song {
         override val uid: Music.UID
             get() = error("unused")
 
@@ -335,11 +521,27 @@ class ReplayGainAudioProcessorTest {
         override val addedMs: Long = 0L
         override val cover: Cover? = null
         override val album: Album
-            get() = error("unused")
+            get() = songAlbum ?: error("unused")
 
         override val artists: List<Artist> = emptyList()
         override val genres: List<Genre> = emptyList()
         override val composers: List<String> = emptyList()
         override val conductors: List<String> = emptyList()
+    }
+
+    private class FakeAlbum : Album {
+        override val uid: Music.UID
+            get() = error("unused")
+        override val name: Name
+            get() = error("unused")
+        override val songs: Collection<Song> = emptyList()
+        override val dates: Date.Range? = null
+        override val releaseType: ReleaseType
+            get() = error("unused")
+        override val covers: CoverCollection
+            get() = error("unused")
+        override val durationMs: Long = 0L
+        override val addedMs: Long = 0L
+        override val artists: List<Artist> = emptyList()
     }
 }

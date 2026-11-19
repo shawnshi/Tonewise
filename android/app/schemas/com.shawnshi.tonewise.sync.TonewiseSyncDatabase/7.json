@@ -1,0 +1,496 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 7,
+    "identityHash": "aa7803fb2ff6dc602bdd59d7b6d8dff0",
+    "entities": [
+      {
+        "tableName": "track_play_ledger",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`trackUid` TEXT NOT NULL, `playCount` INTEGER NOT NULL, `lastPlayedMs` INTEGER NOT NULL, `loved` INTEGER NOT NULL, `syncedCount` INTEGER NOT NULL, `pulledCloudCount` INTEGER NOT NULL, `lanSyncedCount` INTEGER NOT NULL, `audioFrameBlake3Hex` TEXT NOT NULL, PRIMARY KEY(`trackUid`))",
+        "fields": [
+          {
+            "fieldPath": "trackUid",
+            "columnName": "trackUid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "playCount",
+            "columnName": "playCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastPlayedMs",
+            "columnName": "lastPlayedMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "loved",
+            "columnName": "loved",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncedCount",
+            "columnName": "syncedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pulledCloudCount",
+            "columnName": "pulledCloudCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lanSyncedCount",
+            "columnName": "lanSyncedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioFrameBlake3Hex",
+            "columnName": "audioFrameBlake3Hex",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "trackUid"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_track_play_ledger_audioFrameBlake3Hex",
+            "unique": false,
+            "columnNames": [
+              "audioFrameBlake3Hex"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_track_play_ledger_audioFrameBlake3Hex` ON `${TABLE_NAME}` (`audioFrameBlake3Hex`)"
+          }
+        ]
+      },
+      {
+        "tableName": "lww_overrides",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`trackUid` TEXT NOT NULL, `field` TEXT NOT NULL, `value` TEXT NOT NULL, `updatedAtMs` INTEGER NOT NULL, `audioFrameBlake3Hex` TEXT NOT NULL, PRIMARY KEY(`trackUid`, `field`))",
+        "fields": [
+          {
+            "fieldPath": "trackUid",
+            "columnName": "trackUid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "field",
+            "columnName": "field",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioFrameBlake3Hex",
+            "columnName": "audioFrameBlake3Hex",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "trackUid",
+            "field"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_lww_overrides_audioFrameBlake3Hex",
+            "unique": false,
+            "columnNames": [
+              "audioFrameBlake3Hex"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_lww_overrides_audioFrameBlake3Hex` ON `${TABLE_NAME}` (`audioFrameBlake3Hex`)"
+          }
+        ]
+      },
+      {
+        "tableName": "pending_tag_mutations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`trackUid` TEXT NOT NULL, `field` TEXT NOT NULL, `value` TEXT NOT NULL, `updatedAtMs` INTEGER NOT NULL, `deviceId` TEXT NOT NULL, PRIMARY KEY(`trackUid`, `field`))",
+        "fields": [
+          {
+            "fieldPath": "trackUid",
+            "columnName": "trackUid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "field",
+            "columnName": "field",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deviceId",
+            "columnName": "deviceId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "trackUid",
+            "field"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_pending_tag_mutations_updatedAtMs",
+            "unique": false,
+            "columnNames": [
+              "updatedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_pending_tag_mutations_updatedAtMs` ON `${TABLE_NAME}` (`updatedAtMs`)"
+          }
+        ]
+      },
+      {
+        "tableName": "pending_scrobbles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `songUid` TEXT NOT NULL, `artist` TEXT NOT NULL, `track` TEXT NOT NULL, `album` TEXT NOT NULL, `durationSec` INTEGER NOT NULL, `timestampSec` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "songUid",
+            "columnName": "songUid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artist",
+            "columnName": "artist",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "track",
+            "columnName": "track",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "album",
+            "columnName": "album",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationSec",
+            "columnName": "durationSec",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestampSec",
+            "columnName": "timestampSec",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_pending_scrobbles_timestampSec",
+            "unique": false,
+            "columnNames": [
+              "timestampSec"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_pending_scrobbles_timestampSec` ON `${TABLE_NAME}` (`timestampSec`)"
+          }
+        ]
+      },
+      {
+        "tableName": "seen_cloud_stamps",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`stamp` TEXT NOT NULL, `createdAtMs` INTEGER NOT NULL, PRIMARY KEY(`stamp`))",
+        "fields": [
+          {
+            "fieldPath": "stamp",
+            "columnName": "stamp",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtMs",
+            "columnName": "createdAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "stamp"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_seen_cloud_stamps_createdAtMs",
+            "unique": false,
+            "columnNames": [
+              "createdAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_seen_cloud_stamps_createdAtMs` ON `${TABLE_NAME}` (`createdAtMs`)"
+          }
+        ]
+      },
+      {
+        "tableName": "bio_cache",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`cacheKey` TEXT NOT NULL, `summary` TEXT NOT NULL, `updatedAtMs` INTEGER NOT NULL, PRIMARY KEY(`cacheKey`))",
+        "fields": [
+          {
+            "fieldPath": "cacheKey",
+            "columnName": "cacheKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "summary",
+            "columnName": "summary",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "cacheKey"
+          ]
+        }
+      },
+      {
+        "tableName": "sync_kv",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key` TEXT NOT NULL, `value` TEXT NOT NULL, PRIMARY KEY(`key`))",
+        "fields": [
+          {
+            "fieldPath": "key",
+            "columnName": "key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "key"
+          ]
+        }
+      },
+      {
+        "tableName": "audio_fingerprint_cache",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`trackUid` TEXT NOT NULL, `fileSize` INTEGER NOT NULL, `audioFrameBlake3Hex` TEXT NOT NULL, `headerBlake3Hex` TEXT NOT NULL, `headerSize` INTEGER NOT NULL, `updatedAtMs` INTEGER NOT NULL, `mtimeMs` INTEGER NOT NULL, PRIMARY KEY(`trackUid`))",
+        "fields": [
+          {
+            "fieldPath": "trackUid",
+            "columnName": "trackUid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioFrameBlake3Hex",
+            "columnName": "audioFrameBlake3Hex",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "headerBlake3Hex",
+            "columnName": "headerBlake3Hex",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "headerSize",
+            "columnName": "headerSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mtimeMs",
+            "columnName": "mtimeMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "trackUid"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_audio_fingerprint_cache_audioFrameBlake3Hex",
+            "unique": false,
+            "columnNames": [
+              "audioFrameBlake3Hex"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_audio_fingerprint_cache_audioFrameBlake3Hex` ON `${TABLE_NAME}` (`audioFrameBlake3Hex`)"
+          }
+        ]
+      },
+      {
+        "tableName": "synced_tracks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`trackUid` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `documentUri` TEXT, `fileSize` INTEGER NOT NULL, `mtimeMs` INTEGER NOT NULL, `sourceOutboxIdsJson` TEXT NOT NULL, `syncedAtMs` INTEGER NOT NULL, `headerBlake3Hex` TEXT NOT NULL, `audioFrameBlake3Hex` TEXT NOT NULL, PRIMARY KEY(`trackUid`))",
+        "fields": [
+          {
+            "fieldPath": "trackUid",
+            "columnName": "trackUid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "documentUri",
+            "columnName": "documentUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mtimeMs",
+            "columnName": "mtimeMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceOutboxIdsJson",
+            "columnName": "sourceOutboxIdsJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncedAtMs",
+            "columnName": "syncedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "headerBlake3Hex",
+            "columnName": "headerBlake3Hex",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioFrameBlake3Hex",
+            "columnName": "audioFrameBlake3Hex",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "trackUid"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_synced_tracks_relativePath",
+            "unique": false,
+            "columnNames": [
+              "relativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_synced_tracks_relativePath` ON `${TABLE_NAME}` (`relativePath`)"
+          },
+          {
+            "name": "index_synced_tracks_audioFrameBlake3Hex",
+            "unique": false,
+            "columnNames": [
+              "audioFrameBlake3Hex"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_synced_tracks_audioFrameBlake3Hex` ON `${TABLE_NAME}` (`audioFrameBlake3Hex`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'aa7803fb2ff6dc602bdd59d7b6d8dff0')"
+    ]
+  }
+}

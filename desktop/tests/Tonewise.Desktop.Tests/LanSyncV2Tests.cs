@@ -264,6 +264,7 @@ public sealed class LanSyncV2Tests
             await using var server = new SyncHostServer(tempRoot, "pc-mut");
             int port = await server.StartAsync(port: 0, enableMdns: false);
             using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            await PairHttpClientAsync(http, server);
 
             var resp = await http.PostAsJsonAsync("/api/v1/mutations/push", new
             {
@@ -314,6 +315,7 @@ public sealed class LanSyncV2Tests
             await using var server = new SyncHostServer(tempRoot, "pc-m3u");
             int port = await server.StartAsync(port: 0, enableMdns: false);
             using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            await PairHttpClientAsync(http, server);
 
             var resp = await http.PostAsJsonAsync("/api/v1/playlists/merge", new
             {
@@ -328,6 +330,20 @@ public sealed class LanSyncV2Tests
             Assert.NotNull(merged);
             Assert.Empty(merged!.Conflicts);
             Assert.Equal(["Artist/Album/01.flac", "Artist/Album/03.flac", "Artist/Album/04.flac"], merged.Merged);
+
+            // Also normalize paths rooted directly under Music/ (without Tonewise/ subfolder)
+            var musicResp = await http.PostAsJsonAsync("/api/v1/playlists/merge", new
+            {
+                playlist_name = "Roadtrip",
+                @base = new[] { "Artist/Album/01.flac", "Artist/Album/03.flac", "Artist/Album/04.flac" },
+                ours = new[] { "Artist/Album/01.flac", "Artist/Album/03.flac", "Artist/Album/04.flac" },
+                theirs = new[] { "Music/Artist/Album/01.flac", "Music/Artist/Album/03.flac" }
+            });
+            musicResp.EnsureSuccessStatusCode();
+            var musicMerged = await musicResp.Content.ReadFromJsonAsync<M3u8MergeResult>();
+            Assert.NotNull(musicMerged);
+            Assert.Empty(musicMerged!.Conflicts);
+            Assert.Equal(["Artist/Album/01.flac", "Artist/Album/03.flac"], musicMerged.Merged);
         }
         finally
         {
@@ -559,6 +575,366 @@ public sealed class LanSyncV2Tests
             var remaining = server.Store.GetOutboxItems();
             Assert.Single(remaining);
             Assert.Equal(sub.Id, remaining[0].Id);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task EnqueuePlaylists_BatchDeduplicatesTracks_AndEmitsHeaderAndAudioHashes()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_s1_batch_pl_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string dbPath = CreateEmptyManifestDb(tempRoot);
+            string f1 = Path.Combine(tempRoot, "ArtistA", "Alb1", "01.flac");
+            string f2 = Path.Combine(tempRoot, "ArtistB", "Alb2", "02.flac");
+            foreach (string f in new[] { f1, f2 })
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(f)!);
+                File.WriteAllBytes(f, [0x66, 0x4C, 0x61, 0x43, 1, 2, 3, 4]);
+            }
+
+            Directory.CreateDirectory(Path.Combine(tempRoot, "Playlists"));
+            File.WriteAllText(
+                Path.Combine(tempRoot, "Playlists", "Mix1.m3u8"),
+                "#EXTM3U\n#PLAYLIST:Mix1\nArtistA/Alb1/01.flac\nArtistB/Alb2/02.flac\nArtistA/Alb1/01.flac\n",
+                new UTF8Encoding(false));
+            File.WriteAllText(
+                Path.Combine(tempRoot, "Playlists", "Mix2.m3u8"),
+                "#EXTM3U\n#PLAYLIST:Mix2\nArtistB/Alb2/02.flac\n",
+                new UTF8Encoding(false));
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes, rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms, title, album, album_artist, artists_json, genre) VALUES
+                    ('u1', X'AA11', 4, X'BB22', 0, 'ArtistA/Alb1/01.flac', 8, 2000, 'flac', 44100, 10000, 'Song 1', 'Alb1', 'ArtistA', '["ArtistA"]', 'Rock'),
+                    ('u2', X'CC33', 4, X'DD44', 0, 'ArtistB/Alb2/02.flac', 8, 3000, 'flac', 44100, 10000, 'Song 2', 'Alb2', 'ArtistB', '["ArtistB"]', 'Pop');
+                    """;
+                ins.ExecuteNonQuery();
+            }
+
+            await using var server = new SyncHostServer(tempRoot, "pc-batch-pl");
+            var added = server.Store.EnqueuePlaylists(["Mix1", "Mix2", "mix1"]);
+            Assert.Equal(2, added.Count);
+
+            var payload = server.Store.ResolveOutbox();
+            Assert.Equal(2, payload.Items.Count);
+            Assert.Equal(2, payload.Playlists.Count);
+            Assert.Equal(2, payload.Tracks.Count);
+            Assert.Equal(2, payload.DuplicateTrackCount);
+            Assert.Equal(16L, payload.TotalBytes);
+
+            var u1 = payload.Tracks.Single(t => t.TrackUid == "u1");
+            Assert.Equal("bb22", u1.HeaderBlake3);
+            Assert.Equal("aa11", u1.AudioFrameBlake3);
+            var u2 = payload.Tracks.Single(t => t.TrackUid == "u2");
+            Assert.Equal(2, u2.SourceOutboxIds.Count);
+            Assert.Equal("dd44", u2.HeaderBlake3);
+            Assert.Equal("cc33", u2.AudioFrameBlake3);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task S0_PlaylistMerge_PreservesSpacesAndDotsInPlaylistName_AndWritesPlaylistDirective()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_s0_pl_names_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(tempRoot);
+            await using var server = new SyncHostServer(tempRoot, "pc-m3u-names");
+            int port = await server.StartAsync(port: 0, enableMdns: false);
+            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            await PairHttpClientAsync(http, server);
+
+            foreach (string plName in new[] { "All Out 2010s", "Vol. 1 Classics" })
+            {
+                var resp = await http.PostAsJsonAsync("/api/v1/playlists/merge", new
+                {
+                    playlist_name = plName,
+                    @base = Array.Empty<string>(),
+                    ours = Array.Empty<string>(),
+                    theirs = new[] { "Artist/Album/01.flac" },
+                });
+                resp.EnsureSuccessStatusCode();
+                var merged = await resp.Content.ReadFromJsonAsync<M3u8MergeResult>();
+                Assert.NotNull(merged);
+                Assert.Empty(merged!.Conflicts);
+
+                string expectedPath = Path.Combine(tempRoot, "Playlists", plName + ".m3u8");
+                Assert.True(File.Exists(expectedPath), $"Expected file at {expectedPath}");
+                string content = File.ReadAllText(expectedPath, Encoding.UTF8);
+                Assert.Contains($"#PLAYLIST:{plName}", content);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase1_V1Endpoints_RequireBearerAuth_AndRejectNonJsonPost()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_p1_v1auth_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            CreateEmptyManifestDb(tempRoot);
+            await using var server = new SyncHostServer(tempRoot, "pc-p1-auth");
+            int port = await server.StartAsync(port: 0, enableMdns: false);
+            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+
+            Assert.Equal(HttpStatusCode.Unauthorized, (await http.GetAsync("/api/v1/status")).StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, (await http.GetAsync("/api/v1/manifest")).StatusCode);
+            Assert.Equal(
+                HttpStatusCode.Unauthorized,
+                (await http.PostAsJsonAsync("/api/v1/playlists/merge", new { playlists = Array.Empty<object>() })).StatusCode);
+            Assert.Equal(
+                HttpStatusCode.Unauthorized,
+                (await http.PostAsJsonAsync("/api/v1/mutations/push", new { device_id = "d1", mutations = Array.Empty<object>() })).StatusCode);
+
+            await PairHttpClientAsync(http, server, "p1-auth-dev");
+
+            using var textBody = new StringContent("{}", Encoding.UTF8, "text/plain");
+            var nonJsonResp = await http.PostAsync("/api/v1/playlists/merge", textBody);
+            Assert.Equal(HttpStatusCode.UnsupportedMediaType, nonJsonResp.StatusCode);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase1_PairingRateLimit_LocksOutAfterMaxFailures_AndOversizePatchReturns413()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_p1_lockout_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string dbPath = CreateEmptyManifestDb(tempRoot);
+            string oversizeAudio = Path.Combine(tempRoot, "Artist", "big.flac");
+            Directory.CreateDirectory(Path.GetDirectoryName(oversizeAudio)!);
+            File.WriteAllBytes(oversizeAudio, [0x66, 0x4C, 0x61, 0x43]);
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms, title
+                    ) VALUES (
+                        'uid_oversize', X'1122', 3145728, X'3344', 0,
+                        'Artist/big.flac', 4000000, 1000, 'flac', 44100, 180000, 'Oversize Header'
+                    );
+                    """;
+                ins.ExecuteNonQuery();
+            }
+
+            await using var server = new SyncHostServer(tempRoot, "pc-p1-lock");
+            int port = await server.StartAsync(port: 0, enableMdns: false);
+
+            // Lock out a dedicated pairing server via 5 bad attempts -> 401 x4 then 429 + Retry-After
+            using var anonHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            string realCode = server.Store.CurrentPairingCode;
+            string wrongCode = realCode == "000000" ? "999999" : "000000";
+
+            for (int i = 1; i <= 4; i++)
+            {
+                var badResp = await anonHttp.PostAsJsonAsync("/api/v2/pair", new { code = wrongCode, device_id = "brute", device_name = "Brute" });
+                Assert.Equal(HttpStatusCode.Unauthorized, badResp.StatusCode);
+            }
+
+            var lockResp = await anonHttp.PostAsJsonAsync("/api/v2/pair", new { code = wrongCode, device_id = "brute", device_name = "Brute" });
+            Assert.Equal(HttpStatusCode.TooManyRequests, lockResp.StatusCode);
+            Assert.True(lockResp.Headers.TryGetValues("Retry-After", out _));
+
+            // Even the real code is rejected while locked out
+            var realDuringLockResp = await anonHttp.PostAsJsonAsync("/api/v2/pair", new { code = realCode, device_id = "legit", device_name = "Legit" });
+            Assert.Equal(HttpStatusCode.TooManyRequests, realDuringLockResp.StatusCode);
+
+            // Use a fresh non-locked host instance to verify paired /api/v1/patch oversize cap (3 MiB > 2 MiB -> 413)
+            string tempRoot2 = Path.Combine(Path.GetTempPath(), "tw_p1_patch413_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string dbPath2 = CreateEmptyManifestDb(tempRoot2);
+                string oversizeAudio2 = Path.Combine(tempRoot2, "Artist", "big.flac");
+                Directory.CreateDirectory(Path.GetDirectoryName(oversizeAudio2)!);
+                File.WriteAllBytes(oversizeAudio2, [0x66, 0x4C, 0x61, 0x43]);
+                using (var conn = new SqliteConnection($"Data Source={dbPath2}"))
+                {
+                    conn.Open();
+                    using var ins = conn.CreateCommand();
+                    ins.CommandText = """
+                        INSERT INTO tracks (
+                            track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                            rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms, title
+                        ) VALUES (
+                            'uid_oversize', X'1122', 3145728, X'3344', 0,
+                            'Artist/big.flac', 4000000, 1000, 'flac', 44100, 180000, 'Oversize Header'
+                        );
+                        """;
+                    ins.ExecuteNonQuery();
+                }
+
+                await using var server2 = new SyncHostServer(tempRoot2, "pc-p1-patch");
+                int port2 = await server2.StartAsync(port: 0, enableMdns: false);
+                using var authedHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port2}") };
+                await PairHttpClientAsync(authedHttp, server2, "p1-patch-dev");
+
+                var oversizeResp = await authedHttp.GetAsync("/api/v1/patch/uid_oversize");
+                Assert.Equal(HttpStatusCode.RequestEntityTooLarge, oversizeResp.StatusCode);
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                if (Directory.Exists(tempRoot2)) Directory.Delete(tempRoot2, recursive: true);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase2_ManifestEndpoint_ServesVacuumIntoConsistentSnapshot_UnderConcurrentWalWrites()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_p2_snap_" + Guid.NewGuid().ToString("N"));
+        string snapDownload = Path.Combine(Path.GetTempPath(), "tw_p2_dl_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            string dbPath = CreateEmptyManifestDb(tempRoot);
+            await using var server = new SyncHostServer(tempRoot, "pc-p2-snap");
+            int port = await server.StartAsync(port: 0, enableMdns: false);
+            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            await PairHttpClientAsync(http, server, "p2-snap-dev");
+
+            // Keep an open WAL read-write connection and insert a row via immediate tx without checkpointing main DB
+            using (var writerConn = TonewiseSqlite.OpenReadWrite(dbPath))
+            {
+                using (var walMode = writerConn.CreateCommand())
+                {
+                    walMode.CommandText = "PRAGMA wal_autocheckpoint = 0;";
+                    walMode.ExecuteNonQuery();
+                }
+
+                using var tx = TonewiseSqlite.BeginImmediateTransaction(writerConn);
+                using var ins = writerConn.CreateCommand();
+                ins.Transaction = tx;
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms, title
+                    ) VALUES (
+                        'uid_wal_1', X'5566', 16, X'7788', 0,
+                        'Artist/wal_song.flac', 2048, 1000, 'flac', 44100, 120000, 'WAL Snapshot Track'
+                    );
+                    """;
+                ins.ExecuteNonQuery();
+                tx.Commit();
+
+                byte[] downloadedDb = await http.GetByteArrayAsync("/api/v1/manifest");
+                File.WriteAllBytes(snapDownload, downloadedDb);
+            }
+
+            using var readConn = new SqliteConnection($"Data Source={snapDownload};Mode=ReadOnly;Pooling=False");
+            readConn.Open();
+            using (var integrityCmd = readConn.CreateCommand())
+            {
+                integrityCmd.CommandText = "PRAGMA integrity_check;";
+                Assert.Equal("ok", integrityCmd.ExecuteScalar()?.ToString());
+            }
+            using (var q = readConn.CreateCommand())
+            {
+                q.CommandText = "SELECT title FROM tracks WHERE track_uid = 'uid_wal_1';";
+                Assert.Equal("WAL Snapshot Track", q.ExecuteScalar()?.ToString());
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(snapDownload)) File.Delete(snapDownload);
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase2_MultiDeviceWildcardCopyOutbox_RemainsForSecondDeviceUntilAllAck()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_p2_multi_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string dbPath = CreateEmptyManifestDb(tempRoot);
+            string wavPath = Path.Combine(tempRoot, "Artists", "ArtistS", "01.wav");
+            WriteMinimalWav(wavPath);
+            using (var conn = TonewiseSqlite.OpenReadWrite(dbPath))
+            {
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms, title, artists_json
+                    ) VALUES (
+                        'u_shared', X'AA11', 44, X'BB22', 0,
+                        'Artists/ArtistS/01.wav', 88244, 1000, 'wav', 44100, 1000, 'Shared Song', '["ArtistS"]'
+                    );
+                    """;
+                ins.ExecuteNonQuery();
+            }
+
+            await using var server = new SyncHostServer(tempRoot, "pc-p2-multi");
+            int port = await server.StartAsync(port: 0, enableMdns: false);
+            using var httpA = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            using var httpB = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            await PairHttpClientAsync(httpA, server, "dev-a");
+            await PairHttpClientAsync(httpB, server, "dev-b");
+
+            var ob = server.Store.EnqueueTracks(["u_shared"], "Shared Song", deviceId: "*", mode: "copy");
+
+            using (var obA1 = JsonDocument.Parse(await httpA.GetStringAsync("/api/v2/outbox")))
+                Assert.Single(obA1.RootElement.GetProperty("items").EnumerateArray());
+            using (var obB1 = JsonDocument.Parse(await httpB.GetStringAsync("/api/v2/outbox")))
+                Assert.Single(obB1.RootElement.GetProperty("items").EnumerateArray());
+
+            var ackA = await httpA.PostAsJsonAsync("/api/v2/report", new
+            {
+                device_id = "dev-a",
+                play_events = Array.Empty<object>(),
+                mutations = Array.Empty<object>(),
+                completed_outbox_ids = new[] { ob.Id }
+            });
+            ackA.EnsureSuccessStatusCode();
+
+            using (var obA2 = JsonDocument.Parse(await httpA.GetStringAsync("/api/v2/outbox")))
+                Assert.Empty(obA2.RootElement.GetProperty("items").EnumerateArray());
+            using (var obB2 = JsonDocument.Parse(await httpB.GetStringAsync("/api/v2/outbox")))
+                Assert.Single(obB2.RootElement.GetProperty("items").EnumerateArray());
+
+            var ackB = await httpB.PostAsJsonAsync("/api/v2/report", new
+            {
+                device_id = "dev-b",
+                play_events = Array.Empty<object>(),
+                mutations = Array.Empty<object>(),
+                completed_outbox_ids = new[] { ob.Id }
+            });
+            ackB.EnsureSuccessStatusCode();
+
+            Assert.Empty(server.Store.GetOutboxItems());
         }
         finally
         {

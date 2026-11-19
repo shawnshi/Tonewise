@@ -67,7 +67,9 @@ import com.shawnshi.tonewise.music.WorkRecording
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.formatDurationMs
+import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import kotlin.math.roundToLong
 import org.oxycblt.musikr.Song
 
 @AndroidEntryPoint
@@ -138,12 +140,20 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
         val targetMovement = recording.movements[targetIndex]
         val currentPosMs = playbackModel.positionDs.value * 100L
         val safeSeekMs =
-            if (currentPosMs in 1L until (targetMovement.durationMs - 1000L)) {
-                currentPosMs
-            } else {
-                0L
-            }
-        playbackModel.restoreSessionQueue(recording.movements, targetIndex, safeSeekMs)
+            computeProportionalSeekMs(
+                currentPosMs = currentPosMs,
+                currentDurationMs = currentSong?.durationMs ?: 0L,
+                targetDurationMs = targetMovement.durationMs,
+            )
+        val pq = playbackModel.pagerQueue.value
+        val (updatedQueue, newIndex) =
+            replaceWorkBlockInQueue(
+                currentQueue = pq.queue,
+                currentIndex = pq.index,
+                targetMovements = recording.movements,
+                targetOffsetInMovements = targetIndex,
+            )
+        playbackModel.restoreSessionQueue(updatedQueue, newIndex, safeSeekMs)
         dismiss()
     }
 
@@ -151,6 +161,57 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
         const val TAG = "WorkRecordingsDialog"
 
         fun newInstance() = WorkRecordingsDialog()
+
+        internal fun computeProportionalSeekMs(
+            currentPosMs: Long,
+            currentDurationMs: Long,
+            targetDurationMs: Long,
+        ): Long {
+            if (currentPosMs <= 0L || currentDurationMs <= 0L || targetDurationMs <= 0L) return 0L
+            val ratio = (currentPosMs.toDouble() / currentDurationMs.toDouble()).coerceIn(0.0, 1.0)
+            return (targetDurationMs.toDouble() * ratio)
+                .roundToLong()
+                .coerceIn(0L, (targetDurationMs - 1000L).coerceAtLeast(0L))
+        }
+
+        internal fun replaceWorkBlockInQueue(
+            currentQueue: List<Song>,
+            currentIndex: Int,
+            targetMovements: List<Song>,
+            targetOffsetInMovements: Int,
+        ): Pair<List<Song>, Int> {
+            if (targetMovements.isEmpty()) {
+                return currentQueue to currentIndex.coerceIn(0, (currentQueue.size - 1).coerceAtLeast(0))
+            }
+            val safeOffset = targetOffsetInMovements.coerceIn(0, targetMovements.lastIndex)
+            if (currentQueue.isEmpty() || currentIndex !in currentQueue.indices) {
+                return targetMovements to safeOffset
+            }
+
+            val curSong = currentQueue[currentIndex]
+            val curWorkKey = ReplayGainAudioProcessor.buildWorkBlockKey(curSong)
+            var blockStart = currentIndex
+            var blockEnd = currentIndex
+            if (curWorkKey != null) {
+                while (blockStart > 0 &&
+                    ReplayGainAudioProcessor.buildWorkBlockKey(currentQueue[blockStart - 1]) == curWorkKey
+                ) {
+                    blockStart--
+                }
+                while (blockEnd + 1 < currentQueue.size &&
+                    ReplayGainAudioProcessor.buildWorkBlockKey(currentQueue[blockEnd + 1]) == curWorkKey
+                ) {
+                    blockEnd++
+                }
+            }
+
+            val updated =
+                ArrayList<Song>(currentQueue.size - (blockEnd - blockStart + 1) + targetMovements.size)
+            for (i in 0 until blockStart) updated.add(currentQueue[i])
+            updated.addAll(targetMovements)
+            for (i in (blockEnd + 1) until currentQueue.size) updated.add(currentQueue[i])
+            return updated to (blockStart + safeOffset)
+        }
     }
 }
 

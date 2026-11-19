@@ -48,9 +48,10 @@ object WorkShuffleOrder {
         for (i in songs.indices) {
             val s = songs[i]
             val work = s.workName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+            val conductor = s.conductors.firstOrNull()?.trim()?.lowercase().orEmpty()
             val key =
                 if (work != null) {
-                    "work::${s.album.uid}::$work"
+                    "work::${s.album.uid}::$conductor::$work"
                 } else {
                     "track::$i"
                 }

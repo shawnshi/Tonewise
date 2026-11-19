@@ -21,6 +21,12 @@
         app:showAsAction="ifRoom" />
 
     <item
+        android:id="@+id/action_desk_clock"
+        android:icon="@drawable/ic_time_24"
+        android:title="@string/lbl_desk_clock"
+        app:showAsAction="ifRoom" />
+
+    <item
         android:id="@+id/action_scenes_sync"
         android:title="@string/lbl_scenes_and_sync"
         app:showAsAction="never" />

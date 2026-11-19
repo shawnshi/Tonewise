@@ -26,15 +26,18 @@ import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
+import kotlin.math.tanh
 import com.shawnshi.tonewise.playback.PlaybackSettings
 import com.shawnshi.tonewise.playback.dsp.DspChainConfig
 import com.shawnshi.tonewise.playback.dsp.DspConfigSource
 import com.shawnshi.tonewise.playback.dsp.TonewiseDspEngine
+import com.shawnshi.tonewise.playback.dsp.softLimitSample
 import com.shawnshi.tonewise.playback.state.PlaybackStateManager
 import com.shawnshi.tonewise.playback.state.QueueChange
 import org.oxycblt.musikr.Album
@@ -60,22 +63,20 @@ constructor(
     private val playbackSettings: PlaybackSettings,
     private val dspConfigSource: DspConfigSource? = null,
 ) : BaseAudioProcessor(), PlaybackStateManager.Listener, PlaybackSettings.Listener {
+    private data class GainState(val volume: Float, val adjustmentDb: Float)
+
     private val dspEngine = TonewiseDspEngine()
+    private val defaultDspConfig = DspChainConfig()
     private var workBuffer = DoubleArray(0)
-    private var volume = 1f
-        set(value) {
-            field = value
-            // Processed bytes are no longer valid, flush the stream
-            flush()
-        }
+    private val pendingDspReset = AtomicBoolean(false)
+    @Volatile private var gainState = GainState(1f, 0f)
 
     @Volatile
     var isBypassed: Boolean = false
         private set
 
-    @Volatile
-    var currentAdjustmentDb: Float = 0f
-        private set
+    val currentAdjustmentDb: Float
+        get() = gainState.adjustmentDb
 
     @Volatile
     var configuredEncoding: Int = C.ENCODING_INVALID
@@ -84,7 +85,7 @@ constructor(
     fun setBypassed(bypassed: Boolean) {
         if (isBypassed != bypassed) {
             isBypassed = bypassed
-            flush()
+            pendingDspReset.set(true)
         }
     }
 
@@ -107,10 +108,14 @@ constructor(
     }
 
     override fun onQueueChanged(queue: List<Song>, index: Int, change: QueueChange) {
-        // Other types of queue changes preserve the current song.
-        if (change.type == QueueChange.Type.SONG) {
+        if (change.type == QueueChange.Type.SONG ||
+            playbackSettings.replayGainMode == ReplayGainMode.DYNAMIC) {
             applyReplayGain(playbackManager.currentSong)
         }
+    }
+
+    override fun onQueueReordered(queue: List<Song>, index: Int, isShuffled: Boolean) {
+        applyReplayGain(playbackManager.currentSong)
     }
 
     override fun onNewPlayback(
@@ -136,10 +141,9 @@ constructor(
      * @param song The [Format] of the currently playing track, or null if nothing is playing.
      */
     private fun applyReplayGain(song: Song?) {
-        if (song == null) {
-            L.d("Nothing playing, disabling adjustment")
-            currentAdjustmentDb = 0f
-            volume = 1f
+        if (song == null || playbackSettings.replayGainMode == ReplayGainMode.OFF) {
+            L.d("Nothing playing or ReplayGain off, disabling adjustment")
+            gainState = GainState(1f, 0f)
             return
         }
 
@@ -171,10 +175,24 @@ constructor(
                 // User wants album gain to be used when in an album, track gain otherwise.
                 ReplayGainMode.DYNAMIC -> {
                     L.d("Using dynamic strategy")
-                    gain.album?.takeIf {
-                        playbackManager.parent is Album &&
-                            playbackManager.currentSong?.album == playbackManager.parent
-                    } ?: gain.track
+                    val isSingleAlbumParent =
+                        playbackManager.parent is Album && song.album == playbackManager.parent
+                    val hasExplicitNonMatchingParent =
+                        playbackManager.parent != null && !isSingleAlbumParent
+                    val useAlbum =
+                        shouldUseAlbumGainDynamic(
+                            queue = playbackManager.queue,
+                            currentIndex = playbackManager.index,
+                            currentSong = song,
+                            isSingleAlbumParent = isSingleAlbumParent,
+                            isShuffled = playbackManager.isShuffled,
+                            hasExplicitNonMatchingParent = hasExplicitNonMatchingParent,
+                        )
+                    if (useAlbum) {
+                        gain.album ?: gain.track
+                    } else {
+                        gain.track ?: gain.album
+                    }
                 }
             }
 
@@ -191,9 +209,8 @@ constructor(
 
         L.d("Applying ReplayGain adjustment ${amplifiedAdjustment}db")
 
-        currentAdjustmentDb = amplifiedAdjustment
-        // Final adjustment along the volume curve.
-        volume = 10f.pow(amplifiedAdjustment / 20f)
+        // Final adjustment published atomically alongside dB adjustment.
+        gainState = GainState(10f.pow(amplifiedAdjustment / 20f), amplifiedAdjustment)
     }
 
     // --- AUDIO PROCESSOR IMPLEMENTATION ---
@@ -232,49 +249,105 @@ constructor(
         val buffer = replaceOutputBuffer(size).order(ByteOrder.LITTLE_ENDIAN)
 
         try {
-            val dspCfg = dspConfigSource?.config?.value ?: DspChainConfig()
+            if (pendingDspReset.getAndSet(false)) {
+                dspEngine.resetState()
+            }
+            val dspCfg = dspConfigSource?.config?.value ?: defaultDspConfig
             dspEngine.updateConfig(dspCfg)
             val nonIdentityDsp = dspCfg.hasNonIdentityProcessing()
 
+            val gs = gainState
+            val volume = gs.volume
+            val adjustmentDb = gs.adjustmentDb
             if (isBypassed || (!nonIdentityDsp && volume == 1f)) {
                 buffer.put(inputBuffer.slice())
             } else if (!nonIdentityDsp) {
                 val scale = volume.toDouble()
+                val useSoftLimiter = volume > 1f && dspCfg.limiterEnabled
+                val ceiling =
+                    if (useSoftLimiter) {
+                        10.0.pow(dspCfg.limiterCeilingDb.coerceIn(-3.0, -0.05) / 20.0)
+                    } else {
+                        1.0
+                    }
                 when (inputAudioFormat.encoding) {
                     C.ENCODING_PCM_16BIT -> {
-                        for (i in pos until limit step 2) {
-                            val sample =
-                                (inputBuffer.getShort(i) * scale)
-                                    .toInt()
-                                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                                    .toShort()
-                            buffer.putShort(sample)
+                        if (useSoftLimiter) {
+                            for (i in pos until limit step 2) {
+                                val limited = softLimit((inputBuffer.getShort(i) / 32768.0) * scale, ceiling)
+                                val sample =
+                                    (limited * 32768.0)
+                                        .roundToInt()
+                                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                                        .toShort()
+                                buffer.putShort(sample)
+                            }
+                        } else {
+                            for (i in pos until limit step 2) {
+                                val sample =
+                                    (inputBuffer.getShort(i) * scale)
+                                        .toInt()
+                                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                                        .toShort()
+                                buffer.putShort(sample)
+                            }
                         }
                     }
                     C.ENCODING_PCM_24BIT -> {
-                        for (i in pos until limit step 3) {
-                            val sample =
-                                (inputBuffer.getLeInt24(i) * scale)
-                                    .toInt()
-                                    .coerceIn(MIN_INT24, MAX_INT24)
-                            buffer.putLeInt24(sample)
+                        if (useSoftLimiter) {
+                            for (i in pos until limit step 3) {
+                                val limited = softLimit((inputBuffer.getLeInt24(i) / 8388608.0) * scale, ceiling)
+                                val sample =
+                                    (limited * 8388608.0)
+                                        .roundToInt()
+                                        .coerceIn(MIN_INT24, MAX_INT24)
+                                buffer.putLeInt24(sample)
+                            }
+                        } else {
+                            for (i in pos until limit step 3) {
+                                val sample =
+                                    (inputBuffer.getLeInt24(i) * scale)
+                                        .toInt()
+                                        .coerceIn(MIN_INT24, MAX_INT24)
+                                buffer.putLeInt24(sample)
+                            }
                         }
                     }
                     C.ENCODING_PCM_32BIT -> {
-                        for (i in pos until limit step 4) {
-                            val sample =
-                                (inputBuffer.getInt(i) * scale)
-                                    .coerceIn(Int.MIN_VALUE.toDouble(), Int.MAX_VALUE.toDouble())
-                                    .toInt()
-                            buffer.putInt(sample)
+                        if (useSoftLimiter) {
+                            for (i in pos until limit step 4) {
+                                val limited = softLimit((inputBuffer.getInt(i) / 2147483648.0) * scale, ceiling)
+                                val sample =
+                                    (limited * 2147483648.0)
+                                        .roundToLong()
+                                        .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+                                        .toInt()
+                                buffer.putInt(sample)
+                            }
+                        } else {
+                            for (i in pos until limit step 4) {
+                                val sample =
+                                    (inputBuffer.getInt(i) * scale)
+                                        .coerceIn(Int.MIN_VALUE.toDouble(), Int.MAX_VALUE.toDouble())
+                                        .toInt()
+                                buffer.putInt(sample)
+                            }
                         }
                     }
                     C.ENCODING_PCM_FLOAT -> {
-                        for (i in pos until limit step 4) {
-                            val bits = inputBuffer.getInt(i)
-                            val sample = Float.fromBits(bits)
-                            val scaled = (sample * scale).toFloat()
-                            buffer.putInt(scaled.toRawBits())
+                        if (useSoftLimiter) {
+                            for (i in pos until limit step 4) {
+                                val bits = inputBuffer.getInt(i)
+                                val limited = softLimit(Float.fromBits(bits).toDouble() * scale, ceiling)
+                                buffer.putInt(limited.toFloat().toRawBits())
+                            }
+                        } else {
+                            for (i in pos until limit step 4) {
+                                val bits = inputBuffer.getInt(i)
+                                val sample = Float.fromBits(bits)
+                                val scaled = (sample * scale).toFloat()
+                                buffer.putInt(scaled.toRawBits())
+                            }
                         }
                     }
                     else -> buffer.put(inputBuffer.slice())
@@ -332,42 +405,10 @@ constructor(
                     dspEngine.processInterleaved(
                         samples = workBuffer,
                         frameCount = frameCount,
-                        replayGainDb = currentAdjustmentDb.toDouble(),
+                        replayGainDb = adjustmentDb.toDouble(),
                     )
 
-                    when (inputAudioFormat.encoding) {
-                        C.ENCODING_PCM_16BIT -> {
-                            for (s in 0 until usedSamples) {
-                                val v =
-                                    (workBuffer[s] * 32768.0)
-                                        .roundToInt()
-                                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                                        .toShort()
-                                buffer.putShort(v)
-                            }
-                        }
-                        C.ENCODING_PCM_24BIT -> {
-                            for (s in 0 until usedSamples) {
-                                val v = (workBuffer[s] * 8388608.0).roundToInt().coerceIn(MIN_INT24, MAX_INT24)
-                                buffer.putLeInt24(v)
-                            }
-                        }
-                        C.ENCODING_PCM_32BIT -> {
-                            for (s in 0 until usedSamples) {
-                                val v =
-                                    (workBuffer[s] * 2147483648.0)
-                                        .roundToLong()
-                                        .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
-                                        .toInt()
-                                buffer.putInt(v)
-                            }
-                        }
-                        C.ENCODING_PCM_FLOAT -> {
-                            for (s in 0 until usedSamples) {
-                                buffer.putInt(workBuffer[s].toFloat().toRawBits())
-                            }
-                        }
-                    }
+                    encodeDoubleBufferToOutput(workBuffer, usedSamples, inputAudioFormat.encoding, buffer)
                 }
             }
         } finally {
@@ -377,6 +418,75 @@ constructor(
         inputBuffer.position(limit)
         buffer.flip()
     }
+
+    override fun onQueueEndOfStream() {
+        val pendingFrames = dspEngine.pendingLimiterFrames()
+        if (pendingFrames <= 0 || isBypassed) return
+        val ch = inputAudioFormat.channelCount.coerceAtLeast(1)
+        val neededSamples = pendingFrames * ch
+        if (workBuffer.size < neededSamples) {
+            workBuffer = DoubleArray(neededSamples)
+        }
+        val drainedFrames = dspEngine.drainLimiterTail(workBuffer)
+        if (drainedFrames <= 0) return
+        val usedSamples = drainedFrames * ch
+        val bytesPerSample =
+            when (inputAudioFormat.encoding) {
+                C.ENCODING_PCM_16BIT -> 2
+                C.ENCODING_PCM_24BIT -> 3
+                C.ENCODING_PCM_32BIT,
+                C.ENCODING_PCM_FLOAT -> 4
+                else -> 0
+            }
+        if (bytesPerSample <= 0) return
+        val buffer = replaceOutputBuffer(usedSamples * bytesPerSample).order(ByteOrder.LITTLE_ENDIAN)
+        encodeDoubleBufferToOutput(workBuffer, usedSamples, inputAudioFormat.encoding, buffer)
+        buffer.flip()
+    }
+
+    private fun encodeDoubleBufferToOutput(
+        src: DoubleArray,
+        usedSamples: Int,
+        encoding: Int,
+        buffer: ByteBuffer,
+    ) {
+        when (encoding) {
+            C.ENCODING_PCM_16BIT -> {
+                for (s in 0 until usedSamples) {
+                    val v =
+                        (src[s] * 32768.0)
+                            .roundToInt()
+                            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                            .toShort()
+                    buffer.putShort(v)
+                }
+            }
+            C.ENCODING_PCM_24BIT -> {
+                for (s in 0 until usedSamples) {
+                    val v = (src[s] * 8388608.0).roundToInt().coerceIn(MIN_INT24, MAX_INT24)
+                    buffer.putLeInt24(v)
+                }
+            }
+            C.ENCODING_PCM_32BIT -> {
+                for (s in 0 until usedSamples) {
+                    val v =
+                        (src[s] * 2147483648.0)
+                            .roundToLong()
+                            .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+                            .toInt()
+                    buffer.putInt(v)
+                }
+            }
+            C.ENCODING_PCM_FLOAT -> {
+                for (s in 0 until usedSamples) {
+                    buffer.putInt(src[s].toFloat().toRawBits())
+                }
+            }
+        }
+    }
+
+    private fun softLimit(normalized: Double, ceiling: Double): Double =
+        softLimitSample(normalized, ceiling)
 
     private fun ByteBuffer.getLeInt24(at: Int): Int {
         val b0 = get(at).toInt() and 0xFF
@@ -391,8 +501,59 @@ constructor(
         put((value shr 16).toByte())
     }
 
-    private companion object {
-        const val MIN_INT24 = -8_388_608
-        const val MAX_INT24 = 8_388_607
+    internal companion object {
+        private const val MIN_INT24 = -8_388_608
+        private const val MAX_INT24 = 8_388_607
+
+        internal fun buildWorkBlockKey(song: Song): String? {
+            val work = song.workName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+            return "${song.album.uid}::$work"
+        }
+
+        internal fun shouldUseAlbumGainDynamic(
+            queue: List<Song>,
+            currentIndex: Int,
+            currentSong: Song,
+            isSingleAlbumParent: Boolean,
+            isShuffled: Boolean,
+            hasExplicitNonMatchingParent: Boolean = false,
+        ): Boolean {
+            val currentWorkKey = buildWorkBlockKey(currentSong)
+            if (currentWorkKey != null) {
+                if (currentIndex in queue.indices) {
+                    val prevSame =
+                        currentIndex > 0 && buildWorkBlockKey(queue[currentIndex - 1]) == currentWorkKey
+                    val nextSame =
+                        currentIndex + 1 < queue.size && buildWorkBlockKey(queue[currentIndex + 1]) == currentWorkKey
+                    if (prevSame || nextSame) return true
+                } else {
+                    var sameWorkCount = 0
+                    val cap = minOf(queue.size, 256)
+                    for (i in 0 until cap) {
+                        if (buildWorkBlockKey(queue[i]) == currentWorkKey) {
+                            sameWorkCount++
+                            if (sameWorkCount >= 2) return true
+                        }
+                    }
+                }
+            }
+
+            if (isShuffled) return false
+            if (isSingleAlbumParent) return true
+
+            if (!hasExplicitNonMatchingParent && queue.size > 1) {
+                val curAlbum = currentSong.album
+                val cap = minOf(queue.size, 256)
+                var sameAlbum = true
+                for (i in 0 until cap) {
+                    if (queue[i].album != curAlbum) {
+                        sameAlbum = false
+                        break
+                    }
+                }
+                if (sameAlbum) return true
+            }
+            return false
+        }
     }
 }

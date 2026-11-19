@@ -129,7 +129,7 @@ pub fn apply_header_delta_patch<RW: Read + Write + Seek>(
         });
     }
 
-    if (new_header_bytes.len() as u64) > fp.header_size {
+    if (new_header_bytes.len() as u64) != fp.header_size {
         return Ok(HeaderPatchOutcome::PaddingInsufficient {
             required: new_header_bytes.len(),
             available: fp.header_size,
@@ -138,21 +138,11 @@ pub fn apply_header_delta_patch<RW: Read + Write + Seek>(
 
     stream.seek(SeekFrom::Start(0))?;
     stream.write_all(new_header_bytes)?;
-    let slack = (fp.header_size as usize) - new_header_bytes.len();
-    if slack > 0 {
-        let zeros = vec![0u8; slack.min(64 * 1024)];
-        let mut remaining = slack;
-        while remaining > 0 {
-            let chunk = remaining.min(zeros.len());
-            stream.write_all(&zeros[..chunk])?;
-            remaining -= chunk;
-        }
-    }
     stream.flush()?;
 
     Ok(HeaderPatchOutcome::Applied {
         bytes_written: new_header_bytes.len(),
-        padding_slack: slack,
+        padding_slack: 0,
     })
 }
 
@@ -246,5 +236,42 @@ mod tests {
         let after = compute_audio_frame_fingerprint(&mut cursor).unwrap();
         assert_eq!(before.audio_frame_blake3_hex, after.audio_frame_blake3_hex);
         assert_ne!(before.header_blake3_hex, after.header_blake3_hex);
+    }
+
+    #[test]
+    fn header_patch_rejects_mismatched_size_or_hash_without_corrupting_stream() {
+        let audio = b"LOSSLESS_AUDIO_STREAM_BYTES_9988776655";
+        let mut initial = Vec::new();
+        initial.extend_from_slice(b"fLaC");
+        initial.push(0x00);
+        initial.extend_from_slice(&[0, 0, 34]);
+        initial.extend_from_slice(&[1u8; 34]);
+        initial.push(0x81);
+        initial.extend_from_slice(&[0, 0, 64]);
+        initial.extend_from_slice(&[0u8; 64]);
+        initial.extend_from_slice(audio);
+
+        let before = compute_audio_frame_fingerprint(&mut Cursor::new(&initial)).unwrap();
+
+        // Shorter header (< header_size) must NOT zero-fill trailing bytes; must reject with PaddingInsufficient
+        let mut short_hdr = initial[..(before.header_size as usize - 16)].to_vec();
+        short_hdr[38] = 0x81; // pretend earlier last block
+        let mut cursor_short = Cursor::new(initial.clone());
+        let res_short =
+            apply_header_delta_patch(&mut cursor_short, &before.header_blake3_hex, &short_hdr)
+                .unwrap();
+        assert!(matches!(res_short, HeaderPatchOutcome::PaddingInsufficient { .. }));
+        assert_eq!(cursor_short.get_ref(), &initial);
+
+        // Hash mismatch must leave stream untouched
+        let mut cursor_mismatch = Cursor::new(initial.clone());
+        let res_mismatch = apply_header_delta_patch(
+            &mut cursor_mismatch,
+            &"0".repeat(64),
+            &initial[..before.header_size as usize],
+        )
+        .unwrap();
+        assert!(matches!(res_mismatch, HeaderPatchOutcome::HeaderHashMismatch { .. }));
+        assert_eq!(cursor_mismatch.get_ref(), &initial);
     }
 }

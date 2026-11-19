@@ -335,7 +335,7 @@ private fun formatPcmEncoding(encoding: Int, floatEnabled: Boolean): String =
         C.ENCODING_PCM_32BIT -> "32-bit PCM"
         C.ENCODING_PCM_24BIT -> "24-bit PCM"
         C.ENCODING_PCM_16BIT -> "16-bit PCM"
-        else -> if (floatEnabled) "32-bit Float Pipeline" else "16-bit PCM"
+        else -> "Idle / Standby"
     }
 
 @Composable

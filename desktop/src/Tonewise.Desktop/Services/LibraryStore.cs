@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Tonewise.Desktop.Models;
 using Tonewise.Interop;
+using Tonewise.SyncHost;
 using Tonewise.SyncHost.Curation;
 using Tonewise.SyncHost.Ledger;
 
@@ -11,7 +12,7 @@ namespace Tonewise.Desktop.Services;
 public sealed class LibraryStore
 {
     private static readonly string[] AudioExtensions =
-        [".flac", ".mp3", ".wav", ".m4a", ".alac", ".aac", ".ogg", ".opus"];
+        [".flac", ".mp3", ".wav", ".m4a", ".alac", ".aac", ".ogg", ".opus", ".dsf", ".dff", ".aiff", ".aif"];
 
     public string? MusicRoot { get; private set; }
     public string? WaveformsBinPath { get; private set; }
@@ -147,8 +148,7 @@ public sealed class LibraryStore
 
         try
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
-            conn.Open();
+            using var conn = TonewiseSqlite.OpenReadOnly(dbPath);
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT EXISTS(SELECT 1 FROM tracks LIMIT 1);";
             object? res = cmd.ExecuteScalar();
@@ -178,8 +178,7 @@ public sealed class LibraryStore
         }
 
         var albumAssetsCache = new Dictionary<string, (string? Cover, string? Booklet)>(StringComparer.OrdinalIgnoreCase);
-        using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
-        conn.Open();
+        using var conn = TonewiseSqlite.OpenReadOnly(dbPath);
 
         var cols = ReadExistingColumns(conn);
         string selectSql = BuildTrackSelectSql(cols, "ORDER BY album, rel_path");
@@ -197,8 +196,7 @@ public sealed class LibraryStore
             return result;
 
         var albumAssetsCache = new Dictionary<string, (string? Cover, string? Booklet)>(StringComparer.OrdinalIgnoreCase);
-        using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
-        conn.Open();
+        using var conn = TonewiseSqlite.OpenReadOnly(dbPath);
         var cols = ReadExistingColumns(conn);
 
         var distinctUids = trackUids.Where(u => !string.IsNullOrWhiteSpace(u)).Distinct(StringComparer.Ordinal).ToList();
@@ -230,6 +228,8 @@ public sealed class LibraryStore
         bool hasPlayCountTotal = cols.Contains("play_count_total");
         bool hasMovementNumber = cols.Contains("movement_number");
         bool hasReplayGainAlbum = cols.Contains("replaygain_album_db");
+        bool hasDiscNumber = cols.Contains("disc_number");
+        bool hasTrackNumber = cols.Contains("track_number");
         bool hasLedgerCols = cols.Contains("legacy_play_count")
                              && cols.Contains("lastfm_pulled_count")
                              && cols.Contains("local_unsynced_expired_count");
@@ -247,7 +247,9 @@ public sealed class LibraryStore
                 {(hasLedgerCols ? "lastfm_pulled_count" : "0")} AS lastfm_pulled_count,
                 {(hasLedgerCols ? "local_unsynced_expired_count" : "0")} AS local_unsynced_expired_count,
                 {(hasMovementNumber ? "movement_number" : "NULL")} AS movement_number,
-                {(hasReplayGainAlbum ? "replaygain_album_db" : "NULL")} AS replaygain_album_db
+                {(hasReplayGainAlbum ? "replaygain_album_db" : "NULL")} AS replaygain_album_db,
+                {(hasDiscNumber ? "disc_number" : "0")} AS disc_number,
+                {(hasTrackNumber ? "track_number" : "0")} AS track_number
             FROM tracks
             {tailClause}
             """;
@@ -300,6 +302,11 @@ public sealed class LibraryStore
             int effectiveCount = Math.Max(total, LastFmLedgerService.ComputeEffectivePlayCount(legacy, pulled, expired));
             int? movementNumber = reader.IsDBNull(28) ? null : reader.GetInt32(28);
             double? rgAlbumDb = reader.IsDBNull(29) ? null : reader.GetDouble(29);
+            int dbDisc = reader.IsDBNull(30) ? 0 : reader.GetInt32(30);
+            int dbTrack = reader.IsDBNull(31) ? 0 : reader.GetInt32(31);
+            var (pathDisc, pathTrack) = ParseDiscAndTrackFromRelPath(relPath);
+            int discNumber = dbDisc > 0 ? dbDisc : pathDisc;
+            int trackNumber = dbTrack > 0 ? dbTrack : pathTrack;
 
             items.Add(
                 new TrackItem(
@@ -334,7 +341,9 @@ public sealed class LibraryStore
                     CoverArtPath: assets.Cover,
                     BookletPdfPath: assets.Booklet,
                     MovementNumber: movementNumber,
-                    ReplayGainAlbumDb: rgAlbumDb
+                    ReplayGainAlbumDb: rgAlbumDb,
+                    DiscNumber: discNumber,
+                    TrackNumber: trackNumber
                 )
             );
         }
@@ -436,62 +445,13 @@ public sealed class LibraryStore
 
     private static void BuildManifestWithFfiFallback(string musicRoot, string dbPath, bool fastMode = true)
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
-        conn.Open();
+        using var conn = TonewiseSqlite.OpenReadWrite(dbPath);
         using (var init = conn.CreateCommand())
         {
-            init.CommandText = """
-                PRAGMA journal_mode = WAL;
-                CREATE TABLE IF NOT EXISTS tracks (
-                    track_uid TEXT PRIMARY KEY,
-                    audio_frame_blake3 BLOB NOT NULL UNIQUE,
-                    header_size INTEGER NOT NULL DEFAULT 0,
-                    header_blake3 BLOB NOT NULL,
-                    padding_bytes INTEGER NOT NULL DEFAULT 0,
-                    rel_path TEXT NOT NULL,
-                    file_size INTEGER NOT NULL,
-                    mtime_ms INTEGER NOT NULL,
-                    codec TEXT NOT NULL,
-                    sample_rate_hz INTEGER NOT NULL,
-                    bit_depth INTEGER,
-                    bitrate_kbps INTEGER,
-                    duration_ms INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    album TEXT,
-                    album_artist TEXT,
-                    artists_json TEXT NOT NULL DEFAULT '[]',
-                    composers_json TEXT NOT NULL DEFAULT '[]',
-                    conductors_json TEXT NOT NULL DEFAULT '[]',
-                    work_name TEXT,
-                    movement_name TEXT,
-                    movement_number INTEGER,
-                    genre TEXT,
-                    year INTEGER,
-                    original_date TEXT,
-                    release_type TEXT,
-                    replaygain_track_db REAL,
-                    replaygain_album_db REAL,
-                    replaygain_peak REAL,
-                    dj_scene_json TEXT NOT NULL DEFAULT '[]',
-                    dj_scene_ts INTEGER NOT NULL DEFAULT 0,
-                    dj_vocals TEXT,
-                    dj_vocals_ts INTEGER NOT NULL DEFAULT 0,
-                    dj_energy TEXT,
-                    dj_energy_ts INTEGER NOT NULL DEFAULT 0,
-                    tempo_bpm REAL,
-                    tempo_bucket TEXT,
-                    tempo_ts INTEGER NOT NULL DEFAULT 0,
-                    mood_json TEXT NOT NULL DEFAULT '[]',
-                    mood_ts INTEGER NOT NULL DEFAULT 0,
-                    rating INTEGER DEFAULT 0,
-                    rating_ts INTEGER NOT NULL DEFAULT 0,
-                    play_count_total INTEGER NOT NULL DEFAULT 0,
-                    last_played_ts INTEGER NOT NULL DEFAULT 0,
-                    waveform_offset INTEGER
-                );
-                """;
+            init.CommandText = ManifestSchemaProvider.ManifestSql;
             init.ExecuteNonQuery();
         }
+        ManifestSchemaProvider.EnsureSchemaV2(conn);
 
         var existingByRel = new Dictionary<string, (string Uid, long FileSize, long MtimeMs)>(StringComparer.OrdinalIgnoreCase);
         using (var existingCmd = conn.CreateCommand())
@@ -507,7 +467,7 @@ public sealed class LibraryStore
         var seenRelPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string cleanRoot = LongPathHelper.StripExtendedPrefix(Path.GetFullPath(musicRoot)).TrimEnd('\\', '/');
 
-        using var tx = conn.BeginTransaction();
+        using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
         foreach (string file in LongPathHelper.SafeEnumerateFiles(cleanRoot, "*.*", recursive: true, skipHiddenDirectories: true))
         {
             string ext = Path.GetExtension(file);
@@ -524,19 +484,14 @@ public sealed class LibraryStore
                 long fsz = fi.Length;
                 long mt = new DateTimeOffset(fi.LastWriteTimeUtc).ToUnixTimeMilliseconds();
 
+                string? prevUidForRel = null;
                 if (existingByRel.TryGetValue(rel, out var prev))
                 {
-                    if (prev.FileSize != fsz || Math.Abs(prev.MtimeMs - mt) > 2000)
+                    if (prev.FileSize == fsz && Math.Abs(prev.MtimeMs - mt) <= 2000)
                     {
-                        using var upd = conn.CreateCommand();
-                        upd.Transaction = tx;
-                        upd.CommandText = "UPDATE tracks SET file_size = $fsz, mtime_ms = $mt WHERE track_uid = $uid;";
-                        upd.Parameters.AddWithValue("$fsz", fsz);
-                        upd.Parameters.AddWithValue("$mt", mt);
-                        upd.Parameters.AddWithValue("$uid", prev.Uid);
-                        upd.ExecuteNonQuery();
+                        continue;
                     }
-                    continue;
+                    prevUidForRel = prev.Uid;
                 }
 
                 byte[] audioHash;
@@ -561,11 +516,35 @@ public sealed class LibraryStore
                         ? dirName
                         : "Unknown Album");
                 string? albumArtist = !string.IsNullOrWhiteSpace(embedded.AlbumArtist) ? embedded.AlbumArtist : null;
-                string artistsJson = !string.IsNullOrWhiteSpace(embedded.Artist)
-                    ? JsonSerializer.Serialize(new[] { embedded.Artist! })
+                var splitArtists = !string.IsNullOrWhiteSpace(embedded.Artist)
+                    ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.SplitPerformers(embedded.Artist!)
                     : (!string.IsNullOrWhiteSpace(albumArtist)
-                        ? JsonSerializer.Serialize(new[] { albumArtist })
-                        : "[]");
+                        ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.SplitPerformers(albumArtist!)
+                        : []);
+                string artistsJson = splitArtists.Count > 0
+                    ? JsonSerializer.Serialize(splitArtists)
+                    : "[]";
+                var splitComposers = !string.IsNullOrWhiteSpace(embedded.Composer)
+                    ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.SplitPerformers(embedded.Composer!)
+                    : [];
+                var splitConductors = !string.IsNullOrWhiteSpace(embedded.Conductor)
+                    ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.SplitPerformers(embedded.Conductor!)
+                    : [];
+                string composersJson = splitComposers.Count > 0
+                    ? JsonSerializer.Serialize(splitComposers)
+                    : "[]";
+                string conductorsJson = splitConductors.Count > 0
+                    ? JsonSerializer.Serialize(splitConductors)
+                    : "[]";
+                string? workName = !string.IsNullOrWhiteSpace(embedded.WorkName) ? embedded.WorkName.Trim() : null;
+                string? movementName = !string.IsNullOrWhiteSpace(embedded.MovementName) ? embedded.MovementName.Trim() : null;
+                int? movementNumber = embedded.MovementNumber is > 0 ? embedded.MovementNumber : null;
+                var (pathDiscNo, pathTrackNo) = ParseDiscAndTrackFromRelPath(rel);
+                int discNo = embedded.DiscNumber is > 0 ? embedded.DiscNumber.Value : pathDiscNo;
+                int trackNo = embedded.TrackNumber is > 0 ? embedded.TrackNumber.Value : pathTrackNo;
+                string? genre = !string.IsNullOrWhiteSpace(embedded.Genre) ? embedded.Genre.Trim() : null;
+                double? rgAlbum = embedded.ReplayGainAlbumDb;
+                rgTrack = embedded.ReplayGainTrackDb;
 
                 if (fastMode)
                 {
@@ -598,6 +577,26 @@ public sealed class LibraryStore
 
                 string trackUid = Convert.ToHexStringLower(audioHash);
 
+                rgTrack ??= embedded.ReplayGainTrackDb;
+                if (prevUidForRel is not null && !string.Equals(prevUidForRel, trackUid, StringComparison.Ordinal))
+                {
+                    using var delOld = conn.CreateCommand();
+                    delOld.Transaction = tx;
+                    delOld.CommandText = "DELETE FROM tracks WHERE track_uid = $oldUid AND rel_path = $rel;";
+                    delOld.Parameters.AddWithValue("$oldUid", prevUidForRel);
+                    delOld.Parameters.AddWithValue("$rel", rel);
+                    delOld.ExecuteNonQuery();
+                }
+
+                using (var dedupAf = conn.CreateCommand())
+                {
+                    dedupAf.Transaction = tx;
+                    dedupAf.CommandText = "DELETE FROM tracks WHERE audio_frame_blake3 = $af AND track_uid <> $uid;";
+                    dedupAf.Parameters.AddWithValue("$af", audioHash);
+                    dedupAf.Parameters.AddWithValue("$uid", trackUid);
+                    dedupAf.ExecuteNonQuery();
+                }
+
                 using var ins = conn.CreateCommand();
                 ins.Transaction = tx;
                 ins.CommandText = """
@@ -605,17 +604,37 @@ public sealed class LibraryStore
                         track_uid, audio_frame_blake3, header_size, header_blake3,
                         rel_path, file_size, mtime_ms, codec, sample_rate_hz, bit_depth,
                         bitrate_kbps, duration_ms, title, album, album_artist, artists_json,
-                        replaygain_track_db, tempo_bpm, tempo_bucket
+                        composers_json, conductors_json, work_name, movement_name, movement_number, disc_number, track_number, genre,
+                        replaygain_track_db, replaygain_album_db, tempo_bpm, tempo_bucket
                     ) VALUES (
                         $uid, $af, $hsz, $hb,
                         $rel, $fsz, $mt, $cdc, $sr, $bd,
                         $br, $dur, $ti, $al, $aa, $ar,
-                        $rg, $bpm, $bkt
+                        $cmp, $cnd, $wk, $mvn, $mvi, $dsc, $trk, $gen,
+                        $rg, $rga, $bpm, $bkt
                     )
                     ON CONFLICT(track_uid) DO UPDATE SET
+                        audio_frame_blake3 = excluded.audio_frame_blake3,
+                        header_size = excluded.header_size,
+                        header_blake3 = excluded.header_blake3,
                         rel_path = excluded.rel_path,
                         file_size = excluded.file_size,
-                        mtime_ms = excluded.mtime_ms;
+                        mtime_ms = excluded.mtime_ms,
+                        codec = excluded.codec,
+                        title = CASE WHEN length(trim(excluded.title)) > 0 THEN excluded.title ELSE tracks.title END,
+                        album = CASE WHEN length(trim(excluded.album)) > 0 THEN excluded.album ELSE tracks.album END,
+                        album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
+                        artists_json = CASE WHEN excluded.artists_json <> '[]' THEN excluded.artists_json ELSE tracks.artists_json END,
+                        composers_json = CASE WHEN excluded.composers_json <> '[]' THEN excluded.composers_json ELSE tracks.composers_json END,
+                        conductors_json = CASE WHEN excluded.conductors_json <> '[]' THEN excluded.conductors_json ELSE tracks.conductors_json END,
+                        work_name = COALESCE(NULLIF(excluded.work_name, ''), tracks.work_name),
+                        movement_name = COALESCE(NULLIF(excluded.movement_name, ''), tracks.movement_name),
+                        movement_number = COALESCE(excluded.movement_number, tracks.movement_number),
+                        disc_number = CASE WHEN excluded.disc_number > 0 THEN excluded.disc_number ELSE tracks.disc_number END,
+                        track_number = CASE WHEN excluded.track_number > 0 THEN excluded.track_number ELSE tracks.track_number END,
+                        genre = COALESCE(NULLIF(excluded.genre, ''), tracks.genre),
+                        replaygain_track_db = COALESCE(excluded.replaygain_track_db, tracks.replaygain_track_db),
+                        replaygain_album_db = COALESCE(excluded.replaygain_album_db, tracks.replaygain_album_db);
                     """;
                 ins.Parameters.AddWithValue("$uid", trackUid);
                 ins.Parameters.AddWithValue("$af", audioHash);
@@ -633,7 +652,16 @@ public sealed class LibraryStore
                 ins.Parameters.AddWithValue("$al", album);
                 ins.Parameters.AddWithValue("$aa", (object?)albumArtist ?? DBNull.Value);
                 ins.Parameters.AddWithValue("$ar", artistsJson);
+                ins.Parameters.AddWithValue("$cmp", composersJson);
+                ins.Parameters.AddWithValue("$cnd", conductorsJson);
+                ins.Parameters.AddWithValue("$wk", (object?)workName ?? DBNull.Value);
+                ins.Parameters.AddWithValue("$mvn", (object?)movementName ?? DBNull.Value);
+                ins.Parameters.AddWithValue("$mvi", movementNumber.HasValue ? movementNumber.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("$dsc", discNo);
+                ins.Parameters.AddWithValue("$trk", trackNo);
+                ins.Parameters.AddWithValue("$gen", (object?)genre ?? DBNull.Value);
                 ins.Parameters.AddWithValue("$rg", rgTrack.HasValue ? rgTrack.Value : DBNull.Value);
+                ins.Parameters.AddWithValue("$rga", rgAlbum.HasValue ? rgAlbum.Value : DBNull.Value);
                 ins.Parameters.AddWithValue("$bpm", estBpm.HasValue ? estBpm.Value : DBNull.Value);
                 ins.Parameters.AddWithValue("$bkt", (object?)tempoBucket ?? DBNull.Value);
                 ins.ExecuteNonQuery();
@@ -667,6 +695,48 @@ public sealed class LibraryStore
             return null;
         }
         return TonewiseCoreClient.LookupWaveform(WaveformsBinPath, track.AudioFrameBlake3Hex);
+    }
+
+    public static (int DiscNumber, int TrackNumber) ParseDiscAndTrackFromRelPath(string? relPath)
+    {
+        if (string.IsNullOrWhiteSpace(relPath)) return (0, 0);
+        string norm = relPath.Replace('\\', '/');
+        string fileStem = Path.GetFileNameWithoutExtension(norm);
+
+        var discTrack = System.Text.RegularExpressions.Regex.Match(
+            fileStem,
+            @"^0*(?<disc>\d{1,2})-0*(?<track>\d{1,3})(?:[\s._-]+|$)");
+        if (discTrack.Success
+            && int.TryParse(discTrack.Groups["disc"].Value, out int d1)
+            && int.TryParse(discTrack.Groups["track"].Value, out int t1))
+        {
+            return (Math.Max(0, d1), Math.Max(0, t1));
+        }
+
+        int trackNo = 0;
+        var trackOnly = System.Text.RegularExpressions.Regex.Match(
+            fileStem,
+            @"^0*(?<track>\d{1,3})(?:[\s._-]+|$)");
+        if (trackOnly.Success && int.TryParse(trackOnly.Groups["track"].Value, out int t2))
+        {
+            trackNo = Math.Max(0, t2);
+        }
+
+        int discNo = 0;
+        int lastSlash = norm.LastIndexOf('/');
+        if (lastSlash > 0)
+        {
+            string parentDir = norm[..lastSlash];
+            var discDir = System.Text.RegularExpressions.Regex.Match(
+                parentDir,
+                @"(?:^|/)(?:CD|Disc|Disk)\s*0*(?<disc>\d{1,2})(?=$|[/\s_-])",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (discDir.Success && int.TryParse(discDir.Groups["disc"].Value, out int d2))
+            {
+                discNo = Math.Max(0, d2);
+            }
+        }
+        return (discNo, trackNo);
     }
 
     private static HashSet<string> ReadExistingColumns(SqliteConnection conn)

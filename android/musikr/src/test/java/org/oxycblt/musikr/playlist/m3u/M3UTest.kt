@@ -22,15 +22,23 @@ import android.content.Context
 import io.mockk.every
 import io.mockk.mockk
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.oxycblt.musikr.Album
+import org.oxycblt.musikr.Artist
+import org.oxycblt.musikr.Playlist
+import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.fs.Components
 import org.oxycblt.musikr.fs.Path
 import org.oxycblt.musikr.fs.Volume
 import org.oxycblt.musikr.fs.path.VolumeManager
+import org.oxycblt.musikr.playlist.ExportConfig
+import org.oxycblt.musikr.tag.Name
+import org.oxycblt.musikr.tag.interpret.Naming
 
 class M3UTest {
     private val fakeVolume =
@@ -86,5 +94,49 @@ class M3UTest {
         val expectedPath =
             Path(fakeVolume, Components.parseUnix("Music/Bach/BWV1007/01_Prelude.flac"))
         assertTrue(imported.paths[0].contains(expectedPath))
+    }
+
+    @Test
+    fun write_formatsExtinfDurationInSecondsWithArtists() {
+        val volumeManager = mockk<VolumeManager>()
+        every { volumeManager.getVolumes() } returns listOf(fakeVolume)
+        val m3u = M3U.from(volumeManager)
+        val naming = Naming.simple()
+
+        val artist = mockk<Artist>()
+        every { artist.name } returns naming.name("Glenn Gould", null)
+
+        val album = mockk<Album>()
+        every { album.name } returns naming.name("Goldberg Variations", null)
+
+        val song = mockk<Song>()
+        every { song.name } returns naming.name("Aria", null)
+        every { song.durationMs } returns 210_450L
+        every { song.artists } returns listOf(artist)
+        every { song.album } returns album
+        every { song.genres } returns emptyList()
+        every { song.path } returns Path(fakeVolume, Components.parseUnix("Music/Bach/01_Aria.flac"))
+
+        val playlist = mockk<Playlist>()
+        every { playlist.name } returns naming.name("Midnight Bach", null)
+        every { playlist.songs } returns listOf(song)
+
+        val out = ByteArrayOutputStream()
+        val workingDir = Path(fakeVolume, Components.parseUnix("Music/Playlists"))
+        m3u.write(
+            playlist = playlist,
+            outputStream = out,
+            workingDirectory = workingDir,
+            config = ExportConfig(absolute = false, windowsPaths = false),
+        )
+
+        val text = out.toString(Charsets.UTF_8)
+        val lines = text.lines()
+        assertTrue("Expected #EXTINF:210,Glenn Gould - Aria in:\n$text", lines.contains("#EXTINF:210,Glenn Gould - Aria"))
+        assertFalse("Duration should not be written in milliseconds", text.contains("#EXTINF:210450,"))
+        assertTrue(
+            "Expected relative track path in:\n$text",
+            lines.any { it.replace('\\', '/') == "./../Bach/01_Aria.flac" },
+        )
     }
 }

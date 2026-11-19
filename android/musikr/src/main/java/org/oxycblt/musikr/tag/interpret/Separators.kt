@@ -60,12 +60,73 @@ interface Separators {
     }
 }
 
+private object ArtistWhitelistRegistry {
+    // Mirrors `protocol/dictionaries/artist_whitelist.json` sorted longest-first for greedy placeholder masking
+    val protectedNames: List<String> =
+        listOf(
+                "Tom Petty & The Heartbreakers",
+                "Crosby, Stills, Nash & Young",
+                "Nick Cave & The Bad Seeds",
+                "Florence + The Machine",
+                "Hootie & the Blowfish",
+                "Sly & the Family Stone",
+                "Crosby, Stills & Nash",
+                "Angus & Julia Stone",
+                "Earth, Wind & Fire",
+                "Simon & Garfunkel",
+                "Belle & Sebastian",
+                "Tears for Fears",
+                "Kool & the Gang",
+                "Above & Beyond",
+                "The Civil Wars",
+                "Mumford & Sons",
+                "Brooks & Dunn",
+                "Hall & Oates",
+                "Iron & Wine",
+                "AC/DC",
+            )
+            .sortedByDescending { it.length }
+
+    fun splitPreservingWhitelist(input: String, splitUnmasked: (String) -> List<String>): List<String> {
+        var working = input
+        val replacements = ArrayList<Pair<String, String>>()
+        var seq = 0
+        for ((idx, name) in protectedNames.withIndex()) {
+            var searchFrom = 0
+            while (true) {
+                val matchIdx = working.indexOf(name, startIndex = searchFrom, ignoreCase = true)
+                if (matchIdx < 0) break
+                val token = "__TW_WL_${idx}_${seq++}__"
+                val originalSlice = working.substring(matchIdx, matchIdx + name.length)
+                working = working.replaceRange(matchIdx, matchIdx + name.length, token)
+                replacements.add(token to originalSlice)
+                searchFrom = matchIdx + token.length
+            }
+        }
+        val chunks = splitUnmasked(working)
+        if (replacements.isEmpty()) return chunks
+        return chunks
+            .map { chunk ->
+                var restored = chunk
+                for ((token, original) in replacements) {
+                    if (restored.contains(token)) {
+                        restored = restored.replace(token, original)
+                    }
+                }
+                restored.trim()
+            }
+            .filter { it.isNotEmpty() }
+    }
+}
+
 private data class CharSeparators(private val chars: Set<Char>) : Separators {
     override fun split(strings: List<String>) =
         if (strings.size == 1) splitImpl(strings.first()) else strings
 
-    private fun splitImpl(string: String) =
-        string.splitEscaped { chars.contains(it) }.correctWhitespace()
+    private fun splitImpl(string: String): List<String> =
+        ArtistWhitelistRegistry.splitPreservingWhitelist(string) { unmasked ->
+            unmasked.splitEscaped { chars.contains(it) }.correctWhitespace()
+        }
 }
 
 private object NoSeparators : Separators {

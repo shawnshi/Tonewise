@@ -18,8 +18,11 @@
  
 package org.oxycblt.musikr.tag.interpret
 
+import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.oxycblt.musikr.core.TonewiseCore
 
 class SeparatorsTest {
     @Test
@@ -46,5 +49,34 @@ class SeparatorsTest {
             listOf("a,b;c/d", "e&f"),
             Separators.from(",;/+&").split(listOf("a,b;c/d", "e&f")),
         )
+    }
+
+    @Test
+    fun separators_split_preservesAll20WhitelistedArtistsIntact() {
+        var dir: File? = File(System.getProperty("user.dir") ?: ".").canonicalFile
+        var whitelistFile: File? = null
+        while (dir != null) {
+            val candidate = File(dir, "protocol/dictionaries/artist_whitelist.json")
+            if (candidate.isFile) {
+                whitelistFile = candidate
+                break
+            }
+            dir = dir.parentFile
+        }
+        val file = requireNotNull(whitelistFile) { "Could not locate protocol/dictionaries/artist_whitelist.json" }
+        @Suppress("UNCHECKED_CAST")
+        val root = TonewiseCore.parseJson(file.readText(Charsets.UTF_8)) as Map<String, Any?>
+        val names = (root["protected_names"] as List<*>).map { it.toString() }
+        assertTrue(names.size >= 20)
+
+        val sep = Separators.from(",;/+&")
+        for (name in names) {
+            assertEquals("Expected standalone whitelist artist intact: $name", listOf(name), sep.split(listOf(name)))
+            assertEquals(
+                "Expected whitelisted artist preserved alongside collaborator: $name",
+                listOf(name, "Guest Artist"),
+                sep.split(listOf("$name / Guest Artist")),
+            )
+        }
     }
 }

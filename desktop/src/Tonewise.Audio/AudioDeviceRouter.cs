@@ -1,4 +1,5 @@
 using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi.Interfaces;
 using NAudio.Wave;
 
 namespace Tonewise.Audio;
@@ -74,7 +75,7 @@ public static class AudioDeviceRouter
 
     internal static MMDevice? ResolveDevice(string? deviceId)
     {
-        var enumerator = new MMDeviceEnumerator();
+        using var enumerator = new MMDeviceEnumerator();
         if (!string.IsNullOrWhiteSpace(deviceId))
         {
             try
@@ -93,6 +94,57 @@ public static class AudioDeviceRouter
         catch
         {
             return null;
+        }
+    }
+}
+
+public sealed class AudioDeviceChangeWatcher : IMMNotificationClient, IDisposable
+{
+    private readonly MMDeviceEnumerator? _enumerator;
+    private int _disposed;
+
+    public event Action? EndpointsChanged;
+
+    public AudioDeviceChangeWatcher()
+    {
+        try
+        {
+            _enumerator = new MMDeviceEnumerator();
+            _enumerator.RegisterEndpointNotificationCallback(this);
+        }
+        catch
+        {
+            _enumerator?.Dispose();
+            _enumerator = null;
+        }
+    }
+
+    public void OnDeviceStateChanged(string deviceId, DeviceState newState) => EndpointsChanged?.Invoke();
+
+    public void OnDeviceAdded(string pwstrDeviceId) => EndpointsChanged?.Invoke();
+
+    public void OnDeviceRemoved(string deviceId) => EndpointsChanged?.Invoke();
+
+    public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
+    {
+        if (flow == DataFlow.Render)
+        {
+            EndpointsChanged?.Invoke();
+        }
+    }
+
+    public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key)
+    {
+        // Ignored to avoid notification storms on metadata/volume property updates
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        if (_enumerator is not null)
+        {
+            try { _enumerator.UnregisterEndpointNotificationCallback(this); } catch { }
+            try { _enumerator.Dispose(); } catch { }
         }
     }
 }

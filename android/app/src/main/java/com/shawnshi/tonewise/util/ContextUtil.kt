@@ -211,6 +211,6 @@ fun Context.newBroadcastPendingIntent(action: String): PendingIntent =
     PendingIntent.getBroadcast(
         this,
         IntegerTable.REQUEST_CODE,
-        Intent(action).setFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY),
+        Intent(action).setPackage(packageName).setFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY),
         PendingIntent.FLAG_IMMUTABLE,
     )

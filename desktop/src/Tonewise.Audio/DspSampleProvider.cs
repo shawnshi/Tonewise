@@ -7,7 +7,7 @@ namespace Tonewise.Audio;
 /// ISO 226 dynamic equal-loudness, dual-channel L/R 64-band Biquad PEQ,
 /// partitioned FIR convolution, ±1 LSB TPDF dithering, and bit-perfect bypass.
 /// </summary>
-public sealed class DspSampleProvider : ISampleProvider
+public sealed class DspSampleProvider : ISampleProvider, IDisposable
 {
     private readonly ISampleProvider _source;
     private readonly Lock _dspLock = new();
@@ -17,8 +17,14 @@ public sealed class DspSampleProvider : ISampleProvider
     private readonly SandboxedVst3HostBridge _vst3Bridge = new();
     private readonly TpdfDitherProcessor _dither = new();
 
-    private double _preampLinear = 1.0;
-    private double _masterLinear = 1.0;
+    private double _targetPreampLinear = 1.0;
+    private double _currentPreampLinear = 1.0;
+    private double _userMasterLinear = 1.0;
+    private double _sleepFadeLinear = 1.0;
+    private double _targetMasterLinear = 1.0;
+    private double _currentMasterLinear = 1.0;
+    private double _gainRampCoeff = 0.002;
+    private bool _hasProcessedSamples;
     private EqualizerApoProfile? _lastProfile;
     private double _lastReplayGainDb;
     private volatile bool _bypass;
@@ -27,7 +33,14 @@ public sealed class DspSampleProvider : ISampleProvider
     // Extended stereo acoustic stages (Gain-Matched A/B, Bauer Crossfeed, Balance/Mono, 3ms Lookahead Limiter)
     private bool _gainMatchedBypass;
     private double _rmsShiftDb;
+    private double _targetGainMatchedBypassLinear = 1.0;
+    private double _currentGainMatchedBypassLinear = 1.0;
     private bool _crossfeedEnabled;
+    private double _lastCrossfeedCutoffHz = 700.0;
+    private double _lastCrossfeedFeedDb = 4.5;
+    private double _lastCrossfeedDelayMs = 0.28;
+    private int _configuredSampleRateHz;
+    private int _configuredChannels;
     private double _crossLpL;
     private double _crossLpR;
     private double _crossAlphaLp;
@@ -46,8 +59,11 @@ public sealed class DspSampleProvider : ISampleProvider
     private double _limiterCeilingLinear = Math.Pow(10.0, -0.2 / 20.0);
     private int _limiterDelaySamples = 144;
     private double[][] _limiterDelayBuf = [];
+    private double[] _limiterPeakRing = new double[160];
+    private double _limiterRunningMax;
     private int _limiterDelayPos;
     private double _limiterEnvelope = 1.0;
+    private double _limiterAttackCoeff = 0.98;
     private double _limiterReleaseCoeff = 0.999;
     private double[] _frameWork = new double[8];
 
@@ -69,6 +85,12 @@ public sealed class DspSampleProvider : ISampleProvider
         double crossfeedDelayMs,
         double limiterCeilingDb)
     {
+        _configuredSampleRateHz = sampleRateHz;
+        _configuredChannels = channels;
+        _lastCrossfeedCutoffHz = crossfeedCutoffHz;
+        _lastCrossfeedFeedDb = crossfeedFeedDb;
+        _lastCrossfeedDelayMs = crossfeedDelayMs;
+
         double cutoff = Math.Clamp(crossfeedCutoffHz, 450.0, 950.0);
         _crossAlphaLp = Math.Clamp(1.0 - Math.Exp(-2.0 * Math.PI * cutoff / sampleRateHz), 0.001, 0.999);
         double feedDb = Math.Clamp(crossfeedFeedDb, 1.5, 9.5);
@@ -76,7 +98,7 @@ public sealed class DspSampleProvider : ISampleProvider
         double norm = 1.0 / Math.Sqrt(1.0 + rawFeed * rawFeed);
         _crossDirectGain = norm;
         _crossFeedGain = rawFeed * norm;
-        _crossDelaySamples = Math.Clamp((int)Math.Round(Math.Clamp(crossfeedDelayMs, 0.15, 0.45) / 1000.0 * sampleRateHz), 1, 128);
+        _crossDelaySamples = Math.Clamp((int)Math.Round(Math.Clamp(crossfeedDelayMs, 0.15, 0.45) / 1000.0 * sampleRateHz), 1, 256);
         if (_crossDelayBufL.Length < _crossDelaySamples)
         {
             _crossDelayBufL = new double[_crossDelaySamples];
@@ -88,7 +110,8 @@ public sealed class DspSampleProvider : ISampleProvider
         _crossLpL = 0.0;
         _crossLpR = 0.0;
 
-        _limiterDelaySamples = Math.Clamp((int)Math.Round(0.003 * sampleRateHz), 8, 1024);
+        _gainRampCoeff = 1.0 - Math.Exp(-1.0 / (0.012 * sampleRateHz));
+        _limiterDelaySamples = Math.Clamp((int)Math.Round(0.003 * sampleRateHz), 8, 2048);
         if (_limiterDelayBuf.Length != channels || _limiterDelayBuf[0].Length < _limiterDelaySamples)
         {
             _limiterDelayBuf = new double[channels][];
@@ -101,10 +124,26 @@ public sealed class DspSampleProvider : ISampleProvider
         {
             for (int c = 0; c < channels; c++) Array.Clear(_limiterDelayBuf[c]);
         }
+        if (_limiterPeakRing.Length < _limiterDelaySamples)
+        {
+            _limiterPeakRing = new double[_limiterDelaySamples];
+        }
+        else
+        {
+            Array.Clear(_limiterPeakRing);
+        }
+        _limiterRunningMax = 0.0;
         _limiterDelayPos = 0;
         _limiterEnvelope = 1.0;
+        _limiterAttackCoeff = Math.Exp(-Math.Log(20.0) / Math.Max(_limiterDelaySamples, 1));
         _limiterReleaseCoeff = Math.Exp(-1.0 / (0.08 * sampleRateHz));
         _limiterCeilingLinear = Math.Pow(10.0, Math.Clamp(limiterCeilingDb, -3.0, -0.05) / 20.0);
+    }
+
+    private void UpdateGainMatchedBypassLinearUnlocked()
+    {
+        _targetGainMatchedBypassLinear = Math.Pow(10.0, Math.Clamp(_lastReplayGainDb + _rmsShiftDb, -24.0, 12.0) / 20.0);
+        _currentGainMatchedBypassLinear = _targetGainMatchedBypassLinear;
     }
 
     public WaveFormat WaveFormat => _source.WaveFormat;
@@ -199,8 +238,13 @@ public sealed class DspSampleProvider : ISampleProvider
             _lastProfile = profile;
             _lastReplayGainDb = replayGainDb;
             EffectivePreampDb = effectiveDb;
-            _preampLinear = linear;
+            _targetPreampLinear = linear;
+            if (!_hasProcessedSamples)
+            {
+                _currentPreampLinear = linear;
+            }
             _rmsShiftDb = rmsShift;
+            UpdateGainMatchedBypassLinearUnlocked();
             _biquadNode.Configure(profile, WaveFormat.SampleRate, WaveFormat.Channels);
         }
     }
@@ -214,7 +258,10 @@ public sealed class DspSampleProvider : ISampleProvider
                 ? _lastProfile.ComputeEffectivePreampDb(replayGainDb)
                 : replayGainDb;
             EffectivePreampDb = effectiveDb;
-            _preampLinear = Math.Pow(10.0, effectiveDb / 20.0);
+            double linear = Math.Pow(10.0, effectiveDb / 20.0);
+            _targetPreampLinear = linear;
+            _currentPreampLinear = linear;
+            UpdateGainMatchedBypassLinearUnlocked();
         }
     }
 
@@ -240,11 +287,11 @@ public sealed class DspSampleProvider : ISampleProvider
             {
                 _rmsShiftDb = rmsShiftDbOverride.Value;
             }
-            bool crossParamsChanged =
-                _crossfeedEnabled != crossfeedEnabled
-                || Math.Abs(crossfeedCutoffHz - 700.0) > 1e-3
-                || Math.Abs(crossfeedFeedDb - 4.5) > 1e-3
-                || Math.Abs(_limiterCeilingDb - limiterCeilingDb) > 1e-3;
+            UpdateGainMatchedBypassLinearUnlocked();
+            bool formatChanged = _configuredSampleRateHz != sr || _configuredChannels != ch || _limiterDelayBuf.Length != ch;
+            bool crossDelayChanged = Math.Abs(_lastCrossfeedDelayMs - crossfeedDelayMs) > 1e-4;
+            bool crossTurnedOn = !_crossfeedEnabled && crossfeedEnabled;
+            bool crossTurnedOff = _crossfeedEnabled && !crossfeedEnabled;
 
             _crossfeedEnabled = crossfeedEnabled;
             _balanceDb = Math.Clamp(balanceDb, -6.0, 6.0);
@@ -254,12 +301,16 @@ public sealed class DspSampleProvider : ISampleProvider
             _limiterEnabled = limiterEnabled;
             _limiterCeilingDb = limiterCeilingDb;
 
-            if (crossParamsChanged || !crossfeedEnabled)
+            if (formatChanged)
             {
                 InitExtendedBuffersUnlocked(sr, ch, crossfeedCutoffHz, crossfeedFeedDb, crossfeedDelayMs, limiterCeilingDb);
             }
             else
             {
+                _lastCrossfeedCutoffHz = crossfeedCutoffHz;
+                _lastCrossfeedFeedDb = crossfeedFeedDb;
+                _lastCrossfeedDelayMs = crossfeedDelayMs;
+
                 double cutoff = Math.Clamp(crossfeedCutoffHz, 450.0, 950.0);
                 _crossAlphaLp = Math.Clamp(1.0 - Math.Exp(-2.0 * Math.PI * cutoff / sr), 0.001, 0.999);
                 double feedDb = Math.Clamp(crossfeedFeedDb, 1.5, 9.5);
@@ -267,6 +318,22 @@ public sealed class DspSampleProvider : ISampleProvider
                 double norm = 1.0 / Math.Sqrt(1.0 + rawFeed * rawFeed);
                 _crossDirectGain = norm;
                 _crossFeedGain = rawFeed * norm;
+
+                if (crossDelayChanged || crossTurnedOn || crossTurnedOff)
+                {
+                    _crossDelaySamples = Math.Clamp((int)Math.Round(Math.Clamp(crossfeedDelayMs, 0.15, 0.45) / 1000.0 * sr), 1, 256);
+                    if (_crossDelayBufL.Length < _crossDelaySamples)
+                    {
+                        _crossDelayBufL = new double[_crossDelaySamples];
+                        _crossDelayBufR = new double[_crossDelaySamples];
+                    }
+                    Array.Clear(_crossDelayBufL);
+                    Array.Clear(_crossDelayBufR);
+                    _crossDelayPos = 0;
+                    _crossLpL = 0.0;
+                    _crossLpR = 0.0;
+                }
+
                 _limiterCeilingLinear = Math.Pow(10.0, Math.Clamp(limiterCeilingDb, -3.0, -0.05) / 20.0);
             }
         }
@@ -281,21 +348,78 @@ public sealed class DspSampleProvider : ISampleProvider
     }
 
     /// <summary>
-    /// Master digital volume stage (applied after preamp/ReplayGain). Muted forces silence.
+    /// Master digital volume stage (applied after preamp/ReplayGain). Muted or 0% forces exact silence.
     /// </summary>
     public void ConfigureMasterVolume(double attenuationDb, bool muted)
     {
-        double clamped = Math.Clamp(attenuationDb, -60.0, 0.0);
-        double linear = muted ? 0.0 : (clamped >= -0.05 ? 1.0 : Math.Pow(10.0, clamped / 20.0));
+        double clamped = Math.Clamp(attenuationDb, -80.0, 0.0);
+        double linear = (muted || clamped <= -79.5)
+            ? 0.0
+            : (clamped >= -0.05 ? 1.0 : Math.Pow(10.0, clamped / 20.0));
         lock (_dspLock)
         {
-            _masterLinear = linear;
+            _userMasterLinear = linear;
+            _targetMasterLinear = _userMasterLinear * _sleepFadeLinear;
+            if (!_hasProcessedSamples)
+            {
+                _currentMasterLinear = _targetMasterLinear;
+            }
         }
     }
 
+    public void SetSleepFadeLinear(double linear)
+    {
+        double clamped = Math.Clamp(linear, 0.0, 1.0);
+        lock (_dspLock)
+        {
+            _sleepFadeLinear = clamped;
+            _targetMasterLinear = _userMasterLinear * _sleepFadeLinear;
+            if (!_hasProcessedSamples)
+            {
+                _currentMasterLinear = _targetMasterLinear;
+            }
+        }
+    }
+
+    public void Dispose() => _vst3Bridge.Dispose();
+
     public double MasterLinearGain
     {
-        get { lock (_dspLock) return _masterLinear; }
+        get { lock (_dspLock) return _targetMasterLinear; }
+    }
+
+    public void SetFirDryWetMix(double dryWetMix)
+    {
+        lock (_dspLock)
+        {
+            _firConvolver.DryWetMix = dryWetMix;
+        }
+    }
+
+    public void ResetFilterStates()
+    {
+        lock (_dspLock)
+        {
+            _biquadNode.Reset();
+            _iso226.Reset();
+            _firConvolver.ResetState();
+            Array.Clear(_crossDelayBufL);
+            Array.Clear(_crossDelayBufR);
+            _crossDelayPos = 0;
+            _crossLpL = 0.0;
+            _crossLpR = 0.0;
+            for (int c = 0; c < _limiterDelayBuf.Length; c++)
+            {
+                Array.Clear(_limiterDelayBuf[c]);
+            }
+            Array.Clear(_limiterPeakRing);
+            _limiterRunningMax = 0.0;
+            _limiterDelayPos = 0;
+            _limiterEnvelope = 1.0;
+            _currentPreampLinear = _targetPreampLinear;
+            _currentMasterLinear = _targetMasterLinear;
+            _currentGainMatchedBypassLinear = _targetGainMatchedBypassLinear;
+        }
     }
 
     public void ConfigureFirImpulse(double[]? leftIr, double[]? rightIr, double dryWetMix = 1.0, string? sourceLabel = null)
@@ -325,7 +449,7 @@ public sealed class DspSampleProvider : ISampleProvider
             return;
         }
 
-        var (left, right) = PartitionedFirConvolver.ReadImpulseArraysFromSofaOrWav(wavPath);
+        var (left, right) = PartitionedFirConvolver.ReadImpulseArraysFromSofaOrWav(wavPath, WaveFormat.SampleRate);
         lock (_dspLock)
         {
             _firConvolver.DryWetMix = dryWetMix;
@@ -342,22 +466,84 @@ public sealed class DspSampleProvider : ISampleProvider
         }
     }
 
+    private bool IsIdentityLocked(int channels)
+    {
+        bool abBypass = _gainMatchedBypass;
+        bool anyEq = !abBypass && _biquadNode.TotalSpecCount > 0;
+        bool anyIso = !abBypass && _iso226.IsEnabled && _iso226.VolumeAttenuationDb < -0.5;
+        bool anyFir = !abBypass && _firConvolver.IsEnabled && _firConvolver.LoadedTapCount > 0;
+        bool anyVst3 = !abBypass && _vst3Bridge.ActiveSlotCount > 0 && _vst3Bridge.IsWorkerConnected;
+        bool anyCrossfeed = !abBypass && _crossfeedEnabled && channels == 2;
+        bool anyBalanceMono = !abBypass && (Math.Abs(_balanceDb) > 1e-4 || _monoFold);
+
+        double targetGain = abBypass ? _targetGainMatchedBypassLinear : _targetPreampLinear;
+        double currentGain = abBypass ? _currentGainMatchedBypassLinear : _currentPreampLinear;
+        bool anyGain = Math.Abs(targetGain * _targetMasterLinear - 1.0) >= 1e-9
+            || Math.Abs(currentGain * _currentMasterLinear - 1.0) >= 1e-9;
+        bool runLimiter = _limiterEnabled && (anyEq || anyGain || anyIso || anyFir || anyVst3 || anyCrossfeed || abBypass);
+
+        return !anyEq && !anyGain && !anyIso && !anyFir && !anyVst3 && !anyCrossfeed && !anyBalanceMono && !runLimiter;
+    }
+
+    public bool IsIdentityPassthrough
+    {
+        get
+        {
+            if (_bypass) return true;
+            lock (_dspLock)
+            {
+                return IsIdentityLocked(Math.Max(WaveFormat.Channels, 1));
+            }
+        }
+    }
+
     public int Read(float[] buffer, int offset, int count)
     {
+        if (_source is GaplessSampleProvider gapless)
+        {
+            int totalRead = 0;
+            while (totalRead < count)
+            {
+                int seg = gapless.ReadSegment(buffer, offset + totalRead, count - totalRead);
+                if (seg <= 0)
+                {
+                    if (totalRead == 0)
+                    {
+                        _reachedEndOfStream = true;
+                    }
+                    break;
+                }
+                if (!_bypass)
+                {
+                    ProcessSegment(buffer, offset + totalRead, seg);
+                }
+                totalRead += seg;
+            }
+            return totalRead;
+        }
+
         int read = _source.Read(buffer, offset, count);
         if (read <= 0)
         {
             _reachedEndOfStream = true;
             return read;
         }
-        if (_bypass)
+        if (!_bypass)
         {
-            return read;
+            ProcessSegment(buffer, offset, read);
         }
+        return read;
+    }
 
+    private void ProcessSegment(float[] buffer, int offset, int read)
+    {
         int channels = Math.Max(WaveFormat.Channels, 1);
         lock (_dspLock)
         {
+            if (IsIdentityLocked(channels))
+            {
+                return;
+            }
             bool abBypass = _gainMatchedBypass;
             bool anyEq = !abBypass && _biquadNode.TotalSpecCount > 0;
             bool anyIso = !abBypass && _iso226.IsEnabled && _iso226.VolumeAttenuationDb < -0.5;
@@ -366,33 +552,37 @@ public sealed class DspSampleProvider : ISampleProvider
             bool anyCrossfeed = !abBypass && _crossfeedEnabled && channels == 2;
             bool anyBalanceMono = !abBypass && (Math.Abs(_balanceDb) > 1e-4 || _monoFold);
 
-            double gain = abBypass
-                ? Math.Pow(10.0, Math.Clamp(_lastReplayGainDb + _rmsShiftDb, -24.0, 12.0) / 20.0)
-                : _preampLinear;
-            double master = _masterLinear;
-            bool anyGain = Math.Abs(gain * master - 1.0) >= 1e-9;
-            bool runLimiter = _limiterEnabled && (anyEq || anyGain || anyIso || anyCrossfeed || abBypass);
-
-            if (!anyEq && !anyGain && !anyIso && !anyFir && !anyVst3 && !anyCrossfeed && !anyBalanceMono && !runLimiter)
-            {
-                return read;
-            }
+            double targetGain = abBypass ? _targetGainMatchedBypassLinear : _targetPreampLinear;
+            double targetMaster = _targetMasterLinear;
+            bool anyGain = Math.Abs(targetGain * targetMaster - 1.0) >= 1e-9
+                || Math.Abs((abBypass ? _currentGainMatchedBypassLinear : _currentPreampLinear) * _currentMasterLinear - 1.0) >= 1e-9;
+            bool runLimiter = _limiterEnabled && (anyEq || anyGain || anyIso || anyFir || anyVst3 || anyCrossfeed || abBypass);
+            _hasProcessedSamples = true;
 
             if (!anyCrossfeed && !anyBalanceMono && !runLimiter)
             {
                 for (int i = 0; i < read; i++)
                 {
                     int ch = i % channels;
-                    double sample = buffer[offset + i] * gain;
+                    if (ch == 0)
+                    {
+                        if (abBypass)
+                            _currentGainMatchedBypassLinear += (_targetGainMatchedBypassLinear - _currentGainMatchedBypassLinear) * _gainRampCoeff;
+                        else
+                            _currentPreampLinear += (_targetPreampLinear - _currentPreampLinear) * _gainRampCoeff;
+                        _currentMasterLinear += (targetMaster - _currentMasterLinear) * _gainRampCoeff;
+                    }
+                    double g = abBypass ? _currentGainMatchedBypassLinear : _currentPreampLinear;
+                    double sample = buffer[offset + i] * g;
                     if (anyIso) sample = _iso226.ProcessSample(sample, ch);
                     if (anyEq) sample = _biquadNode.ProcessSample(sample, ch);
                     if (anyFir) sample = _firConvolver.ProcessSample(sample, ch);
                     if (anyVst3) sample = _vst3Bridge.ProcessSample(sample, ch);
-                    sample *= master;
+                    sample *= _currentMasterLinear;
                     sample = _dither.ProcessSample(sample);
                     buffer[offset + i] = (float)sample;
                 }
-                return read;
+                return;
             }
 
             if (_frameWork.Length < channels)
@@ -403,10 +593,17 @@ public sealed class DspSampleProvider : ISampleProvider
             double[] frameWork = _frameWork;
             for (int frame = 0; frame < frameCount; frame++)
             {
+                if (abBypass)
+                    _currentGainMatchedBypassLinear += (_targetGainMatchedBypassLinear - _currentGainMatchedBypassLinear) * _gainRampCoeff;
+                else
+                    _currentPreampLinear += (_targetPreampLinear - _currentPreampLinear) * _gainRampCoeff;
+                _currentMasterLinear += (targetMaster - _currentMasterLinear) * _gainRampCoeff;
+
+                double g = abBypass ? _currentGainMatchedBypassLinear : _currentPreampLinear;
                 int baseIdx = offset + frame * channels;
                 for (int c = 0; c < channels; c++)
                 {
-                    double sample = buffer[baseIdx + c] * gain;
+                    double sample = buffer[baseIdx + c] * g;
                     if (anyIso) sample = _iso226.ProcessSample(sample, c);
                     if (anyEq) sample = _biquadNode.ProcessSample(sample, c);
                     if (anyFir) sample = _firConvolver.ProcessSample(sample, c);
@@ -452,7 +649,7 @@ public sealed class DspSampleProvider : ISampleProvider
 
                 for (int c = 0; c < channels; c++)
                 {
-                    frameWork[c] *= master;
+                    frameWork[c] *= _currentMasterLinear;
                 }
 
                 if (runLimiter)
@@ -467,28 +664,53 @@ public sealed class DspSampleProvider : ISampleProvider
                         if (absS > futurePeak) futurePeak = absS;
                         frameWork[c] = delayed;
                     }
+                    double evicted = _limiterPeakRing[_limiterDelayPos];
+                    _limiterPeakRing[_limiterDelayPos] = futurePeak;
                     _limiterDelayPos = (_limiterDelayPos + 1) % _limiterDelaySamples;
 
-                    double instantPeak = futurePeak;
+                    double windowPeak;
+                    if (futurePeak >= _limiterRunningMax)
+                    {
+                        _limiterRunningMax = futurePeak;
+                        windowPeak = futurePeak;
+                    }
+                    else if (evicted >= _limiterRunningMax - 1e-12)
+                    {
+                        double m = 0.0;
+                        for (int k = 0; k < _limiterDelaySamples; k++)
+                        {
+                            if (_limiterPeakRing[k] > m) m = _limiterPeakRing[k];
+                        }
+                        _limiterRunningMax = m;
+                        windowPeak = m;
+                    }
+                    else
+                    {
+                        windowPeak = _limiterRunningMax;
+                    }
+
+                    double delayedPeak = 0.0;
                     for (int c = 0; c < channels; c++)
                     {
                         double absD = Math.Abs(frameWork[c]);
-                        if (absD > instantPeak) instantPeak = absD;
+                        if (absD > delayedPeak) delayedPeak = absD;
                     }
-                    double targetGain = instantPeak > _limiterCeilingLinear
-                        ? _limiterCeilingLinear / instantPeak
+                    double maxPeak = Math.Max(windowPeak, delayedPeak);
+                    double limiterTargetGain = maxPeak > _limiterCeilingLinear
+                        ? _limiterCeilingLinear / maxPeak
                         : 1.0;
-                    _limiterEnvelope = targetGain < _limiterEnvelope
-                        ? targetGain
-                        : _limiterEnvelope * _limiterReleaseCoeff + targetGain * (1.0 - _limiterReleaseCoeff);
+                    _limiterEnvelope = limiterTargetGain < _limiterEnvelope
+                        ? _limiterEnvelope * _limiterAttackCoeff + limiterTargetGain * (1.0 - _limiterAttackCoeff)
+                        : _limiterEnvelope * _limiterReleaseCoeff + limiterTargetGain * (1.0 - _limiterReleaseCoeff);
+                    if (delayedPeak > _limiterCeilingLinear)
+                    {
+                        double safeGain = _limiterCeilingLinear / delayedPeak;
+                        if (_limiterEnvelope > safeGain) _limiterEnvelope = safeGain;
+                    }
 
                     for (int c = 0; c < channels; c++)
                     {
-                        double limited = frameWork[c] * _limiterEnvelope;
-                        if (Math.Abs(limited) > _limiterCeilingLinear)
-                        {
-                            limited = _limiterCeilingLinear * Math.Tanh(limited / _limiterCeilingLinear);
-                        }
+                        double limited = SoftLimitSample(frameWork[c] * _limiterEnvelope, _limiterCeilingLinear);
                         buffer[baseIdx + c] = (float)_dither.ProcessSample(limited);
                     }
                 }
@@ -501,7 +723,16 @@ public sealed class DspSampleProvider : ISampleProvider
                 }
             }
         }
+    }
 
-        return read;
+    public static double SoftLimitSample(double normalized, double ceiling)
+    {
+        double c = Math.Clamp(ceiling, 0.1, 1.0);
+        double knee = c * 0.85;
+        double absX = Math.Abs(normalized);
+        if (absX <= knee) return normalized;
+        double headroom = c - knee;
+        double shaped = knee + headroom * Math.Tanh((absX - knee) / headroom);
+        return normalized >= 0.0 ? shaped : -shaped;
     }
 }

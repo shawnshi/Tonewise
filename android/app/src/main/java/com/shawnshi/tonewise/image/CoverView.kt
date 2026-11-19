@@ -115,6 +115,7 @@ constructor(context: Context, attrs: AttributeSet? = null, @AttrRes defStyleAttr
     private val squareishShapeAppearance: ShapeAppearanceModel
     private val circularShapeAppearance: ShapeAppearanceModel
     private var currentShapeAppearance: ShapeAppearanceModel
+    private var defaultChildrenInitialized = false
 
     init {
         // Obtain some StyledImageView attributes to use later when theming the custom view.
@@ -190,13 +191,21 @@ constructor(context: Context, attrs: AttributeSet? = null, @AttrRes defStyleAttr
 
     override fun onFinishInflate() {
         super.onFinishInflate()
+        ensureDefaultChildrenAttached()
+    }
+
+    private fun ensureDefaultChildrenAttached() {
+        if (defaultChildrenInitialized) return
+        defaultChildrenInitialized = true
 
         // The image isn't added if other children have populated the body. This is by design.
-        if (isEmpty()) {
+        if (isEmpty() && image.parent == null) {
             addView(image)
         }
 
-        playbackIndicator?.run { addView(view) }
+        playbackIndicator?.run {
+            if (view.parent == null) addView(view)
+        }
 
         for (child in children) {
             if (child == selectionBadge) {
@@ -216,17 +225,19 @@ constructor(context: Context, attrs: AttributeSet? = null, @AttrRes defStyleAttr
         // The selection badge has it's own background we don't want overridden, add it after
         // all other elements.
         selectionBadge?.let {
-            addView(
-                it,
-                // Position the selection badge to the bottom right.
-                LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
-                    // Override the layout params of the indicator so that it's in the
-                    // bottom left corner.
-                    gravity = Gravity.BOTTOM or Gravity.END
-                    val spacing = context.getDimenPixels(R.dimen.spacing_tiny)
-                    updateMarginsRelative(bottom = spacing, end = spacing)
-                },
-            )
+            if (it.parent == null) {
+                addView(
+                    it,
+                    // Position the selection badge to the bottom right.
+                    LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+                        // Override the layout params of the indicator so that it's in the
+                        // bottom left corner.
+                        gravity = Gravity.BOTTOM or Gravity.END
+                        val spacing = context.getDimenPixels(R.dimen.spacing_tiny)
+                        updateMarginsRelative(bottom = spacing, end = spacing)
+                    },
+                )
+            }
         }
     }
 
@@ -268,6 +279,7 @@ constructor(context: Context, attrs: AttributeSet? = null, @AttrRes defStyleAttr
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        ensureDefaultChildrenAttached()
         invalidateRootAlpha()
         invalidatePlaybackIndicatorAlpha(playbackIndicator ?: return)
         invalidateSelectionIndicatorAlpha(selectionBadge ?: return)
@@ -479,6 +491,7 @@ constructor(context: Context, attrs: AttributeSet? = null, @AttrRes defStyleAttr
         @DrawableRes errorRes: Int,
         shapeAppearanceModel: ShapeAppearanceModel,
     ) {
+        ensureDefaultChildrenAttached()
         // prep proper shape to use if necessary. be safe and do it now
         // idk if doing it at layout time will cause issues
         updateShapeAppearance(shapeAppearanceModel)

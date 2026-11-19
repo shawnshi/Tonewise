@@ -27,4 +27,8 @@ char* tonewise_apply_header_patch_path(
     const uint8_t* new_header_ptr,
     uintptr_t new_header_len);
 
+char* tonewise_analyze_audio_path(const char* path_utf8);
+
+char* tonewise_write_audio_tags_json(const char* request_json);
+
 #endif /* TONEWISE_CORE_H */

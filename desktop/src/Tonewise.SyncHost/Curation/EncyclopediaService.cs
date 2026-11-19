@@ -394,12 +394,7 @@ public sealed partial class EncyclopediaService
             UpdatedAtMs: reader.GetInt64(10)
         );
 
-    private SqliteConnection OpenConnection()
-    {
-        var conn = new SqliteConnection($"Data Source={DbPath}");
-        conn.Open();
-        return conn;
-    }
+    private SqliteConnection OpenConnection() => TonewiseSqlite.OpenReadWrite(DbPath);
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex MultiSpaceRegex();

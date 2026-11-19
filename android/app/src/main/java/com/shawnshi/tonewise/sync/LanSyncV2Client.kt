@@ -19,14 +19,20 @@
 package com.shawnshi.tonewise.sync
 
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import kotlinx.coroutines.CancellationException
+import org.oxycblt.musikr.core.RawJson
 import org.oxycblt.musikr.core.TonewiseCore
 
 class LanSyncAuthException(val httpCode: Int, message: String) : IllegalStateException(message)
+
+class LanSyncRateLimitException(
+    val retryAfterSeconds: Long,
+    message: String,
+) : IllegalStateException(message)
 
 data class PairResponse(
     val token: String,
@@ -61,7 +67,15 @@ data class OutboxTrackDto(
     val mtimeMs: Long,
     val hasCover: Boolean,
     val sourceOutboxIds: List<String>,
+    val headerBlake3: String = "",
+    val audioFrameBlake3: String = "",
 )
+
+enum class LocalSyncState {
+    MISSING,
+    UP_TO_DATE,
+    OUTDATED,
+}
 
 data class OutboxPlaylistDto(
     val outboxId: String,
@@ -77,6 +91,7 @@ data class OutboxResponse(
     val tracks: List<OutboxTrackDto>,
     val playlists: List<OutboxPlaylistDto>,
     val totalBytes: Long,
+    val duplicateTrackCount: Int = 0,
 )
 
 data class PlayDeltaPayload(
@@ -88,6 +103,8 @@ data class PlayDeltaPayload(
     val playCountDelta: Int,
     val lastPlayedTsMs: Long,
     val deviceId: String,
+    val scrobbledDelta: Int = 0,
+    val devicePlayCountTotal: Int = 0,
 )
 
 data class MutationPayload(
@@ -110,14 +127,19 @@ data class ReportResponse(
     val acknowledgedMutationKeys: Set<String>,
     val unmatchedMutationUids: List<String>,
     val completedOutboxCount: Int,
+    val handoffSlotsRawJson: String? = null,
+    val unlovedUids: List<String> = emptyList(),
 )
 
 object LanSyncV2Client {
     fun ping(baseUrl: String): Boolean {
         val clean = baseUrl.trim().trimEnd('/')
+        val pingUrl = "$clean/api/v2/ping"
+        if (!LanHttpClient.isSafeLanOrHttpsUrl(pingUrl)) return false
         return try {
             val conn =
-                (URL("$clean/api/v2/ping").openConnection() as HttpURLConnection).apply {
+                (URL(pingUrl).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = false
                     connectTimeout = 4_000
                     readTimeout = 4_000
                     requestMethod = "GET"
@@ -132,22 +154,55 @@ object LanSyncV2Client {
         }
     }
 
+    fun unpair(
+        baseUrl: String,
+        token: String,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): Boolean {
+        val clean = baseUrl.trim().trimEnd('/')
+        if (clean.isEmpty() || token.isBlank()) return false
+        return try {
+            val respText =
+                LanHttpClient.postJson(
+                    url = "$clean/api/v2/unpair",
+                    body = "{}",
+                    bearerToken = token,
+                    cancelToken = cancelToken,
+                    connectTimeoutMs = 3_000,
+                    readTimeoutMs = 5_000,
+                )
+            val root = TonewiseCore.parseJson(respText) as? Map<*, *>
+            (root?.get("ok") as? Boolean) ?: true
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun pair(
         baseUrl: String,
         code: String,
         deviceId: String,
         deviceName: String,
+        cancelToken: LanHttpClient.CancelToken? = null,
     ): PairResponse {
         val clean = baseUrl.trim().trimEnd('/')
         val body =
-            buildString {
-                append('{')
-                append("\"code\":\"").append(escapeJson(code.trim())).append("\",")
-                append("\"device_id\":\"").append(escapeJson(deviceId.trim())).append("\",")
-                append("\"device_name\":\"").append(escapeJson(deviceName.trim())).append('"')
-                append('}')
-            }
-        val respText = httpPostJson("$clean/api/v2/pair", body, token = null)
+            TonewiseCore.stringifyJson(
+                linkedMapOf(
+                    "code" to code.trim(),
+                    "device_id" to deviceId.trim(),
+                    "device_name" to deviceName.trim(),
+                )
+            )
+        val respText =
+            LanHttpClient.postJson(
+                url = "$clean/api/v2/pair",
+                body = body,
+                bearerToken = null,
+                cancelToken = cancelToken,
+            )
         @Suppress("UNCHECKED_CAST")
         val root =
             TonewiseCore.parseJson(respText) as? Map<String, Any?>
@@ -163,9 +218,18 @@ object LanSyncV2Client {
         )
     }
 
-    fun fetchOutbox(baseUrl: String, token: String): OutboxResponse {
+    fun fetchOutbox(
+        baseUrl: String,
+        token: String,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): OutboxResponse {
         val clean = baseUrl.trim().trimEnd('/')
-        val respText = httpGetString("$clean/api/v2/outbox", token)
+        val respText =
+            LanHttpClient.getString(
+                url = "$clean/api/v2/outbox",
+                bearerToken = token,
+                cancelToken = cancelToken,
+            )
         return parseOutboxResponse(respText)
     }
 
@@ -214,6 +278,8 @@ object LanSyncV2Client {
                     mtimeMs = asLong(m["mtime_ms"]),
                     hasCover = m["has_cover"] == true,
                     sourceOutboxIds = asStringList(m["source_outbox_ids"]),
+                    headerBlake3 = m["header_blake3"]?.toString() ?: "",
+                    audioFrameBlake3 = m["audio_frame_blake3"]?.toString() ?: "",
                 )
             }
 
@@ -239,6 +305,7 @@ object LanSyncV2Client {
             tracks = tracks,
             playlists = playlists,
             totalBytes = asLong(root["total_bytes"]),
+            duplicateTrackCount = asInt(root["duplicate_track_count"]),
         )
     }
 
@@ -258,116 +325,37 @@ object LanSyncV2Client {
         partFile: File,
         expectedSize: Long,
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
+        cancelToken: LanHttpClient.CancelToken? = null,
     ): Long {
-        return downloadFileResumableInternal(url, token, partFile, expectedSize, onProgress, allowRetry416 = true)
+        return LanHttpClient.downloadFileResumable(
+            url = url,
+            bearerToken = token,
+            partFile = partFile,
+            expectedSize = expectedSize,
+            onProgress = onProgress,
+            cancelToken = cancelToken,
+        )
     }
 
-    private fun downloadFileResumableInternal(
+    fun downloadCoverIfPresent(
         url: String,
         token: String,
-        partFile: File,
-        expectedSize: Long,
-        onProgress: (Long, Long) -> Unit,
-        allowRetry416: Boolean,
-    ): Long {
-        partFile.parentFile?.mkdirs()
-        var existingBytes = if (partFile.isFile) partFile.length() else 0L
-        if (expectedSize > 0L && existingBytes == expectedSize) {
-            onProgress(expectedSize, expectedSize)
-            return expectedSize
-        }
-        if (expectedSize > 0L && existingBytes > expectedSize) {
-            partFile.delete()
-            existingBytes = 0L
-        }
-
-        val conn =
-            (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8_000
-                readTimeout = 30_000
-                requestMethod = "GET"
-                setRequestProperty("Authorization", "Bearer $token")
-                if (existingBytes > 0L) {
-                    setRequestProperty("Range", "bytes=$existingBytes-")
-                }
-            }
-
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): ByteArray? {
         return try {
-            val code = conn.responseCode
-            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
-                throw LanSyncAuthException(code, "未授权或配对已过期，请重新配对")
-            }
-            if (code == 416) {
-                if (expectedSize > 0L && existingBytes == expectedSize) {
-                    onProgress(expectedSize, expectedSize)
-                    return expectedSize
-                }
-                if (allowRetry416) {
-                    partFile.delete()
-                    conn.disconnect()
-                    return downloadFileResumableInternal(url, token, partFile, expectedSize, onProgress, allowRetry416 = false)
-                }
-                throw IOException("HTTP 416 Range mismatch for $url")
-            }
-            if (code !in 200..299) {
-                throw IOException("HTTP $code for $url")
-            }
-
-            val append = (code == HttpURLConnection.HTTP_PARTIAL && existingBytes > 0L)
-            if (!append && existingBytes > 0L) {
-                existingBytes = 0L
-            }
-            var written = existingBytes
-            val contentLen = conn.contentLengthLong
-            val totalTarget =
-                when {
-                    expectedSize > 0L -> expectedSize
-                    contentLen > 0L -> existingBytes + contentLen
-                    else -> -1L
-                }
-
-            val buffer = ByteArray(32 * 1024)
-            conn.inputStream.use { input ->
-                FileOutputStream(partFile, append).use { output ->
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n <= 0) break
-                        output.write(buffer, 0, n)
-                        written += n
-                        onProgress(written, totalTarget)
-                    }
-                    output.flush()
-                }
-            }
-
-            val finalSize = partFile.length()
-            if (expectedSize > 0L && finalSize != expectedSize) {
-                throw IOException("文件传输未完成（已接收 $finalSize / $expectedSize 字节），下次同步将继续断点续传")
-            }
-            finalSize
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-    fun downloadCoverIfPresent(url: String, token: String): ByteArray? {
-        val conn =
-            (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5_000
-                readTimeout = 10_000
-                requestMethod = "GET"
-                setRequestProperty("Authorization", "Bearer $token")
-            }
-        return try {
-            val code = conn.responseCode
-            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
-                throw LanSyncAuthException(code, "未授权或配对已过期")
-            }
-            if (code == HttpURLConnection.HTTP_NOT_FOUND) return null
-            if (code !in 200..299) return null
-            conn.inputStream.readBytes()
-        } finally {
-            conn.disconnect()
+            LanHttpClient.getBytes(
+                url = url,
+                bearerToken = token,
+                cancelToken = cancelToken,
+                connectTimeoutMs = 5_000,
+                readTimeoutMs = 10_000,
+            )
+        } catch (authErr: LanSyncAuthException) {
+            throw authErr
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: IOException) {
+            null
         }
     }
 
@@ -379,53 +367,55 @@ object LanSyncV2Client {
         mutations: List<MutationPayload>,
         completedOutboxIds: List<String>,
         handoffSlotsRawJson: String? = null,
+        cancelToken: LanHttpClient.CancelToken? = null,
     ): ReportResponse {
         val clean = baseUrl.trim().trimEnd('/')
-        val body =
-            buildString {
-                append('{')
-                append("\"device_id\":\"").append(escapeJson(deviceId)).append("\",")
-                append("\"play_events\":[")
-                playDeltas.forEachIndexed { idx, p ->
-                    if (idx > 0) append(',')
-                    append('{')
-                    append("\"event_id\":\"").append(escapeJson(p.eventId)).append("\",")
-                    append("\"track_uid\":\"").append(escapeJson(p.trackUid)).append("\",")
-                    append("\"artist\":\"").append(escapeJson(p.artist)).append("\",")
-                    append("\"title\":\"").append(escapeJson(p.title)).append("\",")
-                    append("\"album\":\"").append(escapeJson(p.album)).append("\",")
-                    append("\"play_count_delta\":").append(p.playCountDelta).append(',')
-                    append("\"last_played_ts_ms\":").append(p.lastPlayedTsMs).append(',')
-                    append("\"device_id\":\"").append(escapeJson(p.deviceId)).append('"')
-                    append('}')
-                }
-                append("],\"mutations\":[")
-                mutations.forEachIndexed { idx, m ->
-                    if (idx > 0) append(',')
-                    append('{')
-                    append("\"mutation_key\":\"").append(escapeJson(m.mutationKey)).append("\",")
-                    append("\"track_uid\":\"").append(escapeJson(m.trackUid)).append("\",")
-                    append("\"artist\":\"").append(escapeJson(m.artist)).append("\",")
-                    append("\"title\":\"").append(escapeJson(m.title)).append("\",")
-                    append("\"field\":\"").append(escapeJson(m.field)).append("\",")
-                    append("\"value\":\"").append(escapeJson(m.value)).append("\",")
-                    append("\"updated_at_ms\":").append(m.updatedAtMs).append(',')
-                    append("\"device_id\":\"").append(escapeJson(m.deviceId)).append('"')
-                    append('}')
-                }
-                append("],\"completed_outbox_ids\":[")
-                completedOutboxIds.forEachIndexed { idx, id ->
-                    if (idx > 0) append(',')
-                    append('"').append(escapeJson(id)).append('"')
-                }
-                append(']')
-                if (!handoffSlotsRawJson.isNullOrBlank()) {
-                    append(",\"handoff_slots\":").append(handoffSlotsRawJson)
-                }
-                append('}')
-            }
+        val bodyMap =
+            linkedMapOf<String, Any?>(
+                "device_id" to deviceId,
+                "play_events" to
+                    playDeltas.map { p ->
+                        linkedMapOf(
+                            "event_id" to p.eventId,
+                            "track_uid" to p.trackUid,
+                            "artist" to p.artist,
+                            "title" to p.title,
+                            "album" to p.album,
+                            "play_count_delta" to p.playCountDelta,
+                            "last_played_ts_ms" to p.lastPlayedTsMs,
+                            "device_id" to p.deviceId,
+                            "scrobbled_delta" to p.scrobbledDelta,
+                            "device_play_count_total" to p.devicePlayCountTotal,
+                        )
+                    },
+                "mutations" to
+                    mutations.map { m ->
+                        linkedMapOf(
+                            "mutation_key" to m.mutationKey,
+                            "track_uid" to m.trackUid,
+                            "artist" to m.artist,
+                            "title" to m.title,
+                            "field" to m.field,
+                            "value" to m.value,
+                            "lww_ts_ms" to m.updatedAtMs,
+                            "updated_at_ms" to m.updatedAtMs,
+                            "device_id" to m.deviceId,
+                        )
+                    },
+                "completed_outbox_ids" to completedOutboxIds,
+            )
+        if (!handoffSlotsRawJson.isNullOrBlank()) {
+            bodyMap["handoff_slots"] = RawJson(handoffSlotsRawJson)
+        }
+        val body = TonewiseCore.stringifyJson(bodyMap)
 
-        val respText = httpPostJson("$clean/api/v2/report", body, token)
+        val respText =
+            LanHttpClient.postJson(
+                url = "$clean/api/v2/report",
+                body = body,
+                bearerToken = token,
+                cancelToken = cancelToken,
+            )
         return parseReportResponse(respText)
     }
 
@@ -444,6 +434,11 @@ object LanSyncV2Client {
             }
         }
 
+        val handoffSlotsRawJson =
+            (root["handoff_slots"] as? List<*>)?.let { rawSlots ->
+                TonewiseCore.stringifyJson(rawSlots)
+            }
+
         return ReportResponse(
             ok = root["ok"] == true,
             mergedTracks = asInt(root["merged_tracks"]),
@@ -453,6 +448,8 @@ object LanSyncV2Client {
             acknowledgedMutationKeys = asStringList(root["acknowledged_mutation_keys"]).toSet(),
             unmatchedMutationUids = asStringList(root["unmatched_mutation_uids"]),
             completedOutboxCount = asInt(root["completed_outbox_count"]),
+            handoffSlotsRawJson = handoffSlotsRawJson,
+            unlovedUids = asStringList(root["unloved_uids"]),
         )
     }
 
@@ -490,52 +487,75 @@ object LanSyncV2Client {
         }
     }
 
-    private fun httpGetString(url: String, token: String): String {
-        val conn =
-            (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5_000
-                readTimeout = 15_000
-                requestMethod = "GET"
-                setRequestProperty("Authorization", "Bearer $token")
+    fun deduplicateOutboxTracks(tracks: List<OutboxTrackDto>): Pair<List<OutboxTrackDto>, Int> {
+        if (tracks.isEmpty()) return emptyList<OutboxTrackDto>() to 0
+        val deduped = ArrayList<OutboxTrackDto>(tracks.size)
+        val indexByUid = HashMap<String, Int>()
+        val indexByRelPath = HashMap<String, Int>()
+        var duplicateCount = 0
+
+        for (track in tracks) {
+            val uidKey = track.trackUid.trim().lowercase()
+            val relKey = sanitizeRelativePathSegments(track.targetRelPath).joinToString("/").lowercase()
+            val existingIdx =
+                indexByUid[uidKey] ?: if (relKey.isNotEmpty()) indexByRelPath[relKey] else null
+
+            if (existingIdx == null) {
+                val idx = deduped.size
+                deduped.add(track)
+                if (uidKey.isNotEmpty()) indexByUid[uidKey] = idx
+                if (relKey.isNotEmpty()) indexByRelPath[relKey] = idx
+            } else {
+                duplicateCount++
+                val existing = deduped[existingIdx]
+                val mergedOutboxIds = (existing.sourceOutboxIds + track.sourceOutboxIds).distinct()
+                val preferred = if (track.mtimeMs > existing.mtimeMs) track else existing
+                deduped[existingIdx] = preferred.copy(sourceOutboxIds = mergedOutboxIds)
             }
-        return try {
-            val code = conn.responseCode
-            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
-                throw LanSyncAuthException(code, "未授权或配对已过期，请重新配对")
-            }
-            if (code !in 200..299) {
-                throw IOException("HTTP $code for $url")
-            }
-            String(conn.inputStream.readBytes(), Charsets.UTF_8)
-        } finally {
-            conn.disconnect()
         }
+        return deduped to duplicateCount
     }
 
-    private fun httpPostJson(url: String, body: String, token: String?): String {
-        val conn =
-            (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5_000
-                readTimeout = 20_000
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                if (!token.isNullOrBlank()) {
-                    setRequestProperty("Authorization", "Bearer $token")
-                }
+    fun evaluateLocalTrackFreshness(
+        remote: OutboxTrackDto,
+        exists: Boolean,
+        localFileSize: Long,
+        localMtimeMs: Long,
+        localHeaderBlake3: String = "",
+        localAudioFrameBlake3: String = "",
+    ): LocalSyncState {
+        if (!exists) return LocalSyncState.MISSING
+
+        if (remote.fileSize > 0L && localFileSize > 0L && localFileSize != remote.fileSize) {
+            return LocalSyncState.OUTDATED
+        }
+
+        val remoteAudio = remote.audioFrameBlake3.trim()
+        val localAudio = localAudioFrameBlake3.trim()
+        if (remoteAudio.isNotEmpty() && localAudio.isNotEmpty() &&
+            !remoteAudio.equals(localAudio, ignoreCase = true)
+        ) {
+            return LocalSyncState.OUTDATED
+        }
+
+        val remoteHeader = remote.headerBlake3.trim()
+        val localHeader = localHeaderBlake3.trim()
+        if (remoteHeader.isNotEmpty() && localHeader.isNotEmpty()) {
+            return if (remoteHeader.equals(localHeader, ignoreCase = true)) {
+                LocalSyncState.UP_TO_DATE
+            } else {
+                LocalSyncState.OUTDATED
             }
-        return try {
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            val code = conn.responseCode
-            if (code == HttpURLConnection.HTTP_UNAUTHORIZED) {
-                throw LanSyncAuthException(code, "配对码错误或未授权")
-            }
-            if (code !in 200..299) {
-                throw IOException("HTTP $code for $url")
-            }
-            String(conn.inputStream.readBytes(), Charsets.UTF_8)
-        } finally {
-            conn.disconnect()
+        }
+
+        if (remote.mtimeMs > 0L && localMtimeMs > 0L && remote.mtimeMs > localMtimeMs + 2_000L) {
+            return LocalSyncState.OUTDATED
+        }
+
+        return if (remote.fileSize <= 0L || localFileSize <= 0L || localFileSize == remote.fileSize) {
+            LocalSyncState.UP_TO_DATE
+        } else {
+            LocalSyncState.OUTDATED
         }
     }
 
@@ -545,27 +565,4 @@ object LanSyncV2Client {
 
     private fun asStringList(v: Any?): List<String> =
         (v as? List<*>)?.mapNotNull { it?.toString()?.takeIf { s -> s.isNotEmpty() } } ?: emptyList()
-
-    private fun escapeJson(value: String): String =
-        buildString {
-            for (ch in value) {
-                when (ch) {
-                    '"' -> append("\\\"")
-                    '\\' -> append("\\\\")
-                    '\b' -> append("\\b")
-                    '\u000C' -> append("\\f")
-                    '\n' -> append("\\n")
-                    '\r' -> append("\\r")
-                    '\t' -> append("\\t")
-                    else -> {
-                        if (ch.code < 0x20) {
-                            append("\\u")
-                            append(ch.code.toString(16).padStart(4, '0'))
-                        } else {
-                            append(ch)
-                        }
-                    }
-                }
-            }
-        }
 }

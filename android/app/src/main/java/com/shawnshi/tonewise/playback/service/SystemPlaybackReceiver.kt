@@ -44,6 +44,12 @@ private constructor(
     private val onExitRequested: () -> Unit,
 ) : BroadcastReceiver() {
     private var initialHeadsetPlugEventHandled = false
+    private val internalActionReceiver =
+        object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                this@SystemPlaybackReceiver.onReceive(context, intent)
+            }
+        }
 
     class Factory
     @Inject
@@ -70,13 +76,20 @@ private constructor(
         ContextCompat.registerReceiver(
             context,
             this,
-            INTENT_FILTER,
+            SYSTEM_INTENT_FILTER,
             ContextCompat.RECEIVER_EXPORTED,
+        )
+        ContextCompat.registerReceiver(
+            context,
+            internalActionReceiver,
+            INTERNAL_INTENT_FILTER,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
         )
     }
 
     fun release() {
-        context.unregisterReceiver(this)
+        runCatching { context.unregisterReceiver(this) }
+        runCatching { context.unregisterReceiver(internalActionReceiver) }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -158,10 +171,14 @@ private constructor(
     }
 
     private companion object {
-        val INTENT_FILTER =
+        val SYSTEM_INTENT_FILTER =
             IntentFilter().apply {
                 addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
                 addAction(AudioManager.ACTION_HEADSET_PLUG)
+            }
+
+        val INTERNAL_INTENT_FILTER =
+            IntentFilter().apply {
                 addAction(PlaybackActions.ACTION_INC_REPEAT_MODE)
                 addAction(PlaybackActions.ACTION_INVERT_SHUFFLE)
                 addAction(PlaybackActions.ACTION_SKIP_PREV)

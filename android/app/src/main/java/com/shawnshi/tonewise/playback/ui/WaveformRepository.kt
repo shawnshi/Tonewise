@@ -25,7 +25,6 @@ import android.provider.DocumentsContract
 import android.util.LruCache
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -52,11 +51,12 @@ constructor(
     private val syncDb: TonewiseSyncDatabase by lazy { TonewiseSyncDatabase.getInstance(context) }
     private val envelopeCache = LruCache<Music.UID, FloatArray>(128)
     private val fingerprintCache = LruCache<Music.UID, String>(256)
-    private val persistentFpMap = ConcurrentHashMap<String, AudioFingerprintCacheEntity>()
+    private val persistentFpCache = LruCache<String, AudioFingerprintCacheEntity>(2048)
     private val fpInitLock = Any()
-    @Volatile private var fpLoaded = false
+    @Volatile private var dbMigrated = false
 
     @Volatile private var cachedArchiveUri: Uri? = null
+    @Volatile private var archiveMissingCheckedAtMs = 0L
 
     suspend fun getEnvelope(song: Song): FloatArray? {
         envelopeCache.get(song.uid)?.let { return it }
@@ -84,28 +84,43 @@ constructor(
 
     fun invalidateArchiveCache() {
         cachedArchiveUri = null
+        archiveMissingCheckedAtMs = 0L
         envelopeCache.evictAll()
     }
 
-    private fun ensureFpLoaded() {
-        if (fpLoaded) return
+    private fun ensureDbReady() {
+        if (dbMigrated) return
         synchronized(fpInitLock) {
-            if (fpLoaded) return
-            val all = syncDb.audioFingerprintDao().getAll()
-            for (entity in all) {
-                persistentFpMap[entity.trackUid] = entity
-            }
-            fpLoaded = true
+            if (dbMigrated) return
+            syncDb.ensureLegacyMigrated(context)
+            dbMigrated = true
         }
     }
 
     private fun hasAnyWaveformArchive(): Boolean {
-        if (File(context.filesDir, ".tonewise/waveforms.bin").isFile) return true
+        val checkedAt = archiveMissingCheckedAtMs
+        if (checkedAt > 0L && (System.currentTimeMillis() - checkedAt) < ARCHIVE_NEGATIVE_CACHE_MS) {
+            return false
+        }
+        if (File(context.filesDir, ".tonewise/waveforms.bin").isFile) {
+            archiveMissingCheckedAtMs = 0L
+            return true
+        }
         @Suppress("DEPRECATION")
         val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-        if (File(musicDir, ".tonewise/waveforms.bin").isFile) return true
-        return runCatching { (cachedArchiveUri ?: findSafWaveformsUri()?.also { cachedArchiveUri = it }) != null }
-            .getOrDefault(false)
+        if (File(musicDir, ".tonewise/waveforms.bin").isFile) {
+            archiveMissingCheckedAtMs = 0L
+            return true
+        }
+        val foundSaf =
+            runCatching { (cachedArchiveUri ?: findSafWaveformsUri()?.also { cachedArchiveUri = it }) != null }
+                .getOrDefault(false)
+        if (foundSaf) {
+            archiveMissingCheckedAtMs = 0L
+            return true
+        }
+        archiveMissingCheckedAtMs = System.currentTimeMillis()
+        return false
     }
 
     private fun lookupFromSyncedCache(blake3Hex: String): FloatArray? {
@@ -119,10 +134,20 @@ constructor(
 
     private fun getOrComputeBlake3(song: Song): String? {
         fingerprintCache.get(song.uid)?.let { return it }
-        ensureFpLoaded()
+        ensureDbReady()
         val uidStr = song.uid.toString()
-        persistentFpMap[uidStr]
-            ?.takeIf { it.fileSize == song.size }
+        val cachedEntity =
+            synchronized(fpInitLock) { persistentFpCache.get(uidStr) }
+                ?: syncDb.audioFingerprintDao().getByUid(uidStr)?.also { loaded ->
+                    synchronized(fpInitLock) { persistentFpCache.put(uidStr, loaded) }
+                }
+        cachedEntity
+            ?.takeIf { cached ->
+                cached.fileSize == song.size &&
+                    (cached.mtimeMs == 0L ||
+                        song.modifiedMs <= 0L ||
+                        kotlin.math.abs(cached.mtimeMs - song.modifiedMs) <= 2_000L)
+            }
             ?.audioFrameBlake3Hex
             ?.let { cachedHex ->
                 fingerprintCache.put(song.uid, cachedHex)
@@ -139,8 +164,9 @@ constructor(
                     headerBlake3Hex = fp.headerBlake3Hex,
                     headerSize = fp.headerSize,
                     updatedAtMs = System.currentTimeMillis(),
+                    mtimeMs = song.modifiedMs,
                 )
-            persistentFpMap[uidStr] = entity
+            synchronized(fpInitLock) { persistentFpCache.put(uidStr, entity) }
             syncDb.audioFingerprintDao().upsert(entity)
             fp.audioFrameBlake3Hex
         }
@@ -198,5 +224,9 @@ constructor(
         } catch (_: Exception) {
             null
         }
+    }
+
+    private companion object {
+        const val ARCHIVE_NEGATIVE_CACHE_MS = 60_000L
     }
 }

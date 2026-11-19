@@ -50,12 +50,21 @@ android {
     buildFeatures {
         buildConfig true
     }
+    sourceSets {
+        main {
+            resources.srcDir("../../protocol/dictionaries")
+        }
+    }
     lint {
         targetSdk target_sdk
     }
     testOptions {
         targetSdk target_sdk
     }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {
@@ -107,9 +116,14 @@ tasks.register("assembleTonewiseCore", Exec, {
     def libs = abis.collect { abi -> new File("$jniLibsDir/$abi/libtonewise_core.so") }
     def ndkDir = androidComponents.sdkComponents.ndkDirectory.get().asFile
 
+    inputs.files("${repoRoot}/core/Cargo.toml", "${repoRoot}/core/Cargo.lock")
+    inputs.dir("${repoRoot}/core/crates")
+    inputs.dir("${repoRoot}/protocol/dictionaries")
+    outputs.files(libs)
+
     onlyIf {
-        !libs.every { it.isFile() } &&
-                System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows")
+        System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows") &&
+                ndkDir.isDirectory()
     }
 
     commandLine "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -120,9 +134,13 @@ tasks.register("assembleTonewiseCoreDesktop", Exec, {
     def repoRoot = rootDir.parentFile
     def dll = new File("${repoRoot}/core/target/release/tonewise_core.dll")
 
+    inputs.files("${repoRoot}/core/Cargo.toml", "${repoRoot}/core/Cargo.lock")
+    inputs.dir("${repoRoot}/core/crates")
+    inputs.dir("${repoRoot}/protocol/dictionaries")
+    outputs.file(dll)
+
     onlyIf {
-        !dll.isFile() &&
-                System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows")
+        System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows")
     }
 
     commandLine "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",

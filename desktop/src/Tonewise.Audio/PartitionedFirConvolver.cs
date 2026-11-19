@@ -63,8 +63,12 @@ public sealed class PartitionedFirConvolver
         double[] rTrimmed = TrimToMaxTaps(rightIr);
         if (normalizeEnergy)
         {
-            NormalizeEnergy(lTrimmed);
-            NormalizeEnergy(rTrimmed);
+            double sharedNorm = Math.Max(ComputeL2Energy(lTrimmed), ComputeL2Energy(rTrimmed));
+            if (sharedNorm > 1e-12 && Math.Abs(sharedNorm - 1.0) > 1e-6)
+            {
+                ScaleByInverseNorm(lTrimmed, sharedNorm);
+                ScaleByInverseNorm(rTrimmed, sharedNorm);
+            }
         }
 
         var convolvers = new ChannelConvolver[_channels];
@@ -80,13 +84,13 @@ public sealed class PartitionedFirConvolver
         _isEnabled = true;
     }
 
-    public void LoadImpulseFromWav(string wavPath, bool normalizeEnergy = true)
+    public void LoadImpulseFromWav(string wavPath, bool normalizeEnergy = true, int? targetSampleRateHz = null)
     {
-        var (left, right) = ReadImpulseArraysFromWav(wavPath);
+        var (left, right) = ReadImpulseArraysFromWav(wavPath, targetSampleRateHz);
         LoadImpulse(left, right, normalizeEnergy, wavPath);
     }
 
-    public static (double[] Left, double[] Right) ReadImpulseArraysFromWav(string wavPath)
+    public static (double[] Left, double[] Right) ReadImpulseArraysFromWav(string wavPath, int? targetSampleRateHz = null)
     {
         if (!File.Exists(wavPath))
         {
@@ -94,6 +98,7 @@ public sealed class PartitionedFirConvolver
         }
 
         using var reader = new AudioFileReader(wavPath);
+        int srcRate = reader.WaveFormat.SampleRate;
         int wavChannels = Math.Max(reader.WaveFormat.Channels, 1);
         float[] temp = new float[8192];
         var left = new List<double>();
@@ -113,26 +118,34 @@ public sealed class PartitionedFirConvolver
             }
         }
 
-        return (left.ToArray(), right.ToArray());
+        double[] lArr = left.ToArray();
+        double[] rArr = right.ToArray();
+        if (targetSampleRateHz is > 0 && srcRate > 0 && srcRate != targetSampleRateHz.Value && lArr.Length > 0)
+        {
+            lArr = ResampleImpulseLinear(lArr, srcRate, targetSampleRateHz.Value);
+            rArr = ResampleImpulseLinear(rArr, srcRate, targetSampleRateHz.Value);
+        }
+
+        return (lArr, rArr);
     }
 
     /// <summary>
     /// Loads either a `.wav` impulse file or a `.sofa` (TW-SOFA JSON/binary HRIR or HDF5 BRIR) impulse.
     /// </summary>
-    public void LoadImpulseFromSofaOrWav(string filePath, bool normalizeEnergy = true)
+    public void LoadImpulseFromSofaOrWav(string filePath, bool normalizeEnergy = true, int? targetSampleRateHz = null)
     {
-        var (left, right) = ReadImpulseArraysFromSofaOrWav(filePath);
+        var (left, right) = ReadImpulseArraysFromSofaOrWav(filePath, targetSampleRateHz);
         LoadImpulse(left, right, normalizeEnergy, filePath);
     }
 
-    public static (double[] Left, double[] Right) ReadImpulseArraysFromSofaOrWav(string filePath)
+    public static (double[] Left, double[] Right) ReadImpulseArraysFromSofaOrWav(string filePath, int? targetSampleRateHz = null)
     {
         if (!File.Exists(filePath))
             throw new FileNotFoundException("Impulse file not found", filePath);
 
         if (!filePath.EndsWith(".sofa", StringComparison.OrdinalIgnoreCase))
         {
-            return ReadImpulseArraysFromWav(filePath);
+            return ReadImpulseArraysFromWav(filePath, targetSampleRateHz);
         }
 
         byte[] raw = File.ReadAllBytes(filePath);
@@ -221,6 +234,27 @@ public sealed class PartitionedFirConvolver
         }
     }
 
+    public void ResetState() => Reset();
+
+    private static double[] ResampleImpulseLinear(double[] ir, int srcRate, int dstRate)
+    {
+        if (ir.Length <= 1 || srcRate <= 0 || dstRate <= 0 || srcRate == dstRate) return ir;
+        double ratio = dstRate / (double)srcRate;
+        int outLen = Math.Clamp((int)Math.Round(ir.Length * ratio), 1, MaxTaps);
+        double[] resampled = new double[outLen];
+        double gainScale = srcRate / (double)dstRate;
+        for (int i = 0; i < outLen; i++)
+        {
+            double srcPos = i / ratio;
+            int idx0 = (int)Math.Floor(srcPos);
+            double frac = srcPos - idx0;
+            double s0 = idx0 < ir.Length ? ir[idx0] : 0.0;
+            double s1 = idx0 + 1 < ir.Length ? ir[idx0 + 1] : 0.0;
+            resampled[i] = (s0 + (s1 - s0) * frac) * gainScale;
+        }
+        return resampled;
+    }
+
     private static double[] TrimToMaxTaps(double[] ir)
     {
         int len = Math.Min(ir.Length, MaxTaps);
@@ -229,20 +263,21 @@ public sealed class PartitionedFirConvolver
         return copy;
     }
 
-    private static void NormalizeEnergy(double[] ir)
+    private static double ComputeL2Energy(double[] ir)
     {
         double sumSq = 0.0;
         for (int i = 0; i < ir.Length; i++)
         {
             sumSq += ir[i] * ir[i];
         }
-        double norm = Math.Sqrt(sumSq);
-        if (norm > 1e-12 && Math.Abs(norm - 1.0) > 1e-6)
+        return Math.Sqrt(sumSq);
+    }
+
+    private static void ScaleByInverseNorm(double[] ir, double norm)
+    {
+        for (int i = 0; i < ir.Length; i++)
         {
-            for (int i = 0; i < ir.Length; i++)
-            {
-                ir[i] /= norm;
-            }
+            ir[i] /= norm;
         }
     }
 

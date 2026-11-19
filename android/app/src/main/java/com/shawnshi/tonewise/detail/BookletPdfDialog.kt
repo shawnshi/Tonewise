@@ -75,8 +75,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.material.bottomsheet.BackportBottomSheetDialogFragment
 import dagger.hilt.android.AndroidEntryPoint
 import java.io.File
+import java.util.concurrent.Executors
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.MusicSettings
@@ -110,20 +114,19 @@ class BookletPdfDialog : BackportBottomSheetDialogFragment() {
                 LaunchedEffect(song?.uid) {
                     loading = true
                     resolved = null
-                    resolved =
-                        if (song != null) {
-                            withContext(Dispatchers.IO) {
-                                BookletLocator.findForSong(context, musicSettings, song!!)
+                    val targetSong = song
+                    if (targetSong != null) {
+                        val found =
+                            withContext(Dispatchers.IO + NonCancellable) {
+                                BookletLocator.findForSong(context, musicSettings, targetSong)
                             }
+                        if (isActive) {
+                            resolved = found
                         } else {
-                            null
+                            found?.closeQuietly()
                         }
+                    }
                     loading = false
-                }
-
-                DisposableEffect(resolved) {
-                    val handle = resolved
-                    onDispose { handle?.closeQuietly() }
                 }
 
                 TonewiseComposeTheme {
@@ -356,51 +359,93 @@ private fun BookletPdfSheet(
     var pageIndex by remember(resolved) { mutableIntStateOf(0) }
     var pageCount by remember(resolved) { mutableIntStateOf(0) }
     var renderedPage by remember(resolved) { mutableStateOf<ImageBitmap?>(null) }
+    var renderer by remember(resolved) { mutableStateOf<PdfRenderer?>(null) }
 
-    val renderer =
-        remember(resolved) {
-            resolved?.let { runCatching { PdfRenderer(it.pfd) }.getOrNull() }
+    val pdfExecutor = remember {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "Tonewise-PdfRenderer").apply { isDaemon = true }
         }
+    }
+    val pdfDispatcher = remember(pdfExecutor) { pdfExecutor.asCoroutineDispatcher() }
 
-    DisposableEffect(renderer) {
-        onDispose { runCatching { renderer?.close() } }
+    DisposableEffect(pdfExecutor) {
+        onDispose {
+            pdfDispatcher.close()
+            pdfExecutor.shutdown()
+        }
+    }
+
+    DisposableEffect(resolved) {
+        var activeRenderer: PdfRenderer? = null
+        val handle = resolved
+        if (handle != null) {
+            pdfExecutor.execute {
+                val created = runCatching { PdfRenderer(handle.pfd) }.getOrNull()
+                if (created != null) {
+                    activeRenderer = created
+                    renderer = created
+                } else {
+                    handle.closeQuietly()
+                }
+            }
+        }
+        onDispose {
+            val toClose = activeRenderer ?: renderer
+            renderer = null
+            pdfExecutor.execute {
+                if (toClose != null) {
+                    runCatching { toClose.close() }
+                } else {
+                    handle?.closeQuietly()
+                }
+            }
+        }
     }
 
     LaunchedEffect(renderer, pageIndex) {
-        if (renderer == null || renderer.pageCount <= 0) {
+        val active = renderer
+        if (active == null) {
             pageCount = 0
             renderedPage = null
             return@LaunchedEffect
         }
-        val clamped = pageIndex.coerceIn(0, renderer.pageCount - 1)
-        pageCount = renderer.pageCount
-        renderedPage =
-            withContext(Dispatchers.IO) {
-                runCatching {
-                        renderer.openPage(clamped).use { page ->
-                            val targetWidth = 1080
-                            val targetHeight =
-                                ((page.height.toFloat() / page.width.coerceAtLeast(1)) * targetWidth)
-                                    .toInt()
-                                    .coerceIn(480, 2400)
-                            val bitmap =
-                                Bitmap.createBitmap(
-                                    targetWidth,
-                                    targetHeight,
-                                    Bitmap.Config.ARGB_8888,
-                                )
-                            Canvas(bitmap).drawColor(AndroidColor.WHITE)
-                            page.render(
-                                bitmap,
-                                null,
-                                null,
-                                PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY,
-                            )
-                            bitmap.asImageBitmap()
-                        }
-                    }
-                    .getOrNull()
+        val (count, bmp) =
+            withContext(pdfDispatcher) {
+                if (active.pageCount <= 0) {
+                    0 to null
+                } else {
+                    val clamped = pageIndex.coerceIn(0, active.pageCount - 1)
+                    val rendered =
+                        runCatching {
+                                active.openPage(clamped).use { page ->
+                                    val targetWidth = 1080
+                                    val targetHeight =
+                                        ((page.height.toFloat() / page.width.coerceAtLeast(1)) *
+                                                targetWidth)
+                                            .toInt()
+                                            .coerceIn(480, 2400)
+                                    val bitmap =
+                                        Bitmap.createBitmap(
+                                            targetWidth,
+                                            targetHeight,
+                                            Bitmap.Config.ARGB_8888,
+                                        )
+                                    Canvas(bitmap).drawColor(AndroidColor.WHITE)
+                                    page.render(
+                                        bitmap,
+                                        null,
+                                        null,
+                                        PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY,
+                                    )
+                                    bitmap.asImageBitmap()
+                                }
+                            }
+                            .getOrNull()
+                    active.pageCount to rendered
+                }
             }
+        pageCount = count
+        renderedPage = bmp
     }
 
     Surface(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface) {

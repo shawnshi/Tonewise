@@ -5,6 +5,12 @@
         <domain includeSubdomains="true">audioscrobbler.com</domain>
         <domain includeSubdomains="true">last.fm</domain>
         <domain includeSubdomains="true">wikipedia.org</domain>
+        <domain includeSubdomains="true">wikimedia.org</domain>
+        <domain includeSubdomains="true">musicbrainz.org</domain>
+        <domain includeSubdomains="true">coverartarchive.org</domain>
+        <domain includeSubdomains="true">discogs.com</domain>
+        <domain includeSubdomains="true">itunes.apple.com</domain>
+        <domain includeSubdomains="true">spotify.com</domain>
     </domain-config>
     <!-- Allow local dynamic LAN SyncHost HTTP connections on private subnets -->
     <base-config cleartextTrafficPermitted="true" />

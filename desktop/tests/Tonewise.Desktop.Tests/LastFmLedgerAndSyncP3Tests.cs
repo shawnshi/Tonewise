@@ -203,6 +203,19 @@ public sealed class LastFmLedgerAndSyncP3Tests
             await using var server = new SyncHostServer(tempRoot, "pc-p3");
             int port = await server.StartAsync(port: 0, enableMdns: false);
             using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            var pairResp = await http.PostAsJsonAsync("/api/v2/pair", new
+            {
+                code = server.Store.CurrentPairingCode,
+                device_id = "pc-p3-phone",
+                device_name = "Test"
+            });
+            pairResp.EnsureSuccessStatusCode();
+            using (var pairDoc = JsonDocument.Parse(await pairResp.Content.ReadAsStringAsync()))
+            {
+                string token = pairDoc.RootElement.GetProperty("token").GetString()!;
+                http.DefaultRequestHeaders.Authorization =
+                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
 
             // 1. /api/v1/encyclopedia returns persisted entries
             using var encDoc = JsonDocument.Parse(await http.GetStringAsync("/api/v1/encyclopedia?entityType=composer"));
@@ -597,6 +610,171 @@ public sealed class LastFmLedgerAndSyncP3Tests
         {
             SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Phase1_LastFmAccountConfig_EncryptsSecretsWithDpapiOnWindows()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "tw_p1_dpapi_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            const string plainSecret = "secret_top_value_987654";
+            const string plainSession = "session_key_secret_123456";
+            var original = new LastFmAccountConfig(
+                ApiKey: "public_api_key_abc",
+                ApiSecret: plainSecret,
+                Username: "shawn",
+                SessionKey: plainSession,
+                LastPullUnixSec: 1_763_251_200L);
+
+            LastFmAccountConfig.Save(tempDir, original);
+
+            string jsonPath = Path.Combine(tempDir, "lastfm_config.json");
+            Assert.True(File.Exists(jsonPath));
+            string rawJson = File.ReadAllText(jsonPath, Encoding.UTF8);
+
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.Contains("dpapi:", rawJson, StringComparison.Ordinal);
+                Assert.DoesNotContain(plainSecret, rawJson, StringComparison.Ordinal);
+                Assert.DoesNotContain(plainSession, rawJson, StringComparison.Ordinal);
+            }
+
+            var loaded = LastFmAccountConfig.Load(tempDir);
+            Assert.NotNull(loaded);
+            Assert.Equal("public_api_key_abc", loaded!.ApiKey);
+            Assert.Equal(plainSecret, loaded.ApiSecret);
+            Assert.Equal("shawn", loaded.Username);
+            Assert.Equal(plainSession, loaded.SessionKey);
+            Assert.Equal(1_763_251_200L, loaded.LastPullUnixSec);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Phase2_LastFmLedger_LocalPlayCountIsNotClobberedBySubsequentCloudSync()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_p2_lfm_mono_" + Guid.NewGuid().ToString("N"));
+        string dotTonewise = Path.Combine(tempRoot, ".tonewise");
+        Directory.CreateDirectory(dotTonewise);
+        string dbPath = Path.Combine(dotTonewise, "manifest.db");
+
+        try
+        {
+            string schemaSql = File.ReadAllText(Path.Combine(FindRepoRoot(), "protocol", "schemas", "manifest.sql"));
+            using (var conn = TonewiseSqlite.OpenReadWrite(dbPath))
+            {
+                using var setup = conn.CreateCommand();
+                setup.CommandText = schemaSql;
+                setup.ExecuteNonQuery();
+
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                        title, album, artists_json, play_count_total
+                    ) VALUES (
+                        'uid_mono', X'CCDD', 64, X'EEFF', 0,
+                        'Bach/01_Aria.flac', 2048, 1000, 'flac', 96000, 185000,
+                        'Aria', 'Goldberg', '["Glenn Gould"]', 0
+                    );
+                    """;
+                ins.ExecuteNonQuery();
+            }
+
+            new StagingDiffStore(dbPath).EnsureSchema();
+            long nowSec = 1_763_251_200L;
+            for (int i = 0; i < 5; i++)
+            {
+                LastFmLedgerService.RecordLocalPlaybackEvent(
+                    dbPath,
+                    dotTonewise,
+                    "uid_mono",
+                    "Glenn Gould",
+                    "Aria",
+                    "Goldberg",
+                    nowSec - 60L + i,
+                    scrobbleEligible: true,
+                    deviceId: "desktop");
+            }
+
+            LastFmLedgerService.IngestPulledCloudPlays(
+                dbPath,
+                dotTonewise,
+                [new CloudRecentTrack("Glenn Gould", "Aria", "Goldberg", nowSec - 300L)]);
+            LastFmLedgerService.SyncTopTrackPlayCounts(
+                dbPath,
+                [new CloudTopTrack("Glenn Gould", "Aria", 2)]);
+
+            using (var conn = TonewiseSqlite.OpenReadOnly(dbPath))
+            {
+                using var q = conn.CreateCommand();
+                q.CommandText = "SELECT play_count_total FROM tracks WHERE track_uid = 'uid_mono';";
+                Assert.Equal(5, Convert.ToInt32(q.ExecuteScalar()));
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase2_LastFmWebApiClient_RetriesTransient429AndThrowsOnPersistentFailure()
+    {
+        int transientAttempts = 0;
+        var retryHandler = new SequenceStatusHandler(_ =>
+        {
+            transientAttempts++;
+            if (transientAttempts == 1)
+            {
+                return (HttpStatusCode.TooManyRequests, """{"error":29,"message":"Rate limit"}""");
+            }
+            string okJson = """
+                {
+                  "recenttracks": {
+                    "@attr": { "totalPages": "1" },
+                    "track": [
+                      { "name": "Aria", "artist": { "#text": "Glenn Gould" }, "album": { "#text": "Goldberg" }, "date": { "uts": "1763251200" } }
+                    ]
+                  }
+                }
+                """;
+            return (HttpStatusCode.OK, okJson);
+        });
+        var retryClient = new LastFmWebApiClient(new HttpClient(retryHandler));
+        var pulled = await retryClient.FetchRecentTracksAsync("api_key", "shawn");
+        Assert.Equal(2, transientAttempts);
+        Assert.Single(pulled);
+        Assert.Equal("Aria", pulled[0].Title);
+
+        int failAttempts = 0;
+        var failHandler = new SequenceStatusHandler(_ =>
+        {
+            failAttempts++;
+            return (HttpStatusCode.InternalServerError, """{"error":8,"message":"Backend down"}""");
+        });
+        var failClient = new LastFmWebApiClient(new HttpClient(failHandler));
+        await Assert.ThrowsAsync<HttpRequestException>(() => failClient.FetchRecentTracksAsync("api_key", "shawn"));
+        Assert.Equal(3, failAttempts);
+    }
+
+    private sealed class SequenceStatusHandler(Func<HttpRequestMessage, (HttpStatusCode Status, string Body)> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var (status, json) = responder(request);
+            return Task.FromResult(new HttpResponseMessage(status)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
         }
     }
 

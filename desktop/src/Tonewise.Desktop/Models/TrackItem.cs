@@ -18,6 +18,37 @@ public sealed class BulkObservableCollection<T> : ObservableCollection<T>
         OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
         OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
+
+    public void AddRange(IEnumerable<T> items)
+    {
+        CheckReentrancy();
+        bool any = false;
+        foreach (var item in items)
+        {
+            Items.Add(item);
+            any = true;
+        }
+        if (!any) return;
+        OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+        OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+        OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+    }
+
+    public void InsertRange(int index, IEnumerable<T> items)
+    {
+        CheckReentrancy();
+        int cursor = Math.Clamp(index, 0, Items.Count);
+        bool any = false;
+        foreach (var item in items)
+        {
+            Items.Insert(cursor++, item);
+            any = true;
+        }
+        if (!any) return;
+        OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+        OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+        OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+    }
 }
 
 public sealed record TrackItem(
@@ -52,7 +83,9 @@ public sealed record TrackItem(
     string? CoverArtPath = null,
     string? BookletPdfPath = null,
     int? MovementNumber = null,
-    double? ReplayGainAlbumDb = null
+    double? ReplayGainAlbumDb = null,
+    int DiscNumber = 0,
+    int TrackNumber = 0
 )
 {
     public bool IsLoved => Rating >= 5;
@@ -89,10 +122,64 @@ public sealed record TrackItem(
             ? $"{WorkDisplay} · {ConductorsDisplay}"
             : (!string.IsNullOrWhiteSpace(WorkDisplay) ? WorkDisplay : ConductorsDisplay);
 
+    public static bool IsExplicitNonClassicalGenre(string? genre)
+    {
+        if (string.IsNullOrWhiteSpace(genre)) return false;
+        string g = genre.Trim();
+        return g.Contains("Pop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Rock", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Metal", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Jazz", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Hip-Hop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Hip Hop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Rap", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("R&B", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Electronic", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("EDM", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Dance", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Country", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Folk", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Blues", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Reggae", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Indie", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Punk", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Soul", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Funk", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("K-Pop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("J-Pop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("C-Pop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Mandopop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Cantopop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("ACG", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Anime", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Soundtrack", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("OST", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Game", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("流行", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("摇滚", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("爵士", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("电子", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("民谣", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("说唱", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("嘻哈", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("原声", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool ClassifyIsClassical(
+        string? genre,
+        string? workName,
+        string? composersDisplay,
+        string? conductorsDisplay)
+    {
+        if (IsClassicalGenre(genre)) return true;
+        if (!string.IsNullOrWhiteSpace(workName)) return true;
+        if (IsExplicitNonClassicalGenre(genre)) return false;
+        if (!string.IsNullOrWhiteSpace(conductorsDisplay)) return true;
+        return string.IsNullOrWhiteSpace(genre) && !string.IsNullOrWhiteSpace(composersDisplay);
+    }
+
     public bool IsClassical =>
-        IsClassicalGenre(Genre)
-        || !string.IsNullOrWhiteSpace(ComposersDisplay)
-        || !string.IsNullOrWhiteSpace(WorkName);
+        ClassifyIsClassical(Genre, WorkName, ComposersDisplay, ConductorsDisplay);
 
     public string ClassicalFourLevelSummary =>
         IsClassical

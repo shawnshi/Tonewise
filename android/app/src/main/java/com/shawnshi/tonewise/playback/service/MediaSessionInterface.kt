@@ -110,14 +110,12 @@ constructor(
 
     override fun onRemoveQueueItem(description: MediaDescriptionCompat) {
         super.onRemoveQueueItem(description)
-        val at = description.extras?.getInt(KEY_QUEUE_POS)
-        if (at != null) {
-            // Direct queue item removal w/preserved extras, we can explicitly remove
-            // the correct item rather than a duplicate elsewhere.
+        val at = description.extras?.getInt(KEY_QUEUE_POS, -1) ?: -1
+        if (at in playbackManager.queue.indices) {
             playbackManager.removeQueueItem(at)
             return
         }
-        // Non-queue item or queue item lost it's extras in transit, remove the first item
+        // Non-queue item or queue item lost its extras in transit, remove the first matching item
         val uid = MediaSessionUID.fromString(description.mediaId ?: return) ?: return
         val songUid =
             when (uid) {
@@ -125,7 +123,9 @@ constructor(
                 else -> return
             }
         val firstAt = playbackManager.queue.indexOfFirst { it.uid == songUid }
-        playbackManager.removeQueueItem(firstAt)
+        if (firstAt in playbackManager.queue.indices) {
+            playbackManager.removeQueueItem(firstAt)
+        }
     }
 
     override fun onPlay() {
@@ -145,7 +145,10 @@ constructor(
     }
 
     override fun onSkipToQueueItem(id: Long) {
-        playbackManager.goto(id.toInt())
+        val target = id.toInt()
+        if (target in playbackManager.queue.indices) {
+            playbackManager.goto(target)
+        }
     }
 
     override fun onSeekTo(position: Long) {

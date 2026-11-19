@@ -18,17 +18,24 @@
  
 package com.shawnshi.tonewise
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.support.v4.media.MediaBrowserCompat.MediaItem
 import androidx.annotation.StringRes
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.media.MediaBrowserServiceCompat
 import androidx.media.utils.MediaConstants
 import dagger.hilt.android.AndroidEntryPoint
@@ -45,6 +52,7 @@ class AuxioService :
 
     @Inject lateinit var musicFragmentFactory: MusicServiceFragment.Factory
     private lateinit var musicFragment: MusicServiceFragment
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     @SuppressLint("WrongConstant")
     override fun onCreate() {
@@ -57,14 +65,23 @@ class AuxioService :
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // TODO: Start command occurring from a foreign service basically implies a detached
-        //  service, we might need more handling here.
         super.onStartCommand(intent, flags, startId)
         onHandleForeground(intent)
-        // If we die we want to not restart, we will immediately try to foreground in and just
-        // fail to start again since the activity will be dead too. This is not the semantically
-        // "correct" flag (normally you want START_STICKY for playback) but we need this to avoid
-        // weird foreground errors.
+        val startExtra = intent?.getIntExtra(INTENT_KEY_START_ID, -1)
+        if ((startExtra == IntegerTable.START_ID_MEDIA_BUTTON ||
+                startExtra == IntegerTable.START_ID_TASKER) && !isForeground) {
+            // Guarantees startForeground() completes synchronously within Android's 5s deadline.
+            startForegroundCompat(playbackFragment.fallbackNotification)
+            isForeground = true
+            mainHandler.postDelayed(
+                {
+                    if (!playbackFragment.isSessionOngoing) {
+                        updateForeground(ForegroundListener.Change.MEDIA_SESSION)
+                    }
+                },
+                2500L,
+            )
+        }
         return START_NOT_STICKY
     }
 
@@ -85,6 +102,8 @@ class AuxioService :
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
+        isForeground = false
         super.onDestroy()
         musicFragment.release()
         playbackFragment.release()
@@ -127,11 +146,25 @@ class AuxioService :
         ) ?: 4
     }
 
+    private fun startForegroundCompat(notification: ForegroundServiceNotification) {
+        val type =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            } else {
+                0
+            }
+        ServiceCompat.startForeground(this, notification.code, notification.build(), type)
+    }
+
     override fun updateForeground(change: ForegroundListener.Change) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { updateForeground(change) }
+            return
+        }
         val mediaNotification = playbackFragment.notification
         if (mediaNotification != null) {
-            if (change == ForegroundListener.Change.MEDIA_SESSION) {
-                startForeground(mediaNotification.code, mediaNotification.build())
+            if (change == ForegroundListener.Change.MEDIA_SESSION || !isForeground) {
+                startForegroundCompat(mediaNotification)
             }
             // Nothing changed, but don't show anything music related since we can always
             // index during playback.
@@ -139,11 +172,27 @@ class AuxioService :
         } else {
             musicFragment.createNotification {
                 if (it != null) {
-                    startForeground(it.code, it.build())
-                    isForeground = true
+                    try {
+                        startForegroundCompat(it)
+                        isForeground = true
+                    } catch (e: Exception) {
+                        Timber.w(e, "Unable to promote indexer foreground notification")
+                        val canNotify =
+                            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                                ContextCompat.checkSelfPermission(
+                                    this,
+                                    Manifest.permission.POST_NOTIFICATIONS,
+                                ) == PackageManager.PERMISSION_GRANTED
+                        if (canNotify) {
+                            try {
+                                NotificationManagerCompat.from(this).notify(it.code, it.build())
+                            } catch (_: SecurityException) {}
+                        }
+                    }
                 } else {
                     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                     isForeground = false
+                    stopSelf()
                 }
             }
         }
@@ -156,6 +205,7 @@ class AuxioService :
     companion object {
         const val ACTION_START = BuildConfig.APPLICATION_ID + ".service.START"
 
+        @Volatile
         var isForeground = false
             private set
 

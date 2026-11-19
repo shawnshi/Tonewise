@@ -124,6 +124,19 @@ public sealed class CoreInteropAndDspTests
             Assert.True(port > 0);
 
             using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            var pairResp = await http.PostAsJsonAsync("/api/v2/pair", new
+            {
+                code = server.Store.CurrentPairingCode,
+                device_id = "pc-test-phone",
+                device_name = "Test"
+            });
+            pairResp.EnsureSuccessStatusCode();
+            using (var pairDoc = JsonDocument.Parse(await pairResp.Content.ReadAsStringAsync()))
+            {
+                string token = pairDoc.RootElement.GetProperty("token").GetString()!;
+                http.DefaultRequestHeaders.Authorization =
+                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
 
             // 1. Status & Scenes
             using var statusDoc = JsonDocument.Parse(await http.GetStringAsync("/api/v1/status"));

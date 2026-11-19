@@ -1,13 +1,7 @@
-using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Data.Sqlite;
-using Tonewise.SyncHost.Curation;
-using Tonewise.SyncHost.Playlists;
-using Tonewise.SyncHost.Workbench;
 
 namespace Tonewise.SyncHost;
 
@@ -27,7 +21,8 @@ public sealed record SyncOutboxItem(
     [property: JsonPropertyName("display_name")] string DisplayName,
     [property: JsonPropertyName("mode")] string Mode,
     [property: JsonPropertyName("track_uids")] IReadOnlyList<string> TrackUids,
-    [property: JsonPropertyName("created_at_ms")] long CreatedAtMs
+    [property: JsonPropertyName("created_at_ms")] long CreatedAtMs,
+    [property: JsonPropertyName("completed_device_ids")] IReadOnlyList<string>? CompletedDeviceIds = null
 );
 
 public sealed record ResolvedSyncTrack(
@@ -43,7 +38,9 @@ public sealed record ResolvedSyncTrack(
     [property: JsonPropertyName("file_size")] long FileSize,
     [property: JsonPropertyName("mtime_ms")] long MtimeMs,
     [property: JsonPropertyName("has_cover")] bool HasCover,
-    [property: JsonPropertyName("source_outbox_ids")] IReadOnlyList<string> SourceOutboxIds
+    [property: JsonPropertyName("source_outbox_ids")] IReadOnlyList<string> SourceOutboxIds,
+    [property: JsonPropertyName("header_blake3")] string HeaderBlake3 = "",
+    [property: JsonPropertyName("audio_frame_blake3")] string AudioFrameBlake3 = ""
 );
 
 public sealed record ResolvedSyncPlaylist(
@@ -59,7 +56,8 @@ public sealed record ResolvedOutboxPayload(
     [property: JsonPropertyName("items")] IReadOnlyList<SyncOutboxItem> Items,
     [property: JsonPropertyName("tracks")] IReadOnlyList<ResolvedSyncTrack> Tracks,
     [property: JsonPropertyName("playlists")] IReadOnlyList<ResolvedSyncPlaylist> Playlists,
-    [property: JsonPropertyName("total_bytes")] long TotalBytes
+    [property: JsonPropertyName("total_bytes")] long TotalBytes,
+    [property: JsonPropertyName("duplicate_track_count")] int DuplicateTrackCount = 0
 );
 
 public sealed record CatalogEntry(
@@ -70,10 +68,21 @@ public sealed record CatalogEntry(
     [property: JsonPropertyName("total_bytes")] long TotalBytes
 );
 
-public sealed record OutboxSummary(int ItemCount, int TrackCount, long TotalBytes);
+public sealed record OutboxSummary(int ItemCount, int TrackCount, long TotalBytes, int DuplicateTrackCount = 0);
 
-public sealed class SyncOutboxAndPairingStore
+public enum PairAttemptStatus
 {
+    Success,
+    InvalidCode,
+    LockedOut
+}
+
+public sealed partial class SyncOutboxAndPairingStore
+{
+    private static readonly TimeSpan PairingCodeTtl = TimeSpan.FromMinutes(10);
+    private const int MaxFailedPairAttempts = 5;
+    private static readonly TimeSpan PairLockoutDuration = TimeSpan.FromSeconds(60);
+
     private static readonly string[] CoverCandidateNames =
     [
         "cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.png", "front.jpg", "front.png"
@@ -87,6 +96,9 @@ public sealed class SyncOutboxAndPairingStore
     private readonly string _outboxPath;
     private readonly Lock _gate = new();
     private string _pairingCode;
+    private DateTimeOffset _pairingCodeIssuedAtUtc;
+    private readonly Dictionary<string, (int FailedAttempts, DateTimeOffset LockedUntilUtc)> _pairLockoutsByClient =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public SyncOutboxAndPairingStore(string musicRoot)
     {
@@ -95,6 +107,7 @@ public sealed class SyncOutboxAndPairingStore
         _devicesPath = Path.Combine(_tonewiseDir, "paired_devices.json");
         _outboxPath = Path.Combine(_tonewiseDir, "sync_outbox.json");
         _pairingCode = GenerateSixDigitCode();
+        _pairingCodeIssuedAtUtc = DateTimeOffset.UtcNow;
     }
 
     public string CurrentPairingCode
@@ -103,6 +116,7 @@ public sealed class SyncOutboxAndPairingStore
         {
             lock (_gate)
             {
+                RotatePairingCodeIfExpiredUnlocked(DateTimeOffset.UtcNow);
                 return _pairingCode;
             }
         }
@@ -113,6 +127,8 @@ public sealed class SyncOutboxAndPairingStore
         lock (_gate)
         {
             _pairingCode = GenerateSixDigitCode();
+            _pairingCodeIssuedAtUtc = DateTimeOffset.UtcNow;
+            _pairLockoutsByClient.Clear();
             return _pairingCode;
         }
     }
@@ -122,27 +138,69 @@ public sealed class SyncOutboxAndPairingStore
         string? deviceId,
         string? deviceName,
         out string? issuedToken,
-        out PairedDeviceRecord? device)
+        out PairedDeviceRecord? device,
+        string? clientKey = null) =>
+        TryPairWithStatus(code, deviceId, deviceName, out issuedToken, out device, out _, clientKey) == PairAttemptStatus.Success;
+
+    public PairAttemptStatus TryPairWithStatus(
+        string? code,
+        string? deviceId,
+        string? deviceName,
+        out string? issuedToken,
+        out PairedDeviceRecord? device,
+        out int retryAfterSeconds,
+        string? clientKey = null)
     {
         issuedToken = null;
         device = null;
+        retryAfterSeconds = 0;
 
         if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(deviceId))
-            return false;
+            return PairAttemptStatus.InvalidCode;
 
         string submitted = code.Trim();
         string cleanDeviceId = SanitizeDeviceId(deviceId);
-        if (string.IsNullOrEmpty(cleanDeviceId)) return false;
+        if (string.IsNullOrEmpty(cleanDeviceId)) return PairAttemptStatus.InvalidCode;
         string cleanName = string.IsNullOrWhiteSpace(deviceName) ? cleanDeviceId : deviceName.Trim();
+        string bucketKey = string.IsNullOrWhiteSpace(clientKey) ? "global" : clientKey.Trim();
 
         lock (_gate)
         {
+            var nowUtc = DateTimeOffset.UtcNow;
+            if (_pairLockoutsByClient.Count > 256)
+            {
+                var staleKeys = _pairLockoutsByClient
+                    .Where(kv => kv.Value.LockedUntilUtc != DateTimeOffset.MinValue && kv.Value.LockedUntilUtc <= nowUtc)
+                    .Select(kv => kv.Key)
+                    .ToList();
+                foreach (string k in staleKeys) _pairLockoutsByClient.Remove(k);
+            }
+
+            if (_pairLockoutsByClient.TryGetValue(bucketKey, out var state) && nowUtc < state.LockedUntilUtc)
+            {
+                retryAfterSeconds = Math.Max(1, (int)Math.Ceiling((state.LockedUntilUtc - nowUtc).TotalSeconds));
+                return PairAttemptStatus.LockedOut;
+            }
+
+            RotatePairingCodeIfExpiredUnlocked(nowUtc);
+
             if (!ConstantTimeEqualsUtf8(submitted, _pairingCode))
-                return false;
+            {
+                int failed = (state.LockedUntilUtc <= nowUtc ? state.FailedAttempts : 0) + 1;
+                if (failed >= MaxFailedPairAttempts)
+                {
+                    DateTimeOffset lockedUntil = nowUtc + PairLockoutDuration;
+                    _pairLockoutsByClient[bucketKey] = (0, lockedUntil);
+                    retryAfterSeconds = (int)PairLockoutDuration.TotalSeconds;
+                    return PairAttemptStatus.LockedOut;
+                }
+                _pairLockoutsByClient[bucketKey] = (failed, DateTimeOffset.MinValue);
+                return PairAttemptStatus.InvalidCode;
+            }
 
             string token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
             string tokenHash = ComputeTokenHashHex(token);
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            long now = nowUtc.ToUnixTimeMilliseconds();
 
             var devices = LoadDevicesUnlocked();
             devices.RemoveAll(d => string.Equals(d.DeviceId, cleanDeviceId, StringComparison.OrdinalIgnoreCase));
@@ -152,10 +210,22 @@ public sealed class SyncOutboxAndPairingStore
 
             // Rotate pairing code after successful pairing to prevent stale code reuse
             _pairingCode = GenerateSixDigitCode();
+            _pairingCodeIssuedAtUtc = nowUtc;
+            _pairLockoutsByClient.Remove(bucketKey);
 
             issuedToken = token;
             device = record;
-            return true;
+            return PairAttemptStatus.Success;
+        }
+    }
+
+    private void RotatePairingCodeIfExpiredUnlocked(DateTimeOffset nowUtc)
+    {
+        if (nowUtc - _pairingCodeIssuedAtUtc >= PairingCodeTtl)
+        {
+            _pairingCode = GenerateSixDigitCode();
+            _pairingCodeIssuedAtUtc = nowUtc;
+            _pairLockoutsByClient.Clear();
         }
     }
 
@@ -220,9 +290,16 @@ public sealed class SyncOutboxAndPairingStore
             if (removed > 0)
             {
                 SaveDevicesUnlocked(devices);
-                return true;
             }
-            return false;
+
+            var items = LoadOutboxUnlocked();
+            int removedOutbox = items.RemoveAll(i => string.Equals(i.DeviceId, deviceId.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (removedOutbox > 0)
+            {
+                SaveOutboxUnlocked(items);
+            }
+
+            return removed > 0 || removedOutbox > 0;
         }
     }
 
@@ -236,6 +313,36 @@ public sealed class SyncOutboxAndPairingStore
 
     public SyncOutboxItem EnqueuePlaylist(string playlistName, string deviceId = "*", string mode = "subscribe") =>
         UpsertEntityOutboxItem("playlist", playlistName, $"歌单：{playlistName}", NormalizeMode(mode, "subscribe"), deviceId);
+
+    public IReadOnlyList<SyncOutboxItem> EnqueuePlaylists(
+        IEnumerable<string> playlistNames,
+        string deviceId = "*",
+        string mode = "subscribe")
+    {
+        var distinctNames = playlistNames?
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList() ?? [];
+        if (distinctNames.Count == 0) return [];
+
+        string cleanDevice = string.IsNullOrWhiteSpace(deviceId) ? "*" : deviceId.Trim();
+        string resolvedMode = NormalizeMode(mode, "subscribe");
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        lock (_gate)
+        {
+            var items = LoadOutboxUnlocked();
+            var upserted = new List<SyncOutboxItem>(distinctNames.Count);
+            foreach (string name in distinctNames)
+            {
+                upserted.Add(UpsertEntityOutboxItemUnlocked(
+                    items, "playlist", name, $"歌单：{name}", resolvedMode, cleanDevice, now));
+            }
+            SaveOutboxUnlocked(items);
+            return upserted;
+        }
+    }
 
     public SyncOutboxItem EnqueueGenre(string genre, string deviceId = "*", string mode = "subscribe") =>
         UpsertEntityOutboxItem("genre", genre, $"流派：{genre}", NormalizeMode(mode, "subscribe"), deviceId);
@@ -310,356 +417,68 @@ public sealed class SyncOutboxAndPairingStore
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (ids is null || ids.Count == 0) return 0;
 
+        string? cleanDevice = string.IsNullOrWhiteSpace(deviceId) ? null : deviceId.Trim();
+
         lock (_gate)
         {
             var items = LoadOutboxUnlocked();
-            int removed = items.RemoveAll(i =>
-                ids.Contains(i.Id)
-                && string.Equals(i.Mode, "copy", StringComparison.OrdinalIgnoreCase)
-                && (string.Equals(i.DeviceId, "*", StringComparison.OrdinalIgnoreCase)
-                    || string.IsNullOrWhiteSpace(deviceId)
-                    || string.Equals(i.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase)));
-            if (removed > 0)
+            var pairedDevices = LoadDevicesUnlocked();
+            bool changed = false;
+            int completedCount = 0;
+
+            for (int idx = items.Count - 1; idx >= 0; idx--)
+            {
+                var item = items[idx];
+                if (!ids.Contains(item.Id) || !string.Equals(item.Mode, "copy", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                bool targetMatches =
+                    string.Equals(item.DeviceId, "*", StringComparison.OrdinalIgnoreCase)
+                    || cleanDevice is null
+                    || string.Equals(item.DeviceId, cleanDevice, StringComparison.OrdinalIgnoreCase);
+                if (!targetMatches) continue;
+
+                if (!string.Equals(item.DeviceId, "*", StringComparison.OrdinalIgnoreCase)
+                    || cleanDevice is null
+                    || pairedDevices.Count <= 1)
+                {
+                    items.RemoveAt(idx);
+                    changed = true;
+                    completedCount++;
+                }
+                else
+                {
+                    var completedSet = (item.CompletedDeviceIds ?? [])
+                        .Where(d => !string.IsNullOrWhiteSpace(d))
+                        .Select(d => d.Trim())
+                        .ToList();
+                    if (!completedSet.Contains(cleanDevice, StringComparer.OrdinalIgnoreCase))
+                    {
+                        completedSet.Add(cleanDevice);
+                        changed = true;
+                    }
+
+                    bool allPairedDone = pairedDevices.All(p =>
+                        completedSet.Contains(p.DeviceId, StringComparer.OrdinalIgnoreCase));
+                    if (allPairedDone)
+                    {
+                        items.RemoveAt(idx);
+                        changed = true;
+                    }
+                    else
+                    {
+                        items[idx] = item with { CompletedDeviceIds = completedSet };
+                    }
+                    completedCount++;
+                }
+            }
+
+            if (changed)
             {
                 SaveOutboxUnlocked(items);
             }
-            return removed;
+            return completedCount;
         }
-    }
-
-    public OutboxSummary GetOutboxSummary(string? deviceId = null)
-    {
-        var resolved = ResolveOutbox(deviceId);
-        return new OutboxSummary(resolved.Items.Count, resolved.Tracks.Count, resolved.TotalBytes);
-    }
-
-    public ResolvedOutboxPayload ResolveOutbox(string? deviceId = null, string? hostName = null)
-    {
-        List<SyncOutboxItem> relevantItems;
-        lock (_gate)
-        {
-            relevantItems = FilterOutboxForDevice(LoadOutboxUnlocked(), deviceId);
-        }
-
-        string effectiveHost = string.IsNullOrWhiteSpace(hostName) ? Environment.MachineName : hostName;
-        long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-
-        if (relevantItems.Count == 0)
-        {
-            return new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, [], [], 0);
-        }
-
-        var rows = LoadManifestRows();
-        var rowsByUid = new Dictionary<string, ManifestTrackRow>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in rows)
-        {
-            rowsByUid[r.TrackUid] = r;
-            if (!string.IsNullOrWhiteSpace(r.AudioFrameBlake3Hex))
-                rowsByUid.TryAdd(r.AudioFrameBlake3Hex, r);
-        }
-
-        var libRefs = rows.Select(r => new LocalLibraryTrackRef(
-            r.TrackUid,
-            r.RelPath,
-            BuildFullPath(r.RelPath),
-            r.Title,
-            r.ArtistDisplay,
-            r.Album,
-            r.DurationMs,
-            r.SampleRateHz
-        )).ToList();
-
-        var playlistsInDir = relevantItems.Any(i => string.Equals(i.Kind, "playlist", StringComparison.OrdinalIgnoreCase))
-            ? PlaylistStore.ListPlaylists(_musicRoot, libRefs)
-            : [];
-
-        var outboxIdsByUid = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        var resolvedTrackOrder = new List<ManifestTrackRow>();
-        var resolvedPlaylists = new List<ResolvedSyncPlaylist>();
-        var coverCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-
-        void AttachTrack(ManifestTrackRow row, string outboxId)
-        {
-            if (!TryGetValidPhysicalFileInfo(row.RelPath, out _, out long realSize, out long realMtime))
-                return;
-
-            var normalizedRow = row with { FileSize = realSize > 0 ? realSize : row.FileSize, MtimeMs = realMtime > 0 ? realMtime : row.MtimeMs };
-            if (!outboxIdsByUid.TryGetValue(normalizedRow.TrackUid, out var owners))
-            {
-                owners = [];
-                outboxIdsByUid[normalizedRow.TrackUid] = owners;
-                resolvedTrackOrder.Add(normalizedRow);
-            }
-            if (!owners.Contains(outboxId, StringComparer.OrdinalIgnoreCase))
-            {
-                owners.Add(outboxId);
-            }
-        }
-
-        foreach (var item in relevantItems)
-        {
-            switch (item.Kind.ToLowerInvariant())
-            {
-                case "playlist":
-                {
-                    var plSummary = playlistsInDir.FirstOrDefault(p =>
-                        string.Equals(p.Name, item.TargetKey, StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(Path.GetFileNameWithoutExtension(p.FilePath), item.TargetKey, StringComparison.OrdinalIgnoreCase));
-                    if (plSummary is null) break;
-
-                    var doc = PlaylistStore.LoadPlaylist(plSummary.FilePath, libRefs, _musicRoot);
-                    var plTrackUids = new List<string>();
-                    var plRelPaths = new List<string>();
-                    foreach (var entry in doc.Entries)
-                    {
-                        if (!entry.IsLocalMatched || string.IsNullOrWhiteSpace(entry.MatchedTrackUid))
-                            continue;
-                        if (!rowsByUid.TryGetValue(entry.MatchedTrackUid, out var row))
-                            continue;
-                        if (!TryGetValidPhysicalFileInfo(row.RelPath, out _, out _, out _))
-                            continue;
-
-                        AttachTrack(row, item.Id);
-                        plTrackUids.Add(row.TrackUid);
-                        plRelPaths.Add(BuildTargetRelPath(row));
-                    }
-                    resolvedPlaylists.Add(new ResolvedSyncPlaylist(item.Id, plSummary.Name, plRelPaths, plTrackUids));
-                    break;
-                }
-                case "genre":
-                {
-                    bool matchUnlabeled = string.Equals(item.TargetKey, "(未标注流派)", StringComparison.OrdinalIgnoreCase);
-                    foreach (var row in rows)
-                    {
-                        bool match = matchUnlabeled
-                            ? string.IsNullOrWhiteSpace(row.Genre)
-                            : string.Equals(row.Genre.Trim(), item.TargetKey.Trim(), StringComparison.OrdinalIgnoreCase);
-                        if (match) AttachTrack(row, item.Id);
-                    }
-                    break;
-                }
-                case "artist":
-                {
-                    string targetArtist = item.TargetKey.Trim();
-                    foreach (var row in rows)
-                    {
-                        if (row.MatchesArtist(targetArtist))
-                        {
-                            AttachTrack(row, item.Id);
-                        }
-                    }
-                    break;
-                }
-                case "tracks":
-                {
-                    foreach (string uid in item.TrackUids)
-                    {
-                        if (rowsByUid.TryGetValue(uid, out var row))
-                        {
-                            AttachTrack(row, item.Id);
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-
-        long totalBytes = 0;
-        var resolvedTracks = new List<ResolvedSyncTrack>(resolvedTrackOrder.Count);
-        foreach (var row in resolvedTrackOrder)
-        {
-            string fullPath = BuildFullPath(row.RelPath);
-            string dir = Path.GetDirectoryName(fullPath) ?? "";
-            bool hasCover = false;
-            if (!string.IsNullOrEmpty(dir))
-            {
-                if (!coverCache.TryGetValue(dir, out hasCover))
-                {
-                    hasCover = FindCoverFileInDir(dir) is not null;
-                    coverCache[dir] = hasCover;
-                }
-            }
-
-            string targetRel = BuildTargetRelPath(row);
-            totalBytes += row.FileSize;
-            resolvedTracks.Add(new ResolvedSyncTrack(
-                TrackUid: row.TrackUid,
-                RelPath: row.RelPath,
-                TargetRelPath: targetRel,
-                Title: row.Title,
-                Artist: row.ArtistDisplay,
-                Album: row.Album,
-                AlbumArtist: row.AlbumArtist,
-                Genre: row.Genre,
-                DurationMs: row.DurationMs,
-                FileSize: row.FileSize,
-                MtimeMs: row.MtimeMs,
-                HasCover: hasCover,
-                SourceOutboxIds: outboxIdsByUid[row.TrackUid]
-            ));
-        }
-
-        return new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, resolvedTracks, resolvedPlaylists, totalBytes);
-    }
-
-    public IReadOnlyList<CatalogEntry> GetCatalog(string kind)
-    {
-        var rows = LoadManifestRows();
-        switch (kind.Trim().ToLowerInvariant())
-        {
-            case "playlists":
-            {
-                var libRefs = rows.Select(r => new LocalLibraryTrackRef(
-                    r.TrackUid, r.RelPath, BuildFullPath(r.RelPath),
-                    r.Title, r.ArtistDisplay, r.Album, r.DurationMs, r.SampleRateHz
-                )).ToList();
-                var byUid = rows.ToDictionary(r => r.TrackUid, StringComparer.OrdinalIgnoreCase);
-                var result = new List<CatalogEntry>();
-                foreach (var pl in PlaylistStore.ListPlaylists(_musicRoot, libRefs))
-                {
-                    var doc = PlaylistStore.LoadPlaylist(pl.FilePath, libRefs, _musicRoot);
-                    long bytes = doc.Entries
-                        .Where(e => e.IsLocalMatched && e.MatchedTrackUid is not null && byUid.ContainsKey(e.MatchedTrackUid))
-                        .Sum(e => byUid[e.MatchedTrackUid!].FileSize);
-                    result.Add(new CatalogEntry("playlist", pl.Name, pl.Name, pl.LocalMatchedCount, bytes));
-                }
-                return result;
-            }
-            case "genres":
-            {
-                return rows
-                    .GroupBy(r => string.IsNullOrWhiteSpace(r.Genre) ? "(未标注流派)" : r.Genre.Trim(), StringComparer.OrdinalIgnoreCase)
-                    .Select(g => new CatalogEntry("genre", g.Key, g.Key, g.Count(), g.Sum(r => r.FileSize)))
-                    .OrderByDescending(c => c.TrackCount)
-                    .ThenBy(c => c.Name, StringComparer.CurrentCultureIgnoreCase)
-                    .ToList();
-            }
-            case "artists":
-            {
-                var counts = new Dictionary<string, (string Name, int Tracks, long Bytes)>(StringComparer.OrdinalIgnoreCase);
-                foreach (var r in rows)
-                {
-                    foreach (string name in r.AllArtists)
-                    {
-                        if (!counts.TryGetValue(name, out var prev))
-                            counts[name] = (name, 1, r.FileSize);
-                        else
-                            counts[name] = (prev.Name, prev.Tracks + 1, prev.Bytes + r.FileSize);
-                    }
-                }
-                return counts.Values
-                    .OrderByDescending(v => v.Tracks)
-                    .ThenBy(v => v.Name, StringComparer.CurrentCultureIgnoreCase)
-                    .Take(500)
-                    .Select(v => new CatalogEntry("artist", v.Name, v.Name, v.Tracks, v.Bytes))
-                    .ToList();
-            }
-            default:
-                return [];
-        }
-    }
-
-    public bool TryResolveTrackPhysicalPath(string trackUid, out string fullPath, out string relPath)
-    {
-        fullPath = "";
-        relPath = "";
-        if (string.IsNullOrWhiteSpace(trackUid)) return false;
-
-        string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
-        if (!File.Exists(dbPath)) return false;
-
-        string? dbRelPath = null;
-        using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
-        {
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                SELECT rel_path
-                FROM tracks
-                WHERE track_uid = $uid OR lower(hex(audio_frame_blake3)) = lower($uid)
-                LIMIT 1;
-                """;
-            cmd.Parameters.AddWithValue("$uid", trackUid.Trim());
-            object? res = cmd.ExecuteScalar();
-            dbRelPath = res as string;
-        }
-
-        if (string.IsNullOrWhiteSpace(dbRelPath)) return false;
-        if (!TryGetValidPhysicalFileInfo(dbRelPath, out string audioFull, out _, out _))
-            return false;
-
-        relPath = dbRelPath;
-        fullPath = audioFull;
-        return true;
-    }
-
-    public bool TryResolveTrackCoverPath(string trackUid, out string coverPath)
-    {
-        coverPath = "";
-        if (!TryResolveTrackPhysicalPath(trackUid, out string audioFull, out _))
-            return false;
-
-        string? dir = Path.GetDirectoryName(audioFull);
-        if (string.IsNullOrWhiteSpace(dir)) return false;
-
-        string? candidate = FindCoverFileInDir(dir);
-        if (string.IsNullOrWhiteSpace(candidate)) return false;
-
-        string rootFull = GetNormalizedRootPrefix();
-        string fullCandidate = LongPathHelper.StripExtendedPrefix(Path.GetFullPath(candidate));
-        if (!fullCandidate.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        coverPath = fullCandidate;
-        return true;
-    }
-
-    public static IReadOnlyList<string> GetLocalLanUrls(int port)
-    {
-        if (port <= 0) return [];
-        var scored = new List<(int Score, string Url)>();
-        try
-        {
-            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
-
-                string desc = (ni.Name + " " + ni.Description).ToLowerInvariant();
-                int ifacePenalty = (desc.Contains("vethernet") || desc.Contains("vmware") || desc.Contains("virtualbox")
-                                    || desc.Contains("wsl") || desc.Contains("tailscale") || desc.Contains("zerotier")
-                                    || desc.Contains("hyper-v"))
-                    ? 100
-                    : (ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 || ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet ? 0 : 20);
-
-                var ipProps = ni.GetIPProperties();
-                foreach (var uni in ipProps.UnicastAddresses)
-                {
-                    if (uni.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-                    byte[] b = uni.Address.GetAddressBytes();
-                    if (b[0] == 127 || (b[0] == 169 && b[1] == 254)) continue;
-
-                    int netRank = (b[0], b[1]) switch
-                    {
-                        (192, 168) => 1,
-                        (10, _) => 2,
-                        (172, >= 16 and <= 31) => 3,
-                        _ => 10
-                    };
-                    scored.Add((ifacePenalty + netRank, $"http://{uni.Address}:{port}"));
-                }
-            }
-        }
-        catch
-        {
-            // Ignore interface enumeration failures
-        }
-
-        return scored
-            .OrderBy(s => s.Score)
-            .Select(s => s.Url)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
     }
 
     private SyncOutboxItem UpsertEntityOutboxItem(
@@ -669,242 +488,57 @@ public sealed class SyncOutboxAndPairingStore
         string mode,
         string deviceId)
     {
-        string cleanKey = string.IsNullOrWhiteSpace(targetKey) ? "" : targetKey.Trim();
         string cleanDevice = string.IsNullOrWhiteSpace(deviceId) ? "*" : deviceId.Trim();
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         lock (_gate)
         {
             var items = LoadOutboxUnlocked();
-            int existingIdx = items.FindIndex(i =>
-                string.Equals(i.DeviceId, cleanDevice, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(i.Kind, kind, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(i.TargetKey, cleanKey, StringComparison.OrdinalIgnoreCase));
-
-            var updated = new SyncOutboxItem(
-                Id: existingIdx >= 0 ? items[existingIdx].Id : "ob_" + Guid.NewGuid().ToString("N")[..12],
-                DeviceId: cleanDevice,
-                Kind: kind,
-                TargetKey: cleanKey,
-                DisplayName: displayName.Trim(),
-                Mode: mode,
-                TrackUids: [],
-                CreatedAtMs: now
-            );
-
-            if (existingIdx >= 0) items[existingIdx] = updated;
-            else items.Add(updated);
-
+            var updated = UpsertEntityOutboxItemUnlocked(items, kind, targetKey, displayName, mode, cleanDevice, now);
             SaveOutboxUnlocked(items);
             return updated;
         }
     }
 
-    private bool TryGetValidPhysicalFileInfo(string relPath, out string fullPath, out long fileSize, out long mtimeMs)
+    private static SyncOutboxItem UpsertEntityOutboxItemUnlocked(
+        List<SyncOutboxItem> items,
+        string kind,
+        string targetKey,
+        string displayName,
+        string mode,
+        string cleanDevice,
+        long now)
     {
-        fullPath = "";
-        fileSize = 0;
-        mtimeMs = 0;
-        if (string.IsNullOrWhiteSpace(relPath)) return false;
+        string cleanKey = string.IsNullOrWhiteSpace(targetKey) ? "" : targetKey.Trim();
+        int existingIdx = items.FindIndex(i =>
+            string.Equals(i.DeviceId, cleanDevice, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(i.Kind, kind, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(i.TargetKey, cleanKey, StringComparison.OrdinalIgnoreCase));
 
-        try
-        {
-            string rootFull = GetNormalizedRootPrefix();
-            string combined = BuildFullPath(relPath);
-            string resolved = LongPathHelper.StripExtendedPrefix(Path.GetFullPath(combined));
-            if (!resolved.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
-                return false;
+        var updated = new SyncOutboxItem(
+            Id: existingIdx >= 0 ? items[existingIdx].Id : "ob_" + Guid.NewGuid().ToString("N")[..12],
+            DeviceId: cleanDevice,
+            Kind: kind,
+            TargetKey: cleanKey,
+            DisplayName: displayName.Trim(),
+            Mode: mode,
+            TrackUids: [],
+            CreatedAtMs: now
+        );
 
-            if (!LongPathHelper.FileExists(resolved))
-                return false;
-
-            var fi = new FileInfo(LongPathHelper.ToExtendedIfLong(resolved));
-            fileSize = fi.Length;
-            mtimeMs = new DateTimeOffset(fi.LastWriteTimeUtc).ToUnixTimeMilliseconds();
-            fullPath = resolved;
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private string GetNormalizedRootPrefix() =>
-        LongPathHelper.StripExtendedPrefix(Path.GetFullPath(_musicRoot))
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-        + Path.DirectorySeparatorChar;
-
-    private string BuildFullPath(string relPath) =>
-        Path.Combine(_musicRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
-
-    private static string? FindCoverFileInDir(string dir)
-    {
-        if (!LongPathHelper.DirectoryExists(dir)) return null;
-        foreach (string name in CoverCandidateNames)
-        {
-            string candidate = Path.Combine(dir, name);
-            if (LongPathHelper.FileExists(candidate)) return candidate;
-        }
-        return null;
-    }
-
-    private static string BuildTargetRelPath(ManifestTrackRow row)
-    {
-        var rawSegments = row.RelPath.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
-        var cleanSegments = new List<string>(rawSegments.Length);
-        foreach (string seg in rawSegments)
-        {
-            string s = SanitizePathSegment(seg);
-            if (!string.IsNullOrEmpty(s)) cleanSegments.Add(s);
-        }
-        if (cleanSegments.Count > 0)
-        {
-            return string.Join('/', cleanSegments);
-        }
-
-        string artistSeg = SanitizePathSegment(string.IsNullOrWhiteSpace(row.AlbumArtist) ? row.ArtistDisplay : row.AlbumArtist);
-        if (string.IsNullOrEmpty(artistSeg)) artistSeg = "Unknown Artist";
-        string albumSeg = SanitizePathSegment(row.Album);
-        if (string.IsNullOrEmpty(albumSeg)) albumSeg = "Unknown Album";
-        string ext = Path.GetExtension(row.RelPath);
-        if (string.IsNullOrEmpty(ext)) ext = ".flac";
-        string titleSeg = SanitizePathSegment(row.Title);
-        if (string.IsNullOrEmpty(titleSeg)) titleSeg = row.TrackUid;
-        return $"{artistSeg}/{albumSeg}/{titleSeg}{ext}";
-    }
-
-    private static string SanitizePathSegment(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return "";
-        string s = raw.Trim();
-        if (s is "." or "..") return "";
-        char[] invalid = Path.GetInvalidFileNameChars();
-        var sb = new StringBuilder(s.Length);
-        foreach (char c in s)
-        {
-            if (Array.IndexOf(invalid, c) >= 0 || c is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|')
-                sb.Append('_');
-            else
-                sb.Append(c);
-        }
-        return sb.ToString().Trim();
-    }
-
-    private List<ManifestTrackRow> LoadManifestRows()
-    {
-        var result = new List<ManifestTrackRow>();
-        string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
-        if (!File.Exists(dbPath)) return result;
-
-        using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT track_uid, lower(hex(audio_frame_blake3)), rel_path,
-                   title, album, album_artist, artists_json, composers_json, conductors_json,
-                   genre, duration_ms, sample_rate_hz, file_size, mtime_ms
-            FROM tracks
-            ORDER BY album, rel_path;
-            """;
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            string uid = reader.GetString(0);
-            string blake3 = reader.IsDBNull(1) ? "" : reader.GetString(1);
-            string relPath = reader.IsDBNull(2) ? "" : reader.GetString(2);
-            string title = reader.IsDBNull(3) ? "" : reader.GetString(3);
-            string album = reader.IsDBNull(4) ? "" : reader.GetString(4);
-            string albumArtist = reader.IsDBNull(5) ? "" : reader.GetString(5);
-            string artistsJson = reader.IsDBNull(6) ? "[]" : reader.GetString(6);
-            string composersJson = reader.IsDBNull(7) ? "[]" : reader.GetString(7);
-            string conductorsJson = reader.IsDBNull(8) ? "[]" : reader.GetString(8);
-            string genre = reader.IsDBNull(9) ? "" : reader.GetString(9);
-            int durationMs = reader.IsDBNull(10) ? 0 : reader.GetInt32(10);
-            int sampleRate = reader.IsDBNull(11) ? 44100 : reader.GetInt32(11);
-            long fileSize = reader.IsDBNull(12) ? 0L : reader.GetInt64(12);
-            long mtimeMs = reader.IsDBNull(13) ? 0L : reader.GetInt64(13);
-
-            result.Add(new ManifestTrackRow(
-                uid, blake3, relPath, title, album, albumArtist,
-                artistsJson, composersJson, conductorsJson,
-                genre, durationMs, sampleRate, fileSize, mtimeMs));
-        }
-        return result;
-    }
-
-    private sealed record ManifestTrackRow(
-        string TrackUid,
-        string AudioFrameBlake3Hex,
-        string RelPath,
-        string Title,
-        string Album,
-        string AlbumArtist,
-        string ArtistsJson,
-        string ComposersJson,
-        string ConductorsJson,
-        string Genre,
-        int DurationMs,
-        int SampleRateHz,
-        long FileSize,
-        long MtimeMs
-    )
-    {
-        private List<string>? _allArtists;
-
-        public string ArtistDisplay =>
-            ParseJsonArray(ArtistsJson) is { Count: > 0 } arr
-                ? string.Join(", ", arr)
-                : AlbumArtist;
-
-        public IReadOnlyList<string> AllArtists
-        {
-            get
-            {
-                if (_allArtists is not null) return _allArtists;
-                var list = new List<string>();
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-                void AddSplit(string? raw)
-                {
-                    if (string.IsNullOrWhiteSpace(raw)) return;
-                    foreach (string s in ArtistEntitySplitter.SplitPerformers(raw))
-                    {
-                        if (seen.Add(s)) list.Add(s);
-                    }
-                }
-
-                AddSplit(AlbumArtist);
-                foreach (string item in ParseJsonArray(ArtistsJson)) AddSplit(item);
-                foreach (string item in ParseJsonArray(ComposersJson)) AddSplit(item);
-                foreach (string item in ParseJsonArray(ConductorsJson)) AddSplit(item);
-                _allArtists = list;
-                return _allArtists;
-            }
-        }
-
-        public bool MatchesArtist(string target) =>
-            AllArtists.Any(a => string.Equals(a, target, StringComparison.OrdinalIgnoreCase));
-
-        private static List<string> ParseJsonArray(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json) || json == "[]") return [];
-            try
-            {
-                return JsonSerializer.Deserialize<List<string>>(json) ?? [];
-            }
-            catch
-            {
-                return [];
-            }
-        }
+        if (existingIdx >= 0) items[existingIdx] = updated;
+        else items.Add(updated);
+        return updated;
     }
 
     private static List<SyncOutboxItem> FilterOutboxForDevice(List<SyncOutboxItem> all, string? deviceId) =>
         all.Where(i =>
-            string.Equals(i.DeviceId, "*", StringComparison.OrdinalIgnoreCase)
-            || string.IsNullOrWhiteSpace(deviceId)
-            || string.Equals(i.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+            (string.Equals(i.DeviceId, "*", StringComparison.OrdinalIgnoreCase)
+             || string.IsNullOrWhiteSpace(deviceId)
+             || string.Equals(i.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+            && (string.IsNullOrWhiteSpace(deviceId)
+                || i.CompletedDeviceIds is null
+                || !i.CompletedDeviceIds.Contains(deviceId, StringComparer.OrdinalIgnoreCase)))
             .OrderByDescending(i => i.CreatedAtMs)
             .ToList();
 
@@ -925,7 +559,7 @@ public sealed class SyncOutboxAndPairingStore
     {
         Directory.CreateDirectory(_tonewiseDir);
         string json = JsonSerializer.Serialize(devices, JsonWriteOptions);
-        File.WriteAllText(_devicesPath, json + "\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        WriteTextAtomic(_devicesPath, json + "\n");
     }
 
     private List<SyncOutboxItem> LoadOutboxUnlocked()
@@ -945,7 +579,28 @@ public sealed class SyncOutboxAndPairingStore
     {
         Directory.CreateDirectory(_tonewiseDir);
         string json = JsonSerializer.Serialize(items, JsonWriteOptions);
-        File.WriteAllText(_outboxPath, json + "\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        WriteTextAtomic(_outboxPath, json + "\n");
+    }
+
+    private static void WriteTextAtomic(string path, string content)
+    {
+        string tmpPath = path + ".tmp." + Guid.NewGuid().ToString("N")[..8];
+        try
+        {
+            File.WriteAllText(tmpPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Move(tmpPath, path, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tmpPath)) File.Delete(tmpPath);
+            }
+            catch
+            {
+                // Ignore temp cleanup failure
+            }
+        }
     }
 
     private static string NormalizeMode(string mode, string defaultMode)

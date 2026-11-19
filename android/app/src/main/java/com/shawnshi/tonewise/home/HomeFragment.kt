@@ -43,6 +43,7 @@ import com.shawnshi.tonewise.databinding.FragmentHomeBinding
 import com.shawnshi.tonewise.detail.DetailViewModel
 import com.shawnshi.tonewise.detail.Show
 import com.shawnshi.tonewise.home.focus.FocusFilterDialog
+import com.shawnshi.tonewise.playback.ui.clock.DeskClockDialog
 import com.shawnshi.tonewise.home.list.AlbumListFragment
 import com.shawnshi.tonewise.home.list.ArtistListFragment
 import com.shawnshi.tonewise.home.list.ComposerListFragment
@@ -202,6 +203,13 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
             R.id.action_focus_filter -> {
                 FocusFilterDialog.newInstance()
                     .show(parentFragmentManager, FocusFilterDialog.TAG)
+                true
+            }
+            R.id.action_desk_clock -> {
+                if (parentFragmentManager.findFragmentByTag(DeskClockDialog.TAG) == null) {
+                    DeskClockDialog.newInstance()
+                        .show(parentFragmentManager, DeskClockDialog.TAG)
+                }
                 true
             }
             R.id.action_scenes_sync -> {

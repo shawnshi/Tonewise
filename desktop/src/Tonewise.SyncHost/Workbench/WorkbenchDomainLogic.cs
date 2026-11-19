@@ -84,13 +84,26 @@ public static class ClassicalAbSwitchHelper
         IEnumerable<T> library,
         Func<T, string> uidSelector,
         Func<T, string?> workSelector,
-        Func<T, string?> movementSelector)
+        Func<T, string?> movementSelector) =>
+        FindAlternateRecordings(current, library, uidSelector, workSelector, movementSelector, movementNumberSelector: null, albumScopeSelector: null);
+
+    public static IReadOnlyList<T> FindAlternateRecordings<T>(
+        T current,
+        IEnumerable<T> library,
+        Func<T, string> uidSelector,
+        Func<T, string?> workSelector,
+        Func<T, string?> movementSelector,
+        Func<T, int?>? movementNumberSelector,
+        Func<T, string?>? albumScopeSelector = null)
     {
         string targetUid = uidSelector(current);
         string normWork = NormalizeSegment(workSelector(current));
         if (string.IsNullOrEmpty(normWork)) return [];
 
         string normMovement = NormalizeSegment(movementSelector(current));
+        int? targetMovementNo = movementNumberSelector?.Invoke(current);
+        if (targetMovementNo is <= 0) targetMovementNo = null;
+        string targetScope = albumScopeSelector is null ? "" : NormalizeSegment(albumScopeSelector(current));
         var results = new List<T>();
 
         foreach (var candidate in library)
@@ -102,7 +115,28 @@ public static class ClassicalAbSwitchHelper
             if (!string.Equals(candWork, normWork, StringComparison.Ordinal))
                 continue;
 
-            if (!string.IsNullOrEmpty(normMovement))
+            if (!string.IsNullOrEmpty(targetScope))
+            {
+                string candScope = NormalizeSegment(albumScopeSelector!(candidate));
+                if (!string.IsNullOrEmpty(candScope) && string.Equals(candScope, targetScope, StringComparison.Ordinal))
+                    continue;
+            }
+
+            if (targetMovementNo.HasValue)
+            {
+                int? candMovNo = movementNumberSelector?.Invoke(candidate);
+                if (candMovNo is > 0)
+                {
+                    if (candMovNo.Value != targetMovementNo.Value) continue;
+                }
+                else if (!string.IsNullOrEmpty(normMovement))
+                {
+                    string candMov = NormalizeSegment(movementSelector(candidate));
+                    if (!string.Equals(candMov, normMovement, StringComparison.Ordinal))
+                        continue;
+                }
+            }
+            else if (!string.IsNullOrEmpty(normMovement))
             {
                 string candMov = NormalizeSegment(movementSelector(candidate));
                 if (!string.Equals(candMov, normMovement, StringComparison.Ordinal))
@@ -113,6 +147,67 @@ public static class ClassicalAbSwitchHelper
         }
 
         return results;
+    }
+
+    public static (List<T> UpdatedQueue, int NewCurrentIndex) ReplaceWorkBlockInQueue<T>(
+        IReadOnlyList<T> currentQueue,
+        int currentIndex,
+        T targetTrack,
+        IReadOnlyList<T> targetWorkOrderedTracks,
+        Func<T, string> uidSelector,
+        Func<T, string?> workSelector,
+        Func<T, string?> albumScopeSelector)
+    {
+        IReadOnlyList<T> replacement = targetWorkOrderedTracks.Count > 0
+            ? targetWorkOrderedTracks
+            : [targetTrack];
+        string targetUid = uidSelector(targetTrack);
+
+        int FindTargetOffset(IReadOnlyList<T> list)
+        {
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (string.Equals(uidSelector(list[i]), targetUid, StringComparison.Ordinal))
+                    return i;
+            }
+            return 0;
+        }
+
+        if (currentQueue.Count == 0 || currentIndex < 0 || currentIndex >= currentQueue.Count)
+        {
+            var standalone = replacement.ToList();
+            return (standalone, FindTargetOffset(standalone));
+        }
+
+        string curWork = NormalizeSegment(workSelector(currentQueue[currentIndex]));
+        string curScope = NormalizeSegment(albumScopeSelector(currentQueue[currentIndex]));
+        int blockStart = currentIndex;
+        int blockEnd = currentIndex;
+
+        if (!string.IsNullOrEmpty(curWork))
+        {
+            while (blockStart > 0
+                   && string.Equals(NormalizeSegment(workSelector(currentQueue[blockStart - 1])), curWork, StringComparison.Ordinal)
+                   && string.Equals(NormalizeSegment(albumScopeSelector(currentQueue[blockStart - 1])), curScope, StringComparison.Ordinal))
+            {
+                blockStart--;
+            }
+
+            while (blockEnd + 1 < currentQueue.Count
+                   && string.Equals(NormalizeSegment(workSelector(currentQueue[blockEnd + 1])), curWork, StringComparison.Ordinal)
+                   && string.Equals(NormalizeSegment(albumScopeSelector(currentQueue[blockEnd + 1])), curScope, StringComparison.Ordinal))
+            {
+                blockEnd++;
+            }
+        }
+
+        var updated = new List<T>(currentQueue.Count - (blockEnd - blockStart + 1) + replacement.Count);
+        for (int i = 0; i < blockStart; i++) updated.Add(currentQueue[i]);
+        updated.AddRange(replacement);
+        for (int i = blockEnd + 1; i < currentQueue.Count; i++) updated.Add(currentQueue[i]);
+
+        int newIdx = blockStart + FindTargetOffset(replacement);
+        return (updated, newIdx);
     }
 
     public static long ComputeTargetPositionMs(long currentPositionMs, long currentDurationMs, long targetDurationMs)
@@ -134,7 +229,15 @@ public static class OledBurnInGuard
     private static readonly (int Dx, int Dy)[] OrbitTable =
     [
         (0, 0), (1, 0), (2, 1), (1, 2), (0, 1), (-1, 2),
-        (-2, 1), (-1, 0), (-2, -1), (-1, -2), (0, -1), (1, -2), (2, -1), (1, 0)
+        (-2, 1), (-1, 0), (-2, -1), (-1, -2), (0, -1), (1, -2), (2, -1), (1, 1)
+    ];
+
+    private static readonly (double X, double Y)[] NormalizedOrbit16 =
+    [
+        (0.0, 0.0), (0.5, 0.0), (1.0, 0.33), (0.83, 0.83),
+        (0.33, 1.0), (-0.33, 1.0), (-0.83, 0.83), (-1.0, 0.33),
+        (-1.0, -0.33), (-0.83, -0.83), (-0.33, -1.0), (0.33, -1.0),
+        (0.83, -0.83), (1.0, -0.33), (0.5, -0.5), (-0.5, 0.5)
     ];
 
     public static (int Dx, int Dy) ComputePixelOffset(int tickCount)
@@ -142,10 +245,20 @@ public static class OledBurnInGuard
         int idx = ((tickCount % OrbitTable.Length) + OrbitTable.Length) % OrbitTable.Length;
         return OrbitTable[idx];
     }
+
+    public static (int Dx, int Dy) ComputeOrbitOffset(int tickCount, int amplitudeDip = 12)
+    {
+        int amp = Math.Max(0, amplitudeDip);
+        int idx = ((tickCount % NormalizedOrbit16.Length) + NormalizedOrbit16.Length) % NormalizedOrbit16.Length;
+        var (nx, ny) = NormalizedOrbit16[idx];
+        return ((int)Math.Round(nx * amp), (int)Math.Round(ny * amp));
+    }
 }
 
 public static class SessionSlotStore
 {
+    public static readonly Lock SyncFileLock = new();
+
     private static readonly (int SlotIndex, string Name, string SceneId)[] Presets =
     [
         (1, "Focus", "focus"),
@@ -156,6 +269,14 @@ public static class SessionSlotStore
     ];
 
     public static IReadOnlyList<SessionSlotDto> LoadOrInitializeDefault(string sessionsJsonPath)
+    {
+        lock (SyncFileLock)
+        {
+            return LoadOrInitializeDefaultUnlocked(sessionsJsonPath);
+        }
+    }
+
+    private static IReadOnlyList<SessionSlotDto> LoadOrInitializeDefaultUnlocked(string sessionsJsonPath)
     {
         var byIndex = new Dictionary<int, SessionSlotDto>();
         foreach (var (idx, name, sceneId) in Presets)
@@ -190,68 +311,125 @@ public static class SessionSlotStore
 
     public static IReadOnlyList<SessionSlotDto> SaveSlot(string sessionsJsonPath, SessionSlotDto updatedSlot)
     {
-        var all = LoadOrInitializeDefault(sessionsJsonPath).ToList();
-        int idx = all.FindIndex(s => s.SlotIndex == updatedSlot.SlotIndex);
-        if (idx >= 0)
+        lock (SyncFileLock)
         {
-            all[idx] = updatedSlot;
-        }
-        else
-        {
-            all.Add(updatedSlot);
-        }
+            var all = LoadOrInitializeDefaultUnlocked(sessionsJsonPath).ToList();
+            int idx = all.FindIndex(s => s.SlotIndex == updatedSlot.SlotIndex);
+            if (idx >= 0)
+            {
+                all[idx] = updatedSlot;
+            }
+            else
+            {
+                all.Add(updatedSlot);
+            }
 
-        string? dir = Path.GetDirectoryName(sessionsJsonPath);
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        string json = JsonSerializer.Serialize(all.OrderBy(s => s.SlotIndex).ToList(), new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(sessionsJsonPath, json + "\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        return all.OrderBy(s => s.SlotIndex).ToList();
+            var ordered = all.OrderBy(s => s.SlotIndex).ToList();
+            string? dir = Path.GetDirectoryName(sessionsJsonPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            string json = JsonSerializer.Serialize(ordered, new JsonSerializerOptions { WriteIndented = true });
+            string tmpPath = sessionsJsonPath + ".tmp." + Guid.NewGuid().ToString("N")[..8];
+            try
+            {
+                File.WriteAllText(tmpPath, json + "\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                File.Move(tmpPath, sessionsJsonPath, overwrite: true);
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(tmpPath)) File.Delete(tmpPath);
+                }
+                catch
+                {
+                    // Ignore temp cleanup failure
+                }
+            }
+            return ordered;
+        }
     }
 }
 
 public static class ArtistEntitySplitter
 {
-    private static readonly HashSet<string> ProtectedBandWhitelist = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly Lazy<IReadOnlyList<string>> LazyWhitelist = new(() =>
     {
-        "Above & Beyond",
-        "Simon & Garfunkel",
-        "Hall & Oates",
-        "Iron & Wine",
-        "Angus & Julia Stone",
-        "Florence + The Machine",
-        "Mumford & Sons",
-        "Belle & Sebastian",
-    };
+        var asm = typeof(ArtistEntitySplitter).Assembly;
+        const string resourceName = "Tonewise.SyncHost.protocol.artist_whitelist.json";
+        using Stream? stream = asm.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded whitelist resource '{resourceName}' not found.");
+        using var doc = JsonDocument.Parse(stream);
+        if (doc.RootElement.TryGetProperty("protected_names", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            return arr.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString()!.Trim())
+                .Where(s => !string.IsNullOrEmpty(s))
+                .OrderByDescending(s => s.Length)
+                .ToList();
+        }
+        return [];
+    });
+
+    public static IReadOnlyList<string> Whitelist => LazyWhitelist.Value;
 
     public static IReadOnlyList<string> SplitPerformers(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return [];
-        string trimmed = raw.Trim();
-        if (ProtectedBandWhitelist.Contains(trimmed))
+        string working = raw.Trim();
+        var whitelist = Whitelist;
+        foreach (string w in whitelist)
         {
-            return [trimmed];
+            if (string.Equals(working, w, StringComparison.OrdinalIgnoreCase))
+            {
+                return [working];
+            }
+        }
+
+        var replacements = new List<(string Token, string Original)>();
+        int seq = 0;
+        for (int i = 0; i < whitelist.Count; i++)
+        {
+            string protectedName = whitelist[i];
+            int idx;
+            while ((idx = working.IndexOf(protectedName, StringComparison.OrdinalIgnoreCase)) >= 0)
+            {
+                string token = $"__TW_PROTECTED_{i}_{seq++}__";
+                string originalSlice = working.Substring(idx, protectedName.Length);
+                working = string.Concat(working.AsSpan(0, idx), token, working.AsSpan(idx + protectedName.Length));
+                replacements.Add((token, originalSlice));
+            }
+        }
+
+        static string Restore(string s, List<(string Token, string Original)> map)
+        {
+            string res = s;
+            foreach (var (token, original) in map)
+            {
+                if (res.Contains(token, StringComparison.Ordinal))
+                {
+                    res = res.Replace(token, original, StringComparison.Ordinal);
+                }
+            }
+            return res.Trim();
         }
 
         var result = new List<string>();
-        foreach (string part in trimmed.Split(['/', ';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (string part in working.Split(['/', ';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             if (string.IsNullOrWhiteSpace(part)) continue;
-            if (ProtectedBandWhitelist.Contains(part))
-            {
-                result.Add(part);
-                continue;
-            }
-            if (part.Contains(" & ", StringComparison.Ordinal) &&
-                !ProtectedBandWhitelist.Any(b => part.Contains(b, StringComparison.OrdinalIgnoreCase)))
+            if (part.Contains(" & ", StringComparison.Ordinal))
             {
                 foreach (string sub in part.Split([" & "], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 {
-                    if (!string.IsNullOrWhiteSpace(sub)) result.Add(sub);
+                    string restored = Restore(sub, replacements);
+                    if (!string.IsNullOrWhiteSpace(restored)) result.Add(restored);
                 }
             }
             else
             {
-                result.Add(part);
+                string restored = Restore(part, replacements);
+                if (!string.IsNullOrWhiteSpace(restored)) result.Add(restored);
             }
         }
         return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -376,7 +554,12 @@ public sealed record DesktopUserSettings(
     bool RememberPauseOnSkip = false,
     bool PauseOnSingleRepeat = false,
     int ExclusiveIdleReleaseMinutes = 15,
-    string? DeviceDspProfilesJson = null
+    string? DeviceDspProfilesJson = null,
+    int? DeskClockX = null,
+    int? DeskClockY = null,
+    int? DeskClockWidth = null,
+    int? DeskClockHeight = null,
+    bool DeskClockAlwaysOnTop = true
 );
 
 public static class DesktopSettingsStore
@@ -440,7 +623,12 @@ public sealed record AutoDjTrackCandidate(
     string? DjVocals,
     IReadOnlyList<string> DjScene,
     IReadOnlyList<string> Moods,
-    long LastPlayedTsMs = 0
+    long LastPlayedTsMs = 0,
+    string? WorkKey = null,
+    int? MovementNumber = null,
+    int DiscNumber = 0,
+    int TrackNumber = 0,
+    string RelPath = ""
 );
 
 public sealed record AutoDjTimeProfile(
@@ -553,79 +741,121 @@ public static class AutoDjPlaylistGenerator
         var rng = randomSeed.HasValue ? new Random(randomSeed.Value) : new Random();
         var features = candidates
             .GroupBy(c => c.TrackUid, StringComparer.Ordinal)
-            .Select(g => BuildFeatureNode(g.First(), profile, rng))
+            .Select((g, idx) => BuildFeatureNode(g.First(), profile, rng, idx))
             .ToList();
 
         total = Math.Min(total, features.Count);
         targetFrequent = (int)Math.Round(total * 0.70);
         targetDiscovery = total - targetFrequent;
 
-        // Partition frequent (>=2 plays, or fallback >=1 plays) vs discovery (unplayed / low-play).
-        List<FeatureNode> freqPool;
-        List<FeatureNode> discPool;
-        int freqAtLeast2 = features.Count(f => f.Candidate.EffectivePlayCount >= 2);
-        int freqAtLeast1 = features.Count(f => f.Candidate.EffectivePlayCount >= 1);
+        var units = BuildAtomicUnits(features);
+
+        // Partition atomic units (solo tracks or complete classical works) so multi-movement works stay together.
+        List<UnitNode> freqPool;
+        List<UnitNode> discPool;
+        int freqAtLeast2 = units.Where(u => u.EffectivePlayCount >= 2).Sum(u => u.Nodes.Count);
+        int freqAtLeast1 = units.Where(u => u.EffectivePlayCount >= 1).Sum(u => u.Nodes.Count);
 
         if (freqAtLeast2 >= targetFrequent)
         {
-            freqPool = features.Where(f => f.Candidate.EffectivePlayCount >= 2).ToList();
-            discPool = features.Where(f => f.Candidate.EffectivePlayCount <= 1).ToList();
+            freqPool = units.Where(u => u.EffectivePlayCount >= 2).ToList();
+            discPool = units.Where(u => u.EffectivePlayCount <= 1).ToList();
         }
         else if (freqAtLeast1 >= targetFrequent)
         {
-            freqPool = features.Where(f => f.Candidate.EffectivePlayCount >= 1).ToList();
-            discPool = features.Where(f => f.Candidate.EffectivePlayCount == 0).ToList();
+            freqPool = units.Where(u => u.EffectivePlayCount >= 1).ToList();
+            discPool = units.Where(u => u.EffectivePlayCount == 0).ToList();
         }
         else if (freqAtLeast1 > 0)
         {
-            freqPool = features.Where(f => f.Candidate.EffectivePlayCount >= 1).ToList();
-            discPool = features.Where(f => f.Candidate.EffectivePlayCount == 0).ToList();
+            freqPool = units.Where(u => u.EffectivePlayCount >= 1).ToList();
+            discPool = units.Where(u => u.EffectivePlayCount == 0).ToList();
         }
         else
         {
-            var orderedFallback = features.OrderByDescending(f => f.Candidate.Rating).ThenBy(f => f.Jitter).ToList();
-            freqPool = orderedFallback.Take(targetFrequent).ToList();
-            discPool = orderedFallback.Skip(targetFrequent).ToList();
+            var orderedFallback = units.OrderByDescending(u => u.AverageRating).ThenBy(u => u.Jitter).ToList();
+            freqPool = [];
+            discPool = [];
+            int freqTracks = 0;
+            foreach (var u in orderedFallback)
+            {
+                if (freqTracks < targetFrequent && freqTracks + u.Nodes.Count <= total)
+                {
+                    freqPool.Add(u);
+                    freqTracks += u.Nodes.Count;
+                }
+                else
+                {
+                    discPool.Add(u);
+                }
+            }
         }
 
-        foreach (var f in freqPool)
+        foreach (var u in freqPool)
         {
-            f.PoolWeight = f.BaseCompatibilityScore
-                           + Math.Log10(1.0 + f.Candidate.EffectivePlayCount) * 1.15
-                           + f.Candidate.Rating * 0.12
-                           + f.Jitter * 0.40;
-            f.IsFrequent = true;
+            u.PoolWeight = u.AverageCompatibilityScore
+                           + Math.Log10(1.0 + u.EffectivePlayCount) * 1.15
+                           + u.AverageRating * 0.12
+                           + u.Jitter * 0.40;
+            u.IsFrequent = true;
+            foreach (var n in u.Nodes)
+            {
+                n.PoolWeight = u.PoolWeight;
+                n.IsFrequent = true;
+            }
         }
 
-        foreach (var f in discPool)
+        foreach (var u in discPool)
         {
-            double rarityBonus = f.Candidate.EffectivePlayCount == 0 ? 1.0 : 0.65;
-            f.PoolWeight = f.BaseCompatibilityScore
+            double rarityBonus = u.EffectivePlayCount == 0 ? 1.0 : 0.65;
+            u.PoolWeight = u.AverageCompatibilityScore
                            + rarityBonus
-                           + (f.Candidate.Rating == 5 ? 0.25 : 0.0)
-                           + f.Jitter * 0.45;
-            f.IsFrequent = false;
+                           + (u.AverageRating >= 4.5 ? 0.25 : 0.0)
+                           + u.Jitter * 0.45;
+            u.IsFrequent = false;
+            foreach (var n in u.Nodes)
+            {
+                n.PoolWeight = u.PoolWeight;
+                n.IsFrequent = false;
+            }
         }
 
-        var selected = new List<FeatureNode>(total);
-        var usedUids = new HashSet<string>(StringComparer.Ordinal);
+        var selectedUnits = new List<UnitNode>(units.Count);
+        var usedUnitKeys = new HashSet<string>(StringComparer.Ordinal);
         var artistCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        int freqPicked = PickCohesiveSubset(freqPool, targetFrequent, selected, usedUids, artistCounts, maxPerArtist: 2);
-        int discPicked = PickCohesiveSubset(discPool, targetDiscovery, selected, usedUids, artistCounts, maxPerArtist: 2);
+        int selectedTracks = PickCohesiveUnitSubset(
+            freqPool, targetFrequent, maxTotalTracks: total,
+            selectedUnits, usedUnitKeys, artistCounts, maxPerArtist: 2);
+        selectedTracks += PickCohesiveUnitSubset(
+            discPool, Math.Min(targetDiscovery, Math.Max(0, total - selectedTracks)), maxTotalTracks: total - selectedTracks,
+            selectedUnits, usedUnitKeys, artistCounts, maxPerArtist: 2);
 
-        if (selected.Count < total)
+        if (selectedTracks < total)
         {
-            var remainingPool = features
-                .Where(f => !usedUids.Contains(f.Candidate.TrackUid))
-                .OrderByDescending(f => f.BaseCompatibilityScore + f.Jitter * 0.35)
+            var remainingPool = units
+                .Where(u => !usedUnitKeys.Contains(u.UnitKey))
+                .OrderByDescending(u => u.AverageCompatibilityScore + u.Jitter * 0.35)
                 .ToList();
-            PickCohesiveSubset(remainingPool, total - selected.Count, selected, usedUids, artistCounts, maxPerArtist: 4);
+            selectedTracks += PickCohesiveUnitSubset(
+                remainingPool, total - selectedTracks, maxTotalTracks: total - selectedTracks,
+                selectedUnits, usedUnitKeys, artistCounts, maxPerArtist: 4);
         }
 
-        // Sequence selected items along a smooth BPM + arousal + valence curve.
-        var sequenced = SequenceSmoothly(selected, profile, ratioTarget: 0.70);
-        ApplyLocalSmoothingSwaps(sequenced);
+        if (selectedUnits.Count == 0 && units.Count > 0)
+        {
+            selectedUnits.Add(units.OrderBy(u => u.Nodes.Count).First());
+        }
+
+        // Sequence atomic work blocks / solo tracks smoothly without splitting classical movements.
+        var sequencedUnits = SequenceUnitsSmoothly(selectedUnits, profile, ratioTarget: 0.70);
+        ApplyLocalUnitSmoothingSwaps(sequencedUnits);
+
+        var sequenced = sequencedUnits.SelectMany(u => u.Nodes).ToList();
+        if (sequenced.Count > total)
+        {
+            sequenced = sequenced.Take(total).ToList();
+        }
 
         double maxBpmDelta = 0.0;
         for (int i = 1; i < sequenced.Count; i++)
@@ -651,6 +881,7 @@ public static class AutoDjPlaylistGenerator
     private sealed class FeatureNode
     {
         public required AutoDjTrackCandidate Candidate { get; init; }
+        public int OriginalIndex { get; init; }
         public double Bpm { get; init; }
         public double Arousal { get; init; }
         public double Valence { get; init; }
@@ -661,7 +892,80 @@ public static class AutoDjPlaylistGenerator
         public string PrimaryArtist { get; init; } = "";
     }
 
-    private static FeatureNode BuildFeatureNode(AutoDjTrackCandidate c, AutoDjTimeProfile profile, Random rng)
+    private sealed class UnitNode
+    {
+        public required string UnitKey { get; init; }
+        public required List<FeatureNode> Nodes { get; init; }
+        public FeatureNode EntryNode => Nodes[0];
+        public FeatureNode ExitNode => Nodes[^1];
+        public int EffectivePlayCount { get; init; }
+        public double AverageRating { get; init; }
+        public double AverageCompatibilityScore { get; init; }
+        public double Jitter { get; init; }
+        public double PoolWeight { get; set; }
+        public bool IsFrequent { get; set; }
+        public string PrimaryArtist { get; init; } = "";
+    }
+
+    private static List<UnitNode> BuildAtomicUnits(List<FeatureNode> features)
+    {
+        var blocksByKey = new Dictionary<string, List<FeatureNode>>(StringComparer.Ordinal);
+        var order = new List<string>(features.Count);
+
+        for (int i = 0; i < features.Count; i++)
+        {
+            var node = features[i];
+            string work = node.Candidate.WorkKey?.Trim().ToLowerInvariant() ?? "";
+            string unitKey = string.IsNullOrEmpty(work) ? $"track::{node.Candidate.TrackUid}" : $"work::{work}";
+            if (!blocksByKey.TryGetValue(unitKey, out var list))
+            {
+                list = [];
+                blocksByKey[unitKey] = list;
+                order.Add(unitKey);
+            }
+            list.Add(node);
+        }
+
+        var result = new List<UnitNode>(order.Count);
+        foreach (string key in order)
+        {
+            var list = blocksByKey[key];
+            if (list.Count > 1)
+            {
+                list.Sort((a, b) =>
+                {
+                    int ma = a.Candidate.MovementNumber is > 0 ? a.Candidate.MovementNumber.Value : int.MaxValue;
+                    int mb = b.Candidate.MovementNumber is > 0 ? b.Candidate.MovementNumber.Value : int.MaxValue;
+                    int cmp = ma.CompareTo(mb);
+                    if (cmp != 0) return cmp;
+                    int da = a.Candidate.DiscNumber > 0 ? a.Candidate.DiscNumber : int.MaxValue;
+                    int db = b.Candidate.DiscNumber > 0 ? b.Candidate.DiscNumber : int.MaxValue;
+                    cmp = da.CompareTo(db);
+                    if (cmp != 0) return cmp;
+                    int ta = a.Candidate.TrackNumber > 0 ? a.Candidate.TrackNumber : int.MaxValue;
+                    int tb = b.Candidate.TrackNumber > 0 ? b.Candidate.TrackNumber : int.MaxValue;
+                    cmp = ta.CompareTo(tb);
+                    if (cmp != 0) return cmp;
+                    cmp = WorkAwareShuffleEngine.NaturalPathCompare(a.Candidate.RelPath, b.Candidate.RelPath);
+                    return cmp != 0 ? cmp : a.OriginalIndex.CompareTo(b.OriginalIndex);
+                });
+            }
+
+            result.Add(new UnitNode
+            {
+                UnitKey = key,
+                Nodes = list,
+                EffectivePlayCount = list.Max(n => n.Candidate.EffectivePlayCount),
+                AverageRating = list.Average(n => (double)n.Candidate.Rating),
+                AverageCompatibilityScore = list.Average(n => n.BaseCompatibilityScore),
+                Jitter = list[0].Jitter,
+                PrimaryArtist = list[0].PrimaryArtist,
+            });
+        }
+        return result;
+    }
+
+    private static FeatureNode BuildFeatureNode(AutoDjTrackCandidate c, AutoDjTimeProfile profile, Random rng, int index)
     {
         double bpm = EstimateBpm(c, profile);
         double arousal = EstimateArousal(c, bpm);
@@ -682,6 +986,7 @@ public static class AutoDjPlaylistGenerator
         return new FeatureNode
         {
             Candidate = c,
+            OriginalIndex = index,
             Bpm = bpm,
             Arousal = arousal,
             Valence = valence,
@@ -700,11 +1005,11 @@ public static class AutoDjPlaylistGenerator
         {
             return c.TempoBucket.Trim() switch
             {
-                "Very Slow" => 66.0,
-                "Slow" => 80.0,
-                "Moderate" => 100.0,
-                "Fast" => 122.0,
-                "Very Fast" => 144.0,
+                "Very Slow" => 58.0,
+                "Slow" => 78.0,
+                "Moderate" => 105.0,
+                "Fast" => 135.0,
+                "Very Fast" => 160.0,
                 _ => profile.TargetBpmCenter,
             };
         }
@@ -762,74 +1067,80 @@ public static class AutoDjPlaylistGenerator
         return moodHits > 0 ? Math.Clamp(v, 0.15, 0.95) : 0.55;
     }
 
-    private static int PickCohesiveSubset(
-        List<FeatureNode> pool,
-        int needed,
-        List<FeatureNode> dest,
-        HashSet<string> usedUids,
+    private static int PickCohesiveUnitSubset(
+        List<UnitNode> pool,
+        int neededTracks,
+        int maxTotalTracks,
+        List<UnitNode> dest,
+        HashSet<string> usedUnitKeys,
         Dictionary<string, int> artistCounts,
         int maxPerArtist)
     {
-        if (needed <= 0 || pool.Count == 0) return 0;
-        var ranked = pool.OrderByDescending(f => f.PoolWeight).ToList();
-        int picked = 0;
+        int cap = Math.Min(neededTracks, maxTotalTracks);
+        if (cap <= 0 || pool.Count == 0) return 0;
+        var ranked = pool.OrderByDescending(u => u.PoolWeight).ToList();
+        int pickedTracks = 0;
 
-        for (int pass = 0; pass < 2 && picked < needed; pass++)
+        for (int pass = 0; pass < 2 && pickedTracks < cap; pass++)
         {
             bool enforceArtistCap = pass == 0;
-            foreach (var node in ranked)
+            foreach (var unit in ranked)
             {
-                if (picked >= needed) break;
-                if (usedUids.Contains(node.Candidate.TrackUid)) continue;
-                if (enforceArtistCap && !string.IsNullOrEmpty(node.PrimaryArtist)
-                    && artistCounts.TryGetValue(node.PrimaryArtist, out int cnt)
+                if (pickedTracks >= cap) break;
+                if (usedUnitKeys.Contains(unit.UnitKey)) continue;
+                int unitLen = unit.Nodes.Count;
+                if (pickedTracks + unitLen > maxTotalTracks) continue;
+                if (pickedTracks > 0 && pickedTracks + unitLen > cap && unitLen > 1 && pickedTracks + 1 >= cap) continue;
+                if (enforceArtistCap && !string.IsNullOrEmpty(unit.PrimaryArtist)
+                    && artistCounts.TryGetValue(unit.PrimaryArtist, out int cnt)
                     && cnt >= maxPerArtist)
                 {
                     continue;
                 }
 
-                usedUids.Add(node.Candidate.TrackUid);
-                if (!string.IsNullOrEmpty(node.PrimaryArtist))
+                usedUnitKeys.Add(unit.UnitKey);
+                if (!string.IsNullOrEmpty(unit.PrimaryArtist))
                 {
-                    artistCounts[node.PrimaryArtist] = artistCounts.GetValueOrDefault(node.PrimaryArtist) + 1;
+                    artistCounts[unit.PrimaryArtist] = artistCounts.GetValueOrDefault(unit.PrimaryArtist) + 1;
                 }
-                dest.Add(node);
-                picked++;
+                dest.Add(unit);
+                pickedTracks += unitLen;
             }
         }
-        return picked;
+        return pickedTracks;
     }
 
-    private static List<FeatureNode> SequenceSmoothly(
-        List<FeatureNode> selected,
+    private static List<UnitNode> SequenceUnitsSmoothly(
+        List<UnitNode> selected,
         AutoDjTimeProfile profile,
         double ratioTarget)
     {
         if (selected.Count <= 2) return [.. selected];
 
-        var remaining = new List<FeatureNode>(selected);
-        var result = new List<FeatureNode>(selected.Count);
+        var remaining = new List<UnitNode>(selected);
+        var result = new List<UnitNode>(selected.Count);
 
         var first = remaining
-            .OrderBy(n => n.IsFrequent ? 0 : 1)
-            .ThenBy(n => Math.Abs(n.Bpm - profile.TargetBpmCenter) + 12.0 * Math.Abs(n.Arousal - profile.TargetArousal))
+            .OrderBy(u => u.IsFrequent ? 0 : 1)
+            .ThenBy(u => Math.Abs(u.EntryNode.Bpm - profile.TargetBpmCenter) + 12.0 * Math.Abs(u.EntryNode.Arousal - profile.TargetArousal))
             .First();
         remaining.Remove(first);
         result.Add(first);
-        int freqSoFar = first.IsFrequent ? 1 : 0;
+        int tracksSoFar = first.Nodes.Count;
+        int freqSoFar = first.IsFrequent ? first.Nodes.Count : 0;
 
         while (remaining.Count > 0)
         {
             var prev = result[^1];
-            double nextTargetRatio = ratioTarget * (result.Count + 1);
-            FeatureNode? best = null;
+            UnitNode? best = null;
             double bestCost = double.MaxValue;
 
             foreach (var cand in remaining)
             {
-                int projFreq = freqSoFar + (cand.IsFrequent ? 1 : 0);
-                double cadencePenalty = Math.Abs(projFreq - nextTargetRatio) * 0.45;
-                double cost = ComputeTransitionCost(prev, cand) + cadencePenalty;
+                int projTotal = tracksSoFar + cand.Nodes.Count;
+                int projFreq = freqSoFar + (cand.IsFrequent ? cand.Nodes.Count : 0);
+                double cadencePenalty = Math.Abs(projFreq - (ratioTarget * projTotal)) * 0.45;
+                double cost = ComputeTransitionCost(prev.ExitNode, cand.EntryNode) + cadencePenalty;
                 if (cost < bestCost)
                 {
                     bestCost = cost;
@@ -839,7 +1150,8 @@ public static class AutoDjPlaylistGenerator
 
             result.Add(best!);
             remaining.Remove(best!);
-            if (best!.IsFrequent) freqSoFar++;
+            tracksSoFar += best!.Nodes.Count;
+            if (best.IsFrequent) freqSoFar += best.Nodes.Count;
         }
 
         return result;
@@ -864,7 +1176,7 @@ public static class AutoDjPlaylistGenerator
         return c * c;
     }
 
-    private static void ApplyLocalSmoothingSwaps(List<FeatureNode> seq)
+    private static void ApplyLocalUnitSmoothingSwaps(List<UnitNode> seq)
     {
         int n = seq.Count;
         if (n < 4) return;
@@ -878,18 +1190,18 @@ public static class AutoDjPlaylistGenerator
                     if (seq[i].IsFrequent != seq[j].IsFrequent) continue;
 
                     double before =
-                        SquaredPairCost(seq[i - 1], seq[i])
+                        SquaredPairCost(seq[i - 1].ExitNode, seq[i].EntryNode)
                         + (j == i + 1
-                            ? SquaredPairCost(seq[i], seq[j])
-                            : SquaredPairCost(seq[i], seq[i + 1]) + SquaredPairCost(seq[j - 1], seq[j]))
-                        + SquaredPairCost(seq[j], seq[j + 1]);
+                            ? SquaredPairCost(seq[i].ExitNode, seq[j].EntryNode)
+                            : SquaredPairCost(seq[i].ExitNode, seq[i + 1].EntryNode) + SquaredPairCost(seq[j - 1].ExitNode, seq[j].EntryNode))
+                        + SquaredPairCost(seq[j].ExitNode, seq[j + 1].EntryNode);
 
                     double after =
-                        SquaredPairCost(seq[i - 1], seq[j])
+                        SquaredPairCost(seq[i - 1].ExitNode, seq[j].EntryNode)
                         + (j == i + 1
-                            ? SquaredPairCost(seq[j], seq[i])
-                            : SquaredPairCost(seq[j], seq[i + 1]) + SquaredPairCost(seq[j - 1], seq[i]))
-                        + SquaredPairCost(seq[i], seq[j + 1]);
+                            ? SquaredPairCost(seq[j].ExitNode, seq[i].EntryNode)
+                            : SquaredPairCost(seq[j].ExitNode, seq[i + 1].EntryNode) + SquaredPairCost(seq[j - 1].ExitNode, seq[i].EntryNode))
+                        + SquaredPairCost(seq[i].ExitNode, seq[j + 1].EntryNode);
 
                     if (after + 1e-6 < before)
                     {
@@ -966,7 +1278,10 @@ public sealed record ShuffleTrackDescriptor(
     string Album,
     string WorkName,
     int? MovementNumber,
-    string RelPath
+    string RelPath,
+    string AlbumScope = "",
+    int DiscNumber = 0,
+    int TrackNumber = 0
 );
 
 /// <summary>
@@ -988,10 +1303,8 @@ public static class WorkAwareShuffleEngine
         for (int i = 0; i < tracks.Count; i++)
         {
             var t = tracks[i];
-            string work = t.WorkName?.Trim().ToLowerInvariant() ?? "";
-            string key = string.IsNullOrEmpty(work)
-                ? $"track::{i}"
-                : $"work::{(t.Album ?? "").Trim().ToLowerInvariant()}::{work}";
+            string? blockKey = BuildWorkBlockKey(t.WorkName, t.Album, t.AlbumScope);
+            string key = blockKey ?? $"track::{i}";
             if (!blocksByKey.TryGetValue(key, out var list))
             {
                 list = [];
@@ -1009,11 +1322,19 @@ public static class WorkAwareShuffleEngine
             {
                 indices.Sort((a, b) =>
                 {
-                    int ma = tracks[a].MovementNumber ?? int.MaxValue;
-                    int mb = tracks[b].MovementNumber ?? int.MaxValue;
+                    int ma = tracks[a].MovementNumber is > 0 ? tracks[a].MovementNumber!.Value : int.MaxValue;
+                    int mb = tracks[b].MovementNumber is > 0 ? tracks[b].MovementNumber!.Value : int.MaxValue;
                     int cmp = ma.CompareTo(mb);
                     if (cmp != 0) return cmp;
-                    cmp = string.Compare(tracks[a].RelPath, tracks[b].RelPath, StringComparison.OrdinalIgnoreCase);
+                    int da = tracks[a].DiscNumber > 0 ? tracks[a].DiscNumber : int.MaxValue;
+                    int db = tracks[b].DiscNumber > 0 ? tracks[b].DiscNumber : int.MaxValue;
+                    cmp = da.CompareTo(db);
+                    if (cmp != 0) return cmp;
+                    int ta = tracks[a].TrackNumber > 0 ? tracks[a].TrackNumber : int.MaxValue;
+                    int tb = tracks[b].TrackNumber > 0 ? tracks[b].TrackNumber : int.MaxValue;
+                    cmp = ta.CompareTo(tb);
+                    if (cmp != 0) return cmp;
+                    cmp = NaturalPathCompare(tracks[a].RelPath, tracks[b].RelPath);
                     return cmp != 0 ? cmp : a.CompareTo(b);
                 });
             }
@@ -1048,10 +1369,162 @@ public static class WorkAwareShuffleEngine
         }
         return [.. flattened];
     }
+
+    public static string BuildAlbumScope(string? album, string? conductor = null, string? albumArtist = null)
+    {
+        string normAlbum = (album ?? "").Trim().ToLowerInvariant();
+        string normConductor = (conductor ?? "").Trim().ToLowerInvariant();
+        string normArtist = (albumArtist ?? "").Trim().ToLowerInvariant();
+        string discriminator = !string.IsNullOrEmpty(normConductor) ? normConductor : normArtist;
+        if (string.IsNullOrEmpty(discriminator)) return normAlbum;
+        return string.IsNullOrEmpty(normAlbum) ? discriminator : $"{normAlbum}|{discriminator}";
+    }
+
+    public static string? BuildWorkBlockKey(string? workName, string? album, string? albumScope = null)
+    {
+        string work = (workName ?? "").Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(work)) return null;
+        string scope = !string.IsNullOrWhiteSpace(albumScope)
+            ? albumScope.Trim().ToLowerInvariant()
+            : (album ?? "").Trim().ToLowerInvariant();
+        return $"{scope}::{work}";
+    }
+
+    public static int NaturalPathCompare(string? a, string? b)
+    {
+        string sa = a ?? "";
+        string sb = b ?? "";
+        int ia = 0, ib = 0;
+        while (ia < sa.Length && ib < sb.Length)
+        {
+            if (char.IsDigit(sa[ia]) && char.IsDigit(sb[ib]))
+            {
+                int startA = ia, startB = ib;
+                while (ia < sa.Length && char.IsDigit(sa[ia])) ia++;
+                while (ib < sb.Length && char.IsDigit(sb[ib])) ib++;
+                string digitsA = sa[startA..ia].TrimStart('0');
+                string digitsB = sb[startB..ib].TrimStart('0');
+                int lenCmp = digitsA.Length.CompareTo(digitsB.Length);
+                if (lenCmp != 0) return lenCmp;
+                int numCmp = string.Compare(digitsA, digitsB, StringComparison.Ordinal);
+                if (numCmp != 0) return numCmp;
+                int zeroCmp = (ia - startA).CompareTo(ib - startB);
+                if (zeroCmp != 0) return zeroCmp;
+            }
+            else
+            {
+                int charCmp = char.ToLowerInvariant(sa[ia]).CompareTo(char.ToLowerInvariant(sb[ib]));
+                if (charCmp != 0) return charCmp;
+                ia++;
+                ib++;
+            }
+        }
+        return (sa.Length - ia).CompareTo(sb.Length - ib);
+    }
+
+    public static void AvoidLeadingRepeatPreservingWorkBlock<T>(
+        List<T> ordered,
+        string? previousTrackUid,
+        Func<T, string> uidSelector,
+        Func<T, string?> albumSelector,
+        Func<T, string?> workSelector,
+        Func<T, string?>? albumScopeSelector = null,
+        string? previousWorkKey = null)
+    {
+        if (ordered.Count <= 1 || string.IsNullOrWhiteSpace(previousTrackUid)) return;
+        string? leadWorkKey = BuildWorkBlockKey(
+            workSelector(ordered[0]),
+            albumSelector(ordered[0]),
+            albumScopeSelector?.Invoke(ordered[0]));
+        bool sameLeadTrack = string.Equals(uidSelector(ordered[0]), previousTrackUid, StringComparison.Ordinal);
+        bool sameLeadWork = !string.IsNullOrWhiteSpace(previousWorkKey)
+            && !string.IsNullOrEmpty(leadWorkKey)
+            && string.Equals(leadWorkKey, previousWorkKey.Trim(), StringComparison.OrdinalIgnoreCase);
+        if (!sameLeadTrack && !sameLeadWork) return;
+
+        string firstWork = (workSelector(ordered[0]) ?? "").Trim();
+        string firstScope = ((albumScopeSelector?.Invoke(ordered[0]) ?? albumSelector(ordered[0])) ?? "").Trim();
+        int blockLen = 1;
+        if (!string.IsNullOrEmpty(firstWork))
+        {
+            while (blockLen < ordered.Count
+                   && string.Equals((workSelector(ordered[blockLen]) ?? "").Trim(), firstWork, StringComparison.OrdinalIgnoreCase)
+                   && string.Equals(((albumScopeSelector?.Invoke(ordered[blockLen]) ?? albumSelector(ordered[blockLen])) ?? "").Trim(), firstScope, StringComparison.OrdinalIgnoreCase))
+            {
+                blockLen++;
+            }
+        }
+
+        if (blockLen >= ordered.Count)
+        {
+            // Entire queue is one single multi-movement work; move only the lead item if unavoidable
+            var single = ordered[0];
+            ordered.RemoveAt(0);
+            ordered.Add(single);
+            return;
+        }
+
+        var moved = ordered.GetRange(0, blockLen);
+        ordered.RemoveRange(0, blockLen);
+        ordered.AddRange(moved);
+    }
 }
 
 public static class ReplayGainResolver
 {
+    public static bool ShouldUseAlbumReplayGain(
+        bool isShuffleEnabled,
+        int queueCount,
+        int currentIndex,
+        Func<int, string?> albumAt,
+        Func<int, string?> workKeyAt,
+        string? currentAlbum,
+        string? currentWorkKey,
+        bool isSingleAlbumParent = false)
+    {
+        if (queueCount <= 0) return false;
+        string normAlbum = (currentAlbum ?? "").Trim();
+        string normWork = (currentWorkKey ?? "").Trim();
+        if (string.IsNullOrEmpty(normAlbum)) return false;
+
+        if (!string.IsNullOrEmpty(normWork))
+        {
+            if (currentIndex >= 0 && currentIndex < queueCount)
+            {
+                bool prevSame = currentIndex > 0
+                    && string.Equals((workKeyAt(currentIndex - 1) ?? "").Trim(), normWork, StringComparison.OrdinalIgnoreCase);
+                bool nextSame = currentIndex + 1 < queueCount
+                    && string.Equals((workKeyAt(currentIndex + 1) ?? "").Trim(), normWork, StringComparison.OrdinalIgnoreCase);
+                if (prevSame || nextSame) return true;
+            }
+            else
+            {
+                int sameWorkCount = 0;
+                int cap = Math.Min(queueCount, 256);
+                for (int i = 0; i < cap; i++)
+                {
+                    if (string.Equals((workKeyAt(i) ?? "").Trim(), normWork, StringComparison.OrdinalIgnoreCase))
+                    {
+                        sameWorkCount++;
+                        if (sameWorkCount >= 2) return true;
+                    }
+                }
+            }
+        }
+
+        if (isShuffleEnabled) return false;
+        if (isSingleAlbumParent) return true;
+
+        int checkCap = Math.Min(queueCount, 256);
+        int sameAlbumCount = 0;
+        for (int i = 0; i < checkCap; i++)
+        {
+            if (string.Equals((albumAt(i) ?? "").Trim(), normAlbum, StringComparison.OrdinalIgnoreCase))
+                sameAlbumCount++;
+        }
+        return sameAlbumCount >= checkCap;
+    }
+
     public static double ResolveGainDb(
         string? mode,
         double? trackDb,

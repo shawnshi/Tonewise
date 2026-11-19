@@ -206,7 +206,7 @@ public static partial class LastFmLedgerService
         if (newlyAddedByTrack.Count > 0)
         {
             using var conn = OpenReadWrite(manifestDbPath);
-            using var tx = conn.BeginTransaction();
+            using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
             foreach (var (uid, delta) in newlyAddedByTrack)
             {
                 using var cmd = conn.CreateCommand();
@@ -214,7 +214,7 @@ public static partial class LastFmLedgerService
                 cmd.CommandText = """
                     UPDATE tracks
                     SET lastfm_pulled_count = lastfm_pulled_count + $delta,
-                        play_count_total = MAX(legacy_play_count, lastfm_pulled_count + $delta) + local_unsynced_expired_count
+                        play_count_total = MAX(play_count_total, MAX(legacy_play_count, lastfm_pulled_count + $delta) + local_unsynced_expired_count)
                     WHERE track_uid = $uid;
                     """;
                 cmd.Parameters.AddWithValue("$delta", delta);
@@ -240,7 +240,7 @@ public static partial class LastFmLedgerService
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         int updated = 0;
 
-        using var tx = conn.BeginTransaction();
+        using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
         foreach (var loved in lovedTracks)
         {
             if (!TryResolveTrackUids(loved.Artist, loved.Title, artistAliasMap, index, out var uids) || uids.Count == 0) continue;
@@ -288,7 +288,7 @@ public static partial class LastFmLedgerService
         if (maxByUid.Count == 0) return 0;
 
         int updated = 0;
-        using var tx = conn.BeginTransaction();
+        using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
         foreach (var (uid, cloudCount) in maxByUid)
         {
             using var cmd = conn.CreateCommand();
@@ -296,7 +296,7 @@ public static partial class LastFmLedgerService
             cmd.CommandText = """
                 UPDATE tracks
                 SET lastfm_pulled_count = MAX(lastfm_pulled_count, $cnt),
-                    play_count_total = MAX(legacy_play_count, MAX(lastfm_pulled_count, $cnt)) + local_unsynced_expired_count
+                    play_count_total = MAX(play_count_total, MAX(legacy_play_count, MAX(lastfm_pulled_count, $cnt)) + local_unsynced_expired_count)
                 WHERE track_uid = $uid AND lastfm_pulled_count < $cnt;
                 """;
             cmd.Parameters.AddWithValue("$cnt", cloudCount);
@@ -383,7 +383,9 @@ public static partial class LastFmLedgerService
                 if (modifiedFile)
                 {
                     var rewritten = events.Select(e => JsonSerializer.Serialize(e));
-                    File.WriteAllLines(filePath, rewritten, new UTF8Encoding(false));
+                    string tmpPath = filePath + ".tmp." + Guid.NewGuid().ToString("N")[..6];
+                    File.WriteAllLines(tmpPath, rewritten, new UTF8Encoding(false));
+                    File.Move(tmpPath, filePath, overwrite: true);
                 }
             }
         }
@@ -391,7 +393,7 @@ public static partial class LastFmLedgerService
         if (hasDb && expiredByTrackUid.Count > 0)
         {
             using var conn = OpenReadWrite(manifestDbPath);
-            using var tx = conn.BeginTransaction();
+            using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
             foreach (var (uid, delta) in expiredByTrackUid)
             {
                 using var cmd = conn.CreateCommand();
@@ -399,7 +401,7 @@ public static partial class LastFmLedgerService
                 cmd.CommandText = """
                     UPDATE tracks
                     SET local_unsynced_expired_count = local_unsynced_expired_count + $delta,
-                        play_count_total = MAX(legacy_play_count, lastfm_pulled_count) + (local_unsynced_expired_count + $delta)
+                        play_count_total = MAX(play_count_total, MAX(legacy_play_count, lastfm_pulled_count) + (local_unsynced_expired_count + $delta))
                     WHERE track_uid = $uid;
                     """;
                 cmd.Parameters.AddWithValue("$delta", delta);
@@ -472,7 +474,8 @@ public static partial class LastFmLedgerService
                     ? artProp.GetString() ?? ""
                     : "";
                 if (!string.IsNullOrWhiteSpace(title)
-                    && TryResolveTrackUids(artist, title, null, _lookupIndex, out var matchedUids)
+                    && !string.IsNullOrWhiteSpace(artist)
+                    && TryResolveTrackUids(artist, title, null, _lookupIndex, out var matchedUids, allowTitleOnlyFallback: false)
                     && matchedUids.Count == 1)
                 {
                     return matchedUids[0];
@@ -494,13 +497,16 @@ public static partial class LastFmLedgerService
             return new IncomingHistoryMergeResult(0, new Dictionary<string, int>(StringComparer.Ordinal), []);
 
         new StagingDiffStore(manifestDbPath).EnsureSchema();
+        string stateDbPath = DesktopStateStore.ResolveStateDbPath(manifestDbPath);
 
         using var conn = OpenReadWrite(manifestDbPath);
-        EnsureLanSyncAckTable(conn);
+        using var stateConn = TonewiseSqlite.OpenReadWrite(stateDbPath);
+        DesktopStateStore.EnsureSchema(stateConn);
 
         var resolver = TrackUidResolver.Build(conn);
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        using var tx = conn.BeginTransaction();
+        using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
+        using var stateTx = TonewiseSqlite.BeginImmediateTransaction(stateConn);
         int merged = 0;
 
         foreach (var ev in events)
@@ -515,6 +521,22 @@ public static partial class LastFmLedgerService
                 && deltaProp.ValueKind == JsonValueKind.Number
                 && deltaProp.TryGetInt32(out rawDelta);
             int delta = hasPlayDeltaProp ? Math.Max(0, rawDelta) : 0;
+
+            int scrobbledDelta = 0;
+            if (ev.TryGetProperty("scrobbled_delta", out var scrobProp)
+                && scrobProp.ValueKind == JsonValueKind.Number
+                && scrobProp.TryGetInt32(out int rawScrobbled))
+            {
+                scrobbledDelta = Math.Clamp(rawScrobbled, 0, delta);
+            }
+
+            int deviceTotal = 0;
+            if (ev.TryGetProperty("device_play_count_total", out var totProp)
+                && totProp.ValueKind == JsonValueKind.Number
+                && totProp.TryGetInt32(out int rawTotal))
+            {
+                deviceTotal = Math.Max(0, rawTotal);
+            }
 
             long lastPlayedMs = 0;
             if (ev.TryGetProperty("last_played_ts_ms", out var lptProp)
@@ -544,8 +566,8 @@ public static partial class LastFmLedgerService
                         string ackKey = string.IsNullOrWhiteSpace(deviceId)
                             ? evId.Trim()
                             : $"{deviceId.Trim()}::{evId.Trim()}";
-                        using var ackCmd = conn.CreateCommand();
-                        ackCmd.Transaction = tx;
+                        using var ackCmd = stateConn.CreateCommand();
+                        ackCmd.Transaction = stateTx;
                         ackCmd.CommandText = """
                             INSERT OR IGNORE INTO lan_sync_play_acks (event_key, track_uid, delta, applied_at_ms)
                             VALUES ($k, $uid, $d, $now);
@@ -561,16 +583,74 @@ public static partial class LastFmLedgerService
                     }
                 }
 
+                int effectiveDelta = delta;
+                if (deviceTotal > 0 && !string.IsNullOrWhiteSpace(deviceId))
+                {
+                    string cleanDev = deviceId.Trim();
+                    int? prevDeviceTotal = null;
+                    using (var wmQuery = stateConn.CreateCommand())
+                    {
+                        wmQuery.Transaction = stateTx;
+                        wmQuery.CommandText = """
+                            SELECT last_device_total FROM lan_sync_device_watermarks
+                            WHERE device_id = $dev AND track_uid = $uid;
+                            """;
+                        wmQuery.Parameters.AddWithValue("$dev", cleanDev);
+                        wmQuery.Parameters.AddWithValue("$uid", resolvedUid);
+                        object? scalar = wmQuery.ExecuteScalar();
+                        if (scalar is not null && scalar != DBNull.Value)
+                        {
+                            prevDeviceTotal = Convert.ToInt32(scalar);
+                        }
+                    }
+
+                    if (prevDeviceTotal.HasValue)
+                    {
+                        if (deviceTotal <= prevDeviceTotal.Value)
+                        {
+                            continue;
+                        }
+                        effectiveDelta = Math.Min(delta, deviceTotal - prevDeviceTotal.Value);
+                    }
+
+                    using var wmUpsert = stateConn.CreateCommand();
+                    wmUpsert.Transaction = stateTx;
+                    wmUpsert.CommandText = """
+                        INSERT INTO lan_sync_device_watermarks (device_id, track_uid, last_device_total, updated_at_ms)
+                        VALUES ($dev, $uid, $tot, $now)
+                        ON CONFLICT(device_id, track_uid) DO UPDATE SET
+                            last_device_total = MAX(last_device_total, excluded.last_device_total),
+                            updated_at_ms = excluded.updated_at_ms;
+                        """;
+                    wmUpsert.Parameters.AddWithValue("$dev", cleanDev);
+                    wmUpsert.Parameters.AddWithValue("$uid", resolvedUid);
+                    wmUpsert.Parameters.AddWithValue("$tot", deviceTotal);
+                    wmUpsert.Parameters.AddWithValue("$now", nowMs);
+                    wmUpsert.ExecuteNonQuery();
+                }
+
+                if (effectiveDelta <= 0)
+                {
+                    continue;
+                }
+
+                int effectiveScrobbled = Math.Min(effectiveDelta, scrobbledDelta);
+                int effectiveOffline = effectiveDelta - effectiveScrobbled;
+
                 using var cmd = conn.CreateCommand();
                 cmd.Transaction = tx;
                 cmd.CommandText = """
                     UPDATE tracks
-                    SET local_unsynced_expired_count = local_unsynced_expired_count + $delta,
-                        play_count_total = MAX(legacy_play_count, lastfm_pulled_count) + (local_unsynced_expired_count + $delta),
+                    SET local_unsynced_expired_count = local_unsynced_expired_count + $offlineDelta,
+                        play_count_total = MAX(
+                            play_count_total + $effectiveDelta,
+                            MAX(legacy_play_count, lastfm_pulled_count) + (local_unsynced_expired_count + $offlineDelta)
+                        ),
                         last_played_ts = CASE WHEN $ts > 0 AND last_played_ts < $ts THEN $ts ELSE last_played_ts END
                     WHERE track_uid = $uid;
                     """;
-                cmd.Parameters.AddWithValue("$delta", delta);
+                cmd.Parameters.AddWithValue("$offlineDelta", effectiveOffline);
+                cmd.Parameters.AddWithValue("$effectiveDelta", effectiveDelta);
                 cmd.Parameters.AddWithValue("$ts", lastPlayedMs);
                 cmd.Parameters.AddWithValue("$uid", resolvedUid);
                 merged += cmd.ExecuteNonQuery();
@@ -590,7 +670,16 @@ public static partial class LastFmLedgerService
             }
         }
 
-        tx.Commit();
+        if (merged > 0)
+        {
+            tx.Commit();
+        }
+        else
+        {
+            tx.Rollback();
+        }
+        DesktopStateStore.PruneOldLanSyncAcks(stateConn, stateTx, nowMs);
+        stateTx.Commit();
         var (effectiveCounts, lovedUids) = ReadEffectiveCountsAndLoved(conn);
         return new IncomingHistoryMergeResult(merged, effectiveCounts, lovedUids);
     }
@@ -601,7 +690,7 @@ public static partial class LastFmLedgerService
             return (new Dictionary<string, int>(StringComparer.Ordinal), []);
 
         new StagingDiffStore(manifestDbPath).EnsureSchema();
-        using var conn = OpenReadWrite(manifestDbPath);
+        using var conn = TonewiseSqlite.OpenReadOnly(manifestDbPath);
         return ReadEffectiveCountsAndLoved(conn);
     }
 
@@ -643,18 +732,33 @@ public static partial class LastFmLedgerService
         return (effectiveCounts, lovedUids);
     }
 
-    private static void EnsureLanSyncAckTable(SqliteConnection conn)
+    public static List<string> ReadUnlovedTrackUids(string manifestDbPath)
     {
+        if (!File.Exists(manifestDbPath)) return [];
+        new StagingDiffStore(manifestDbPath).EnsureSchema();
+        using var conn = TonewiseSqlite.OpenReadOnly(manifestDbPath);
+        return ReadUnlovedTrackUids(conn);
+    }
+
+    private static List<string> ReadUnlovedTrackUids(SqliteConnection conn)
+    {
+        var unlovedUids = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            CREATE TABLE IF NOT EXISTS lan_sync_play_acks (
-                event_key TEXT PRIMARY KEY,
-                track_uid TEXT NOT NULL,
-                delta INTEGER NOT NULL,
-                applied_at_ms INTEGER NOT NULL
-            );
-            """;
-        cmd.ExecuteNonQuery();
+        cmd.CommandText = "SELECT track_uid, lower(hex(audio_frame_blake3)) FROM tracks WHERE rating_ts > 0 AND rating < 5;";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            string uid = reader.GetString(0);
+            string hex = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            if (seen.Add(uid)) unlovedUids.Add(uid);
+            if (hex.Length == 64 && !string.Equals(uid, hex, StringComparison.OrdinalIgnoreCase) && seen.Add(hex))
+            {
+                unlovedUids.Add(hex);
+            }
+        }
+        return unlovedUids;
     }
 
     public static string BuildLastFmApiSignature(
@@ -677,7 +781,7 @@ public static partial class LastFmLedgerService
     private static Dictionary<string, (string Artist, string Title, string Album)> BuildTrackMetaByUid(string dbPath)
     {
         var map = new Dictionary<string, (string Artist, string Title, string Album)>(StringComparer.Ordinal);
-        using var conn = OpenReadWrite(dbPath);
+        using var conn = TonewiseSqlite.OpenReadOnly(dbPath);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT track_uid, title, album, artists_json FROM tracks;";
         using var reader = cmd.ExecuteReader();
@@ -796,7 +900,8 @@ public static partial class LastFmLedgerService
         string title,
         IReadOnlyDictionary<string, string>? artistAliasMap,
         TrackLookupIndex index,
-        out IReadOnlyList<string> uids)
+        out IReadOnlyList<string> uids,
+        bool allowTitleOnlyFallback = true)
     {
         string key = NormalizeKey(artist, title, artistAliasMap);
         if (index.ByExactArtistTitle.TryGetValue(key, out var exactHits) && exactHits.Count > 0)
@@ -826,6 +931,12 @@ public static partial class LastFmLedgerService
                 uids = colonHits;
                 return true;
             }
+        }
+
+        if (!allowTitleOnlyFallback)
+        {
+            uids = [];
+            return false;
         }
 
         string normTitle = NormalizeToken(title);
@@ -1194,12 +1305,8 @@ public static partial class LastFmLedgerService
         File.Move(tmp, path, overwrite: true);
     }
 
-    private static SqliteConnection OpenReadWrite(string dbPath)
-    {
-        var conn = new SqliteConnection($"Data Source={dbPath}");
-        conn.Open();
-        return conn;
-    }
+    private static SqliteConnection OpenReadWrite(string dbPath) =>
+        TonewiseSqlite.OpenReadWrite(dbPath);
 
     [GeneratedRegex(@"[\p{P}\p{S}]")]
     private static partial Regex NonWordRegex();
@@ -1228,6 +1335,9 @@ public sealed record LastFmAccountConfig(
     long LastPullUnixSec = 0
 )
 {
+    private const string DpapiPrefix = "dpapi:";
+    private const uint CryptProtectUiForbidden = 0x1;
+
     public bool HasWriteSession =>
         !string.IsNullOrWhiteSpace(ApiKey)
         && !string.IsNullOrWhiteSpace(ApiSecret)
@@ -1239,7 +1349,13 @@ public sealed record LastFmAccountConfig(
         if (!File.Exists(path)) return null;
         try
         {
-            return JsonSerializer.Deserialize<LastFmAccountConfig>(File.ReadAllText(path, Encoding.UTF8));
+            var raw = JsonSerializer.Deserialize<LastFmAccountConfig>(File.ReadAllText(path, Encoding.UTF8));
+            if (raw is null) return null;
+            return raw with
+            {
+                ApiSecret = UnprotectSecret(raw.ApiSecret),
+                SessionKey = UnprotectSecret(raw.SessionKey),
+            };
         }
         catch
         {
@@ -1251,8 +1367,129 @@ public sealed record LastFmAccountConfig(
     {
         Directory.CreateDirectory(tonewiseDir);
         string path = Path.Combine(tonewiseDir, "lastfm_config.json");
-        string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(path, json + "\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        var stored = config with
+        {
+            ApiSecret = ProtectSecret(config.ApiSecret),
+            SessionKey = ProtectSecret(config.SessionKey),
+        };
+        string json = JsonSerializer.Serialize(stored, new JsonSerializerOptions { WriteIndented = true });
+        string tmpPath = path + ".tmp." + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.WriteAllText(tmpPath, json + "\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Move(tmpPath, path, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tmpPath)) File.Delete(tmpPath);
+            }
+            catch
+            {
+                // Ignore cleanup error
+            }
+        }
+    }
+
+    private static string ProtectSecret(string? plain)
+    {
+        if (string.IsNullOrEmpty(plain)) return "";
+        if (plain.StartsWith(DpapiPrefix, StringComparison.Ordinal)) return plain;
+        if (!OperatingSystem.IsWindows()) return plain;
+        byte[] plainBytes = Encoding.UTF8.GetBytes(plain);
+        byte[] encrypted = ProtectWindowsDpapi(plainBytes);
+        return DpapiPrefix + Convert.ToBase64String(encrypted);
+    }
+
+    private static string UnprotectSecret(string? stored)
+    {
+        if (string.IsNullOrEmpty(stored)) return "";
+        if (!stored.StartsWith(DpapiPrefix, StringComparison.Ordinal)) return stored;
+        if (!OperatingSystem.IsWindows()) return stored;
+        byte[] cipher = Convert.FromBase64String(stored[DpapiPrefix.Length..]);
+        byte[] plainBytes = UnprotectWindowsDpapi(cipher);
+        return Encoding.UTF8.GetString(plainBytes);
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct DataBlob
+    {
+        public int cbData;
+        public IntPtr pbData;
+    }
+
+    [System.Runtime.InteropServices.DllImport("crypt32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CryptProtectData(
+        ref DataBlob pDataIn,
+        string? szDataDescr,
+        IntPtr pOptionalEntropy,
+        IntPtr pvReserved,
+        IntPtr pPromptStruct,
+        uint dwFlags,
+        out DataBlob pDataOut);
+
+    [System.Runtime.InteropServices.DllImport("crypt32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CryptUnprotectData(
+        ref DataBlob pDataIn,
+        IntPtr ppszDataDescr,
+        IntPtr pOptionalEntropy,
+        IntPtr pvReserved,
+        IntPtr pPromptStruct,
+        uint dwFlags,
+        out DataBlob pDataOut);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LocalFree(IntPtr hMem);
+
+    private static byte[] ProtectWindowsDpapi(byte[] data)
+    {
+        var inBlob = new DataBlob();
+        var outBlob = new DataBlob();
+        try
+        {
+            inBlob.cbData = data.Length;
+            inBlob.pbData = System.Runtime.InteropServices.Marshal.AllocHGlobal(data.Length);
+            System.Runtime.InteropServices.Marshal.Copy(data, 0, inBlob.pbData, data.Length);
+            if (!CryptProtectData(ref inBlob, "Tonewise Last.fm Secret", IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, CryptProtectUiForbidden, out outBlob))
+            {
+                throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            }
+            byte[] result = new byte[outBlob.cbData];
+            System.Runtime.InteropServices.Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
+            return result;
+        }
+        finally
+        {
+            if (inBlob.pbData != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(inBlob.pbData);
+            if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
+        }
+    }
+
+    private static byte[] UnprotectWindowsDpapi(byte[] encrypted)
+    {
+        var inBlob = new DataBlob();
+        var outBlob = new DataBlob();
+        try
+        {
+            inBlob.cbData = encrypted.Length;
+            inBlob.pbData = System.Runtime.InteropServices.Marshal.AllocHGlobal(encrypted.Length);
+            System.Runtime.InteropServices.Marshal.Copy(encrypted, 0, inBlob.pbData, encrypted.Length);
+            if (!CryptUnprotectData(ref inBlob, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, CryptProtectUiForbidden, out outBlob))
+            {
+                throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            }
+            byte[] result = new byte[outBlob.cbData];
+            System.Runtime.InteropServices.Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
+            return result;
+        }
+        finally
+        {
+            if (inBlob.pbData != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(inBlob.pbData);
+            if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
+        }
     }
 }
 
@@ -1506,6 +1743,46 @@ public sealed class LastFmWebApiClient
         return combined;
     }
 
+    private async Task<string> GetStringWithRetryAsync(string url, CancellationToken ct)
+    {
+        const int maxAttempts = 3;
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                using var resp = await _http.GetAsync(url, ct);
+                if (resp.IsSuccessStatusCode)
+                {
+                    return await resp.Content.ReadAsStringAsync(ct);
+                }
+
+                int status = (int)resp.StatusCode;
+                bool transient = status == 429 || status >= 500;
+                if (!transient || attempt == maxAttempts - 1)
+                {
+                    throw new HttpRequestException(
+                        $"Last.fm API GET failed with HTTP {status} ({resp.ReasonPhrase})",
+                        null,
+                        resp.StatusCode);
+                }
+
+                int delayMs = attempt == 0 ? 300 : 900;
+                if (resp.Headers.RetryAfter?.Delta is TimeSpan delta)
+                {
+                    delayMs = Math.Clamp((int)delta.TotalMilliseconds, 100, 10_000);
+                }
+                await Task.Delay(delayMs, ct);
+            }
+            catch (HttpRequestException) when (attempt < maxAttempts - 1)
+            {
+                int delayMs = attempt == 0 ? 300 : 900;
+                await Task.Delay(delayMs, ct);
+            }
+        }
+        throw new HttpRequestException($"Last.fm API GET failed after {maxAttempts} attempts: {url}");
+    }
+
     public async Task<IReadOnlyList<CloudRecentTrack>> FetchRecentTracksAsync(
         string apiKey,
         string username,
@@ -1521,9 +1798,7 @@ public sealed class LastFmWebApiClient
                     $"{ApiBaseUrl}?method=user.getrecenttracks&user={Uri.EscapeDataString(username)}&api_key={Uri.EscapeDataString(apiKey)}&limit={perPage}&page={page}&format=json"
                     + (fromUnixSec > 0 ? $"&from={fromUnixSec}" : "");
 
-                using var resp = await _http.GetAsync(url, ct);
-                if (!resp.IsSuccessStatusCode) return ((IReadOnlyList<CloudRecentTrack>)[], 1);
-                string json = await resp.Content.ReadAsStringAsync(ct);
+                string json = await GetStringWithRetryAsync(url, ct);
                 return ParseRecentTracksJson(json);
             },
             maxPagesCap: 15,
@@ -1544,9 +1819,7 @@ public sealed class LastFmWebApiClient
                 string url =
                     $"{ApiBaseUrl}?method=user.getlovedtracks&user={Uri.EscapeDataString(username)}&api_key={Uri.EscapeDataString(apiKey)}&limit={perPage}&page={page}&format=json";
 
-                using var resp = await _http.GetAsync(url, ct);
-                if (!resp.IsSuccessStatusCode) return ((IReadOnlyList<CloudLovedTrack>)[], 1);
-                string json = await resp.Content.ReadAsStringAsync(ct);
+                string json = await GetStringWithRetryAsync(url, ct);
                 return ParseLovedTracksJson(json);
             },
             maxPagesCap: 50,
@@ -1567,9 +1840,7 @@ public sealed class LastFmWebApiClient
                 string url =
                     $"{ApiBaseUrl}?method=user.gettoptracks&user={Uri.EscapeDataString(username)}&api_key={Uri.EscapeDataString(apiKey)}&period=overall&limit={perPage}&page={page}&format=json";
 
-                using var resp = await _http.GetAsync(url, ct);
-                if (!resp.IsSuccessStatusCode) return ((IReadOnlyList<CloudTopTrack>)[], 1);
-                string json = await resp.Content.ReadAsStringAsync(ct);
+                string json = await GetStringWithRetryAsync(url, ct);
                 return ParseTopTracksJson(json);
             },
             maxPagesCap: 100,
@@ -1688,6 +1959,9 @@ public sealed class LastFmWebApiClient
         return (lovedCount, unlovedCount);
     }
 
+    public static bool ShouldRecoverFutureWatermark(long effectiveFromSec, long nowUnixSec, int recentCount) =>
+        effectiveFromSec > nowUnixSec + 60 && recentCount == 0;
+
     public async Task<LastFmFullSyncSummary> RunFullBidirectionalSyncAsync(
         string manifestDbPath,
         string tonewiseDir,
@@ -1701,22 +1975,22 @@ public sealed class LastFmWebApiClient
             (pushedLoved, pushedUnloved) = await FlushPendingLoveOpsAsync(tonewiseDir, config, ct);
         }
 
-        var topTracks = await FetchUserTopTracksAsync(config.ApiKey, config.Username, ct: ct);
-        int topUpdated = LastFmLedgerService.SyncTopTrackPlayCounts(manifestDbPath, topTracks);
-
+        long nowUnixSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long effectiveFromSec = config.LastPullUnixSec;
         var recent = await FetchRecentTracksAsync(config.ApiKey, config.Username, effectiveFromSec, ct: ct);
-        if (effectiveFromSec > 0 && recent.Count == 0)
+        if (ShouldRecoverFutureWatermark(effectiveFromSec, nowUnixSec, recent.Count))
         {
             // Recover from a future or skewed watermark (e.g. testing clock ahead of Last.fm server time)
             recent = await FetchRecentTracksAsync(config.ApiKey, config.Username, fromUnixSec: 0, ct: ct);
         }
         int pulledCount = LastFmLedgerService.IngestPulledCloudPlays(manifestDbPath, tonewiseDir, recent);
 
+        var topTracks = await FetchUserTopTracksAsync(config.ApiKey, config.Username, ct: ct);
+        int topUpdated = LastFmLedgerService.SyncTopTrackPlayCounts(manifestDbPath, topTracks);
+
         var loved = await FetchLovedTracksAsync(config.ApiKey, config.Username, ct: ct);
         int lovedCount = LastFmLedgerService.SyncLovedTracks(manifestDbPath, loved);
 
-        long nowUnixSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var prep = LastFmLedgerService.PrepareScrobbleBatches(
             manifestDbPath, tonewiseDir, nowUnixSec, alreadyOnCloud: recent
         );

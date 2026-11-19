@@ -123,6 +123,16 @@ constructor(@ApplicationContext private val context: Context) {
 }
 
 internal class PlaylistSongMatcher(private val library: Library) {
+    private val byNormalizedRelPath: Map<String, Song?> by lazy {
+        val grouped = HashMap<String, MutableList<Song>>()
+        for (song in library.songs) {
+            for (key in normalizedRelKeys(song.path)) {
+                grouped.getOrPut(key) { mutableListOf() }.add(song)
+            }
+        }
+        grouped.mapValues { (_, matches) -> matches.singleOrNull() }
+    }
+
     private val byParentAndFile: Map<String, Song?> by lazy {
         val grouped = HashMap<String, MutableList<Song>>()
         for (song in library.songs) {
@@ -145,12 +155,50 @@ internal class PlaylistSongMatcher(private val library: Library) {
         paths.mapNotNull { candidates ->
             candidates.firstNotNullOfOrNull(library::findSongByPath)
                 ?: candidates.firstNotNullOfOrNull { candidate ->
+                    normalizedRelKeys(candidate).firstNotNullOfOrNull { byNormalizedRelPath[it] }
+                }
+                ?: candidates.firstNotNullOfOrNull { candidate ->
                     parentAndFileKey(candidate)?.let { byParentAndFile[it] }
                 }
                 ?: candidates.firstNotNullOfOrNull { candidate ->
                     candidate.name?.lowercase()?.let { byFileName[it] }
                 }
         }
+
+    private fun normalizedRelKeys(path: Path): Set<String> {
+        val full =
+            path.components.components
+                .joinToString("/")
+                .replace('\\', '/')
+                .trim('/')
+                .lowercase()
+        if (full.isEmpty()) return emptySet()
+        val keys = LinkedHashSet<String>()
+        keys.add(full)
+        val markerIdx = full.indexOf("/music/tonewise/")
+        if (markerIdx >= 0) {
+            keys.add(full.substring(markerIdx + "/music/tonewise/".length).trimStart('/'))
+        }
+        val musicMarkerIdx = full.indexOf("/music/")
+        if (musicMarkerIdx >= 0) {
+            keys.add(full.substring(musicMarkerIdx + "/music/".length).trimStart('/'))
+        }
+        val tonewiseMarkerIdx = full.indexOf("/tonewise/")
+        if (tonewiseMarkerIdx >= 0) {
+            keys.add(full.substring(tonewiseMarkerIdx + "/tonewise/".length).trimStart('/'))
+        }
+        if (full.startsWith("music/tonewise/")) {
+            keys.add(full.substring("music/tonewise/".length).trimStart('/'))
+        }
+        if (full.startsWith("music/")) {
+            keys.add(full.substring("music/".length).trimStart('/'))
+        }
+        if (full.startsWith("tonewise/")) {
+            keys.add(full.substring("tonewise/".length).trimStart('/'))
+        }
+        keys.remove("")
+        return keys
+    }
 
     private fun parentAndFileKey(path: Path): String? {
         val parts = path.components.components

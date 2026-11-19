@@ -166,15 +166,56 @@ fn merge_sessions_json_impl(request_json: &str) -> String {
     serde_json::to_string(&merged).unwrap_or_else(|e| json_error(&e.to_string()))
 }
 
+fn sync_file_best_effort(file: &File) -> std::io::Result<()> {
+    match file.sync_data() {
+        Ok(()) => Ok(()),
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(22) => Ok(()), // EINVAL on non-syncable pipes/fds
+        Err(e) => Err(e),
+    }
+}
+
+fn apply_header_patch_file_impl(file: &mut File, expected_old_hex: &str, new_header: &[u8]) -> String {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let backup_hdr = match compute_audio_frame_fingerprint(file) {
+        Ok(fp) if fp.header_size <= 64 * 1024 * 1024 => {
+            let mut buf = vec![0u8; fp.header_size as usize];
+            if file.seek(SeekFrom::Start(0)).is_ok() && file.read_exact(&mut buf).is_ok() {
+                Some(buf)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    match apply_header_delta_patch(file, expected_old_hex, new_header) {
+        Ok(outcome) => {
+            if matches!(outcome, tonewise_sync::HeaderPatchOutcome::Applied { .. })
+                && let Err(e) = sync_file_best_effort(file)
+            {
+                return json_error(&format!("sync failed: {e}"));
+            }
+            serde_json::to_string(&outcome).unwrap_or_else(|e| json_error(&e.to_string()))
+        }
+        Err(e) => {
+            if let Some(orig) = backup_hdr {
+                let _ = file.seek(SeekFrom::Start(0));
+                let _ = file.write_all(&orig);
+                let _ = sync_file_best_effort(file);
+            }
+            json_error(&format!("patch failed: {e}"))
+        }
+    }
+}
+
 fn apply_header_patch_path_impl(path: &str, expected_old_hex: &str, new_header: &[u8]) -> String {
     let mut file = match OpenOptions::new().read(true).write(true).open(path) {
         Ok(f) => f,
         Err(e) => return json_error(&format!("open rw failed: {e}")),
     };
-    match apply_header_delta_patch(&mut file, expected_old_hex, new_header) {
-        Ok(outcome) => serde_json::to_string(&outcome).unwrap_or_else(|e| json_error(&e.to_string())),
-        Err(e) => json_error(&format!("patch failed: {e}")),
-    }
+    apply_header_patch_file_impl(&mut file, expected_old_hex, new_header)
 }
 
 #[cfg(unix)]
@@ -190,10 +231,7 @@ fn apply_header_patch_fd_impl(fd: i32, expected_old_hex: &str, new_header: &[u8]
         Ok(f) => f,
         Err(e) => return json_error(&format!("dup fd failed: {e}")),
     };
-    match apply_header_delta_patch(&mut cloned, expected_old_hex, new_header) {
-        Ok(outcome) => serde_json::to_string(&outcome).unwrap_or_else(|e| json_error(&e.to_string())),
-        Err(e) => json_error(&format!("patch failed: {e}")),
-    }
+    apply_header_patch_file_impl(&mut cloned, expected_old_hex, new_header)
 }
 
 #[cfg(not(unix))]
@@ -219,9 +257,83 @@ fn analyze_audio_path_impl(_path: &str) -> String {
 }
 
 #[cfg(not(target_os = "android"))]
-fn write_audio_tags_json_impl(request_json: &str) -> String {
+fn parse_tag_list_value(v: &str) -> Vec<String> {
+    if v.starts_with('[')
+        && let Ok(arr) = serde_json::from_str::<Vec<String>>(v)
+    {
+        return arr
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    v.split([';', ','])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+#[cfg(not(target_os = "android"))]
+fn save_tagged_file_atomically(
+    path: &std::path::Path,
+    tagged: &lofty::file::TaggedFile,
+) -> Result<(), String> {
     use lofty::config::WriteOptions;
-    use lofty::file::{AudioFile, TaggedFileExt};
+    use lofty::file::AudioFile;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let base_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "audio".to_string());
+    let tmp_path = parent.join(format!("{base_name}.twtmp.{pid}.{seq}"));
+
+    std::fs::copy(path, &tmp_path).map_err(|e| format!("temp copy failed: {e}"))?;
+    if let Err(e) = tagged.save_to_path(&tmp_path, WriteOptions::default()) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("lofty save failed: {e}"));
+    }
+    if let Ok(f) = File::open(&tmp_path) {
+        let _ = f.sync_data();
+    }
+
+    #[cfg(windows)]
+    {
+        let bak_path = parent.join(format!("{base_name}.twbak.{pid}.{seq}"));
+        let _ = std::fs::remove_file(&bak_path);
+        if let Err(e) = std::fs::rename(path, &bak_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("backup rename failed: {e}"));
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::rename(&bak_path, path);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("atomic replace failed: {e}"));
+        }
+        let _ = std::fs::remove_file(&bak_path);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("atomic rename failed: {e}"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn write_audio_tags_json_impl(request_json: &str) -> String {
+    use lofty::file::TaggedFileExt;
     use lofty::probe::Probe;
     use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagItem};
 
@@ -255,11 +367,12 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                     None => tag.remove_title(),
                 },
                 "artist" | "artists" | "artists_json" => {
+                    tag.remove_key(&ItemKey::TrackArtists);
                     let display = clean_val.map(|v| {
-                        if v.starts_with('[') {
-                            serde_json::from_str::<Vec<String>>(v)
-                                .unwrap_or_default()
-                                .into_iter()
+                        if v.starts_with('[')
+                            && let Ok(arr) = serde_json::from_str::<Vec<String>>(v)
+                        {
+                            arr.into_iter()
                                 .filter(|s| !s.trim().is_empty())
                                 .collect::<Vec<_>>()
                                 .join(" / ")
@@ -275,15 +388,7 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                 "composer" | "composers" | "composers_json" => {
                     tag.remove_key(&ItemKey::Composer);
                     if let Some(v) = clean_val {
-                        let items: Vec<String> = if v.starts_with('[') {
-                            serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
-                        } else {
-                            v.split([';', ','])
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        };
-                        for c in items {
+                        for c in parse_tag_list_value(v) {
                             tag.push(TagItem::new(ItemKey::Composer, ItemValue::Text(c)));
                         }
                     }
@@ -291,15 +396,7 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                 "conductor" | "conductors" | "conductors_json" => {
                     tag.remove_key(&ItemKey::Conductor);
                     if let Some(v) = clean_val {
-                        let items: Vec<String> = if v.starts_with('[') {
-                            serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
-                        } else {
-                            v.split([';', ','])
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        };
-                        for c in items {
+                        for c in parse_tag_list_value(v) {
                             tag.push(TagItem::new(ItemKey::Conductor, ItemValue::Text(c)));
                         }
                     }
@@ -344,15 +441,7 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                 "mood" | "mood_json" => {
                     tag.remove_key(&ItemKey::Mood);
                     if let Some(v) = clean_val {
-                        let items: Vec<String> = if v.starts_with('[') {
-                            serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
-                        } else {
-                            v.split([';', ','])
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        };
-                        for m in items {
+                        for m in parse_tag_list_value(v) {
                             tag.push(TagItem::new(ItemKey::Mood, ItemValue::Text(m)));
                         }
                     }
@@ -360,14 +449,7 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                 "dj_scene" | "dj_scene_json" => {
                     tag.retain(|it| !matches!(it.key(), ItemKey::Unknown(k) if k.eq_ignore_ascii_case("DJ_SCENE")));
                     if let Some(v) = clean_val {
-                        let items: Vec<String> = if v.starts_with('[') {
-                            serde_json::from_str::<Vec<String>>(v).unwrap_or_default()
-                        } else {
-                            v.split([';', ','])
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        };
+                        let items = parse_tag_list_value(v);
                         if !items.is_empty() {
                             tag.push_unchecked(TagItem::new(
                                 ItemKey::Unknown("DJ_SCENE".to_string()),
@@ -399,8 +481,8 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
         }
     }
 
-    if let Err(e) = tagged.save_to_path(path, WriteOptions::default()) {
-        return json_error(&format!("lofty save failed: {e}"));
+    if let Err(e) = save_tagged_file_atomically(path, &tagged) {
+        return json_error(&e);
     }
 
     fingerprint_path_impl(&req.path)
@@ -593,16 +675,75 @@ pub unsafe extern "C" fn tonewise_write_audio_tags_json(request_json: *const c_c
 // JNI exports for Android (:musikr -> org.oxycblt.musikr.core.TonewiseCoreJNI)
 // -----------------------------------------------------------------------------
 
+fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic in tonewise_core".to_string()
+    }
+}
+
+fn jni_catch<F: FnOnce() -> String>(f: F) -> String {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(out) => out,
+        Err(payload) => json_error(&format!("native panic caught: {}", format_panic_payload(payload))),
+    }
+}
+
+fn clear_pending_jni_exception(env: &mut JNIEnv) -> bool {
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+        true
+    } else {
+        false
+    }
+}
+
 fn jstring_to_rust(env: &mut JNIEnv, input: &JString) -> Result<String, String> {
-    env.get_string(input)
-        .map(|s| s.into())
-        .map_err(|e| format!("jni get_string failed: {e}"))
+    if clear_pending_jni_exception(env) {
+        return Err("jni pending exception cleared".to_string());
+    }
+    if input.is_null() {
+        return Err("null jstring".to_string());
+    }
+    match env.get_string(input) {
+        Ok(s) => Ok(s.into()),
+        Err(e) => {
+            clear_pending_jni_exception(env);
+            Err(format!("jni get_string failed: {e}"))
+        }
+    }
+}
+
+fn jbytes_to_rust(env: &mut JNIEnv, input: &JByteArray) -> Result<Vec<u8>, String> {
+    if clear_pending_jni_exception(env) {
+        return Err("jni pending exception cleared".to_string());
+    }
+    if input.is_null() {
+        return Err("null jbyteArray".to_string());
+    }
+    match env.convert_byte_array(input) {
+        Ok(b) => Ok(b),
+        Err(e) => {
+            clear_pending_jni_exception(env);
+            Err(format!("convert byte array failed: {e}"))
+        }
+    }
 }
 
 fn rust_to_jstring(env: &mut JNIEnv, value: &str) -> jstring {
-    env.new_string(value)
-        .map(|s| s.into_raw())
-        .unwrap_or(std::ptr::null_mut())
+    clear_pending_jni_exception(env);
+    match env.new_string(value) {
+        Ok(s) => s.into_raw(),
+        Err(_) => {
+            clear_pending_jni_exception(env);
+            env.new_string("{\"error\":\"jni new_string failed\"}")
+                .map(|s| s.into_raw())
+                .unwrap_or(std::ptr::null_mut())
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -622,7 +763,7 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeSplitA
     raw: JString<'local>,
 ) -> jstring {
     let out = match jstring_to_rust(&mut env, &raw) {
-        Ok(s) => split_artists_json_impl(&s),
+        Ok(s) => jni_catch(|| split_artists_json_impl(&s)),
         Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
@@ -637,12 +778,12 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeEvalua
     scene_json: JString<'local>,
     tracks_json: JString<'local>,
 ) -> jstring {
-    let out = match (
-        jstring_to_rust(&mut env, &scene_json),
-        jstring_to_rust(&mut env, &tracks_json),
-    ) {
-        (Ok(s), Ok(t)) => evaluate_scene_json_impl(&s, &t),
-        (Err(e), _) | (_, Err(e)) => json_error(&e),
+    let out = match jstring_to_rust(&mut env, &scene_json) {
+        Ok(s) => match jstring_to_rust(&mut env, &tracks_json) {
+            Ok(t) => jni_catch(|| evaluate_scene_json_impl(&s, &t)),
+            Err(e) => json_error(&e),
+        },
+        Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
 }
@@ -654,7 +795,7 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeMergeM
     request_json: JString<'local>,
 ) -> jstring {
     let out = match jstring_to_rust(&mut env, &request_json) {
-        Ok(r) => merge_m3u8_json_impl(&r),
+        Ok(r) => jni_catch(|| merge_m3u8_json_impl(&r)),
         Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
@@ -666,7 +807,7 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeAudioF
     _cls: JClass,
     fd: jint,
 ) -> jstring {
-    let out = fingerprint_fd_impl(fd);
+    let out = jni_catch(|| fingerprint_fd_impl(fd));
     rust_to_jstring(&mut env, &out)
 }
 
@@ -679,7 +820,7 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeAudioF
     path: JString<'local>,
 ) -> jstring {
     let out = match jstring_to_rust(&mut env, &path) {
-        Ok(p) => fingerprint_path_impl(&p),
+        Ok(p) => jni_catch(|| fingerprint_path_impl(&p)),
         Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
@@ -694,12 +835,12 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeLookup
     archive_path: JString<'local>,
     blake3_hex: JString<'local>,
 ) -> jstring {
-    let out = match (
-        jstring_to_rust(&mut env, &archive_path),
-        jstring_to_rust(&mut env, &blake3_hex),
-    ) {
-        (Ok(p), Ok(h)) => lookup_waveform_path_impl(&p, &h),
-        (Err(e), _) | (_, Err(e)) => json_error(&e),
+    let out = match jstring_to_rust(&mut env, &archive_path) {
+        Ok(p) => match jstring_to_rust(&mut env, &blake3_hex) {
+            Ok(h) => jni_catch(|| lookup_waveform_path_impl(&p, &h)),
+            Err(e) => json_error(&e),
+        },
+        Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
 }
@@ -714,7 +855,7 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeLookup
     blake3_hex: JString<'local>,
 ) -> jstring {
     let out = match jstring_to_rust(&mut env, &blake3_hex) {
-        Ok(h) => lookup_waveform_fd_impl(fd, &h),
+        Ok(h) => jni_catch(|| lookup_waveform_fd_impl(fd, &h)),
         Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
@@ -729,7 +870,7 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeApplyL
     request_json: JString<'local>,
 ) -> jstring {
     let out = match jstring_to_rust(&mut env, &request_json) {
-        Ok(r) => apply_lww_mutations_json_impl(&r),
+        Ok(r) => jni_catch(|| apply_lww_mutations_json_impl(&r)),
         Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
@@ -744,7 +885,7 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeMergeS
     request_json: JString<'local>,
 ) -> jstring {
     let out = match jstring_to_rust(&mut env, &request_json) {
-        Ok(r) => merge_sessions_json_impl(&r),
+        Ok(r) => jni_catch(|| merge_sessions_json_impl(&r)),
         Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
@@ -760,13 +901,12 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeApplyH
     expected_old_hex: JString<'local>,
     new_header: JByteArray<'local>,
 ) -> jstring {
-    let out = match (
-        jstring_to_rust(&mut env, &expected_old_hex),
-        env.convert_byte_array(&new_header)
-            .map_err(|e| format!("convert byte array failed: {e}")),
-    ) {
-        (Ok(hex), Ok(bytes)) => apply_header_patch_fd_impl(fd, &hex, &bytes),
-        (Err(e), _) | (_, Err(e)) => json_error(&e),
+    let out = match jstring_to_rust(&mut env, &expected_old_hex) {
+        Ok(hex) => match jbytes_to_rust(&mut env, &new_header) {
+            Ok(bytes) => jni_catch(|| apply_header_patch_fd_impl(fd, &hex, &bytes)),
+            Err(e) => json_error(&e),
+        },
+        Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
 }
@@ -781,14 +921,15 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeApplyH
     expected_old_hex: JString<'local>,
     new_header: JByteArray<'local>,
 ) -> jstring {
-    let out = match (
-        jstring_to_rust(&mut env, &path),
-        jstring_to_rust(&mut env, &expected_old_hex),
-        env.convert_byte_array(&new_header)
-            .map_err(|e| format!("convert byte array failed: {e}")),
-    ) {
-        (Ok(p), Ok(hex), Ok(bytes)) => apply_header_patch_path_impl(&p, &hex, &bytes),
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => json_error(&e),
+    let out = match jstring_to_rust(&mut env, &path) {
+        Ok(p) => match jstring_to_rust(&mut env, &expected_old_hex) {
+            Ok(hex) => match jbytes_to_rust(&mut env, &new_header) {
+                Ok(bytes) => jni_catch(|| apply_header_patch_path_impl(&p, &hex, &bytes)),
+                Err(e) => json_error(&e),
+            },
+            Err(e) => json_error(&e),
+        },
+        Err(e) => json_error(&e),
     };
     rust_to_jstring(&mut env, &out)
 }
@@ -818,5 +959,125 @@ mod tests {
 
         let parsed: Vec<String> = serde_json::from_str(&out_str).unwrap();
         assert_eq!(parsed, vec!["Above & Beyond", "Andrew Bayer"]);
+    }
+
+    #[test]
+    fn ffi_catch_contains_panics_as_json_error() {
+        let out_ptr = ffi_catch(|| panic!("synthetic boom"));
+        let out_str = unsafe { CStr::from_ptr(out_ptr) }.to_str().unwrap().to_string();
+        unsafe { tonewise_free_string(out_ptr) };
+        let val: serde_json::Value = serde_json::from_str(&out_str).unwrap();
+        assert!(val["error"].as_str().unwrap().contains("synthetic boom"));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn write_audio_tags_preserves_bracket_artist_and_removes_track_artists_atomically() {
+        use lofty::file::TaggedFileExt;
+        use lofty::probe::Probe;
+        use lofty::tag::{Accessor, ItemKey};
+
+        let dir = std::env::temp_dir().join(format!("tw_ffi_tags_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("test_bracket.wav");
+
+        // Minimal 1-second 8kHz mono 8-bit PCM WAV
+        let sample_count = 8000u32;
+        let data_len = sample_count;
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        wav.resize(44 + data_len as usize, 128u8);
+        std::fs::write(&wav_path, &wav).unwrap();
+
+        let req = serde_json::json!({
+            "path": wav_path.to_string_lossy(),
+            "updates": {
+                "artist": "[Live] AC/DC",
+                "title": "Test Track"
+            }
+        })
+        .to_string();
+        let res_json = write_audio_tags_json_impl(&req);
+        let parsed: serde_json::Value = serde_json::from_str(&res_json).unwrap();
+        assert!(parsed.get("error").is_none(), "unexpected error: {res_json}");
+
+        let reloaded = Probe::open(&wav_path).unwrap().read().unwrap();
+        let tag = reloaded.primary_tag().unwrap();
+        assert_eq!(tag.artist().as_deref(), Some("[Live] AC/DC"));
+        assert!(tag.get_strings(&ItemKey::TrackArtists).next().is_none());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".twtmp."))
+            .collect();
+        assert!(leftovers.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_header_patch_file_impl_preserves_original_on_mismatch_and_updates_on_match() {
+        let dir = std::env::temp_dir().join(format!("tw_ffi_patch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let flac_path = dir.join("patch_test.flac");
+
+        let mut flac = Vec::new();
+        flac.extend_from_slice(b"fLaC");
+        // STREAMINFO (34 bytes), last=false
+        flac.push(0x00);
+        flac.extend_from_slice(&[0, 0, 34]);
+        flac.extend_from_slice(&[0u8; 34]);
+        // PADDING (16 bytes), last=true
+        flac.push(0x81);
+        flac.extend_from_slice(&[0, 0, 16]);
+        flac.extend_from_slice(&[0u8; 16]);
+        let audio = b"AUDIO_FRAMES_12345";
+        flac.extend_from_slice(audio);
+        std::fs::write(&flac_path, &flac).unwrap();
+
+        let fp_json = fingerprint_path_impl(&flac_path.to_string_lossy());
+        let fp_val: serde_json::Value = serde_json::from_str(&fp_json).unwrap();
+        let old_hdr_hex = fp_val["header_blake3_hex"].as_str().unwrap().to_string();
+        let hdr_size = fp_val["header_size"].as_u64().unwrap() as usize;
+
+        let mut new_hdr = flac[..hdr_size].to_vec();
+        new_hdr[hdr_size - 1] = 0xAA;
+
+        // Wrong expected header hash must leave file untouched
+        let mismatch_json = apply_header_patch_path_impl(
+            &flac_path.to_string_lossy(),
+            &"00".repeat(32),
+            &new_hdr,
+        );
+        let mismatch_val: serde_json::Value = serde_json::from_str(&mismatch_json).unwrap();
+        assert_eq!(mismatch_val["status"].as_str(), Some("header_hash_mismatch"));
+        assert_eq!(std::fs::read(&flac_path).unwrap(), flac);
+
+        // Matching header hash must update header cleanly and preserve audio frames
+        let ok_json = apply_header_patch_path_impl(
+            &flac_path.to_string_lossy(),
+            &old_hdr_hex,
+            &new_hdr,
+        );
+        let ok_val: serde_json::Value = serde_json::from_str(&ok_json).unwrap();
+        assert_eq!(ok_val["status"].as_str(), Some("applied"));
+        let updated = std::fs::read(&flac_path).unwrap();
+        assert_eq!(&updated[..hdr_size], &new_hdr[..]);
+        assert_eq!(&updated[hdr_size..], audio);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

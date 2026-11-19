@@ -44,7 +44,7 @@ import org.oxycblt.musikr.Music
 @Database(
     entities = [PlaylistInfo::class, PlaylistSong::class, PlaylistSongCrossRef::class],
     version = 75,
-    exportSchema = false,
+    exportSchema = true,
 )
 @TypeConverters(Music.UID.TypeConverters::class)
 internal abstract class PlaylistDatabase : RoomDatabase() {
@@ -119,7 +119,6 @@ internal abstract class PlaylistDatabase : RoomDatabase() {
                         }
                     }
                 )
-                .fallbackToDestructiveMigration(true)
                 .build()
     }
 }
@@ -182,6 +181,7 @@ internal abstract class PlaylistDao {
     open suspend fun deletePlaylist(playlistUid: Music.UID) {
         deleteInfo(playlistUid)
         deleteRefs(playlistUid)
+        pruneOrphanSongs()
     }
 
     /**
@@ -212,6 +212,7 @@ internal abstract class PlaylistDao {
         insertRefs(
             songs.map { PlaylistSongCrossRef(playlistUid = playlistUid, songUid = it.songUid) }
         )
+        pruneOrphanSongs()
     }
 
     /** Internal, do not use. */
@@ -233,4 +234,7 @@ internal abstract class PlaylistDao {
     /** Internal, do not use. */
     @Query("DELETE FROM PlaylistSongCrossRef where playlistUid = :playlistUid")
     abstract suspend fun deleteRefs(playlistUid: Music.UID)
+
+    @Query("DELETE FROM PlaylistSong WHERE songUid NOT IN (SELECT DISTINCT songUid FROM PlaylistSongCrossRef)")
+    abstract suspend fun pruneOrphanSongs()
 }

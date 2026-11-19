@@ -27,11 +27,14 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import com.shawnshi.tonewise.music.MusicSettings
 import com.shawnshi.tonewise.music.locations.LocationMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 import org.oxycblt.musikr.fs.Location
@@ -43,6 +46,12 @@ data class CommittedSyncFile(
     val fileSize: Long,
 )
 
+data class ExistingManagedFile(
+    val documentUri: String,
+    val fileSize: Long,
+    val mtimeMs: Long,
+)
+
 @Singleton
 class ManagedSyncStorage
 @Inject
@@ -51,8 +60,17 @@ constructor(
     private val musicSettings: MusicSettings,
 ) {
     private val resolver = context.contentResolver
+    private val safCache = SafPathCache()
 
-    fun commitAudioFile(track: OutboxTrackDto, partFile: File): CommittedSyncFile {
+    fun invalidatePathCache() {
+        safCache.clear()
+    }
+
+    fun commitAudioFile(
+        track: OutboxTrackDto,
+        partFile: File,
+        forceOverwrite: Boolean = false,
+    ): CommittedSyncFile {
         if (!partFile.isFile) {
             throw IOException("临时文件不存在: ${partFile.name}")
         }
@@ -66,15 +84,17 @@ constructor(
         val mime = resolveAudioMimeType(fileName)
 
         val safLocation = pickWritableSafLocation()
-        if (safLocation != null) {
-            return commitAudioViaSaf(safLocation, parentDirs, fileName, safeRelPath, mime, partFile)
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return commitAudioViaMediaStore(track, parentDirs, fileName, safeRelPath, mime, partFile)
-        }
-
-        return commitAudioLegacy(parentDirs, fileName, safeRelPath, partFile)
+        val committed =
+            when {
+                safLocation != null ->
+                    commitAudioViaSaf(safLocation, parentDirs, fileName, safeRelPath, mime, partFile, forceOverwrite)
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                    commitAudioViaMediaStore(track, parentDirs, fileName, safeRelPath, mime, partFile, forceOverwrite)
+                else ->
+                    commitAudioLegacy(parentDirs, fileName, safeRelPath, partFile)
+            }
+        cleanupLegacyTonewiseDuplicate(safLocation, parentDirs, fileName)
+        return committed
     }
 
     fun commitAlbumCoverIfMissing(targetRelPath: String, coverBytes: ByteArray) {
@@ -86,8 +106,8 @@ constructor(
         if (safLocation != null) {
             runCatching {
                 val rootUri = safLocation.uri
-                val tonewiseDocId = ensureSafTonewiseRootDocId(safLocation)
-                val targetDirId = ensureSafDirectoryPath(rootUri, tonewiseDocId, parentDirs)
+                val musicRootId = DocumentsContract.getTreeDocumentId(rootUri)
+                val targetDirId = ensureSafDirectoryPath(rootUri, musicRootId, parentDirs)
                 val existingCover = findSafChild(rootUri, targetDirId, "cover.jpg")
                 if (existingCover == null) {
                     val createdUri =
@@ -99,6 +119,17 @@ constructor(
                         )
                     if (createdUri != null) {
                         resolver.openOutputStream(createdUri, "w")?.use { out -> out.write(coverBytes) }
+                        safCache.putEntry(
+                            rootUri.toString(),
+                            targetDirId,
+                            "cover.jpg",
+                            SafChildInfo(
+                                docId = DocumentsContract.getDocumentId(createdUri),
+                                isDirectory = false,
+                                size = coverBytes.size.toLong(),
+                                lastModifiedMs = System.currentTimeMillis(),
+                            ),
+                        )
                     }
                 }
             }.onFailure { L.w(it, "SAF cover write failed for $targetRelPath") }
@@ -115,11 +146,11 @@ constructor(
             File(cacheDir, "$safeKey.jpg").writeBytes(coverBytes)
         }
 
-        // Best-effort direct file write for external Music/Tonewise folder
+        // Best-effort direct file write directly under external Music folder
         runCatching {
             @Suppress("DEPRECATION")
             val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-            var dir = File(musicDir, "Tonewise")
+            var dir = musicDir
             for (seg in parentDirs) dir = File(dir, seg)
             if (dir.exists() || dir.mkdirs()) {
                 val coverFile = File(dir, "cover.jpg")
@@ -130,6 +161,8 @@ constructor(
 
     fun commitPlaylistM3u8(name: String, relPaths: List<String>) {
         val safeName = LanSyncRepository.sanitizePlaylistFilename(name)
+        val legacyName = LanSyncRepository.legacyUnderscoredPlaylistFilename(name)
+        val shouldCleanupLegacy = !legacyName.equals(safeName, ignoreCase = true)
         val body =
             buildString {
                 append("#EXTM3U\n")
@@ -147,6 +180,9 @@ constructor(
             val internalDir = File(context.filesDir, ".tonewise/playlists")
             internalDir.mkdirs()
             File(internalDir, "$safeName.m3u8").writeBytes(payload)
+            if (shouldCleanupLegacy) {
+                File(internalDir, "$legacyName.m3u8").takeIf { it.isFile }?.delete()
+            }
         }
 
         val safLocation = pickWritableSafLocation()
@@ -167,8 +203,42 @@ constructor(
                         )
                 if (targetUri != null) {
                     resolver.openOutputStream(targetUri, "wt")?.use { out -> out.write(payload) }
+                    safCache.putEntry(
+                        rootUri.toString(),
+                        playlistsDirId,
+                        fileName,
+                        SafChildInfo(
+                            docId = DocumentsContract.getDocumentId(targetUri),
+                            isDirectory = false,
+                            size = payload.size.toLong(),
+                            lastModifiedMs = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+                if (shouldCleanupLegacy) {
+                    val legacy = findSafChild(rootUri, playlistsDirId, "$legacyName.m3u8")
+                    if (legacy != null && !legacy.isDirectory) {
+                        runCatching {
+                            DocumentsContract.deleteDocument(
+                                resolver,
+                                DocumentsContract.buildDocumentUriUsingTree(rootUri, legacy.docId),
+                            )
+                        }
+                        safCache.removeEntry(rootUri.toString(), playlistsDirId, "$legacyName.m3u8")
+                    }
                 }
             }.onFailure { L.w(it, "SAF playlist write failed for $safeName") }
+            return
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                commitPlaylistViaMediaStoreFiles(
+                    safeFileName = "$safeName.m3u8",
+                    legacyFileName = if (shouldCleanupLegacy) "$legacyName.m3u8" else null,
+                    payload = payload,
+                )
+            }.onFailure { L.w(it, "MediaStore playlist write failed for $safeName") }
             return
         }
 
@@ -178,25 +248,306 @@ constructor(
             val extDir = File(musicDir, "Tonewise/Playlists")
             if (extDir.exists() || extDir.mkdirs()) {
                 File(extDir, "$safeName.m3u8").writeBytes(payload)
+                if (shouldCleanupLegacy) {
+                    File(extDir, "$legacyName.m3u8").takeIf { it.isFile }?.delete()
+                }
             }
         }
     }
 
+    fun deletePlaylistM3u8(name: String) {
+        val safeName = LanSyncRepository.sanitizePlaylistFilename(name)
+        val legacyName = LanSyncRepository.legacyUnderscoredPlaylistFilename(name)
+        val candidates =
+            listOf("$safeName.m3u8", "$legacyName.m3u8").distinctBy { it.lowercase() }
+
+        runCatching {
+            val internalDir = File(context.filesDir, ".tonewise/playlists")
+            for (fileName in candidates) {
+                File(internalDir, fileName).takeIf { it.isFile }?.delete()
+            }
+        }
+
+        val safLocation = pickWritableSafLocation()
+        if (safLocation != null) {
+            runCatching {
+                val rootUri = safLocation.uri
+                val rootDocId = DocumentsContract.getTreeDocumentId(rootUri)
+                val lastSeg = safLocation.path.components.components.lastOrNull()
+                val tonewiseDocId =
+                    if (lastSeg != null && lastSeg.equals("Tonewise", ignoreCase = true)) {
+                        rootDocId
+                    } else {
+                        findSafChild(rootUri, rootDocId, "Tonewise")?.takeIf { it.isDirectory }?.docId
+                    }
+                if (tonewiseDocId != null) {
+                    val playlistsDir = findSafChild(rootUri, tonewiseDocId, "Playlists")
+                    if (playlistsDir != null && playlistsDir.isDirectory) {
+                        for (fileName in candidates) {
+                            val existing = findSafChild(rootUri, playlistsDir.docId, fileName)
+                            if (existing != null && !existing.isDirectory) {
+                                runCatching {
+                                    DocumentsContract.deleteDocument(
+                                        resolver,
+                                        DocumentsContract.buildDocumentUriUsingTree(rootUri, existing.docId),
+                                    )
+                                }
+                                safCache.removeEntry(rootUri.toString(), playlistsDir.docId, fileName)
+                            }
+                        }
+                    }
+                }
+            }.onFailure { L.w(it, "SAF playlist delete failed for $safeName") }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching { deletePlaylistViaMediaStoreFiles(candidates) }
+                .onFailure { L.w(it, "MediaStore playlist delete failed for $safeName") }
+        }
+
+        runCatching {
+            @Suppress("DEPRECATION")
+            val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+            for (relDir in listOf("Tonewise/Playlists", ".tonewise/playlists")) {
+                val extDir = File(musicDir, relDir)
+                for (fileName in candidates) {
+                    File(extDir, fileName).takeIf { it.isFile }?.delete()
+                }
+            }
+        }
+    }
+
+    private fun commitPlaylistViaMediaStoreFiles(
+        safeFileName: String,
+        legacyFileName: String?,
+        payload: ByteArray,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val relativeDir = buildMediaStoreTonewiseRelativeDir(listOf("Playlists"))
+        val existingUri = findMediaStoreFileEntry(collection, relativeDir, safeFileName)
+        var written = false
+        if (existingUri != null) {
+            written =
+                runCatching {
+                    resolver.openOutputStream(existingUri, "wt")?.use { out ->
+                        out.write(payload)
+                        out.flush()
+                    } != null
+                }.getOrDefault(false)
+            if (!written) {
+                runCatching { resolver.delete(existingUri, null, null) }
+            }
+        }
+        if (!written) {
+            val values =
+                ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, safeFileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "audio/x-mpegurl")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+            val createdUri =
+                resolver.insert(collection, values)
+                    ?: throw IOException("无法在 MediaStore 创建歌单文件: $safeFileName")
+            try {
+                resolver.openOutputStream(createdUri, "w")?.use { out ->
+                    out.write(payload)
+                    out.flush()
+                } ?: throw IOException("无法写入 MediaStore 歌单文件: $safeFileName")
+                val publish = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+                if (resolver.update(createdUri, publish, null, null) <= 0) {
+                    throw IOException("无法发布 MediaStore 歌单文件: $safeFileName")
+                }
+            } catch (t: Throwable) {
+                runCatching { resolver.delete(createdUri, null, null) }
+                throw t
+            }
+        }
+        if (legacyFileName != null) {
+            findMediaStoreFileEntry(collection, relativeDir, legacyFileName)?.let { legacyUri ->
+                runCatching { resolver.delete(legacyUri, null, null) }
+            }
+        }
+    }
+
+    private fun deletePlaylistViaMediaStoreFiles(candidates: List<String>) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val relativeDir = buildMediaStoreTonewiseRelativeDir(listOf("Playlists"))
+        for (fileName in candidates) {
+            findMediaStoreFileEntry(collection, relativeDir, fileName)?.let { uri ->
+                runCatching { resolver.delete(uri, null, null) }
+            }
+        }
+    }
+
+    private fun findMediaStoreFileEntry(
+        collection: Uri,
+        relativeDir: String,
+        displayName: String,
+    ): Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        val projection = arrayOf(MediaStore.MediaColumns._ID)
+        val selection =
+            "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
+        val args = arrayOf(relativeDir, displayName)
+        return runCatching {
+            resolver.query(collection, projection, selection, args, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID))
+                ContentUris.withAppendedId(collection, id)
+            }
+        }.getOrNull()
+    }
+
+    private fun cleanupLegacyTonewiseDuplicate(
+        safLocation: Location.Opened?,
+        parentDirs: List<String>,
+        fileName: String,
+    ) {
+        val lastSeg = safLocation?.path?.components?.components?.lastOrNull()
+        val safRootIsTonewise = lastSeg != null && lastSeg.equals("Tonewise", ignoreCase = true)
+        if (safRootIsTonewise) return
+
+        if (safLocation != null) {
+            runCatching {
+                val rootUri = safLocation.uri
+                val rootDocId = DocumentsContract.getTreeDocumentId(rootUri)
+                var currentDocId = findSafChild(rootUri, rootDocId, "Tonewise")?.takeIf { it.isDirectory }?.docId
+                    ?: return@runCatching
+                for (seg in parentDirs) {
+                    currentDocId = findSafChild(rootUri, currentDocId, seg)?.takeIf { it.isDirectory }?.docId
+                        ?: return@runCatching
+                }
+                val legacyDoc = findSafChild(rootUri, currentDocId, fileName)
+                if (legacyDoc != null && !legacyDoc.isDirectory) {
+                    DocumentsContract.deleteDocument(
+                        resolver,
+                        DocumentsContract.buildDocumentUriUsingTree(rootUri, legacyDoc.docId),
+                    )
+                    safCache.removeEntry(rootUri.toString(), currentDocId, fileName)
+                }
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                val legacyDir = buildLegacyMediaStoreTonewiseRelativeDir(parentDirs)
+                findExistingMediaStoreEntry(collection, legacyDir, fileName)?.let { stale ->
+                    resolver.delete(stale.uri, null, null)
+                }
+            }
+        }
+
+        runCatching {
+            @Suppress("DEPRECATION")
+            val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+            var dir = File(musicDir, "Tonewise")
+            for (seg in parentDirs) {
+                dir = File(dir, seg)
+            }
+            File(dir, fileName).takeIf { it.isFile }?.delete()
+        }
+    }
+
     fun existsInManagedStorage(entity: SyncedTrackEntity): Boolean {
-        val rawUri = entity.documentUri?.takeIf { it.isNotBlank() } ?: return false
+        val inspected = inspectExistingManagedFile(entity) ?: return false
+        return entity.fileSize <= 0L || inspected.fileSize <= 0L || inspected.fileSize == entity.fileSize
+    }
+
+    fun inspectExistingManagedFile(entity: SyncedTrackEntity): ExistingManagedFile? {
+        val rawUri = entity.documentUri?.takeIf { it.isNotBlank() } ?: return null
+        return inspectUriOrPath(rawUri)
+    }
+
+    fun findExistingManagedFileByRelPath(targetRelPath: String): ExistingManagedFile? {
+        val segments = LanSyncV2Client.sanitizeRelativePathSegments(targetRelPath)
+        if (segments.isEmpty()) return null
+        val fileName = segments.last()
+        val parentDirs = segments.dropLast(1)
+
+        val safLocation = pickWritableSafLocation()
+        if (safLocation != null) {
+            return findSafFileReadOnly(safLocation, parentDirs, fileName)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val primaryDir = buildMediaStoreMusicRelativeDir(parentDirs)
+            findExistingMediaStoreEntry(collection, primaryDir, fileName)
+                ?.takeIf { it.isPending == 0 }
+                ?.let { found ->
+                    return ExistingManagedFile(found.uri.toString(), found.fileSize, found.mtimeMs)
+                }
+            val legacyDir = buildLegacyMediaStoreTonewiseRelativeDir(parentDirs)
+            findExistingMediaStoreEntry(collection, legacyDir, fileName)
+                ?.takeIf { it.isPending == 0 }
+                ?.let { found ->
+                    return ExistingManagedFile(found.uri.toString(), found.fileSize, found.mtimeMs)
+                }
+            return null
+        }
+
+        @Suppress("DEPRECATION")
+        val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+        var targetDir = musicDir
+        for (seg in parentDirs) {
+            targetDir = File(targetDir, seg)
+        }
+        val file = File(targetDir, fileName)
+        if (file.isFile) {
+            return ExistingManagedFile(file.absolutePath, file.length(), file.lastModified())
+        }
+        var legacyTargetDir = File(musicDir, "Tonewise")
+        for (seg in parentDirs) {
+            legacyTargetDir = File(legacyTargetDir, seg)
+        }
+        val legacyFile = File(legacyTargetDir, fileName)
+        return if (legacyFile.isFile) {
+            ExistingManagedFile(legacyFile.absolutePath, legacyFile.length(), legacyFile.lastModified())
+        } else {
+            null
+        }
+    }
+
+    private fun inspectUriOrPath(rawUri: String): ExistingManagedFile? {
         return try {
             if (rawUri.startsWith("content://")) {
                 val uri = Uri.parse(rawUri)
-                resolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                    val size = pfd.statSize
-                    entity.fileSize <= 0L || size <= 0L || size == entity.fileSize
-                } ?: false
+                var queriedSize = -1L
+                var queriedMtime = 0L
+                runCatching {
+                    resolver.query(uri, null, null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                            if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                                queriedSize = cursor.getLong(sizeIdx)
+                            }
+                            val docModIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                            if (docModIdx >= 0 && !cursor.isNull(docModIdx)) {
+                                queriedMtime = cursor.getLong(docModIdx)
+                            } else {
+                                val msModIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                                if (msModIdx >= 0 && !cursor.isNull(msModIdx)) {
+                                    queriedMtime = cursor.getLong(msModIdx) * 1000L
+                                }
+                            }
+                        }
+                    }
+                }
+                val statSize =
+                    resolver.openFileDescriptor(uri, "r")?.use { pfd -> pfd.statSize }
+                        ?: return null
+                val finalSize = if (statSize > 0L) statSize else queriedSize.coerceAtLeast(0L)
+                ExistingManagedFile(rawUri, finalSize, queriedMtime)
             } else {
                 val f = File(rawUri)
-                f.isFile && (entity.fileSize <= 0L || f.length() == entity.fileSize)
+                if (f.isFile) ExistingManagedFile(rawUri, f.length(), f.lastModified()) else null
             }
         } catch (_: Exception) {
-            false
+            null
         }
     }
 
@@ -207,38 +558,157 @@ constructor(
         safeRelPath: String,
         mime: String,
         partFile: File,
+        forceOverwrite: Boolean,
+        allowRetryOnStaleCache: Boolean = true,
     ): CommittedSyncFile {
         val rootUri = location.uri
-        val tonewiseRootId = ensureSafTonewiseRootDocId(location)
-        val parentDocId = ensureSafDirectoryPath(rootUri, tonewiseRootId, parentDirs)
+        val treeKey = rootUri.toString()
+        val musicRootId = DocumentsContract.getTreeDocumentId(rootUri)
+        val parentDocId = ensureSafDirectoryPath(rootUri, musicRootId, parentDirs)
 
         val expectedSize = partFile.length()
         val existing = findSafChild(rootUri, parentDocId, fileName)
-        if (existing != null && existing.size == expectedSize && expectedSize > 0L) {
+        if (!forceOverwrite && existing != null && existing.size == expectedSize && expectedSize > 0L) {
             val docUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, existing.docId)
             partFile.delete()
             return CommittedSyncFile(safeRelPath, docUri.toString(), expectedSize)
         }
 
+        val parentTreeUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, parentDocId)
         val targetDocUri =
-            if (existing != null) {
-                DocumentsContract.buildDocumentUriUsingTree(rootUri, existing.docId)
-            } else {
-                DocumentsContract.createDocument(
-                    resolver,
-                    DocumentsContract.buildDocumentUriUsingTree(rootUri, parentDocId),
-                    mime,
-                    fileName,
-                ) ?: throw IOException("无法在 SAF 目录中创建文件: $safeRelPath")
+            try {
+                if (existing != null) {
+                    commitSafAtomicReplace(
+                        rootUri = rootUri,
+                        parentDocId = parentDocId,
+                        parentTreeUri = parentTreeUri,
+                        existingDocId = existing.docId,
+                        fileName = fileName,
+                        safeRelPath = safeRelPath,
+                        mime = mime,
+                        partFile = partFile,
+                    )
+                } else {
+                    val createdUri =
+                        DocumentsContract.createDocument(resolver, parentTreeUri, mime, fileName)
+                            ?: throw IOException("无法在 SAF 目录中创建文件: $safeRelPath")
+                    try {
+                        resolver.openOutputStream(createdUri, "wt")?.use { out ->
+                            partFile.inputStream().use { input -> input.copyTo(out) }
+                            out.flush()
+                        } ?: throw IOException("无法写入 SAF 目标文件: $safeRelPath")
+                    } catch (e: Exception) {
+                        runCatching { DocumentsContract.deleteDocument(resolver, createdUri) }
+                        throw e
+                    }
+                    createdUri
+                }
+            } catch (stale: Exception) {
+                if (allowRetryOnStaleCache &&
+                    (stale is FileNotFoundException ||
+                        stale is SecurityException ||
+                        stale is IllegalArgumentException)
+                ) {
+                    safCache.invalidateDir(treeKey, parentDocId)
+                    return commitAudioViaSaf(
+                        location = location,
+                        parentDirs = parentDirs,
+                        fileName = fileName,
+                        safeRelPath = safeRelPath,
+                        mime = mime,
+                        partFile = partFile,
+                        forceOverwrite = forceOverwrite,
+                        allowRetryOnStaleCache = false,
+                    )
+                }
+                throw stale
             }
 
-        resolver.openOutputStream(targetDocUri, "wt")?.use { out ->
-            partFile.inputStream().use { input -> input.copyTo(out) }
-            out.flush()
-        } ?: throw IOException("无法写入 SAF 目标文件: $safeRelPath")
-
+        safCache.putEntry(
+            treeKey,
+            parentDocId,
+            fileName,
+            SafChildInfo(
+                docId = DocumentsContract.getDocumentId(targetDocUri),
+                isDirectory = false,
+                size = expectedSize,
+                lastModifiedMs = System.currentTimeMillis(),
+            ),
+        )
         partFile.delete()
         return CommittedSyncFile(safeRelPath, targetDocUri.toString(), expectedSize)
+    }
+
+    private fun commitSafAtomicReplace(
+        rootUri: Uri,
+        parentDocId: String,
+        parentTreeUri: Uri,
+        existingDocId: String,
+        fileName: String,
+        safeRelPath: String,
+        mime: String,
+        partFile: File,
+    ): Uri {
+        val existingUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, existingDocId)
+        val tempName = ".${fileName}.twtmp_${System.currentTimeMillis()}"
+        findSafChild(rootUri, parentDocId, tempName)?.let { stale ->
+            runCatching {
+                DocumentsContract.deleteDocument(
+                    resolver,
+                    DocumentsContract.buildDocumentUriUsingTree(rootUri, stale.docId),
+                )
+            }
+        }
+        val tempUri =
+            runCatching { DocumentsContract.createDocument(resolver, parentTreeUri, mime, tempName) }
+                .getOrNull()
+        if (tempUri != null) {
+            try {
+                resolver.openOutputStream(tempUri, "wt")?.use { out ->
+                    partFile.inputStream().use { input -> input.copyTo(out) }
+                    out.flush()
+                } ?: throw IOException("无法写入 SAF 临时文件: $safeRelPath")
+
+                val deletedOld =
+                    runCatching { DocumentsContract.deleteDocument(resolver, existingUri) }
+                        .getOrDefault(false)
+                if (deletedOld) {
+                    val renamedUri =
+                        runCatching { DocumentsContract.renameDocument(resolver, tempUri, fileName) }
+                            .getOrNull()
+                    if (renamedUri != null) {
+                        return renamedUri
+                    }
+                    // Provider refused rename after deleting existing file: materialize exact target filename,
+                    // stream full payload again, and clean up the staging temp file instead of returning .twtmp_.
+                    val recreatedUri =
+                        DocumentsContract.createDocument(resolver, parentTreeUri, mime, fileName)
+                            ?: throw IOException("无法重建 SAF 目标文件: $safeRelPath")
+                    try {
+                        resolver.openOutputStream(recreatedUri, "wt")?.use { out ->
+                            partFile.inputStream().use { input -> input.copyTo(out) }
+                            out.flush()
+                        } ?: throw IOException("无法写入重建后的 SAF 文件: $safeRelPath")
+                    } catch (recreateErr: Throwable) {
+                        runCatching { DocumentsContract.deleteDocument(resolver, recreatedUri) }
+                        throw recreateErr
+                    }
+                    runCatching { DocumentsContract.deleteDocument(resolver, tempUri) }
+                    return recreatedUri
+                }
+            } catch (e: Exception) {
+                runCatching { DocumentsContract.deleteDocument(resolver, tempUri) }
+                throw e
+            }
+            // Temp copy succeeded but provider refused old document delete before rename: clean temp and fallback below
+            runCatching { DocumentsContract.deleteDocument(resolver, tempUri) }
+        }
+
+        resolver.openOutputStream(existingUri, "wt")?.use { out ->
+            partFile.inputStream().use { input -> input.copyTo(out) }
+            out.flush()
+        } ?: throw IOException("无法覆盖 SAF 目标文件: $safeRelPath")
+        return existingUri
     }
 
     private fun commitAudioViaMediaStore(
@@ -248,6 +718,7 @@ constructor(
         safeRelPath: String,
         mime: String,
         partFile: File,
+        forceOverwrite: Boolean,
     ): CommittedSyncFile {
         val collection =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -255,26 +726,24 @@ constructor(
             } else {
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
             }
-        val relativeDir =
-            buildString {
-                append(Environment.DIRECTORY_MUSIC).append("/Tonewise/")
-                if (parentDirs.isNotEmpty()) {
-                    append(parentDirs.joinToString("/")).append('/')
-                }
-            }
+        val relativeDir = buildMediaStoreMusicRelativeDir(parentDirs)
         val expectedSize = partFile.length()
 
-        findExistingMediaStoreEntry(collection, relativeDir, fileName)?.let { (existingUri, existingSize, isPending) ->
-            if (isPending == 0 && existingSize == expectedSize && expectedSize > 0L) {
-                partFile.delete()
-                return CommittedSyncFile(safeRelPath, existingUri.toString(), expectedSize)
-            }
-            runCatching { resolver.delete(existingUri, null, null) }
+        val existingEntry = findExistingMediaStoreEntry(collection, relativeDir, fileName)
+        if (existingEntry != null && !forceOverwrite && existingEntry.isPending == 0 && existingEntry.fileSize == expectedSize && expectedSize > 0L) {
+            partFile.delete()
+            return CommittedSyncFile(safeRelPath, existingEntry.uri.toString(), expectedSize)
         }
 
+        val stagingName =
+            if (existingEntry != null) {
+                ".twtmp_${System.currentTimeMillis()}_$fileName"
+            } else {
+                fileName
+            }
         val values =
             ContentValues().apply {
-                put(MediaStore.Audio.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Audio.Media.DISPLAY_NAME, stagingName)
                 put(MediaStore.Audio.Media.MIME_TYPE, mime)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.Audio.Media.RELATIVE_PATH, relativeDir)
@@ -295,9 +764,30 @@ constructor(
                 out.flush()
             } ?: throw IOException("无法打开 MediaStore 输出流: $safeRelPath")
 
+            if (existingEntry != null) {
+                val deleted =
+                    try {
+                        resolver.delete(existingEntry.uri, null, null)
+                    } catch (sec: Exception) {
+                        throw IOException("无法覆盖非本应用创建的音频文件，请改用 SAF 授权音乐目录: $safeRelPath", sec)
+                    }
+                if (deleted <= 0) {
+                    throw IOException("无法覆盖现有 MediaStore 音频文件，请改用 SAF 授权音乐目录: $safeRelPath")
+                }
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val publish = ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) }
-                resolver.update(itemUri, publish, null, null)
+                val publish =
+                    ContentValues().apply {
+                        put(MediaStore.Audio.Media.IS_PENDING, 0)
+                        if (stagingName != fileName) {
+                            put(MediaStore.Audio.Media.DISPLAY_NAME, fileName)
+                        }
+                    }
+                val updatedRows = resolver.update(itemUri, publish, null, null)
+                if (updatedRows <= 0) {
+                    throw IOException("无法发布 MediaStore 音频文件: $safeRelPath")
+                }
             }
             partFile.delete()
             return CommittedSyncFile(safeRelPath, itemUri.toString(), expectedSize)
@@ -315,7 +805,7 @@ constructor(
     ): CommittedSyncFile {
         @Suppress("DEPRECATION")
         val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-        var targetDir = File(musicDir, "Tonewise")
+        var targetDir = musicDir
         for (seg in parentDirs) {
             targetDir = File(targetDir, seg)
         }
@@ -337,17 +827,25 @@ constructor(
         return CommittedSyncFile(safeRelPath, destFile.absolutePath, expectedSize)
     }
 
+    private data class MediaStoreMatch(
+        val uri: Uri,
+        val fileSize: Long,
+        val isPending: Int,
+        val mtimeMs: Long,
+    )
+
     private fun findExistingMediaStoreEntry(
         collection: Uri,
         relativeDir: String,
         displayName: String,
-    ): Triple<Uri, Long, Int>? {
+    ): MediaStoreMatch? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         val projection =
             arrayOf(
                 MediaStore.Audio.Media._ID,
                 MediaStore.Audio.Media.SIZE,
                 MediaStore.Audio.Media.IS_PENDING,
+                MediaStore.Audio.Media.DATE_MODIFIED,
             )
         val selection =
             "${MediaStore.Audio.Media.RELATIVE_PATH} = ? AND ${MediaStore.Audio.Media.DISPLAY_NAME} = ?"
@@ -358,7 +856,147 @@ constructor(
                 val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID))
                 val size = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE))
                 val pending = cursor.getInt(cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.IS_PENDING))
-                Triple(ContentUris.withAppendedId(collection, id), size, pending)
+                val modIdx = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
+                val mtimeMs = if (modIdx >= 0 && !cursor.isNull(modIdx)) cursor.getLong(modIdx) * 1000L else 0L
+                MediaStoreMatch(ContentUris.withAppendedId(collection, id), size, pending, mtimeMs)
+            }
+        }.getOrNull()
+    }
+
+    private fun findSafFileReadOnly(
+        location: Location.Opened,
+        parentDirs: List<String>,
+        fileName: String,
+    ): ExistingManagedFile? {
+        val rootUri = location.uri
+        val rootDocId = DocumentsContract.getTreeDocumentId(rootUri)
+        findSafFileFromDocId(rootUri, rootDocId, parentDirs, fileName)?.let { return it }
+
+        val lastSeg = location.path.components.components.lastOrNull()
+        if (lastSeg == null || !lastSeg.equals("Tonewise", ignoreCase = true)) {
+            val tonewiseDir = findSafChild(rootUri, rootDocId, "Tonewise")
+            if (tonewiseDir != null && tonewiseDir.isDirectory) {
+                return findSafFileFromDocId(rootUri, tonewiseDir.docId, parentDirs, fileName)
+            }
+        }
+        return null
+    }
+
+    private fun findSafFileFromDocId(
+        rootUri: Uri,
+        baseDocId: String,
+        parentDirs: List<String>,
+        fileName: String,
+    ): ExistingManagedFile? {
+        var currentDocId = baseDocId
+        for (seg in parentDirs) {
+            val childDir = findSafChild(rootUri, currentDocId, seg)
+            if (childDir == null || !childDir.isDirectory) return null
+            currentDocId = childDir.docId
+        }
+        val childFile = findSafChild(rootUri, currentDocId, fileName)
+        if (childFile == null || childFile.isDirectory) return null
+        val docUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, childFile.docId)
+        return ExistingManagedFile(docUri.toString(), childFile.size, childFile.lastModifiedMs)
+    }
+
+    internal data class SafChildInfo(
+        val docId: String,
+        val isDirectory: Boolean,
+        val size: Long,
+        val lastModifiedMs: Long,
+    )
+
+    internal class SafPathCache {
+        private val dirs = ConcurrentHashMap<String, ConcurrentHashMap<String, SafChildInfo>>()
+
+        private fun dirKey(treeKey: String, parentDocId: String): String = "$treeKey|$parentDocId"
+
+        fun lookup(
+            treeKey: String,
+            parentDocId: String,
+            displayName: String,
+        ): Pair<Boolean, SafChildInfo?> {
+            val map = dirs[dirKey(treeKey, parentDocId)] ?: return false to null
+            return true to map[displayName.lowercase()]
+        }
+
+        fun putDir(treeKey: String, parentDocId: String, entries: Map<String, SafChildInfo>) {
+            val copy = ConcurrentHashMap<String, SafChildInfo>(entries.size.coerceAtLeast(4))
+            for ((k, v) in entries) {
+                copy[k.lowercase()] = v
+            }
+            dirs[dirKey(treeKey, parentDocId)] = copy
+        }
+
+        fun putEntry(treeKey: String, parentDocId: String, displayName: String, info: SafChildInfo) {
+            val key = dirKey(treeKey, parentDocId)
+            dirs.compute(key) { _, existing ->
+                val map = existing ?: ConcurrentHashMap()
+                map[displayName.lowercase()] = info
+                map
+            }
+        }
+
+        fun removeEntry(treeKey: String, parentDocId: String, displayName: String) {
+            dirs[dirKey(treeKey, parentDocId)]?.remove(displayName.lowercase())
+        }
+
+        fun invalidateDir(treeKey: String, parentDocId: String) {
+            dirs.remove(dirKey(treeKey, parentDocId))
+        }
+
+        fun clear() {
+            dirs.clear()
+        }
+    }
+
+    private fun findSafChild(
+        rootUri: Uri,
+        parentDocId: String,
+        targetName: String,
+        forceRefresh: Boolean = false,
+    ): SafChildInfo? {
+        val treeKey = rootUri.toString()
+        if (!forceRefresh) {
+            val (dirCached, cachedInfo) = safCache.lookup(treeKey, parentDocId, targetName)
+            if (dirCached) {
+                return cachedInfo
+            }
+        }
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, parentDocId)
+        val projection =
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE,
+                DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+            )
+        return runCatching {
+            resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                val sizeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+                val modIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                val entries = HashMap<String, SafChildInfo>()
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(nameIdx) ?: continue
+                    val docId = cursor.getString(idIdx)
+                    val mime = cursor.getString(mimeIdx)
+                    val size = if (cursor.isNull(sizeIdx)) 0L else cursor.getLong(sizeIdx)
+                    val mod = if (modIdx >= 0 && !cursor.isNull(modIdx)) cursor.getLong(modIdx) else 0L
+                    entries[name.lowercase()] =
+                        SafChildInfo(
+                            docId = docId,
+                            isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR,
+                            size = size,
+                            lastModifiedMs = mod,
+                        )
+                }
+                safCache.putDir(treeKey, parentDocId, entries)
+                entries[targetName.lowercase()]
             }
         }.getOrNull()
     }
@@ -367,13 +1005,9 @@ constructor(
         if (musicSettings.locationMode != LocationMode.SAF) return null
         val sources = musicSettings.safQuery.source
         if (sources.isEmpty()) return null
-        return sources.firstOrNull {
-            it.path.components.components.lastOrNull()?.equals("Tonewise", ignoreCase = true) == true
-        }
-            ?: sources.firstOrNull {
-                it.path.components.components.lastOrNull()?.equals("Music", ignoreCase = true) == true
-            }
-            ?: sources.first()
+        val preferredIdx =
+            selectPreferredMusicSafIndex(sources.map { it.path.components.components.lastOrNull() })
+        return if (preferredIdx in sources.indices) sources[preferredIdx] else sources.first()
     }
 
     private fun ensureSafTonewiseRootDocId(location: Location.Opened): String {
@@ -414,42 +1048,19 @@ constructor(
                 DocumentsContract.Document.MIME_TYPE_DIR,
                 name,
             ) ?: throw IOException("无法创建 SAF 目录: $name")
-        return DocumentsContract.getDocumentId(created)
-    }
-
-    private data class SafChildInfo(val docId: String, val isDirectory: Boolean, val size: Long)
-
-    private fun findSafChild(rootUri: Uri, parentDocId: String, targetName: String): SafChildInfo? {
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, parentDocId)
-        val projection =
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE,
-                DocumentsContract.Document.COLUMN_SIZE,
-            )
-        return runCatching {
-            resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
-                val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                val sizeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
-                while (cursor.moveToNext()) {
-                    val name = cursor.getString(nameIdx) ?: continue
-                    if (name.equals(targetName, ignoreCase = true)) {
-                        val docId = cursor.getString(idIdx)
-                        val mime = cursor.getString(mimeIdx)
-                        val size = if (cursor.isNull(sizeIdx)) 0L else cursor.getLong(sizeIdx)
-                        return@use SafChildInfo(
-                            docId = docId,
-                            isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR,
-                            size = size,
-                        )
-                    }
-                }
-                null
-            }
-        }.getOrNull()
+        val createdId = DocumentsContract.getDocumentId(created)
+        safCache.putEntry(
+            rootUri.toString(),
+            parentDocId,
+            name,
+            SafChildInfo(
+                docId = createdId,
+                isDirectory = true,
+                size = 0L,
+                lastModifiedMs = System.currentTimeMillis(),
+            ),
+        )
+        return createdId
     }
 
     private fun resolveAudioMimeType(fileName: String): String {
@@ -463,6 +1074,44 @@ constructor(
             ".ogg" -> "audio/ogg"
             ".opus" -> "audio/opus"
             else -> "application/octet-stream"
+        }
+    }
+
+    companion object {
+        internal fun buildMediaStoreMusicRelativeDir(
+            parentDirs: List<String>,
+            musicRootName: String = Environment.DIRECTORY_MUSIC ?: "Music",
+        ): String =
+            buildString {
+                append(musicRootName.ifBlank { "Music" }).append('/')
+                if (parentDirs.isNotEmpty()) {
+                    append(parentDirs.joinToString("/")).append('/')
+                }
+            }
+
+        internal fun buildMediaStoreTonewiseRelativeDir(
+            parentDirs: List<String>,
+            musicRootName: String = Environment.DIRECTORY_MUSIC ?: "Music",
+        ): String = buildLegacyMediaStoreTonewiseRelativeDir(parentDirs, musicRootName)
+
+        internal fun buildLegacyMediaStoreTonewiseRelativeDir(
+            parentDirs: List<String>,
+            musicRootName: String = Environment.DIRECTORY_MUSIC ?: "Music",
+        ): String =
+            buildString {
+                append(musicRootName.ifBlank { "Music" }).append("/Tonewise/")
+                if (parentDirs.isNotEmpty()) {
+                    append(parentDirs.joinToString("/")).append('/')
+                }
+            }
+
+        internal fun selectPreferredMusicSafIndex(lastPathSegments: List<String?>): Int {
+            if (lastPathSegments.isEmpty()) return -1
+            val musicIdx = lastPathSegments.indexOfFirst { it.equals("Music", ignoreCase = true) }
+            if (musicIdx >= 0) return musicIdx
+            val nonTonewiseIdx = lastPathSegments.indexOfFirst { !it.equals("Tonewise", ignoreCase = true) }
+            if (nonTonewiseIdx >= 0) return nonTonewiseIdx
+            return 0
         }
     }
 }

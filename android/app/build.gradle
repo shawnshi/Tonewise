@@ -17,8 +17,8 @@ android {
 
     defaultConfig {
         applicationId namespace
-        versionName "0.7.0"
-        versionCode 76
+        versionName "0.9.0"
+        versionCode 90
 
         minSdk min_sdk
         // randomly flickers between deprecated and required depending on what mood my gradle is in
@@ -81,6 +81,10 @@ kotlin {
         freeCompilerArgs.add("-jvm-default=enable")
         freeCompilerArgs.add("-Xannotation-default-target=param-property")
     }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

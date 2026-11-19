@@ -4,6 +4,16 @@
     <exclude
         domain="database"
         path="music_cache.db" />
+    <!-- Exclude LAN Sync Bearer tokens and mutable sync ledger from cloud backup -->
+    <exclude
+        domain="database"
+        path="tonewise_sync.db" />
+    <exclude
+        domain="database"
+        path="tonewise_sync.db-wal" />
+    <exclude
+        domain="database"
+        path="tonewise_sync.db-shm" />
     <!-- Exclude sensitive Last.fm API secrets and session keys from cloud backup -->
     <exclude
         domain="sharedpref"

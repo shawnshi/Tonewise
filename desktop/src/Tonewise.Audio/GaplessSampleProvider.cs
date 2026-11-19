@@ -164,9 +164,22 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
         int totalRead = 0;
         while (totalRead < count)
         {
+            int seg = ReadSegment(buffer, offset + totalRead, count - totalRead);
+            if (seg <= 0) break;
+            totalRead += seg;
+        }
+        return totalRead;
+    }
+
+    internal int ReadSegment(float[] buffer, int offset, int count)
+    {
+        int totalRead = 0;
+        while (totalRead < count)
+        {
             int n;
             string? transitionedPath = null;
             double transitionedRg = 0.0;
+            IDisposable? oldDisposable = null;
 
             lock (_sourceLock)
             {
@@ -177,13 +190,20 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
                     continue;
                 }
 
-                if (_nextSamples is null || string.IsNullOrWhiteSpace(_nextPath))
+                // Never swap tracks mid-segment after Track A placed samples: return Track A's tail
+                // so DspSampleProvider applies Track A's ReplayGain/bypass exclusively to Track A.
+                if (totalRead > 0)
                 {
-                    _reachedEndOfStream = totalRead == 0;
                     break;
                 }
 
-                var oldDisposable = _currentDisposable;
+                if (_nextSamples is null || string.IsNullOrWhiteSpace(_nextPath))
+                {
+                    _reachedEndOfStream = true;
+                    break;
+                }
+
+                oldDisposable = _currentDisposable;
                 _currentPath = _nextPath;
                 _currentWaveStream = _nextWaveStream;
                 _currentSamples = _nextSamples;
@@ -197,8 +217,14 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
                 _nextDisposable = null;
                 _nextReplayGainDb = 0.0;
                 _reachedEndOfStream = false;
+            }
 
-                try { oldDisposable?.Dispose(); } catch { }
+            if (oldDisposable is not null)
+            {
+                ThreadPool.QueueUserWorkItem(static d =>
+                {
+                    try { ((IDisposable)d!).Dispose(); } catch { }
+                }, oldDisposable);
             }
 
             if (transitionedPath is not null)

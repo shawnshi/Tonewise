@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '1');
+INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '2');
 
 CREATE TABLE IF NOT EXISTS tracks (
     track_uid            TEXT PRIMARY KEY,              -- Canonical UID (hex blake3 audio-frame fingerprint or MBID-anchored UID)
@@ -59,15 +59,24 @@ CREATE TABLE IF NOT EXISTS tracks (
     mood_json            TEXT NOT NULL DEFAULT '[]',    -- Raw mood tags normalized against mood_clusters.json
     mood_ts              INTEGER NOT NULL DEFAULT 0,
 
-    rating               INTEGER CHECK (rating BETWEEN 0 AND 5) DEFAULT 0,
-    rating_ts            INTEGER NOT NULL DEFAULT 0,
-    play_count_total     INTEGER NOT NULL DEFAULT 0,
-    last_played_ts       INTEGER NOT NULL DEFAULT 0,
-    waveform_offset      INTEGER                        -- Byte offset into waveforms.bin payload (NULL if pending)
+    rating                       INTEGER CHECK (rating BETWEEN 0 AND 5) DEFAULT 0,
+    rating_ts                    INTEGER NOT NULL DEFAULT 0,
+    play_count_total             INTEGER NOT NULL DEFAULT 0,
+    last_played_ts               INTEGER NOT NULL DEFAULT 0,
+    waveform_offset              INTEGER,                       -- Byte offset into waveforms.bin payload (NULL if pending)
+    disc_number                  INTEGER NOT NULL DEFAULT 0,
+    track_number                 INTEGER NOT NULL DEFAULT 0,
+    publisher                    TEXT,
+    legacy_play_count            INTEGER NOT NULL DEFAULT 0,
+    lastfm_pulled_count          INTEGER NOT NULL DEFAULT 0,
+    local_unsynced_expired_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_tracks_rel_path ON tracks (rel_path);
+CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks (album);
+CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks (genre);
 CREATE INDEX IF NOT EXISTS idx_tracks_energy ON tracks (dj_energy);
 CREATE INDEX IF NOT EXISTS idx_tracks_vocals ON tracks (dj_vocals);
 CREATE INDEX IF NOT EXISTS idx_tracks_work ON tracks (album_artist, work_name);
+CREATE INDEX IF NOT EXISTS idx_tracks_work_name ON tracks (work_name);
 CREATE INDEX IF NOT EXISTS idx_tracks_last_played ON tracks (last_played_ts);

@@ -31,12 +31,26 @@ data class AudioFrameFingerprint(
     val fileSize: Long,
 )
 
+data class RawJson(val json: String)
+
 /**
  * Kotlin facade over the shared Rust `tonewise-core` native library (`libtonewise_core.so` on
  * Android, `tonewise_core.dll` in Windows unit tests).
  */
 object TonewiseCore {
+    const val EXPECTED_ABI_VERSION: Int = 1
+
+    fun loadNativeFromPath(absolutePath: String) = TonewiseCoreJNI.loadFromPath(absolutePath)
+
+    fun checkAbiVersionMatch(actual: Int, expected: Int = EXPECTED_ABI_VERSION) {
+        check(actual == expected) {
+            "TonewiseCore native ABI mismatch: expected $expected, got $actual"
+        }
+    }
+
     fun parseJson(input: String): Any? = MiniJson.parse(input)
+
+    fun stringifyJson(value: Any?): String = MiniJson.stringify(value)
 
     fun abiVersion(): Int {
         TonewiseCoreJNI.ensureLoaded()
@@ -68,16 +82,13 @@ object TonewiseCore {
     ): M3u8MergeResult {
         TonewiseCoreJNI.ensureLoaded()
         val requestJson =
-            buildString {
-                append('{')
-                append("\"base\":")
-                appendJsonStringArray(base)
-                append(",\"ours\":")
-                appendJsonStringArray(ours)
-                append(",\"theirs\":")
-                appendJsonStringArray(theirs)
-                append('}')
-            }
+            MiniJson.stringify(
+                linkedMapOf(
+                    "base" to base,
+                    "ours" to ours,
+                    "theirs" to theirs,
+                )
+            )
         val responseJson = TonewiseCoreJNI.nativeMergeM3u8Json(requestJson)
         @Suppress("UNCHECKED_CAST")
         val root = MiniJson.parse(responseJson) as Map<String, Any?>
@@ -180,42 +191,88 @@ object TonewiseCore {
             throw IllegalStateException("tonewise-core error: ${parsed["error"]}")
         }
     }
-
-    private fun StringBuilder.appendJsonStringArray(values: List<String>) {
-        append('[')
-        values.forEachIndexed { idx, v ->
-            if (idx > 0) append(',')
-            append('"')
-            for (ch in v) {
-                when (ch) {
-                    '"' -> append("\\\"")
-                    '\\' -> append("\\\\")
-                    '\b' -> append("\\b")
-                    '\u000C' -> append("\\f")
-                    '\n' -> append("\\n")
-                    '\r' -> append("\\r")
-                    '\t' -> append("\\t")
-                    else -> {
-                        if (ch.code < 0x20) {
-                            append("\\u")
-                            append(ch.code.toString(16).padStart(4, '0'))
-                        } else {
-                            append(ch)
-                        }
-                    }
-                }
-            }
-            append('"')
-        }
-        append(']')
-    }
 }
 
-/** Minimal strict RFC 8259 JSON parser for zero-dependency JVM/Android parity across FFI. */
+/** Minimal strict RFC 8259 JSON parser/serializer for zero-dependency JVM/Android parity across FFI. */
 internal object MiniJson {
     private const val MAX_DEPTH = 64
 
     fun parse(input: String): Any? = Parser(input).parseValue()
+
+    fun stringify(value: Any?): String =
+        StringBuilder().apply { appendValue(this, value, 0) }.toString()
+
+    private fun appendValue(sb: StringBuilder, value: Any?, depth: Int) {
+        if (depth > MAX_DEPTH) {
+            throw IllegalArgumentException("JSON serialization depth exceeded $MAX_DEPTH")
+        }
+        when (value) {
+            null -> sb.append("null")
+            is RawJson -> sb.append(value.json)
+            is Boolean -> sb.append(if (value) "true" else "false")
+            is Double -> sb.append(if (value.isFinite()) value.toString() else "null")
+            is Float -> sb.append(if (value.isFinite()) value.toString() else "null")
+            is Number -> sb.append(value.toString())
+            is CharSequence -> appendString(sb, value.toString())
+            is Char -> appendString(sb, value.toString())
+            is Map<*, *> -> {
+                sb.append('{')
+                var first = true
+                for ((k, v) in value) {
+                    if (k == null) continue
+                    if (!first) sb.append(',')
+                    first = false
+                    appendString(sb, k.toString())
+                    sb.append(':')
+                    appendValue(sb, v, depth + 1)
+                }
+                sb.append('}')
+            }
+            is Iterable<*> -> {
+                sb.append('[')
+                var first = true
+                for (item in value) {
+                    if (!first) sb.append(',')
+                    first = false
+                    appendValue(sb, item, depth + 1)
+                }
+                sb.append(']')
+            }
+            is Array<*> -> {
+                sb.append('[')
+                for (i in value.indices) {
+                    if (i > 0) sb.append(',')
+                    appendValue(sb, value[i], depth + 1)
+                }
+                sb.append(']')
+            }
+            else -> appendString(sb, value.toString())
+        }
+    }
+
+    private fun appendString(sb: StringBuilder, s: String) {
+        sb.append('"')
+        for (ch in s) {
+            when (ch) {
+                '"' -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> {
+                    if (ch.code < 0x20) {
+                        sb.append("\\u")
+                        sb.append(ch.code.toString(16).padStart(4, '0'))
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+            }
+        }
+        sb.append('"')
+    }
 
     private class Parser(private val src: String) {
         private var pos = 0

@@ -439,7 +439,15 @@
     <string name="lbl_desk_clock">OLED 桌面时钟</string>
     <string name="lbl_open_desk_clock">进入 OLED 桌面时钟模式</string>
     <string name="lbl_clock_close">退出桌面时钟</string>
-    <string name="lbl_clock_keep_screen_on">已启用防烧屏保护（每 60 秒 ±2dp 循环偏移）</string>
+    <string name="lbl_clock_keep_screen_on">已启用防烧屏保护（每 60 秒循环偏移）</string>
+    <string name="lbl_sleep_timer">睡眠定时</string>
+    <string name="lbl_sleep_off">关闭定时</string>
+    <string name="lbl_sleep_15m">15 分钟后暂停</string>
+    <string name="lbl_sleep_30m">30 分钟后暂停</string>
+    <string name="lbl_sleep_45m">45 分钟后暂停</string>
+    <string name="lbl_sleep_60m">60 分钟后暂停</string>
+    <string name="lbl_sleep_end_track">本曲结束后暂停</string>
+    <string name="lbl_sleep_end_work">本古典作品结束后暂停</string>
     <string name="lbl_scene_pill_default">默认队列</string>
     <string name="fmt_scene_pill">▲ %1$s · 槽位 #%2$d (%3$d)</string>
     <string name="fmt_scene_switched_slot">已切换至槽位 #%1$d：%2$s</string>

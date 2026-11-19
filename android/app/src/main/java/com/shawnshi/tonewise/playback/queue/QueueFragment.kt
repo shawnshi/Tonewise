@@ -43,12 +43,14 @@ import androidx.core.view.isInvisible
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlin.math.min
+import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentQueueBinding
 import com.shawnshi.tonewise.list.EditClickListListener
@@ -195,10 +197,15 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
         }
     }
 
-    private fun saveCurrentQueueToSlot(slotIndex: Int, sceneLabel: String, showFeedback: Boolean = true) {
+    private fun saveCurrentQueueToSlot(
+        slotIndex: Int,
+        sceneLabel: String,
+        showFeedback: Boolean = true,
+        activate: Boolean = true,
+    ) {
         val pagerQueue = playbackModel.pagerQueue.value
-        val uids = pagerQueue.queue.map { it.uid.toString() }
-        if (uids.isEmpty()) {
+        val snapshotSongs = pagerQueue.queue.toList()
+        if (snapshotSongs.isEmpty()) {
             if (showFeedback) {
                 requireContext().showToast(R.string.lbl_slot_empty_queue)
             }
@@ -209,25 +216,29 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
                 .takeUnless { it.equals("Default", ignoreCase = true) || it.isBlank() }
                 ?: playbackModel.song.value?.name?.raw
                 ?: getString(R.string.fmt_queue_slot, slotIndex)
-        sessionSlotStore.saveSlot(
-            SessionSlotItem(
-                slotIndex = slotIndex,
-                name = title,
-                sceneId = null,
-                updatedAtMs = System.currentTimeMillis(),
-                queueTrackUids = uids,
-                currentIndex = pagerQueue.index,
-                positionMs = playbackModel.positionDs.value * 100L,
+        val curIdx = pagerQueue.index
+        val posMs = playbackModel.positionDs.value * 100L
+        val nowMs = System.currentTimeMillis()
+        val appContext = requireContext().applicationContext
+        val feedbackText = getString(R.string.fmt_scene_switched_slot, slotIndex, title)
+        viewLifecycleOwner.lifecycleScope.launch {
+            val canonicalUids = lanSyncRepository.resolveCanonicalTrackUids(snapshotSongs)
+            sessionSlotStore.saveSlot(
+                SessionSlotItem(
+                    slotIndex = slotIndex,
+                    name = title,
+                    sceneId = null,
+                    updatedAtMs = nowMs,
+                    queueTrackUids = canonicalUids,
+                    currentIndex = curIdx,
+                    positionMs = posMs,
+                ),
+                activate = activate,
             )
-        )
-        lanSyncRepository.scheduleM3u8WriteBack(title, pagerQueue.queue)
-        if (showFeedback) {
-            Toast.makeText(
-                    requireContext().applicationContext,
-                    getString(R.string.fmt_scene_switched_slot, slotIndex, title),
-                    Toast.LENGTH_SHORT,
-                )
-                .show()
+            lanSyncRepository.scheduleM3u8WriteBack(title, snapshotSongs)
+            if (showFeedback) {
+                Toast.makeText(appContext, feedbackText, Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -242,30 +253,36 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
             return
         }
         // Snapshot the outgoing active slot automatically before switching away.
-        saveCurrentQueueToSlot(activeSlotIndex, activeSceneLabel, showFeedback = false)
+        saveCurrentQueueToSlot(
+            activeSlotIndex,
+            activeSceneLabel,
+            showFeedback = false,
+            activate = false,
+        )
         if (existing == null || existing.queueTrackUids.isEmpty()) {
             saveCurrentQueueToSlot(targetSlotIndex, "Default", showFeedback = true)
             return
         }
-        val allSongs =
-            musicRepository.library?.songs?.associateBy { it.uid.toString() } ?: emptyMap()
-        val resolved = existing.queueTrackUids.mapNotNull { allSongs[it] }
-        if (resolved.isEmpty()) {
-            requireContext().showToast(R.string.lbl_scene_no_matches)
-            return
-        }
-        sessionSlotStore.setActiveScene(existing.name, targetSlotIndex)
-        playbackModel.restoreSessionQueue(
-            songs = resolved,
-            index = existing.currentIndex.coerceIn(0, resolved.lastIndex),
-            positionMs = existing.positionMs,
-        )
-        Toast.makeText(
-                requireContext().applicationContext,
-                getString(R.string.fmt_scene_switched_slot, targetSlotIndex, existing.name),
-                Toast.LENGTH_SHORT,
+        viewLifecycleOwner.lifecycleScope.launch {
+            val resolved = lanSyncRepository.resolveSlotSongs(existing)
+            if (!isAdded) return@launch
+            if (resolved.isEmpty()) {
+                requireContext().showToast(R.string.lbl_scene_no_matches)
+                return@launch
+            }
+            sessionSlotStore.setActiveScene(existing.name, targetSlotIndex)
+            playbackModel.restoreSessionQueue(
+                songs = resolved,
+                index = existing.currentIndex.coerceIn(0, resolved.lastIndex),
+                positionMs = existing.positionMs,
             )
-            .show()
+            Toast.makeText(
+                    requireContext().applicationContext,
+                    getString(R.string.fmt_scene_switched_slot, targetSlotIndex, existing.name),
+                    Toast.LENGTH_SHORT,
+                )
+                .show()
+        }
     }
 }
 

@@ -47,10 +47,26 @@ public sealed record NativeAudioAnalysisDto(
 
 public static class TonewiseCoreClient
 {
+    private const uint ExpectedAbiVersion = 1;
+    private static int _abiVerified;
+
+    private static void EnsureAbiVersion()
+    {
+        if (Volatile.Read(ref _abiVerified) == 1) return;
+        uint actual = TonewiseCoreNative.tonewise_core_abi_version();
+        if (actual != ExpectedAbiVersion)
+        {
+            throw new InvalidOperationException(
+                $"tonewise-core ABI version mismatch: expected {ExpectedAbiVersion}, got {actual}");
+        }
+        Volatile.Write(ref _abiVerified, 1);
+    }
+
     public static uint AbiVersion() => TonewiseCoreNative.tonewise_core_abi_version();
 
     public static List<string> SplitArtists(string raw)
     {
+        EnsureAbiVersion();
         IntPtr arg = TonewiseCoreNative.AllocUtf8(raw);
         try
         {
@@ -68,10 +84,13 @@ public static class TonewiseCoreClient
 
     public static List<string> EvaluateScene(string sceneJson, string tracksJson)
     {
-        IntPtr pScene = TonewiseCoreNative.AllocUtf8(sceneJson);
-        IntPtr pTracks = TonewiseCoreNative.AllocUtf8(tracksJson);
+        EnsureAbiVersion();
+        IntPtr pScene = IntPtr.Zero;
+        IntPtr pTracks = IntPtr.Zero;
         try
         {
+            pScene = TonewiseCoreNative.AllocUtf8(sceneJson);
+            pTracks = TonewiseCoreNative.AllocUtf8(tracksJson);
             string json = TonewiseCoreNative.ConsumeOwnedUtf8(
                 TonewiseCoreNative.tonewise_evaluate_scene_json(pScene, pTracks)
             );
@@ -80,8 +99,8 @@ public static class TonewiseCoreClient
         }
         finally
         {
-            Marshal.FreeHGlobal(pScene);
-            Marshal.FreeHGlobal(pTracks);
+            if (pScene != IntPtr.Zero) Marshal.FreeHGlobal(pScene);
+            if (pTracks != IntPtr.Zero) Marshal.FreeHGlobal(pTracks);
         }
     }
 
@@ -91,6 +110,7 @@ public static class TonewiseCoreClient
         IReadOnlyList<string> theirs
     )
     {
+        EnsureAbiVersion();
         string requestJson = JsonSerializer.Serialize(new { @base, ours, theirs });
         IntPtr pReq = TonewiseCoreNative.AllocUtf8(requestJson);
         try
@@ -110,6 +130,7 @@ public static class TonewiseCoreClient
 
     public static AudioFrameFingerprint ComputeFingerprint(string filePath)
     {
+        EnsureAbiVersion();
         IntPtr pPath = TonewiseCoreNative.AllocUtf8(filePath);
         try
         {
@@ -128,10 +149,13 @@ public static class TonewiseCoreClient
 
     public static float[]? LookupWaveform(string archivePath, string blake3Hex)
     {
-        IntPtr pArchive = TonewiseCoreNative.AllocUtf8(archivePath);
-        IntPtr pHex = TonewiseCoreNative.AllocUtf8(blake3Hex);
+        EnsureAbiVersion();
+        IntPtr pArchive = IntPtr.Zero;
+        IntPtr pHex = IntPtr.Zero;
         try
         {
+            pArchive = TonewiseCoreNative.AllocUtf8(archivePath);
+            pHex = TonewiseCoreNative.AllocUtf8(blake3Hex);
             string json = TonewiseCoreNative.ConsumeOwnedUtf8(
                 TonewiseCoreNative.tonewise_lookup_waveform_json(pArchive, pHex)
             );
@@ -151,8 +175,8 @@ public static class TonewiseCoreClient
         }
         finally
         {
-            Marshal.FreeHGlobal(pArchive);
-            Marshal.FreeHGlobal(pHex);
+            if (pArchive != IntPtr.Zero) Marshal.FreeHGlobal(pArchive);
+            if (pHex != IntPtr.Zero) Marshal.FreeHGlobal(pHex);
         }
     }
 
@@ -161,6 +185,7 @@ public static class TonewiseCoreClient
         IReadOnlyList<SessionSlotDto> remote
     )
     {
+        EnsureAbiVersion();
         string req = JsonSerializer.Serialize(new { local, remote });
         IntPtr pReq = TonewiseCoreNative.AllocUtf8(req);
         try
@@ -179,6 +204,7 @@ public static class TonewiseCoreClient
 
     public static string ApplyLwwMutationsJson(string requestJson)
     {
+        EnsureAbiVersion();
         IntPtr pReq = TonewiseCoreNative.AllocUtf8(requestJson);
         try
         {
@@ -196,10 +222,13 @@ public static class TonewiseCoreClient
 
     public static string ApplyHeaderPatch(string filePath, string expectedOldHex, byte[] newHeaderBytes)
     {
-        IntPtr pPath = TonewiseCoreNative.AllocUtf8(filePath);
-        IntPtr pHex = TonewiseCoreNative.AllocUtf8(expectedOldHex);
+        EnsureAbiVersion();
+        IntPtr pPath = IntPtr.Zero;
+        IntPtr pHex = IntPtr.Zero;
         try
         {
+            pPath = TonewiseCoreNative.AllocUtf8(filePath);
+            pHex = TonewiseCoreNative.AllocUtf8(expectedOldHex);
             string json = TonewiseCoreNative.ConsumeOwnedUtf8(
                 TonewiseCoreNative.tonewise_apply_header_patch_path(
                     pPath,
@@ -213,13 +242,14 @@ public static class TonewiseCoreClient
         }
         finally
         {
-            Marshal.FreeHGlobal(pPath);
-            Marshal.FreeHGlobal(pHex);
+            if (pPath != IntPtr.Zero) Marshal.FreeHGlobal(pPath);
+            if (pHex != IntPtr.Zero) Marshal.FreeHGlobal(pHex);
         }
     }
 
     public static NativeAudioAnalysisDto AnalyzeAudioFile(string filePath)
     {
+        EnsureAbiVersion();
         IntPtr pPath = TonewiseCoreNative.AllocUtf8(filePath);
         try
         {
@@ -240,6 +270,7 @@ public static class TonewiseCoreClient
         string filePath,
         IReadOnlyDictionary<string, string?> updates)
     {
+        EnsureAbiVersion();
         string req = JsonSerializer.Serialize(new { path = filePath, updates });
         IntPtr pReq = TonewiseCoreNative.AllocUtf8(req);
         try

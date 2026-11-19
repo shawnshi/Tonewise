@@ -594,6 +594,14 @@
     <string name="lbl_open_desk_clock">Open OLED Desk Clock</string>
     <string name="lbl_clock_close">Exit Desk Clock</string>
     <string name="lbl_clock_keep_screen_on">OLED pixel-shift protection active (60s cycle)</string>
+    <string name="lbl_sleep_timer">Sleep timer</string>
+    <string name="lbl_sleep_off">Off</string>
+    <string name="lbl_sleep_15m">15 minutes</string>
+    <string name="lbl_sleep_30m">30 minutes</string>
+    <string name="lbl_sleep_45m">45 minutes</string>
+    <string name="lbl_sleep_60m">60 minutes</string>
+    <string name="lbl_sleep_end_track">End of current track</string>
+    <string name="lbl_sleep_end_work">End of classical work</string>
     <string name="lbl_scene_pill_default">Default Queue</string>
     <string name="fmt_scene_pill">▲ %1$s · Slot #%2$d (%3$d)</string>
     <string name="fmt_scene_switched_slot">Switched to Slot #%1$d: %2$s</string>

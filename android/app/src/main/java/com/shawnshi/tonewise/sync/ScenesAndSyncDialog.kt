@@ -66,6 +66,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BackportBottomSheetDialogFragment
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -121,45 +122,53 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                         onUnpairHost = { lanSyncRepository.unpairHost() },
                         onSaveSlot = { slotIndex ->
                             val queue = playbackModel.pagerQueue.value
-                            val uids = queue.queue.map { it.uid.toString() }
-                            if (uids.isEmpty()) {
+                            val snapshotSongs = queue.queue.toList()
+                            if (snapshotSongs.isEmpty()) {
                                 requireContext().showToast(R.string.lbl_slot_empty_queue)
                             } else {
                                 val title =
                                     playbackModel.song.value?.name?.raw ?: "Session #$slotIndex"
-                                sessionSlotStore.saveSlot(
-                                    SessionSlotItem(
-                                        slotIndex = slotIndex,
-                                        name = title,
-                                        sceneId = null,
-                                        updatedAtMs = System.currentTimeMillis(),
-                                        queueTrackUids = uids,
-                                        currentIndex = queue.index,
-                                        positionMs = playbackModel.positionDs.value * 100L,
+                                val curIdx = queue.index
+                                val posMs = playbackModel.positionDs.value * 100L
+                                val nowMs = System.currentTimeMillis()
+                                viewLifecycleOwner.lifecycleScope.launch {
+                                    val canonicalUids =
+                                        lanSyncRepository.resolveCanonicalTrackUids(snapshotSongs)
+                                    sessionSlotStore.saveSlot(
+                                        SessionSlotItem(
+                                            slotIndex = slotIndex,
+                                            name = title,
+                                            sceneId = null,
+                                            updatedAtMs = nowMs,
+                                            queueTrackUids = canonicalUids,
+                                            currentIndex = curIdx,
+                                            positionMs = posMs,
+                                        )
                                     )
-                                )
-                                lanSyncRepository.scheduleM3u8WriteBack(title, queue.queue)
+                                    lanSyncRepository.scheduleM3u8WriteBack(title, snapshotSongs)
+                                }
                             }
                         },
                         onRestoreSlot = { slot ->
-                            val allSongs =
-                                musicRepository.library?.songs?.associateBy { it.uid.toString() }
-                                    ?: emptyMap()
-                            val resolved = slot.queueTrackUids.mapNotNull { allSongs[it] }
-                            if (resolved.isNotEmpty()) {
-                                sessionSlotStore.setActiveScene(slot.name, slot.slotIndex)
-                                lanSyncRepository.scheduleM3u8WriteBack(slot.name, resolved)
-                                playbackModel.restoreSessionQueue(
-                                    songs = resolved,
-                                    index = slot.currentIndex.coerceIn(0, resolved.lastIndex),
-                                    positionMs = slot.positionMs,
-                                )
-                                dismiss()
-                            } else {
-                                requireContext().showToast(R.string.lbl_scene_no_matches)
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val resolved = lanSyncRepository.resolveSlotSongs(slot)
+                                if (!isAdded) return@launch
+                                if (resolved.isNotEmpty()) {
+                                    sessionSlotStore.setActiveScene(slot.name, slot.slotIndex)
+                                    lanSyncRepository.scheduleM3u8WriteBack(slot.name, resolved)
+                                    playbackModel.restoreSessionQueue(
+                                        songs = resolved,
+                                        index = slot.currentIndex.coerceIn(0, resolved.lastIndex),
+                                        positionMs = slot.positionMs,
+                                    )
+                                    dismiss()
+                                } else {
+                                    requireContext().showToast(R.string.lbl_scene_no_matches)
+                                }
                             }
                         },
-                        onSyncUrl = { url -> lanSyncRepository.syncWithHost(url) },
+                        onSyncUrl = { url -> lanSyncRepository.startSync(url) },
+                        onCancelSync = { lanSyncRepository.cancelSync() },
                         onSaveLastFm = { apiEnabled, broadcastEnabled, key, secret, user, sk ->
                             lastFmRepository.updateConfig(
                                 apiEnabled = apiEnabled,
@@ -210,7 +219,8 @@ private fun SyncHubSheet(
     onUnpairHost: () -> Unit,
     onSaveSlot: (Int) -> Unit,
     onRestoreSlot: (SessionSlotItem) -> Unit,
-    onSyncUrl: suspend (String) -> Unit,
+    onSyncUrl: (String) -> Unit,
+    onCancelSync: () -> Unit,
     onSaveLastFm: (Boolean, Boolean, String, String, String, String) -> Unit,
     onAuthLastFm: suspend (String, String, String, String) -> Boolean,
     onStartLastFmBrowserAuth: suspend (String, String) -> Unit,
@@ -276,13 +286,18 @@ private fun SyncHubSheet(
             ) {
                 for (slotIdx in 1..5) {
                     val existing = sessionSlots.firstOrNull { it.slotIndex == slotIdx }
+                    val populated = SessionSlotStore.isSlotPopulated(existing)
                     OutlinedButton(
                         modifier = Modifier.weight(1f),
                         onClick = {
-                            if (existing != null) onRestoreSlot(existing) else onSaveSlot(slotIdx)
+                            if (populated && existing != null) {
+                                onRestoreSlot(existing)
+                            } else {
+                                onSaveSlot(slotIdx)
+                            }
                         },
                     ) {
-                        Text(text = if (existing != null) "▶$slotIdx" else "+$slotIdx")
+                        Text(text = if (populated) "▶$slotIdx" else "+$slotIdx")
                     }
                 }
             }
@@ -407,6 +422,7 @@ private fun SyncHubSheet(
                     onValueChange = { sessionKey = it },
                     label = { Text(stringResource(R.string.lbl_lastfm_session_key)) },
                     singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Row(
@@ -501,7 +517,7 @@ private fun SyncHubSheet(
                             }
                             Button(
                                 enabled = !syncProgress.isRunning,
-                                onClick = { scope.launch { onSyncUrl(pairedHost.baseUrl) } },
+                                onClick = { onSyncUrl(pairedHost.baseUrl) },
                             ) {
                                 Text(stringResource(R.string.lbl_sync_now))
                             }
@@ -542,7 +558,7 @@ private fun SyncHubSheet(
                             enabled = !syncProgress.isRunning,
                             onClick = {
                                 if (isPairedToThis) {
-                                    scope.launch { onSyncUrl(host.baseUrl) }
+                                    onSyncUrl(host.baseUrl)
                                 } else {
                                     manualUrl = host.baseUrl
                                     showRepairPanel = true
@@ -634,6 +650,14 @@ private fun SyncHubSheet(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onCancelSync) {
+                        Text("取消同步")
+                    }
+                }
             }
 
             Text(

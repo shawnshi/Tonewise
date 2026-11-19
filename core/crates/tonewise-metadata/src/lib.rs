@@ -167,6 +167,35 @@ pub fn split_multi_value(raw: &str) -> Vec<String> {
     out
 }
 
+fn find_case_insensitive_span(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    let needle_lower: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    if needle_lower.is_empty() {
+        return None;
+    }
+    for (start_byte, _) in haystack.char_indices() {
+        let mut matched = 0usize;
+        let mut failed = false;
+        for (rel_byte, h_ch) in haystack[start_byte..].char_indices() {
+            for lc in h_ch.to_lowercase() {
+                if matched < needle_lower.len() && needle_lower[matched] == lc {
+                    matched += 1;
+                } else {
+                    failed = true;
+                    break;
+                }
+            }
+            if failed {
+                break;
+            }
+            if matched == needle_lower.len() {
+                let end_byte = start_byte + rel_byte + h_ch.len_utf8();
+                return Some((start_byte, end_byte));
+            }
+        }
+    }
+    None
+}
+
 /// Splits artist tags on `/` and `;` while protecting known multi-word/delimited band names
 /// from `protocol/dictionaries/artist_whitelist.json` (e.g. `Above & Beyond`, `AC/DC`).
 pub fn split_artists_preserving_whitelist(raw: &str) -> Vec<String> {
@@ -176,12 +205,13 @@ pub fn split_artists_preserving_whitelist(raw: &str) -> Vec<String> {
     }
 
     let mut replacements: Vec<(String, String)> = Vec::new();
+    let mut seq = 0usize;
     for (idx, protected) in artist_whitelist().iter().enumerate() {
-        if let Some(pos) = working.to_lowercase().find(&protected.to_lowercase()) {
-            let token = format!("__TW_PROTECTED_{idx}__");
-            let end = pos + protected.len();
-            let original_slice = working[pos..end].to_string();
-            working.replace_range(pos..end, &token);
+        while let Some((start, end)) = find_case_insensitive_span(&working, protected) {
+            let token = format!("__TW_PROTECTED_{idx}_{seq}__");
+            seq += 1;
+            let original_slice = working[start..end].to_string();
+            working.replace_range(start..end, &token);
             replacements.push((token, original_slice));
         }
     }
@@ -243,6 +273,14 @@ mod tests {
         assert_eq!(
             split_artists_preserving_whitelist("卢家宏 / 李宗盛"),
             vec!["卢家宏", "李宗盛"]
+        );
+        assert_eq!(
+            split_artists_preserving_whitelist("İbrahim / AC/DC"),
+            vec!["İbrahim", "AC/DC"]
+        );
+        assert_eq!(
+            split_artists_preserving_whitelist("AC/DC / AC/DC"),
+            vec!["AC/DC"]
         );
     }
 

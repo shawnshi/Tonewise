@@ -90,13 +90,20 @@ constructor(
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
             .build()
 
+    @Volatile private var activeFloatPipeline: Boolean = shouldUseFloatPipeline()
     private var activeUsbDevice: AudioDeviceInfo? = null
     private var lastUsbSampleRateHz: Int? = null
+    private var lastUsbEncoding: Int? = null
     private var lastSong: Song? = null
     private var lastDecoderName: String? = null
     private var lastPcmEncoding: Int = C.ENCODING_INVALID
     private var lastReplayGainDb: Float = 0f
     private var routeListener: ((Boolean) -> Unit)? = null
+
+    fun setActiveFloatPipeline(enabled: Boolean) {
+        activeFloatPipeline = enabled
+        refreshRoute()
+    }
 
     private val _signalPath = MutableStateFlow(SignalPathState())
     val signalPath: StateFlow<SignalPathState> = _signalPath
@@ -111,6 +118,13 @@ constructor(
                 refreshRoute()
             }
         }
+
+    fun shouldUseFloatPipeline(): Boolean =
+        resolveEnableFloatOutput(
+            floatOutput = playbackSettings.floatOutput,
+            usbBitPerfect = playbackSettings.usbBitPerfect,
+            apiLevel = Build.VERSION.SDK_INT,
+        )
 
     fun start(onBitPerfectChanged: (Boolean) -> Unit) {
         routeListener = onBitPerfectChanged
@@ -146,7 +160,17 @@ constructor(
     fun refreshRoute(): Boolean {
         val manager = audioManager ?: return false
         val outputs = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        val primaryDevice = selectPrimaryDevice(outputs)
+        val routedDevice =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                try {
+                    manager.getAudioDevicesForAttributes(mediaAttributes).firstOrNull()
+                } catch (_: Exception) {
+                    null
+                }
+            } else {
+                null
+            }
+        val primaryDevice = routedDevice ?: selectPrimaryDevice(outputs)
         val routeType = primaryDevice?.let(::classifyDevice) ?: OutputRouteType.UNKNOWN
         val deviceName =
             primaryDevice?.productName?.toString()?.takeIf { it.isNotBlank() }
@@ -155,6 +179,8 @@ constructor(
         var isBitPerfectActive = false
         var mixerLabel = "AudioFlinger"
         var outputSampleRateHz: Int? = null
+        val actualTrackEncoding =
+            if (activeFloatPipeline) C.ENCODING_PCM_FLOAT else C.ENCODING_PCM_16BIT
 
         dspRepository.onDeviceRouteChanged(routeType.name, deviceName)
 
@@ -168,32 +194,39 @@ constructor(
 
             if (usbDevice != null && playbackSettings.usbBitPerfect) {
                 val desiredRate = lastSong?.sampleRateHz
-                if (desiredRate != null && lastUsbSampleRateHz != null && lastUsbSampleRateHz != desiredRate) {
+                if ((desiredRate != null && lastUsbSampleRateHz != null && lastUsbSampleRateHz != desiredRate) ||
+                    (lastUsbEncoding != null &&
+                        lastUsbEncoding != media3ToAudioFormatEncoding(actualTrackEncoding))
+                ) {
                     clearBitPerfectMixer(usbDevice)
                 }
-                val applied = applyBitPerfectMixer(usbDevice, desiredRate)
+                val applied = applyBitPerfectMixer(usbDevice, desiredRate, actualTrackEncoding)
                 if (applied != null) {
                     isBitPerfectActive = true
                     mixerLabel = "MIXER_BEHAVIOR_BIT_PERFECT"
                     outputSampleRateHz = applied.format.sampleRate
                     lastUsbSampleRateHz = outputSampleRateHz
+                    lastUsbEncoding = applied.format.encoding
                 } else {
                     clearBitPerfectMixer(usbDevice)
                     lastUsbSampleRateHz = null
-                    mixerLabel = "AudioFlinger (USB fallback)"
+                    lastUsbEncoding = null
+                    mixerLabel = "AudioFlinger (USB DSP mode)"
                 }
             } else if (usbDevice != null) {
                 clearBitPerfectMixer(usbDevice)
                 lastUsbSampleRateHz = null
+                lastUsbEncoding = null
                 mixerLabel = "AudioFlinger (USB DSP mode)"
             } else {
                 lastUsbSampleRateHz = null
+                lastUsbEncoding = null
             }
         } else if (routeType == OutputRouteType.USB_DAC) {
             mixerLabel = "AudioFlinger (API < 34)"
         }
 
-        val floatEnabled = playbackSettings.floatOutput
+        val floatEnabled = activeFloatPipeline
         val tier =
             when {
                 isBitPerfectActive -> SignalQualityTier.BIT_PERFECT
@@ -260,6 +293,7 @@ constructor(
     private fun applyBitPerfectMixer(
         device: AudioDeviceInfo,
         targetSampleRateHz: Int?,
+        sourceMedia3PcmEncoding: Int,
     ): AudioMixerAttributes? {
         val manager = audioManager ?: return null
         return try {
@@ -269,18 +303,31 @@ constructor(
                 }
             if (supported.isEmpty()) return null
 
+            val candidates =
+                supported.map { BitPerfectCandidate(it.format.sampleRate, it.format.encoding) }
+            val chosenCandidate =
+                selectBestBitPerfectCandidate(
+                    candidates = candidates,
+                    targetSampleRateHz = targetSampleRateHz,
+                    sourceMedia3PcmEncoding = sourceMedia3PcmEncoding,
+                    preferIntegerPcm = !activeFloatPipeline,
+                ) ?: return null
+            if (!isExactBitPerfectMatch(chosenCandidate, targetSampleRateHz, sourceMedia3PcmEncoding)) {
+                L.w(
+                    "Rejecting USB BIT_PERFECT mixer mismatch: candidate=${chosenCandidate.sampleRateHz}Hz enc=${chosenCandidate.audioFormatEncoding} vs trackEnc=$sourceMedia3PcmEncoding targetRate=$targetSampleRateHz"
+                )
+                return null
+            }
             val chosen =
-                if (targetSampleRateHz != null && targetSampleRateHz > 0) {
-                    supported.firstOrNull { it.format.sampleRate == targetSampleRateHz }
-                        ?: supported.maxByOrNull { it.format.sampleRate }
-                } else {
-                    supported.maxByOrNull { it.format.sampleRate }
-                } ?: return null
+                supported.firstOrNull {
+                    it.format.sampleRate == chosenCandidate.sampleRateHz &&
+                        it.format.encoding == chosenCandidate.audioFormatEncoding
+                } ?: supported.first()
 
             val ok = manager.setPreferredMixerAttributes(mediaAttributes, device, chosen)
             if (ok) {
                 L.d(
-                    "Activated USB BIT_PERFECT mixer: ${chosen.format.sampleRate}Hz on ${device.productName}"
+                    "Activated USB BIT_PERFECT mixer: ${chosen.format.sampleRate}Hz enc=${chosen.format.encoding} on ${device.productName}"
                 )
                 chosen
             } else {
@@ -338,4 +385,106 @@ constructor(
             OutputRouteType.SPEAKER -> "Device Speaker"
             OutputRouteType.UNKNOWN -> "System Output"
         }
+
+    data class BitPerfectCandidate(val sampleRateHz: Int, val audioFormatEncoding: Int)
+
+    companion object {
+        const val PCM_ENCODING_INVALID = 0
+        const val PCM_ENCODING_16BIT = 2 // AudioFormat.ENCODING_PCM_16BIT
+        const val PCM_ENCODING_FLOAT = 4 // AudioFormat.ENCODING_PCM_FLOAT
+        const val PCM_ENCODING_24BIT_PACKED = 21 // AudioFormat.ENCODING_PCM_24BIT_PACKED
+        const val PCM_ENCODING_32BIT = 22 // AudioFormat.ENCODING_PCM_32BIT
+
+        fun resolveEnableFloatOutput(
+            floatOutput: Boolean,
+            usbBitPerfect: Boolean,
+            apiLevel: Int,
+        ): Boolean = floatOutput && !(usbBitPerfect && apiLevel >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+
+        fun media3ToAudioFormatEncoding(media3Encoding: Int): Int =
+            when (media3Encoding) {
+                C.ENCODING_PCM_16BIT -> PCM_ENCODING_16BIT
+                C.ENCODING_PCM_24BIT -> PCM_ENCODING_24BIT_PACKED
+                C.ENCODING_PCM_32BIT -> PCM_ENCODING_32BIT
+                C.ENCODING_PCM_FLOAT -> PCM_ENCODING_FLOAT
+                else -> PCM_ENCODING_INVALID
+            }
+
+        private fun integerBitDepthRank(audioFormatEncoding: Int): Int =
+            when (audioFormatEncoding) {
+                PCM_ENCODING_16BIT -> 16
+                PCM_ENCODING_24BIT_PACKED -> 24
+                PCM_ENCODING_32BIT -> 32
+                else -> -1
+            }
+
+        fun isExactBitPerfectMatch(
+            candidate: BitPerfectCandidate,
+            targetSampleRateHz: Int?,
+            actualTrackMedia3Encoding: Int,
+        ): Boolean {
+            val expectedEncoding = media3ToAudioFormatEncoding(actualTrackMedia3Encoding)
+            if (expectedEncoding == PCM_ENCODING_INVALID) return false
+            if (candidate.audioFormatEncoding != expectedEncoding) return false
+            if (targetSampleRateHz != null && targetSampleRateHz > 0 && candidate.sampleRateHz != targetSampleRateHz) {
+                return false
+            }
+            return true
+        }
+
+        fun selectBestBitPerfectCandidate(
+            candidates: List<BitPerfectCandidate>,
+            targetSampleRateHz: Int?,
+            sourceMedia3PcmEncoding: Int,
+            preferIntegerPcm: Boolean = true,
+        ): BitPerfectCandidate? {
+            if (candidates.isEmpty()) return null
+            val sameRate =
+                if (targetSampleRateHz != null && targetSampleRateHz > 0) {
+                    candidates.filter { it.sampleRateHz == targetSampleRateHz }
+                } else {
+                    emptyList()
+                }
+            val ratePool =
+                if (sameRate.isNotEmpty()) {
+                    sameRate
+                } else {
+                    val maxRate = candidates.maxOf { it.sampleRateHz }
+                    candidates.filter { it.sampleRateHz == maxRate }
+                }
+
+            val encodingPool =
+                if (preferIntegerPcm) {
+                    val integerOnly = ratePool.filter { it.audioFormatEncoding != PCM_ENCODING_FLOAT }
+                    integerOnly.ifEmpty { ratePool }
+                } else {
+                    ratePool
+                }
+
+            val desiredEncoding = media3ToAudioFormatEncoding(sourceMedia3PcmEncoding)
+            if (desiredEncoding != PCM_ENCODING_INVALID) {
+                encodingPool.firstOrNull { it.audioFormatEncoding == desiredEncoding }?.let {
+                    return it
+                }
+            }
+
+            val desiredRank = integerBitDepthRank(desiredEncoding)
+            val integerRanked =
+                encodingPool
+                    .map { it to integerBitDepthRank(it.audioFormatEncoding) }
+                    .filter { it.second > 0 }
+            if (integerRanked.isNotEmpty()) {
+                if (desiredRank > 0) {
+                    integerRanked
+                        .filter { it.second >= desiredRank }
+                        .minByOrNull { it.second }
+                        ?.first
+                        ?.let { return it }
+                }
+                return integerRanked.maxByOrNull { it.second }?.first
+            }
+
+            return encodingPool.firstOrNull()
+        }
+    }
 }

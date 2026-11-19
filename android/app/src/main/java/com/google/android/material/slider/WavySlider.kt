@@ -626,7 +626,8 @@ constructor(
     }
 
     private fun shouldTickPhase(): Boolean =
-        shouldDrawWave() &&
+        waveformEnvelope == null &&
+            shouldDrawWave() &&
             waveSpeed != 0 &&
             isVisible &&
             windowVisibility == VISIBLE &&

@@ -6,6 +6,15 @@
             domain="database"
             path="music_cache.db" />
         <exclude
+            domain="database"
+            path="tonewise_sync.db" />
+        <exclude
+            domain="database"
+            path="tonewise_sync.db-wal" />
+        <exclude
+            domain="database"
+            path="tonewise_sync.db-shm" />
+        <exclude
             domain="sharedpref"
             path="tonewise_lastfm.xml" />
     </cloud-backup>
@@ -13,6 +22,15 @@
         <exclude
             domain="database"
             path="music_cache.db" />
+        <exclude
+            domain="database"
+            path="tonewise_sync.db" />
+        <exclude
+            domain="database"
+            path="tonewise_sync.db-wal" />
+        <exclude
+            domain="database"
+            path="tonewise_sync.db-shm" />
         <exclude
             domain="sharedpref"
             path="tonewise_lastfm.xml" />

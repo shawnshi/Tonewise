@@ -54,6 +54,8 @@ public sealed partial class MainWindow : Window
 
     private static readonly SKColor ActiveBarColor = new(0xD9, 0xB3, 0x72);
     private static readonly SKColor InactiveBarColor = new(0x64, 0x74, 0x8B, 0x60);
+    private static readonly SKPaint ActiveBarPaint = new() { Color = ActiveBarColor, IsAntialias = true };
+    private static readonly SKPaint InactiveBarPaint = new() { Color = InactiveBarColor, IsAntialias = true };
 
     public Visibility VisibleWhenBoth(bool a, bool b) => a && b ? Visibility.Visible : Visibility.Collapsed;
 
@@ -188,6 +190,7 @@ public sealed partial class MainWindow : Window
             else if (args.PropertyName is nameof(MainViewModel.PrimaryNavId) or nameof(MainViewModel.SecondarySubTab))
             {
                 SyncNavigationSelection();
+                if (ViewModel.PrimaryNavId == "playlists") SyncPlaylistsListViewSelection();
             }
             else if (args.PropertyName == nameof(MainViewModel.ShowClassicalSidebarSubItems))
             {
@@ -202,6 +205,10 @@ public sealed partial class MainWindow : Window
                 TrackListView.SelectionMode = ViewModel.IsMultiSelectMode
                     ? ListViewSelectionMode.Multiple
                     : ListViewSelectionMode.Extended;
+            }
+            else if (args.PropertyName == nameof(MainViewModel.SelectedPlaylist) && PlaylistsListView is not null)
+            {
+                SyncPlaylistsListViewSelection();
             }
             else if (args.PropertyName == nameof(MainViewModel.IsInspectorOpen))
             {
@@ -267,7 +274,10 @@ public sealed partial class MainWindow : Window
         {
             ViewModel.RefreshProgress();
             SyncSeekSliderFromEngine();
-            WaveformCanvas.Invalidate();
+            if (ViewModel.IsPlaying)
+            {
+                WaveformCanvas.Invalidate();
+            }
         };
         _progressTimer.Start();
 
@@ -315,7 +325,7 @@ public sealed partial class MainWindow : Window
             // Ctrl+Alt+P -> Toggle Play/Pause; Ctrl+Alt+C -> Coding Scene; Ctrl+Alt+M -> Toggle OLED Widget
             _globalHotkeys.TryRegister(1, mod, 0x50, () => DispatcherQueue.TryEnqueue(() => ViewModel.TogglePlayPauseCommand.Execute(null)));
             _globalHotkeys.TryRegister(2, mod, 0x43, () => DispatcherQueue.TryEnqueue(() => ViewModel.ActivateCodingQuickSceneCommand.Execute(null)));
-            _globalHotkeys.TryRegister(3, mod, 0x4D, () => DispatcherQueue.TryEnqueue(() => OnOpenOledWidgetClick(this, new RoutedEventArgs())));
+            _globalHotkeys.TryRegister(3, mod, 0x4D, () => DispatcherQueue.TryEnqueue(ToggleOledWidget));
         }
         catch
         {
@@ -342,8 +352,10 @@ public sealed partial class MainWindow : Window
                     switch (args.Button)
                     {
                         case SystemMediaTransportControlsButton.Play:
+                            if (!ViewModel.IsPlaying) ViewModel.TogglePlayPauseCommand.Execute(null);
+                            break;
                         case SystemMediaTransportControlsButton.Pause:
-                            ViewModel.TogglePlayPauseCommand.Execute(null);
+                            if (ViewModel.IsPlaying) ViewModel.TogglePlayPauseCommand.Execute(null);
                             break;
                         case SystemMediaTransportControlsButton.Next:
                             ViewModel.NextTrackCommand.Execute(null);
@@ -676,6 +688,18 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void ToggleOledWidget()
+    {
+        if (_oledWidget is not null)
+        {
+            _oledWidget.Close();
+            return;
+        }
+        _oledWidget = new DeskClockWidgetWindow(ViewModel);
+        _oledWidget.Closed += (_, _) => _oledWidget = null;
+        _oledWidget.Activate();
+    }
+
     private void OnOpenOledWidgetClick(object sender, RoutedEventArgs e)
     {
         if (_oledWidget is null)
@@ -719,28 +743,122 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void OnSelectPlaylistClick(object sender, RoutedEventArgs e)
+    private bool _syncingPlaylistSelection;
+    private PlaylistSummary? _rightClickedPlaylist;
+
+    private void SyncPlaylistsListViewSelection()
     {
-        if (sender is Button { Tag: string filePath })
+        if (PlaylistsListView is null || PlaylistsListView.SelectionMode != ListViewSelectionMode.Single) return;
+        _syncingPlaylistSelection = true;
+        try
         {
-            var match = ViewModel.Playlists.FirstOrDefault(p =>
-                string.Equals(p.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
-            if (match is not null)
+            PlaylistsListView.SelectedItem = ViewModel.SelectedPlaylist;
+            ViewModel.SelectedPlaylistCount = ViewModel.SelectedPlaylist is not null ? 1 : 0;
+        }
+        finally
+        {
+            _syncingPlaylistSelection = false;
+        }
+    }
+
+    private void OnPlaylistMultiSelectToggleClick(object sender, RoutedEventArgs e)
+    {
+        if (PlaylistsListView is null) return;
+        bool multi = PlaylistMultiSelectToggleButton.IsChecked == true;
+        _syncingPlaylistSelection = true;
+        try
+        {
+            PlaylistsListView.SelectionMode = multi
+                ? ListViewSelectionMode.Multiple
+                : ListViewSelectionMode.Single;
+            if (!multi)
             {
-                ViewModel.SelectPlaylist(match);
+                PlaylistsListView.SelectedItems.Clear();
+                if (ViewModel.SelectedPlaylist is not null)
+                {
+                    PlaylistsListView.SelectedItem = ViewModel.SelectedPlaylist;
+                }
+            }
+            else if (PlaylistsListView.SelectedItems.Count == 0 && ViewModel.SelectedPlaylist is not null)
+            {
+                PlaylistsListView.SelectedItems.Add(ViewModel.SelectedPlaylist);
+            }
+            ViewModel.SelectedPlaylistCount = PlaylistsListView.SelectedItems.Count;
+        }
+        finally
+        {
+            _syncingPlaylistSelection = false;
+        }
+    }
+
+    private void OnSelectAllPlaylistsClick(object sender, RoutedEventArgs e)
+    {
+        if (PlaylistsListView is null || ViewModel.Playlists.Count == 0) return;
+        if (PlaylistsListView.SelectionMode != ListViewSelectionMode.Multiple)
+        {
+            ViewModel.IsPlaylistMultiSelectMode = true;
+            PlaylistsListView.SelectionMode = ListViewSelectionMode.Multiple;
+        }
+        PlaylistsListView.SelectAll();
+    }
+
+    private void OnPlaylistsSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncingPlaylistSelection || PlaylistsListView is null) return;
+        var selected = PlaylistsListView.SelectedItems.OfType<PlaylistSummary>().ToList();
+        ViewModel.SelectedPlaylistCount = selected.Count;
+        if (PlaylistsListView.SelectionMode == ListViewSelectionMode.Single
+            && selected.Count == 1
+            && !ReferenceEquals(selected[0], ViewModel.SelectedPlaylist))
+        {
+            ViewModel.SelectPlaylist(selected[0]);
+        }
+    }
+
+    private void OnPlaylistsRightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if ((e.OriginalSource as FrameworkElement)?.DataContext is PlaylistSummary rightClicked)
+        {
+            _rightClickedPlaylist = rightClicked;
+            if (PlaylistsListView.SelectionMode == ListViewSelectionMode.Single)
+            {
+                if (!ReferenceEquals(PlaylistsListView.SelectedItem, rightClicked))
+                {
+                    PlaylistsListView.SelectedItem = rightClicked;
+                }
+            }
+            else if (!PlaylistsListView.SelectedItems.Contains(rightClicked))
+            {
+                PlaylistsListView.SelectedItems.Add(rightClicked);
             }
         }
     }
 
     private async void OnSendPlaylistToPhoneClick(object sender, RoutedEventArgs e)
     {
-        await ViewModel.SendPlaylistToPhoneAsync(ViewModel.SelectedPlaylist);
+        var selected = PlaylistsListView?.SelectedItems.OfType<PlaylistSummary>().ToList() ?? [];
+        await ViewModel.SendPlaylistsToPhoneAsync(selected);
     }
 
     private async void OnContextSendPlaylistCardToPhoneClick(object sender, RoutedEventArgs e)
     {
-        var pl = (sender as FrameworkElement)?.DataContext as PlaylistSummary ?? ViewModel.SelectedPlaylist;
+        var selected = PlaylistsListView?.SelectedItems.OfType<PlaylistSummary>().ToList() ?? [];
+        if (selected.Count > 1)
+        {
+            _rightClickedPlaylist = null;
+            await ViewModel.SendPlaylistsToPhoneAsync(selected);
+            return;
+        }
+        var pl = _rightClickedPlaylist ?? (sender as FrameworkElement)?.DataContext as PlaylistSummary ?? ViewModel.SelectedPlaylist;
+        _rightClickedPlaylist = null;
         await ViewModel.SendPlaylistToPhoneAsync(pl);
+    }
+
+    private async void OnContextDeletePlaylistCardClick(object sender, RoutedEventArgs e)
+    {
+        var target = _rightClickedPlaylist ?? (sender as FrameworkElement)?.DataContext as PlaylistSummary ?? ViewModel.SelectedPlaylist;
+        _rightClickedPlaylist = null;
+        await DeletePlaylistWithConfirmAsync(target);
     }
 
     private void OnRemoveLanOutboxItemClick(object sender, RoutedEventArgs e)
@@ -808,8 +926,8 @@ public sealed partial class MainWindow : Window
     {
         var urlBox = new TextBox
         {
-            Header = "Playlist / Chart URL (Apple Music / Billboard / Kworb)",
-            PlaceholderText = "https://music.apple.com/... | https://www.billboard.com/charts/... | https://kworb.net/...",
+            Header = "Playlist / Chart URL (Spotify / Apple Music / Billboard / Kworb)",
+            PlaceholderText = "https://open.spotify.com/playlist/... | https://music.apple.com/... | https://www.billboard.com/charts/...",
         };
         var nameBox = new TextBox
         {
@@ -829,6 +947,13 @@ public sealed partial class MainWindow : Window
             PlaceholderText = "Lady Gaga & Bradley Cooper - Shallow\nAdele - Hello\n...",
         };
         ScrollViewer.SetVerticalScrollBarVisibility(textBox, ScrollBarVisibility.Auto);
+
+        var spotifyBtn = new Button { Content = "Spotify All Out 2010s", FontSize = 11, Padding = new Thickness(8, 4, 8, 4) };
+        spotifyBtn.Click += (_, _) =>
+        {
+            urlBox.Text = "https://open.spotify.com/playlist/37i9dQZF1DX5Ejj0EkURtP";
+            textBox.Text = "";
+        };
 
         var appleBtn = new Button { Content = "Apple Music 年度最佳", FontSize = 11, Padding = new Thickness(8, 4, 8, 4) };
         appleBtn.Click += (_, _) =>
@@ -874,6 +999,7 @@ public sealed partial class MainWindow : Window
         };
 
         var presetRow1 = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        presetRow1.Children.Add(spotifyBtn);
         presetRow1.Children.Add(appleBtn);
         presetRow1.Children.Add(bbBtn);
         var presetRow2 = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -1141,7 +1267,11 @@ public sealed partial class MainWindow : Window
 
     private async void OnDeletePlaylistClick(object sender, RoutedEventArgs e)
     {
-        var target = ViewModel.SelectedPlaylist;
+        await DeletePlaylistWithConfirmAsync(ViewModel.SelectedPlaylist);
+    }
+
+    private async Task DeletePlaylistWithConfirmAsync(PlaylistSummary? target)
+    {
         if (target is null)
         {
             ViewModel.StatusMessage = "Select a playlist first to delete.";
@@ -1162,7 +1292,7 @@ public sealed partial class MainWindow : Window
         {
             try
             {
-                ViewModel.DeleteSelectedPlaylist();
+                ViewModel.DeletePlaylist(target);
             }
             catch (Exception ex)
             {
@@ -1176,6 +1306,7 @@ public sealed partial class MainWindow : Window
         var color = ViewModel.SignalPurityColorHex switch
         {
             "#A855F7" => Color.FromArgb(0xFF, 0xA8, 0x55, 0xF7),
+            "#38BDF8" => Color.FromArgb(0xFF, 0x38, 0xBD, 0xF8),
             "#F59E0B" => Color.FromArgb(0xFF, 0xF5, 0x9E, 0x0B),
             _ => Color.FromArgb(0xFF, 0x10, 0xB9, 0x81),
         };
@@ -2166,6 +2297,11 @@ public sealed partial class MainWindow : Window
 
         bool sameTargets = targets.Count == _inlineTargets.Count
             && targets.Select(t => t.TrackUid).SequenceEqual(_inlineTargets.Select(t => t.TrackUid), StringComparer.Ordinal);
+        if (sameTargets && _inlineDirtyCount > 0)
+        {
+            _inlineTargets = targets.ToList();
+            return;
+        }
         if (!sameTargets && _inlineDirtyCount > 0 && _inlineTargets.Count > 0)
         {
             string label = _inlineTargets.Count == 1 ? $"「{_inlineTargets[0].Title}」" : $"{_inlineTargets.Count} 首曲目";
@@ -2960,8 +3096,13 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private bool IsTextInputFocused() =>
+        Content?.XamlRoot is { } xamlRoot
+        && FocusManager.GetFocusedElement(xamlRoot) is TextBox or AutoSuggestBox or PasswordBox or RichEditBox or NumberBox;
+
     private void OnTogglePlayShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (IsTextInputFocused()) return;
         ViewModel.TogglePlayPauseCommand.Execute(null);
         args.Handled = true;
     }
@@ -2974,12 +3115,14 @@ public sealed partial class MainWindow : Window
 
     private void OnPrevTrackShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (IsTextInputFocused()) return;
         ViewModel.PreviousTrackCommand.Execute(null);
         args.Handled = true;
     }
 
     private void OnNextTrackShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (IsTextInputFocused()) return;
         ViewModel.NextTrackCommand.Execute(null);
         args.Handled = true;
     }
@@ -3009,16 +3152,13 @@ public sealed partial class MainWindow : Window
         float centerY = h / 2f;
         float progressX = (float)(ViewModel.PlaybackProgress * w);
 
-        using var activePaint = new SKPaint { Color = ActiveBarColor, IsAntialias = true };
-        using var inactivePaint = new SKPaint { Color = InactiveBarColor, IsAntialias = true };
-
         for (int i = 0; i < count; i++)
         {
             float amp = envelope is not null ? Math.Clamp(envelope[i], 0.05f, 1f) : 0.18f;
             float halfH = Math.Max(2f, amp * (h * 0.44f));
             float cx = (i + 0.5f) * step;
             var rect = new SKRect(cx - barW / 2f, centerY - halfH, cx + barW / 2f, centerY + halfH);
-            canvas.DrawRoundRect(rect, barW / 2f, barW / 2f, cx <= progressX ? activePaint : inactivePaint);
+            canvas.DrawRoundRect(rect, barW / 2f, barW / 2f, cx <= progressX ? ActiveBarPaint : InactiveBarPaint);
         }
     }
 }

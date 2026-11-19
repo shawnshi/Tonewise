@@ -11,6 +11,7 @@ public enum PlaylistSourceKind
     AppleMusic,
     Billboard,
     Kworb,
+    Spotify,
     TextFile,
 }
 
@@ -70,7 +71,11 @@ public sealed record LocalLibraryTrackRef(
     string ArtistsDisplay,
     string Album,
     int DurationMs,
-    int SampleRateHz
+    int SampleRateHz,
+    string ComposersDisplay = "",
+    string ConductorsDisplay = "",
+    string WorkName = "",
+    string MovementName = ""
 );
 
 public static partial class PlaylistImporter
@@ -80,7 +85,8 @@ public static partial class PlaylistImporter
 
     private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".flac", ".mp3", ".wav", ".m4a", ".alac", ".aac", ".ogg", ".opus", ".mp4", ".aiff", ".dsf", ".dff"
+        ".flac", ".mp3", ".wav", ".m4a", ".alac", ".aac", ".ogg", ".opus", ".mp4", ".aiff", ".dsf", ".dff",
+        ".wma", ".ape", ".wv", ".m4b", ".mpc", ".tak"
     };
 
     private static readonly Lazy<HttpClient> SharedClient = new(() =>
@@ -99,25 +105,39 @@ public static partial class PlaylistImporter
         HttpClient? httpClient = null,
         CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)
+        string trimmed = (url ?? "").Trim();
+        var client = httpClient ?? SharedClient.Value;
+
+        if (TryExtractSpotifyPlaylistId(trimmed, out string spotifyId))
+        {
+            var embedUri = new Uri($"https://open.spotify.com/embed/playlist/{spotifyId}");
+            var (embedHtml, _, _) = await FetchHtmlResponseAsync(client, embedUri, ct).ConfigureAwait(false);
+            return ParseSpotifyEmbedHtml(embedHtml, fallbackTitle: spotifyId, maxTracks: maxTracks);
+        }
+
+        if (string.IsNullOrWhiteSpace(trimmed) || !Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
         {
             throw new ArgumentException("Please provide a valid http/https playlist URL.", nameof(url));
         }
 
-        var client = httpClient ?? SharedClient.Value;
-        using var req = new HttpRequestMessage(HttpMethod.Get, uri);
-        req.Headers.TryAddWithoutValidation("User-Agent", BrowserUserAgent);
-        req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-        req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+        var (html, finalUri, mediaType) = await FetchHtmlResponseAsync(client, uri, ct).ConfigureAwait(false);
 
-        using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
-        resp.EnsureSuccessStatusCode();
-        string html = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (!IsSpotifyEmbedUri(finalUri)
+            && TryExtractSpotifyPlaylistId(finalUri.AbsoluteUri, out string redirectedSpotifyId))
+        {
+            var embedUri = new Uri($"https://open.spotify.com/embed/playlist/{redirectedSpotifyId}");
+            var (embedHtml, _, _) = await FetchHtmlResponseAsync(client, embedUri, ct).ConfigureAwait(false);
+            return ParseSpotifyEmbedHtml(embedHtml, fallbackTitle: redirectedSpotifyId, maxTracks: maxTracks);
+        }
 
-        string fallbackTitle = DeriveTitleFromUri(uri);
-        string host = uri.Host;
+        string fallbackTitle = DeriveTitleFromUri(finalUri);
+        string host = finalUri.Host;
 
+        if (host.Contains("open.spotify.com", StringComparison.OrdinalIgnoreCase) && IsSpotifyEmbedUri(finalUri))
+        {
+            return ParseSpotifyEmbedHtml(html, fallbackTitle, maxTracks);
+        }
         if (host.Contains("music.apple.com", StringComparison.OrdinalIgnoreCase))
         {
             return ParseAppleMusicHtml(html, fallbackTitle, maxTracks);
@@ -131,6 +151,11 @@ public static partial class PlaylistImporter
             return ParseKworbHtml(html, fallbackTitle, maxTracks);
         }
 
+        if (html.Contains("__NEXT_DATA__", StringComparison.OrdinalIgnoreCase)
+            && html.Contains("\"trackList\"", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseSpotifyEmbedHtml(html, fallbackTitle, maxTracks);
+        }
         if (html.Contains("serialized-server-data", StringComparison.OrdinalIgnoreCase))
         {
             var apple = ParseAppleMusicHtml(html, fallbackTitle, maxTracks);
@@ -147,7 +172,57 @@ public static partial class PlaylistImporter
             if (kw.Tracks.Count > 0) return kw;
         }
 
+        if (LooksLikeHtmlDocument(mediaType, html))
+        {
+            throw new NotSupportedException(
+                "暂不支持解析该网页链接。当前支持 Spotify、Apple Music、Billboard、Kworb 公开歌单/榜单，或纯文本 / .m3u8 链接。");
+        }
+
         return ParseTextPlaylist(html, fallbackTitle, maxTracks);
+    }
+
+    private static async Task<(string Html, Uri FinalUri, string? MediaType)> FetchHtmlResponseAsync(
+        HttpClient client,
+        Uri uri,
+        CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, uri);
+        req.Headers.TryAddWithoutValidation("User-Agent", BrowserUserAgent);
+        req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+
+        using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+        resp.EnsureSuccessStatusCode();
+        string html = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        Uri finalUri = resp.RequestMessage?.RequestUri ?? uri;
+        string? mediaType = resp.Content.Headers.ContentType?.MediaType;
+        return (html, finalUri, mediaType);
+    }
+
+    private static bool IsSpotifyEmbedUri(Uri uri) =>
+        uri.Host.Contains("open.spotify.com", StringComparison.OrdinalIgnoreCase)
+        && (uri.AbsolutePath.Contains("/embed/", StringComparison.OrdinalIgnoreCase)
+            || uri.AbsolutePath.Contains("/embed-legacy/", StringComparison.OrdinalIgnoreCase));
+
+    private static bool LooksLikeHtmlDocument(string? mediaType, string content)
+    {
+        if (!string.IsNullOrWhiteSpace(mediaType)
+            && (mediaType.Contains("html", StringComparison.OrdinalIgnoreCase)
+                || mediaType.Contains("xhtml", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        string sample = content.TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
+        if (sample.StartsWith("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase)
+            || sample.StartsWith("<html", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return sample.Contains("<head", StringComparison.OrdinalIgnoreCase)
+            || sample.Contains("<body", StringComparison.OrdinalIgnoreCase)
+            || sample.Contains("<script", StringComparison.OrdinalIgnoreCase);
     }
 
     public static ParsedExternalPlaylist ParseAppleMusicHtml(
@@ -259,6 +334,159 @@ public static partial class PlaylistImporter
             PlaylistSourceKind.Kworb,
             seeds
         );
+    }
+
+    public static bool TryExtractSpotifyPlaylistId(string? input, out string playlistId)
+    {
+        playlistId = "";
+        if (string.IsNullOrWhiteSpace(input)) return false;
+        string trimmed = input.Trim();
+
+        var uriMatch = SpotifyUriPlaylistRegex().Match(trimmed);
+        if (uriMatch.Success)
+        {
+            playlistId = uriMatch.Groups["id"].Value;
+            return true;
+        }
+
+        var urlMatch = SpotifyUrlPlaylistRegex().Match(trimmed);
+        if (urlMatch.Success)
+        {
+            playlistId = urlMatch.Groups["id"].Value;
+            return true;
+        }
+
+        return false;
+    }
+
+    public static ParsedExternalPlaylist ParseSpotifyEmbedHtml(
+        string html,
+        string? fallbackTitle = null,
+        int maxTracks = 500)
+    {
+        var match = SpotifyNextDataRegex().Match(html);
+        if (!match.Success)
+        {
+            throw new InvalidOperationException(
+                "未能从 Spotify 歌单页面解析到曲目，请确认歌单为公开状态且链接有效。");
+        }
+
+        string jsonText = WebUtility.HtmlDecode(match.Groups["json"].Value.Trim());
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(jsonText);
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException(
+                "未能从 Spotify 歌单页面解析到曲目，请确认歌单为公开状态且链接有效。",
+                ex);
+        }
+
+        using (doc)
+        {
+            JsonElement root = doc.RootElement;
+            if (!TryGetPropertyPath(root, out JsonElement entity, "props", "pageProps", "state", "data", "entity")
+                || entity.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidOperationException(
+                    "未能从 Spotify 歌单页面解析到曲目，请确认歌单为公开状态且链接有效。");
+            }
+
+            string? rawTitle = GetOptionalStringProperty(entity, "name")
+                ?? GetOptionalStringProperty(entity, "title")
+                ?? ExtractMetaOgTitle(html)
+                ?? ExtractHtmlTitle(html)
+                ?? fallbackTitle;
+            string cleanedTitle = CleanExternalTitle(
+                NormalizeSpotifyText(rawTitle),
+                " | Spotify",
+                " - Spotify");
+
+            var seeds = new List<ImportedTrackSeed>();
+            if (entity.TryGetProperty("trackList", out JsonElement trackList)
+                && trackList.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement item in trackList.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object) continue;
+
+                    string? entityType = GetOptionalStringProperty(item, "entityType");
+                    if (!string.IsNullOrWhiteSpace(entityType)
+                        && !string.Equals(entityType, "track", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    string trackTitle = NormalizeSpotifyText(
+                        GetOptionalStringProperty(item, "title")
+                        ?? GetOptionalStringProperty(item, "name"));
+                    if (string.IsNullOrWhiteSpace(trackTitle)) continue;
+
+                    string artist = NormalizeSpotifyText(GetOptionalStringProperty(item, "subtitle"));
+                    if (string.IsNullOrWhiteSpace(artist)
+                        && item.TryGetProperty("artists", out JsonElement artistsProp)
+                        && artistsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        var artistNames = new List<string>();
+                        foreach (JsonElement artistObj in artistsProp.EnumerateArray())
+                        {
+                            string? an = NormalizeSpotifyText(GetOptionalStringProperty(artistObj, "name"));
+                            if (!string.IsNullOrWhiteSpace(an))
+                            {
+                                artistNames.Add(an);
+                            }
+                        }
+                        artist = string.Join(", ", artistNames);
+                    }
+
+                    seeds.Add(new ImportedTrackSeed(trackTitle, artist));
+                }
+            }
+
+            var deduped = DeduplicateConsecutive(seeds, maxTracks);
+            if (deduped.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "未能从 Spotify 歌单页面解析到曲目，请确认歌单为公开状态且链接有效。");
+            }
+
+            return new ParsedExternalPlaylist(
+                string.IsNullOrWhiteSpace(cleanedTitle) ? "Spotify Playlist" : cleanedTitle,
+                PlaylistSourceKind.Spotify,
+                deduped
+            );
+        }
+    }
+
+    private static bool TryGetPropertyPath(JsonElement current, out JsonElement target, params string[] path)
+    {
+        target = current;
+        foreach (string key in path)
+        {
+            if (target.ValueKind != JsonValueKind.Object || !target.TryGetProperty(key, out JsonElement next))
+            {
+                target = default;
+                return false;
+            }
+            target = next;
+        }
+        return true;
+    }
+
+    private static string? GetOptionalStringProperty(JsonElement obj, string propName) =>
+        obj.ValueKind == JsonValueKind.Object
+        && obj.TryGetProperty(propName, out JsonElement prop)
+        && prop.ValueKind == JsonValueKind.String
+            ? prop.GetString()
+            : null;
+
+    private static string NormalizeSpotifyText(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        string decoded = raw.Replace('\u00A0', ' ');
+        return MultiWhitespaceRegex().Replace(decoded, " ").Trim();
     }
 
     public static ParsedExternalPlaylist ParseTextPlaylist(
@@ -511,7 +739,13 @@ public static partial class PlaylistImporter
     private static bool LooksLikeAudioFilePath(string line)
     {
         string trimmed = line.Trim().Trim('"');
-        if (trimmed.Contains('/') || trimmed.Contains('\\')) return true;
+        if (string.IsNullOrWhiteSpace(trimmed)) return false;
+        if (trimmed.Contains('<') || trimmed.Contains('>')
+            || trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
         string ext = Path.GetExtension(trimmed);
         return !string.IsNullOrEmpty(ext) && AudioExtensions.Contains(ext);
     }
@@ -593,6 +827,15 @@ public static partial class PlaylistImporter
         return Path.GetFileNameWithoutExtension(unescaped).Replace('-', ' ');
     }
 
+    [GeneratedRegex("""^spotify:playlist:(?<id>[A-Za-z0-9]{10,40})(?:[?#].*)?$""", RegexOptions.IgnoreCase)]
+    private static partial Regex SpotifyUriPlaylistRegex();
+
+    [GeneratedRegex("""^https?://open\.spotify\.com/(?:[^/?#\s]+/)*(?:embed(?:-legacy)?/)?playlist/(?<id>[A-Za-z0-9]{10,40})(?:[/?#].*)?$""", RegexOptions.IgnoreCase)]
+    private static partial Regex SpotifyUrlPlaylistRegex();
+
+    [GeneratedRegex("""<script[^>]*id=["']?__NEXT_DATA__["']?[^>]*>(?<json>.*?)</script>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex SpotifyNextDataRegex();
+
     [GeneratedRegex("""<script[^>]*id=["']?serialized-server-data["']?[^>]*>(?<json>.*?)</script>""", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex AppleSerializedDataRegex();
 
@@ -632,16 +875,50 @@ public static partial class PlaylistImporter
 
 public static partial class PlaylistTrackMatcher
 {
-    public static IReadOnlyList<PlaylistEntry> ResolveSeeds(
-        IReadOnlyList<ImportedTrackSeed> seeds,
-        IReadOnlyList<LocalLibraryTrackRef> library,
-        string? musicRoot = null)
+    public sealed class LibraryIndex
+    {
+        internal Dictionary<string, LocalLibraryTrackRef> ByRelPath { get; }
+        internal Dictionary<string, LocalLibraryTrackRef> ByFullPath { get; }
+        internal Dictionary<string, List<LocalLibraryTrackRef>> ByFileName { get; }
+        internal Dictionary<string, List<LocalLibraryTrackRef>> ByTitle { get; }
+        internal Dictionary<string, HashSet<string>> CandidateArtistTokens { get; }
+
+        internal LibraryIndex(
+            Dictionary<string, LocalLibraryTrackRef> byRelPath,
+            Dictionary<string, LocalLibraryTrackRef> byFullPath,
+            Dictionary<string, List<LocalLibraryTrackRef>> byFileName,
+            Dictionary<string, List<LocalLibraryTrackRef>> byTitle,
+            Dictionary<string, HashSet<string>> candidateArtistTokens)
+        {
+            ByRelPath = byRelPath;
+            ByFullPath = byFullPath;
+            ByFileName = byFileName;
+            ByTitle = byTitle;
+            CandidateArtistTokens = candidateArtistTokens;
+        }
+    }
+
+    public static LibraryIndex BuildIndex(IReadOnlyList<LocalLibraryTrackRef> library)
     {
         var byRelPath = new Dictionary<string, LocalLibraryTrackRef>(StringComparer.OrdinalIgnoreCase);
         var byFullPath = new Dictionary<string, LocalLibraryTrackRef>(StringComparer.OrdinalIgnoreCase);
         var byFileName = new Dictionary<string, List<LocalLibraryTrackRef>>(StringComparer.OrdinalIgnoreCase);
         var byTitle = new Dictionary<string, List<LocalLibraryTrackRef>>(StringComparer.Ordinal);
         var candidateArtistTokens = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+
+        static void AddToTitleIndex(Dictionary<string, List<LocalLibraryTrackRef>> indexMap, string key, LocalLibraryTrackRef item)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            if (!indexMap.TryGetValue(key, out var list))
+            {
+                list = [];
+                indexMap[key] = list;
+            }
+            if (!list.Any(existing => string.Equals(existing.TrackUid, item.TrackUid, StringComparison.Ordinal)))
+            {
+                list.Add(item);
+            }
+        }
 
         foreach (var item in library)
         {
@@ -663,19 +940,71 @@ public static partial class PlaylistTrackMatcher
                 }
             }
 
-            string normTitle = NormalizeTitle(item.Title);
-            if (!string.IsNullOrEmpty(normTitle))
+            foreach (string titleKey in NormalizeClassicalTitleVariants(item.Title))
             {
-                if (!byTitle.TryGetValue(normTitle, out var list))
-                {
-                    list = [];
-                    byTitle[normTitle] = list;
-                }
-                list.Add(item);
+                AddToTitleIndex(byTitle, titleKey, item);
             }
 
-            candidateArtistTokens[item.TrackUid] = ExtractArtistTokens(item.ArtistsDisplay);
+            if (!string.IsNullOrWhiteSpace(item.WorkName) && !string.IsNullOrWhiteSpace(item.MovementName))
+            {
+                AddToTitleIndex(byTitle, NormalizeTitle($"{item.WorkName} {item.MovementName}"), item);
+                AddToTitleIndex(byTitle, NormalizeTitle(item.MovementName), item);
+            }
+            else if (!string.IsNullOrWhiteSpace(item.MovementName))
+            {
+                AddToTitleIndex(byTitle, NormalizeTitle(item.MovementName), item);
+            }
+
+            var artistTokens = ExtractArtistTokens(item.ArtistsDisplay);
+            if (!string.IsNullOrWhiteSpace(item.ComposersDisplay))
+            {
+                artistTokens.UnionWith(ExtractArtistTokens(item.ComposersDisplay));
+            }
+            if (!string.IsNullOrWhiteSpace(item.ConductorsDisplay))
+            {
+                artistTokens.UnionWith(ExtractArtistTokens(item.ConductorsDisplay));
+            }
+            candidateArtistTokens[item.TrackUid] = artistTokens;
         }
+
+        return new LibraryIndex(byRelPath, byFullPath, byFileName, byTitle, candidateArtistTokens);
+    }
+
+    public static IReadOnlyList<string> NormalizeClassicalTitleVariants(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return [];
+        var variants = new List<string>(2);
+        string full = NormalizeTitle(raw);
+        if (!string.IsNullOrEmpty(full)) variants.Add(full);
+
+        int colonIdx = raw.IndexOfAny([':', '：']);
+        if (colonIdx > 0 && colonIdx + 1 < raw.Length)
+        {
+            string afterColon = NormalizeTitle(raw[(colonIdx + 1)..]);
+            if (!string.IsNullOrEmpty(afterColon) && !variants.Contains(afterColon, StringComparer.Ordinal))
+            {
+                variants.Add(afterColon);
+            }
+        }
+        return variants;
+    }
+
+    public static IReadOnlyList<PlaylistEntry> ResolveSeeds(
+        IReadOnlyList<ImportedTrackSeed> seeds,
+        IReadOnlyList<LocalLibraryTrackRef> library,
+        string? musicRoot = null) =>
+        ResolveSeeds(seeds, BuildIndex(library), musicRoot);
+
+    public static IReadOnlyList<PlaylistEntry> ResolveSeeds(
+        IReadOnlyList<ImportedTrackSeed> seeds,
+        LibraryIndex index,
+        string? musicRoot = null)
+    {
+        var byRelPath = index.ByRelPath;
+        var byFullPath = index.ByFullPath;
+        var byFileName = index.ByFileName;
+        var byTitle = index.ByTitle;
+        var candidateArtistTokens = index.CandidateArtistTokens;
 
         string? normRoot = !string.IsNullOrWhiteSpace(musicRoot)
             ? musicRoot.Replace('\\', '/').TrimEnd('/') + "/"
@@ -722,8 +1051,20 @@ public static partial class PlaylistTrackMatcher
 
             if (matched is null && !string.IsNullOrWhiteSpace(seed.Title))
             {
-                string normTitle = NormalizeTitle(seed.Title);
-                if (!string.IsNullOrEmpty(normTitle) && byTitle.TryGetValue(normTitle, out var candidates))
+                var candidates = new List<LocalLibraryTrackRef>();
+                var seenCandUids = new HashSet<string>(StringComparer.Ordinal);
+                foreach (string variant in NormalizeClassicalTitleVariants(seed.Title))
+                {
+                    if (byTitle.TryGetValue(variant, out var found))
+                    {
+                        foreach (var c in found)
+                        {
+                            if (seenCandUids.Add(c.TrackUid)) candidates.Add(c);
+                        }
+                    }
+                }
+
+                if (candidates.Count > 0)
                 {
                     if (string.IsNullOrWhiteSpace(seed.Artist))
                     {
@@ -747,7 +1088,8 @@ public static partial class PlaylistTrackMatcher
 
                             if (overlap == 0 && !string.IsNullOrEmpty(seedArtistFlat))
                             {
-                                string candFlat = NormalizeTokenText(cand.ArtistsDisplay);
+                                string combinedCredit = $"{cand.ArtistsDisplay} {cand.ComposersDisplay} {cand.ConductorsDisplay}";
+                                string candFlat = NormalizeTokenText(combinedCredit);
                                 if (!string.IsNullOrEmpty(candFlat)
                                     && (candFlat.Contains(seedArtistFlat, StringComparison.Ordinal)
                                         || seedArtistFlat.Contains(candFlat, StringComparison.Ordinal)))
@@ -767,7 +1109,9 @@ public static partial class PlaylistTrackMatcher
                         {
                             matched = best;
                         }
-                        else if (candidates.Count == 1 && string.IsNullOrWhiteSpace(candidates[0].ArtistsDisplay))
+                        else if (candidates.Count == 1
+                                 && string.IsNullOrWhiteSpace(candidates[0].ArtistsDisplay)
+                                 && string.IsNullOrWhiteSpace(candidates[0].ComposersDisplay))
                         {
                             matched = candidates[0];
                         }
@@ -807,7 +1151,8 @@ public static partial class PlaylistTrackMatcher
     public static string NormalizeTitle(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "";
-        string s = raw.ToLowerInvariant().Trim();
+        string s = raw.Replace('\u00A0', ' ').ToLowerInvariant().Trim();
+        s = DashEditionSuffixRegex().Replace(s, "");
         s = FeaturingParenRegex().Replace(s, " ");
         s = RemasterSuffixRegex().Replace(s, " ");
         s = SingleSuffixRegex().Replace(s, " ");
@@ -819,7 +1164,7 @@ public static partial class PlaylistTrackMatcher
         var tokens = new HashSet<string>(StringComparer.Ordinal);
         if (string.IsNullOrWhiteSpace(raw)) return tokens;
 
-        string normalized = raw.ToLowerInvariant();
+        string normalized = raw.Replace('\u00A0', ' ').ToLowerInvariant();
         string[] parts = ArtistSplitRegex().Split(normalized);
         foreach (string part in parts)
         {
@@ -856,11 +1201,14 @@ public static partial class PlaylistTrackMatcher
     private static string NormalizePathKey(string? path) =>
         string.IsNullOrWhiteSpace(path) ? "" : path.Replace('\\', '/').TrimStart('/');
 
-    [GeneratedRegex("""[\(\[]\s*(?:feat\.?|ft\.?|featuring|from\s+[^\)\]]+)\s*[^\)\]]*[\)\]]""", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("""[\(\[]\s*(?:feat\.?|ft\.?|featuring|with|from\s+[^\)\]]+)(?:\s+[^\)\]]*)?[\)\]]""", RegexOptions.IgnoreCase)]
     private static partial Regex FeaturingParenRegex();
 
     [GeneratedRegex("""[\(\[]\s*[^\)\]]*(?:remaster(?:ed)?|version|radio\s+edit|album\s+version|live|deluxe|mono|stereo)\s*[^\)\]]*[\)\]]""", RegexOptions.IgnoreCase)]
     private static partial Regex RemasterSuffixRegex();
+
+    [GeneratedRegex("""(?:\s+[-–—]\s+(?:(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+version)?|radio\s+edit|album\s+version|single\s+version|single|original\s+mix|live(?:\s+[^\n]*)?|mono|stereo|from\s+[^\n]*|[^\n]*\bsoundtrack\b[^\n]*))+$""", RegexOptions.IgnoreCase)]
+    private static partial Regex DashEditionSuffixRegex();
 
     [GeneratedRegex("""\s+-\s+single\s*$""", RegexOptions.IgnoreCase)]
     private static partial Regex SingleSuffixRegex();
@@ -878,7 +1226,12 @@ public static class PlaylistStore
 
     public static IReadOnlyList<PlaylistSummary> ListPlaylists(
         string? musicRoot,
-        IReadOnlyList<LocalLibraryTrackRef> library)
+        IReadOnlyList<LocalLibraryTrackRef> library) =>
+        ListPlaylists(musicRoot, PlaylistTrackMatcher.BuildIndex(library));
+
+    public static IReadOnlyList<PlaylistSummary> ListPlaylists(
+        string? musicRoot,
+        PlaylistTrackMatcher.LibraryIndex index)
     {
         string dir = GetPlaylistsDirectory(musicRoot);
         if (!Directory.Exists(dir)) return [];
@@ -894,7 +1247,7 @@ public static class PlaylistStore
         {
             try
             {
-                var doc = LoadPlaylist(file, library, musicRoot);
+                var doc = LoadPlaylist(file, index, musicRoot);
                 int matched = doc.Entries.Count(e => e.IsLocalMatched);
                 summaries.Add(new PlaylistSummary(file, doc.Name, file, doc.Entries.Count, matched));
             }
@@ -909,12 +1262,18 @@ public static class PlaylistStore
     public static PlaylistDocument LoadPlaylist(
         string filePath,
         IReadOnlyList<LocalLibraryTrackRef> library,
+        string? musicRoot = null) =>
+        LoadPlaylist(filePath, PlaylistTrackMatcher.BuildIndex(library), musicRoot);
+
+    public static PlaylistDocument LoadPlaylist(
+        string filePath,
+        PlaylistTrackMatcher.LibraryIndex index,
         string? musicRoot = null)
     {
         string text = File.ReadAllText(filePath, Encoding.UTF8);
         string fallbackName = Path.GetFileNameWithoutExtension(filePath);
         var parsed = PlaylistImporter.ParseTextPlaylist(text, fallbackName, maxTracks: 50_000);
-        var resolved = PlaylistTrackMatcher.ResolveSeeds(parsed.Tracks, library, musicRoot);
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(parsed.Tracks, index, musicRoot);
         return new PlaylistDocument(parsed.Title, filePath, resolved);
     }
 
@@ -931,7 +1290,7 @@ public static class PlaylistStore
         string dir = GetPlaylistsDirectory(musicRoot);
         Directory.CreateDirectory(dir);
 
-        string fileName = SanitizeFileName(cleanName) + ".m3u8";
+        string fileName = SanitizePlaylistFileName(cleanName) + ".m3u8";
         string outPath = Path.Combine(dir, fileName);
 
         var sb = new StringBuilder();
@@ -966,7 +1325,23 @@ public static class PlaylistStore
             }
         }
 
-        File.WriteAllText(outPath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        string tmpPath = outPath + ".twtmp." + Guid.NewGuid().ToString("N")[..8];
+        try
+        {
+            File.WriteAllText(tmpPath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Move(tmpPath, outPath, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tmpPath)) File.Delete(tmpPath);
+            }
+            catch
+            {
+                // Ignore temp cleanup failure
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(previousFilePath)
             && !string.Equals(Path.GetFullPath(previousFilePath), Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase)
@@ -986,11 +1361,39 @@ public static class PlaylistStore
         }
     }
 
-    private static string SanitizeFileName(string raw)
+    public static string SanitizePlaylistFileName(string? raw)
     {
+        if (string.IsNullOrWhiteSpace(raw)) return "Untitled";
+        string display = raw.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (string.IsNullOrWhiteSpace(display)) return "Untitled";
+
         var invalid = Path.GetInvalidFileNameChars().ToHashSet();
-        var cleaned = new string(raw.Select(c => invalid.Contains(c) || c == '/' || c == '\\' ? '_' : c).ToArray()).Trim();
-        return string.IsNullOrWhiteSpace(cleaned) ? "Untitled" : cleaned;
+        var sb = new StringBuilder(display.Length);
+        bool prevSpace = false;
+        foreach (char c in display)
+        {
+            if (c == '\t' || c == ' ')
+            {
+                if (!prevSpace && sb.Length > 0)
+                {
+                    sb.Append(' ');
+                    prevSpace = true;
+                }
+            }
+            else if (invalid.Contains(c) || c < 0x20 || c is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|')
+            {
+                sb.Append('_');
+                prevSpace = false;
+            }
+            else
+            {
+                sb.Append(c);
+                prevSpace = false;
+            }
+        }
+
+        string stem = sb.ToString().Trim().TrimEnd('.').Trim();
+        return string.IsNullOrWhiteSpace(stem) || stem is "." or ".." ? "Untitled" : stem;
     }
 
     private static string SanitizeTab(string raw) =>

@@ -79,6 +79,7 @@ import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.sync.FocusFilterSpec
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SceneBanner
+import com.shawnshi.tonewise.sync.SceneRuleEvaluator
 import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.util.showToast
@@ -159,24 +160,20 @@ class SceneListFragment : Fragment() {
                         onMoveDown = { idx -> lanSyncRepository.moveScene(idx, idx + 1) },
                         onLaunchScene = { banner ->
                             scope.launch {
-                                val songs =
+                                val ordered =
                                     withContext(Dispatchers.Default) {
-                                        lanSyncRepository.matchSongsForScene(banner)
+                                        val matched = lanSyncRepository.matchSongsForScene(banner)
+                                        val arc = SceneRuleEvaluator.extractSortArc(banner.rawSceneJson)
+                                        if (arc == "work_shuffle") {
+                                            lanSyncRepository.orderSongsWorkShuffle(matched)
+                                        } else {
+                                            matched
+                                        }
                                     }
-                                if (songs.isNotEmpty()) {
+                                if (ordered.isNotEmpty()) {
                                     sessionSlotStore.setActiveScene(banner.title)
-                                    lanSyncRepository.scheduleM3u8WriteBack(banner.title, songs)
-                                    val bannerArc =
-                                        runCatching {
-                                                JSONObject(banner.rawSceneJson)
-                                                    .optString("sort_arc", "flat")
-                                            }
-                                            .getOrDefault("flat")
-                                    if (bannerArc == "work_shuffle") {
-                                        playbackModel.shuffle(songs)
-                                    } else {
-                                        playbackModel.play(songs)
-                                    }
+                                    lanSyncRepository.scheduleM3u8WriteBack(banner.title, ordered)
+                                    playbackModel.play(ordered)
                                 } else {
                                     requireContext().showToast(R.string.lbl_scene_no_matches)
                                 }

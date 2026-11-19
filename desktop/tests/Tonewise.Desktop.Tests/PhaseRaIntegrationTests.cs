@@ -291,6 +291,10 @@ public sealed class PhaseRaIntegrationTests
                 string json = $"{{\"lovedtracks\":{{\"track\":[{{\"artist\":{{\"name\":\"Miles Davis\"}},\"name\":\"So What\",\"date\":{{\"uts\":\"{cloudPlayedUts}\"}}}}]}}}}";
                 return OkJson(json);
             }
+            if (url.Contains("user.gettoptracks"))
+            {
+                return OkJson("""{"toptracks":{"track":[]}}""");
+            }
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
 

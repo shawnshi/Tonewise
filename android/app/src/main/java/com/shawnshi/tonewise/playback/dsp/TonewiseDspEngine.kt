@@ -36,6 +36,16 @@ import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 
+internal fun softLimitSample(normalized: Double, ceiling: Double): Double {
+    val c = ceiling.coerceIn(0.1, 1.0)
+    val knee = c * 0.85
+    val absX = abs(normalized)
+    if (absX <= knee) return normalized
+    val headroom = c - knee
+    val shaped = knee + headroom * tanh((absX - knee) / headroom)
+    return if (normalized >= 0.0) shaped else -shaped
+}
+
 enum class BiquadType {
     PEAKING,
     LOW_SHELF,
@@ -50,7 +60,14 @@ data class BiquadBand(
     val gainDb: Double,
     val q: Double = 1.41,
     val enabled: Boolean = true,
-)
+    val channelMask: Int = CHANNEL_ALL,
+) {
+    companion object {
+        const val CHANNEL_ALL = 0
+        const val CHANNEL_LEFT = 1
+        const val CHANNEL_RIGHT = 2
+    }
+}
 
 enum class DspPresetId {
     FLAT,
@@ -119,6 +136,7 @@ data class DspChainConfig(
                                 .put("gain_db", b.gainDb)
                                 .put("q", b.q)
                                 .put("enabled", b.enabled)
+                                .put("channel_mask", b.channelMask)
                         )
                     }
                 },
@@ -144,14 +162,17 @@ data class DspChainConfig(
                         preampDb = -4.5,
                         bands =
                             listOf(
-                                BiquadBand(BiquadType.LOW_SHELF, 85.0, 4.5, 0.71, true),
+                                BiquadBand(BiquadType.PEAKING, 31.0, 2.5, 1.0, true),
+                                BiquadBand(BiquadType.LOW_SHELF, 62.0, 4.0, 0.71, true),
+                                BiquadBand(BiquadType.PEAKING, 125.0, 1.0, 1.2, true),
                                 BiquadBand(BiquadType.PEAKING, 250.0, -1.0, 1.2, true),
+                                BiquadBand(BiquadType.PEAKING, 500.0, 0.0, 1.41, true),
+                                BiquadBand(BiquadType.PEAKING, 1000.0, 0.0, 1.41, true),
                                 BiquadBand(BiquadType.PEAKING, 2000.0, 1.0, 1.4, true),
+                                BiquadBand(BiquadType.PEAKING, 4000.0, 0.5, 1.41, true),
                                 BiquadBand(BiquadType.HIGH_SHELF, 8000.0, 1.5, 0.71, true),
-                            ) +
-                                listOf(31.0, 62.0, 500.0, 1000.0, 4000.0, 16000.0).map {
-                                    BiquadBand(BiquadType.PEAKING, it, 0.0, 1.41, true)
-                                },
+                                BiquadBand(BiquadType.PEAKING, 16000.0, 0.5, 1.41, true),
+                            ),
                         limiterEnabled = true,
                     )
                 DspPresetId.FOCUS_NIGHT ->
@@ -161,12 +182,17 @@ data class DspChainConfig(
                         preampDb = -1.5,
                         bands =
                             listOf(
-                                BiquadBand(BiquadType.LOW_SHELF, 85.0, 1.5, 0.71, true),
-                                BiquadBand(BiquadType.HIGH_SHELF, 6000.0, -2.5, 0.71, true),
-                            ) +
-                                listOf(31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0).map {
-                                    BiquadBand(BiquadType.PEAKING, it, 0.0, 1.41, true)
-                                },
+                                BiquadBand(BiquadType.PEAKING, 31.0, 0.0, 1.41, true),
+                                BiquadBand(BiquadType.LOW_SHELF, 62.0, 1.5, 0.71, true),
+                                BiquadBand(BiquadType.PEAKING, 125.0, 0.0, 1.41, true),
+                                BiquadBand(BiquadType.PEAKING, 250.0, 0.0, 1.41, true),
+                                BiquadBand(BiquadType.PEAKING, 500.0, 0.0, 1.41, true),
+                                BiquadBand(BiquadType.PEAKING, 1000.0, 0.0, 1.41, true),
+                                BiquadBand(BiquadType.PEAKING, 2000.0, 0.0, 1.41, true),
+                                BiquadBand(BiquadType.PEAKING, 4000.0, -1.0, 1.41, true),
+                                BiquadBand(BiquadType.HIGH_SHELF, 8000.0, -2.5, 0.71, true),
+                                BiquadBand(BiquadType.PEAKING, 16000.0, -3.0, 1.41, true),
+                            ),
                         crossfeedEnabled = true,
                         crossfeedCutoffHz = 700.0,
                         crossfeedFeedDb = 4.5,
@@ -201,6 +227,7 @@ data class DspChainConfig(
                             gainDb = b.optDouble("gain_db", 0.0),
                             q = b.optDouble("q", 1.41),
                             enabled = b.optBoolean("enabled", true),
+                            channelMask = b.optInt("channel_mask", BiquadBand.CHANNEL_ALL),
                         )
                     }
                 } else {
@@ -239,15 +266,21 @@ interface DspConfigSource {
  * RBJ Audio EQ Cookbook and desktop `BiquadFilter64`.
  */
 class BiquadFilter64(band: BiquadBand, sampleRateHz: Int, channels: Int) {
-    private val b0: Double
-    private val b1: Double
-    private val b2: Double
-    private val a1: Double
-    private val a2: Double
+    private var channelMask: Int = band.channelMask
+    private var b0: Double = 1.0
+    private var b1: Double = 0.0
+    private var b2: Double = 0.0
+    private var a1: Double = 0.0
+    private var a2: Double = 0.0
     private val z1 = DoubleArray(max(channels, 1))
     private val z2 = DoubleArray(max(channels, 1))
 
     init {
+        updateCoefficients(band, sampleRateHz)
+    }
+
+    fun updateCoefficients(band: BiquadBand, sampleRateHz: Int) {
+        channelMask = band.channelMask
         val fs = max(sampleRateHz, 8000).toDouble()
         val fc = band.freqHz.coerceIn(10.0, fs * 0.49)
         val w0 = 2.0 * PI * fc / fs
@@ -317,6 +350,11 @@ class BiquadFilter64(band: BiquadBand, sampleRateHz: Int, channels: Int) {
     }
 
     fun processSample(x: Double, channel: Int): Double {
+        if ((channelMask == BiquadBand.CHANNEL_LEFT && channel != 0) ||
+            (channelMask == BiquadBand.CHANNEL_RIGHT && channel != 1)
+        ) {
+            return x
+        }
         val y = b0 * x + z1[channel]
         z1[channel] = b1 * x - a1 * y + z2[channel]
         z2[channel] = b2 * x - a2 * y
@@ -357,7 +395,16 @@ class TonewiseDspEngine {
     private var config: DspChainConfig = DspChainConfig()
 
     private var filters: List<BiquadFilter64> = emptyList()
+    private var prevFilterSampleRateHz: Int = -1
+    private var prevFilterChannels: Int = -1
     private var frameWork = DoubleArray(2)
+    private var cachedRmsShiftDb: Double = 0.0
+    private var cachedMaxPositiveBoostDb: Double = 0.0
+    private var cachedLeftGain: Double = 1.0
+    private var cachedRightGain: Double = 1.0
+    private var cachedRunBalancePhase: Boolean = false
+    private var lastStage1ReplayGainDb: Double = Double.NaN
+    private var cachedStage1LinearGain: Double = 1.0
 
     // Stage 3: Bauer Crossfeed states (stereo only)
     private var crossLpL = 0.0
@@ -366,15 +413,22 @@ class TonewiseDspEngine {
     private var crossDirectGain = 1.0
     private var crossFeedGain = 0.0
     private var crossDelaySamples = 12
+    private var prevCrossDelaySamples = -1
     private var crossDelayBufL = DoubleArray(64)
     private var crossDelayBufR = DoubleArray(64)
     private var crossDelayPos = 0
 
     // Stage 5: 3ms Lookahead Limiter states
     private var limiterDelaySamples = 144
+    private var prevLimiterDelaySamples = -1
+    private var prevLimiterChannels = -1
     private var limiterDelayBuf = Array(2) { DoubleArray(160) }
+    private var limiterPeakRing = DoubleArray(160)
+    private var limiterRunningMax = 0.0
     private var limiterDelayPos = 0
+    private var limiterBufferedFrames = 0
     private var limiterEnvelope = 1.0
+    private var limiterAttackCoeff = 0.98
     private var limiterReleaseCoeff = 0.999
     private var limiterCeiling = 10.0.pow(-0.2 / 20.0)
 
@@ -401,15 +455,23 @@ class TonewiseDspEngine {
     }
 
     fun computeStage1LinearGain(replayGainDb: Double): Double {
-        if (!config.enabled || config.externalBridgeMode) {
-            return 10.0.pow(replayGainDb / 20.0)
+        if (replayGainDb == lastStage1ReplayGainDb) {
+            return cachedStage1LinearGain
         }
-        if (config.gainMatchedBypass) {
-            val eqRmsShiftDb = estimateRmsLoudnessShiftDb(config, sampleRateHz)
-            return 10.0.pow((replayGainDb + eqRmsShiftDb).coerceIn(-24.0, 12.0) / 20.0)
-        }
-        val effectiveDb = computeEffectivePreampDb(config, replayGainDb)
-        return 10.0.pow(effectiveDb.coerceIn(-24.0, 12.0) / 20.0)
+        val gain =
+            when {
+                !config.enabled || config.externalBridgeMode -> 10.0.pow(replayGainDb / 20.0)
+                config.gainMatchedBypass ->
+                    10.0.pow((replayGainDb + cachedRmsShiftDb).coerceIn(-24.0, 12.0) / 20.0)
+                else -> {
+                    val effectiveDb =
+                        min(replayGainDb - cachedMaxPositiveBoostDb, replayGainDb + config.preampDb)
+                    10.0.pow(effectiveDb.coerceIn(-24.0, 12.0) / 20.0)
+                }
+            }
+        lastStage1ReplayGainDb = replayGainDb
+        cachedStage1LinearGain = gain
+        return gain
     }
 
     fun processInterleaved(samples: DoubleArray, frameCount: Int, replayGainDb: Double) {
@@ -420,19 +482,9 @@ class TonewiseDspEngine {
 
         val runFilters = activeInternal && filters.isNotEmpty()
         val runCrossfeed = activeInternal && config.crossfeedEnabled && chCount == 2
-        val balanceDb = config.balanceDb.coerceIn(-6.0, 6.0)
-        val leftGain =
-            (if (activeInternal && balanceDb > 0.0) 10.0.pow(-balanceDb / 20.0) else 1.0) *
-                (if (activeInternal && config.invertLeftPhase) -1.0 else 1.0)
-        val rightGain =
-            (if (activeInternal && balanceDb < 0.0) 10.0.pow(balanceDb / 20.0) else 1.0) *
-                (if (activeInternal && config.invertRightPhase) -1.0 else 1.0)
-        val runBalancePhase =
-            activeInternal &&
-                (abs(balanceDb) > 1e-4 ||
-                    config.invertLeftPhase ||
-                    config.invertRightPhase ||
-                    config.monoFold)
+        val leftGain = if (activeInternal) cachedLeftGain else 1.0
+        val rightGain = if (activeInternal) cachedRightGain else 1.0
+        val runBalancePhase = activeInternal && cachedRunBalancePhase
         val runLimiter =
             config.limiterEnabled && (!config.externalBridgeMode || config.enabled || abs(replayGainDb) > 1e-4)
 
@@ -485,7 +537,7 @@ class TonewiseDspEngine {
                 }
             }
 
-            // Stage 5: 3ms Lookahead Soft-Knee Limiter (-0.2 dBFS default)
+            // Stage 5: 3ms Sliding-Window Lookahead Soft-Knee Limiter (-0.2 dBFS default)
             if (runLimiter) {
                 var futurePeak = 0.0
                 for (c in 0 until chCount) {
@@ -495,29 +547,50 @@ class TonewiseDspEngine {
                     futurePeak = max(futurePeak, abs(sample))
                     frameWork[c] = delayed
                 }
+                val evicted = limiterPeakRing[limiterDelayPos]
+                limiterPeakRing[limiterDelayPos] = futurePeak
                 limiterDelayPos = (limiterDelayPos + 1) % limiterDelaySamples
-
-                var instantPeak = futurePeak
-                for (c in 0 until chCount) {
-                    instantPeak = max(instantPeak, abs(frameWork[c]))
+                if (limiterBufferedFrames < limiterDelaySamples) {
+                    limiterBufferedFrames++
                 }
+
+                val windowPeak =
+                    if (futurePeak >= limiterRunningMax) {
+                        limiterRunningMax = futurePeak
+                        futurePeak
+                    } else if (evicted >= limiterRunningMax - 1e-12) {
+                        var m = 0.0
+                        for (k in 0 until limiterDelaySamples) {
+                            if (limiterPeakRing[k] > m) m = limiterPeakRing[k]
+                        }
+                        limiterRunningMax = m
+                        m
+                    } else {
+                        limiterRunningMax
+                    }
+
+                var delayedPeak = 0.0
+                for (c in 0 until chCount) {
+                    delayedPeak = max(delayedPeak, abs(frameWork[c]))
+                }
+                val maxPeak = max(windowPeak, delayedPeak)
                 val targetGain =
-                    if (instantPeak > limiterCeiling) limiterCeiling / instantPeak else 1.0
+                    if (maxPeak > limiterCeiling) limiterCeiling / maxPeak else 1.0
                 limiterEnvelope =
                     if (targetGain < limiterEnvelope) {
-                        targetGain
+                        limiterEnvelope * limiterAttackCoeff +
+                            targetGain * (1.0 - limiterAttackCoeff)
                     } else {
                         limiterEnvelope * limiterReleaseCoeff +
                             targetGain * (1.0 - limiterReleaseCoeff)
                     }
+                if (delayedPeak > limiterCeiling) {
+                    val safeGain = limiterCeiling / delayedPeak
+                    if (limiterEnvelope > safeGain) limiterEnvelope = safeGain
+                }
                 for (c in 0 until chCount) {
                     val limited = frameWork[c] * limiterEnvelope
-                    samples[base + c] =
-                        if (abs(limited) > limiterCeiling) {
-                            limiterCeiling * tanh(limited / limiterCeiling)
-                        } else {
-                            limited
-                        }
+                    samples[base + c] = softLimitSample(limited, limiterCeiling)
                 }
             } else {
                 for (c in 0 until chCount) {
@@ -525,6 +598,50 @@ class TonewiseDspEngine {
                 }
             }
         }
+    }
+
+    fun pendingLimiterFrames(): Int = limiterBufferedFrames
+
+    fun drainLimiterTail(outSamples: DoubleArray): Int {
+        val framesToDrain = limiterBufferedFrames
+        if (framesToDrain <= 0) return 0
+        val chCount = channels
+        val maxCapFrames = outSamples.size / max(chCount, 1)
+        val count = min(framesToDrain, maxCapFrames)
+        for (frame in 0 until count) {
+            val base = frame * chCount
+            var delayedPeak = 0.0
+            for (c in 0 until chCount) {
+                val delayed = limiterDelayBuf[c][limiterDelayPos]
+                limiterDelayBuf[c][limiterDelayPos] = 0.0
+                delayedPeak = max(delayedPeak, abs(delayed))
+                frameWork[c] = delayed
+            }
+            limiterPeakRing[limiterDelayPos] = 0.0
+            limiterDelayPos = (limiterDelayPos + 1) % limiterDelaySamples
+            var windowPeak = 0.0
+            for (k in 0 until limiterDelaySamples) {
+                if (limiterPeakRing[k] > windowPeak) windowPeak = limiterPeakRing[k]
+            }
+            limiterRunningMax = windowPeak
+            val maxPeak = max(windowPeak, delayedPeak)
+            val targetGain = if (maxPeak > limiterCeiling) limiterCeiling / maxPeak else 1.0
+            limiterEnvelope =
+                if (targetGain < limiterEnvelope) {
+                    limiterEnvelope * limiterAttackCoeff + targetGain * (1.0 - limiterAttackCoeff)
+                } else {
+                    limiterEnvelope * limiterReleaseCoeff + targetGain * (1.0 - limiterReleaseCoeff)
+                }
+            if (delayedPeak > limiterCeiling) {
+                val safeGain = limiterCeiling / delayedPeak
+                if (limiterEnvelope > safeGain) limiterEnvelope = safeGain
+            }
+            for (c in 0 until chCount) {
+                outSamples[base + c] = softLimitSample(frameWork[c] * limiterEnvelope, limiterCeiling)
+            }
+        }
+        limiterBufferedFrames -= count
+        return count
     }
 
     fun resetState() {
@@ -535,12 +652,15 @@ class TonewiseDspEngine {
         crossDelayBufR.fill(0.0)
         crossDelayPos = 0
         for (buf in limiterDelayBuf) buf.fill(0.0)
+        limiterPeakRing.fill(0.0)
+        limiterRunningMax = 0.0
         limiterDelayPos = 0
+        limiterBufferedFrames = 0
         limiterEnvelope = 1.0
     }
 
     private fun rebuildStages() {
-        filters =
+        val targetBands =
             config.bands
                 .asSequence()
                 .filter {
@@ -550,8 +670,19 @@ class TonewiseDspEngine {
                             it.type == BiquadType.HIGH_PASS)
                 }
                 .take(64)
-                .map { BiquadFilter64(it, sampleRateHz, channels) }
                 .toList()
+        if (targetBands.size == filters.size &&
+            prevFilterSampleRateHz == sampleRateHz &&
+            prevFilterChannels == channels
+        ) {
+            for (i in targetBands.indices) {
+                filters[i].updateCoefficients(targetBands[i], sampleRateHz)
+            }
+        } else {
+            filters = targetBands.map { BiquadFilter64(it, sampleRateHz, channels) }
+            prevFilterSampleRateHz = sampleRateHz
+            prevFilterChannels = channels
+        }
 
         val cutoff = config.crossfeedCutoffHz.coerceIn(450.0, 950.0)
         crossAlphaLp = (1.0 - exp(-2.0 * PI * cutoff / sampleRateHz)).coerceIn(0.001, 0.999)
@@ -560,23 +691,77 @@ class TonewiseDspEngine {
         val norm = 1.0 / sqrt(1.0 + rawFeed * rawFeed)
         crossDirectGain = norm
         crossFeedGain = rawFeed * norm
-        crossDelaySamples =
+        val newCrossDelaySamples =
             ((config.crossfeedDelayMs.coerceIn(0.15, 0.45) / 1000.0) * sampleRateHz)
                 .roundToInt()
-                .coerceIn(1, 128)
+                .coerceIn(1, 256)
+        crossDelaySamples = newCrossDelaySamples
         if (crossDelayBufL.size < crossDelaySamples) {
             crossDelayBufL = DoubleArray(crossDelaySamples)
             crossDelayBufR = DoubleArray(crossDelaySamples)
+            crossDelayPos = 0
+            crossLpL = 0.0
+            crossLpR = 0.0
+        } else if (prevCrossDelaySamples != newCrossDelaySamples) {
+            crossDelayBufL.fill(0.0)
+            crossDelayBufR.fill(0.0)
+            crossDelayPos = 0
+            crossLpL = 0.0
+            crossLpR = 0.0
         }
-        crossDelayPos = 0
+        prevCrossDelaySamples = newCrossDelaySamples
 
-        limiterDelaySamples = ((0.003) * sampleRateHz).roundToInt().coerceIn(8, 1024)
+        val newLimiterDelaySamples = ((0.003) * sampleRateHz).roundToInt().coerceIn(8, 2048)
+        limiterDelaySamples = newLimiterDelaySamples
         if (limiterDelayBuf.size != channels || limiterDelayBuf[0].size < limiterDelaySamples) {
             limiterDelayBuf = Array(channels) { DoubleArray(limiterDelaySamples) }
+            limiterPeakRing = DoubleArray(limiterDelaySamples)
+            limiterRunningMax = 0.0
+            limiterDelayPos = 0
+            limiterBufferedFrames = 0
+            limiterEnvelope = 1.0
+        } else if (prevLimiterDelaySamples != newLimiterDelaySamples || prevLimiterChannels != channels) {
+            for (buf in limiterDelayBuf) buf.fill(0.0)
+            limiterPeakRing.fill(0.0)
+            limiterRunningMax = 0.0
+            limiterDelayPos = 0
+            limiterBufferedFrames = 0
+            limiterEnvelope = 1.0
         }
-        limiterDelayPos = 0
+        prevLimiterDelaySamples = newLimiterDelaySamples
+        prevLimiterChannels = channels
+        limiterAttackCoeff = exp(-ln(20.0) / max(limiterDelaySamples, 1))
         limiterReleaseCoeff = exp(-1.0 / (0.08 * sampleRateHz))
         limiterCeiling = 10.0.pow(config.limiterCeilingDb.coerceIn(-3.0, -0.05) / 20.0)
+
+        cachedMaxPositiveBoostDb =
+            config.bands
+                .asSequence()
+                .filter {
+                    it.enabled &&
+                        it.type != BiquadType.LOW_PASS &&
+                        it.type != BiquadType.HIGH_PASS
+                }
+                .maxOfOrNull { max(0.0, it.gainDb) } ?: 0.0
+        cachedRmsShiftDb =
+            if (config.gainMatchedBypass) {
+                estimateRmsLoudnessShiftDb(config, sampleRateHz)
+            } else {
+                0.0
+            }
+        val balanceDb = config.balanceDb.coerceIn(-6.0, 6.0)
+        cachedLeftGain =
+            (if (balanceDb > 0.0) 10.0.pow(-balanceDb / 20.0) else 1.0) *
+                (if (config.invertLeftPhase) -1.0 else 1.0)
+        cachedRightGain =
+            (if (balanceDb < 0.0) 10.0.pow(balanceDb / 20.0) else 1.0) *
+                (if (config.invertRightPhase) -1.0 else 1.0)
+        cachedRunBalancePhase =
+            abs(balanceDb) > 1e-4 ||
+                config.invertLeftPhase ||
+                config.invertRightPhase ||
+                config.monoFold
+        lastStage1ReplayGainDb = Double.NaN
     }
 
     companion object {
@@ -597,9 +782,16 @@ class TonewiseDspEngine {
         fun estimateRmsLoudnessShiftDb(config: DspChainConfig, sampleRateHz: Int = 48000): Double {
             val activeFilters =
                 config.bands
-                    .filter { it.enabled && abs(it.gainDb) > 1e-4 }
+                    .filter {
+                        it.enabled &&
+                            (abs(it.gainDb) > 1e-4 ||
+                                it.type == BiquadType.LOW_PASS ||
+                                it.type == BiquadType.HIGH_PASS)
+                    }
                     .map { BiquadFilter64(it, sampleRateHz, 1) }
-            if (activeFilters.isEmpty()) return config.preampDb.coerceIn(-15.0, 6.0)
+            if (activeFilters.isEmpty()) {
+                return computeEffectivePreampDb(config, 0.0).coerceIn(-15.0, 6.0)
+            }
             // Log-spaced 24-point perceptual power average from 40 Hz to 14 kHz
             val steps = 24
             val fMin = ln(40.0)
@@ -620,11 +812,29 @@ class TonewiseDspEngine {
 
         fun parseEqualizerApo(text: String): DspChainConfig {
             var preampDb = 0.0
+            var currentChannelMask = BiquadBand.CHANNEL_ALL
             val parsedBands = mutableListOf<BiquadBand>()
             for (rawLine in text.lines()) {
                 val line = rawLine.trim().trimStart('\uFEFF')
                 if (line.isEmpty() || line.startsWith('#')) continue
-                if (line.startsWith("Preamp:", ignoreCase = true)) {
+                if (line.startsWith("Channel:", ignoreCase = true)) {
+                    val chTokens =
+                        line.substringAfter(':')
+                            .trim()
+                            .uppercase()
+                            .split(Regex("[\\s,]+"))
+                            .filter { it.isNotEmpty() }
+                    val hasAll = chTokens.any { it == "ALL" }
+                    val hasLeft = chTokens.any { it == "L" || it == "FL" || it == "LEFT" || it == "1" }
+                    val hasRight = chTokens.any { it == "R" || it == "FR" || it == "RIGHT" || it == "2" }
+                    currentChannelMask =
+                        when {
+                            hasAll || (hasLeft && hasRight) -> BiquadBand.CHANNEL_ALL
+                            hasLeft -> BiquadBand.CHANNEL_LEFT
+                            hasRight -> BiquadBand.CHANNEL_RIGHT
+                            else -> BiquadBand.CHANNEL_ALL
+                        }
+                } else if (line.startsWith("Preamp:", ignoreCase = true)) {
                     val value =
                         line.substringAfter(':')
                             .replace("dB", "", ignoreCase = true)
@@ -633,8 +843,11 @@ class TonewiseDspEngine {
                     if (value != null && value.isFinite()) {
                         preampDb = value.coerceIn(-20.0, 12.0)
                     }
-                } else if (line.startsWith("Filter:", ignoreCase = true)) {
-                    val tokens = line.substringAfter(':').trim().split(Regex("\\s+"))
+                } else {
+                    val filterPayload =
+                        APO_FILTER_LINE_REGEX.matchEntire(line)?.groupValues?.getOrNull(1)
+                            ?: continue
+                    val tokens = filterPayload.trim().split(Regex("\\s+"))
                     if (tokens.size < 4 || !tokens[0].equals("ON", ignoreCase = true)) continue
                     val kind =
                         when (tokens[1].uppercase()) {
@@ -678,6 +891,7 @@ class TonewiseDspEngine {
                                 gainDb = gain.coerceIn(-12.0, 12.0),
                                 q = q.coerceIn(0.1, 20.0),
                                 enabled = true,
+                                channelMask = currentChannelMask,
                             )
                         )
                     }
@@ -691,5 +905,8 @@ class TonewiseDspEngine {
                 limiterEnabled = true,
             )
         }
+
+        private val APO_FILTER_LINE_REGEX =
+            Regex("^Filter(?:\\s+\\d+)?:\\s*(.*)$", RegexOption.IGNORE_CASE)
     }
 }

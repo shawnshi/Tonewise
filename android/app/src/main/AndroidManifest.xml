@@ -21,7 +21,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
-    <queries />
+    <queries>
+        <package android:name="com.dolby.daxservice" />
+        <package android:name="com.dolby.daxappui" />
+        <package android:name="com.miui.misound" />
+    </queries>
 
     <application
         android:name=".Auxio"
@@ -98,6 +102,22 @@
             tools:ignore="ExportedService">
             <intent-filter>
                 <action android:name="android.media.browse.MediaBrowserService"/>
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".sync.LanSyncForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".playback.ui.clock.TonewiseDreamService"
+            android:exported="true"
+            android:label="@string/lbl_desk_clock"
+            android:permission="android.permission.BIND_DREAM_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.dreams.DreamService" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </service>
 

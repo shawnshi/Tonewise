@@ -19,8 +19,15 @@
 package com.shawnshi.tonewise.home
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.concurrent.Executors
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.home.tabs.Tab
 import com.shawnshi.tonewise.list.ListSettings
 import com.shawnshi.tonewise.list.adapter.UpdateInstructions
@@ -138,11 +145,76 @@ private class HomeGeneratorImpl(
     private val listSettings: ListSettings,
     private val musicRepository: MusicRepository,
 ) : HomeGenerator, HomeSettings.Listener, ListSettings.Listener, MusicRepository.UpdateListener {
-    private val syncKvDao by lazy { TonewiseSyncDatabase.getInstance(context).syncKvDao() }
+    private val syncDb by lazy { TonewiseSyncDatabase.getInstance(context) }
+    private val syncKvDao by lazy { syncDb.syncKvDao() }
+    private val dbDispatcher =
+        Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "Tonewise-HomeOrderDb").apply { isDaemon = true }
+            }
+            .asCoroutineDispatcher()
+    private val ioScope = CoroutineScope(SupervisorJob() + dbDispatcher)
+    private val mainHandler by lazy {
+        runCatching { Looper.getMainLooper() }.getOrNull()?.let { Handler(it) }
+    }
+    private val orderLock = Any()
+    @Volatile private var ordersLoaded = false
+    @Volatile private var preloadScheduled = false
+    @Volatile private var composerOrderDirty = false
+    @Volatile private var conductorOrderDirty = false
+    @Volatile private var cachedComposerOrder: List<String> = emptyList()
+    @Volatile private var cachedConductorOrder: List<String> = emptyList()
+
     override fun attach() {
         homeSettings.registerListener(this)
         listSettings.registerListener(this)
         musicRepository.addUpdateListener(this)
+        preloadOrdersAsync()
+    }
+
+    private fun isMainThread(): Boolean {
+        val mainLooper = runCatching { Looper.getMainLooper() }.getOrNull() ?: return false
+        return mainLooper.thread === Thread.currentThread()
+    }
+
+    private fun preloadOrdersAsync() {
+        if (ordersLoaded || preloadScheduled) return
+        preloadScheduled = true
+        ioScope.launch { ensureOrdersLoadedOnBackground() }
+    }
+
+    private fun ensureOrdersLoadedOnBackground() {
+        if (ordersLoaded || isMainThread()) return
+        var composersChanged = false
+        var conductorsChanged = false
+        synchronized(orderLock) {
+            if (ordersLoaded) return
+            syncDb.ensureLegacyMigrated(context)
+            val composerUids =
+                PersonOrderHelper.decodeUids(syncKvDao.getValue(PersonOrderHelper.KEY_COMPOSER_ORDER))
+            val conductorUids =
+                PersonOrderHelper.decodeUids(syncKvDao.getValue(PersonOrderHelper.KEY_CONDUCTOR_ORDER))
+            if (!composerOrderDirty && composerUids != cachedComposerOrder) {
+                cachedComposerOrder = composerUids
+                composersChanged = composerUids.isNotEmpty()
+            }
+            if (!conductorOrderDirty && conductorUids != cachedConductorOrder) {
+                cachedConductorOrder = conductorUids
+                conductorsChanged = conductorUids.isNotEmpty()
+            }
+            ordersLoaded = true
+        }
+        if (composersChanged || conductorsChanged) {
+            val notify = Runnable {
+                if (composersChanged) {
+                    invalidator.invalidateMusic(MusicType.COMPOSERS, UpdateInstructions.Diff)
+                }
+                if (conductorsChanged) {
+                    invalidator.invalidateMusic(MusicType.CONDUCTORS, UpdateInstructions.Diff)
+                }
+            }
+            val handler = mainHandler
+            if (handler != null) handler.post(notify) else notify.run()
+        }
     }
 
     override fun onTabsChanged() {
@@ -253,30 +325,66 @@ private class HomeGeneratorImpl(
             PersonOrderHelper.KEY_CONDUCTOR_ORDER,
         )
 
-    override fun hasCustomComposerOrder(): Boolean =
-        PersonOrderHelper.decodeUids(syncKvDao.getValue(PersonOrderHelper.KEY_COMPOSER_ORDER))
-            .isNotEmpty()
+    override fun hasCustomComposerOrder(): Boolean {
+        if (!ordersLoaded) {
+            if (isMainThread()) preloadOrdersAsync() else ensureOrdersLoadedOnBackground()
+        }
+        return cachedComposerOrder.isNotEmpty()
+    }
 
-    override fun hasCustomConductorOrder(): Boolean =
-        PersonOrderHelper.decodeUids(syncKvDao.getValue(PersonOrderHelper.KEY_CONDUCTOR_ORDER))
-            .isNotEmpty()
+    override fun hasCustomConductorOrder(): Boolean {
+        if (!ordersLoaded) {
+            if (isMainThread()) preloadOrdersAsync() else ensureOrdersLoadedOnBackground()
+        }
+        return cachedConductorOrder.isNotEmpty()
+    }
 
     override fun saveComposerOrder(items: List<Artist>) {
-        val encoded = PersonOrderHelper.encodeUids(items.map { it.uid.toString() })
-        syncKvDao.putValue(SyncKvEntity(PersonOrderHelper.KEY_COMPOSER_ORDER, encoded))
+        val uids = items.map { it.uid.toString() }
+        synchronized(orderLock) {
+            composerOrderDirty = true
+            cachedComposerOrder = uids
+        }
+        val encoded = PersonOrderHelper.encodeUids(uids)
+        ioScope.launch {
+            syncDb.ensureLegacyMigrated(context)
+            syncKvDao.putValue(SyncKvEntity(PersonOrderHelper.KEY_COMPOSER_ORDER, encoded))
+        }
     }
 
     override fun saveConductorOrder(items: List<Artist>) {
-        val encoded = PersonOrderHelper.encodeUids(items.map { it.uid.toString() })
-        syncKvDao.putValue(SyncKvEntity(PersonOrderHelper.KEY_CONDUCTOR_ORDER, encoded))
+        val uids = items.map { it.uid.toString() }
+        synchronized(orderLock) {
+            conductorOrderDirty = true
+            cachedConductorOrder = uids
+        }
+        val encoded = PersonOrderHelper.encodeUids(uids)
+        ioScope.launch {
+            syncDb.ensureLegacyMigrated(context)
+            syncKvDao.putValue(SyncKvEntity(PersonOrderHelper.KEY_CONDUCTOR_ORDER, encoded))
+        }
     }
 
     override fun clearComposerOrder() {
-        syncKvDao.putValue(SyncKvEntity(PersonOrderHelper.KEY_COMPOSER_ORDER, ""))
+        synchronized(orderLock) {
+            composerOrderDirty = true
+            cachedComposerOrder = emptyList()
+        }
+        ioScope.launch {
+            syncDb.ensureLegacyMigrated(context)
+            syncKvDao.putValue(SyncKvEntity(PersonOrderHelper.KEY_COMPOSER_ORDER, ""))
+        }
     }
 
     override fun clearConductorOrder() {
-        syncKvDao.putValue(SyncKvEntity(PersonOrderHelper.KEY_CONDUCTOR_ORDER, ""))
+        synchronized(orderLock) {
+            conductorOrderDirty = true
+            cachedConductorOrder = emptyList()
+        }
+        ioScope.launch {
+            syncDb.ensureLegacyMigrated(context)
+            syncKvDao.putValue(SyncKvEntity(PersonOrderHelper.KEY_CONDUCTOR_ORDER, ""))
+        }
     }
 
     private fun orderedPeople(
@@ -285,7 +393,15 @@ private class HomeGeneratorImpl(
         orderKey: String,
     ): List<Artist> {
         val sorted = sort.artists(raw)
-        val savedUids = PersonOrderHelper.decodeUids(syncKvDao.getValue(orderKey))
+        if (!ordersLoaded) {
+            if (isMainThread()) preloadOrdersAsync() else ensureOrdersLoadedOnBackground()
+        }
+        val savedUids =
+            if (orderKey == PersonOrderHelper.KEY_COMPOSER_ORDER) {
+                cachedComposerOrder
+            } else {
+                cachedConductorOrder
+            }
         return PersonOrderHelper.applyCustomOrder(sorted, savedUids)
     }
 

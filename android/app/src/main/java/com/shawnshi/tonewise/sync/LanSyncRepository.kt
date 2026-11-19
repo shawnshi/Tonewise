@@ -19,36 +19,39 @@
 package com.shawnshi.tonewise.sync
 
 import android.content.Context
+import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Environment
 import android.util.Base64
+import com.shawnshi.tonewise.playback.service.WorkShuffleOrder
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
+import java.io.IOException
 import java.net.URLEncoder
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.detail.MusicBioRepository
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.playback.ui.WaveformRepository
-import org.json.JSONArray
-import org.json.JSONObject
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.core.TonewiseCore
 import org.oxycblt.musikr.fs.Components
@@ -140,13 +143,29 @@ constructor(
 ) {
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val syncDb: TonewiseSyncDatabase by lazy { TonewiseSyncDatabase.getInstance(context) }
+    private val lwwStore = LwwMutationStore({ syncDb }, { context })
     private var activeDiscoveryListener: NsdManager.DiscoveryListener? = null
+    private val resolveLock = Any()
+    private val pendingResolveQueue = ArrayDeque<NsdServiceInfo>()
+    private var resolveInFlight = false
+    private var multicastLock: WifiManager.MulticastLock? = null
     private val syncInFlight = AtomicBoolean(false)
+    private val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var activeSyncJob: Job? = null
+    @Volatile private var activeCancelToken: LanHttpClient.CancelToken? = null
+
+    private data class PendingPlaylistReconcile(
+        val playlist: OutboxPlaylistDto,
+        var remainingAttempts: Int = 3,
+    )
+
+    private val pendingOutboxPlaylists = ConcurrentHashMap<String, PendingPlaylistReconcile>()
+    private val playlistReconcileMutex = Mutex()
 
     private val _discoveredHosts = MutableStateFlow<List<DiscoveredSyncHost>>(emptyList())
     val discoveredHosts: StateFlow<List<DiscoveredSyncHost>> = _discoveredHosts
 
-    private val _pairedHost = MutableStateFlow(loadPairedHost())
+    private val _pairedHost = MutableStateFlow<PairedHostInfo?>(null)
     val pairedHost: StateFlow<PairedHostInfo?> = _pairedHost
 
     private val _scenes = MutableStateFlow(loadCachedOrDefaultScenes())
@@ -158,15 +177,12 @@ constructor(
     private val _syncProgress = MutableStateFlow(SyncProgressState())
     val syncProgress: StateFlow<SyncProgressState> = _syncProgress
 
-    private val pendingMutationsList = loadPendingMutations().toMutableList()
-    private val lwwOverrides = ConcurrentHashMap<String, String>(loadLwwOverrides())
-    @Volatile private var lwwVersion: Long = 0L
     private val tracksCacheLock = Any()
     @Volatile private var cachedTracksKey: TracksCacheKey? = null
     @Volatile private var cachedTracksJson: String = "[]"
 
-    private val _pendingMutationCount = MutableStateFlow(pendingMutationsList.size)
-    val pendingMutationCount: StateFlow<Int> = _pendingMutationCount
+    val pendingMutationCount: StateFlow<Int>
+        get() = lwwStore.pendingMutationCount
 
     private data class TracksCacheKey(
         val songsIdentityHash: Int,
@@ -176,20 +192,72 @@ constructor(
     )
 
     private val writeBackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    @Volatile private var pendingWriteBackJob: Job? = null
+    private val pendingWriteBackJobs = ConcurrentHashMap<String, Job>()
+    private val pendingRemoteLedgerLock = Any()
+    private val pendingRemoteCounts = HashMap<String, Int>()
+    private val pendingRemoteLoved = HashSet<String>()
+    private val pendingRemoteUnloved = HashSet<String>()
+    private val pendingEvictTrackMtimes = HashMap<String, Long>()
+    private var pendingRemoteReconcileRemaining = 0
+
+    init {
+        syncScope.launch {
+            runCatching { syncDb.ensureLegacyMigrated(context) }
+            runCatching { lwwStore.ensureLoadedOnBackground(context) }
+            val loadedHost = runCatching { lwwStore.loadPairedHost() }.getOrNull()
+            if (_pairedHost.value == null && loadedHost != null) {
+                _pairedHost.value = loadedHost
+            }
+            _scenes.value = loadCachedOrDefaultScenes()
+            runCatching {
+                LanHttpClient.pruneStalePartFiles(File(context.cacheDir, "lan_sync_parts"))
+            }
+        }
+        musicRepository.addUpdateListener(
+            object : MusicRepository.UpdateListener {
+                override fun onMusicChanges(changes: MusicRepository.Changes) {
+                    if (changes.deviceLibrary) {
+                        if (pendingOutboxPlaylists.isNotEmpty()) {
+                            writeBackScope.launch {
+                                reconcilePendingOutboxPlaylists()
+                            }
+                        }
+                        val hasPendingLedger =
+                            synchronized(pendingRemoteLedgerLock) {
+                                pendingRemoteCounts.isNotEmpty() ||
+                                    pendingRemoteLoved.isNotEmpty() ||
+                                    pendingRemoteUnloved.isNotEmpty() ||
+                                    pendingEvictTrackMtimes.isNotEmpty()
+                            }
+                        if (hasPendingLedger) {
+                            writeBackScope.launch {
+                                reconcilePendingRemoteLedger()
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    }
 
     fun scheduleM3u8WriteBack(sceneName: String, songs: List<Song>) {
-        pendingWriteBackJob?.cancel()
         val snapshot = songs.toList()
         val safeName = sanitizePlaylistFilename(sceneName)
-        pendingWriteBackJob =
+        val jobKey = safeName.lowercase()
+        pendingWriteBackJobs.remove(jobKey)?.cancel()
+        val legacyName = legacyUnderscoredPlaylistFilename(sceneName)
+        val cleanupLegacy = !legacyName.equals(safeName, ignoreCase = true)
+        pendingWriteBackJobs[jobKey] =
             writeBackScope.launch {
                 delay(2_000L)
-                val payload = formatM3u8Content(snapshot).toByteArray(Charsets.UTF_8)
+                val payload = formatM3u8Content(snapshot, sceneName).toByteArray(Charsets.UTF_8)
                 runCatching {
                     val internalDir = File(context.filesDir, ".tonewise/playlists")
                     internalDir.mkdirs()
                     File(internalDir, "$safeName.m3u8").writeBytes(payload)
+                    if (cleanupLegacy) {
+                        File(internalDir, "$legacyName.m3u8").takeIf { it.isFile }?.delete()
+                    }
                 }
                 runCatching {
                     @Suppress("DEPRECATION")
@@ -198,15 +266,110 @@ constructor(
                     val extDir = File(musicDir, ".tonewise/playlists")
                     if (extDir.exists() || extDir.mkdirs()) {
                         File(extDir, "$safeName.m3u8").writeBytes(payload)
+                        if (cleanupLegacy) {
+                            File(extDir, "$legacyName.m3u8").takeIf { it.isFile }?.delete()
+                        }
                     }
                 }
                 L.d("Debounced .m3u8 write-back flushed for $safeName (${snapshot.size} tracks)")
             }
     }
 
+    private fun acquireMulticastLock() {
+        runCatching {
+            if (multicastLock == null) {
+                val wifi =
+                    context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                multicastLock =
+                    wifi?.createMulticastLock("Tonewise-mDNS-Discovery")?.apply {
+                        setReferenceCounted(false)
+                    }
+            }
+            if (multicastLock?.isHeld == false) {
+                multicastLock?.acquire()
+            }
+        }.onFailure { L.d("MulticastLock acquire skipped: ${it.message}") }
+    }
+
+    private fun releaseMulticastLock() {
+        runCatching {
+            if (multicastLock?.isHeld == true) {
+                multicastLock?.release()
+            }
+        }
+    }
+
+    private fun enqueueResolveLocked(manager: NsdManager, serviceInfo: NsdServiceInfo) {
+        val name = serviceInfo.serviceName
+        if (pendingResolveQueue.none { it.serviceName == name }) {
+            pendingResolveQueue.addLast(serviceInfo)
+        }
+        if (!resolveInFlight) {
+            drainResolveQueueLocked(manager)
+        }
+    }
+
+    private fun drainResolveQueueLocked(manager: NsdManager) {
+        if (activeDiscoveryListener == null) {
+            pendingResolveQueue.clear()
+            resolveInFlight = false
+            return
+        }
+        val next = pendingResolveQueue.removeFirstOrNull()
+        if (next == null) {
+            resolveInFlight = false
+            return
+        }
+        resolveInFlight = true
+        try {
+            @Suppress("DEPRECATION")
+            manager.resolveService(
+                next,
+                object : NsdManager.ResolveListener {
+                    override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
+                        L.w("NSD resolve failed (${info.serviceName}): $errorCode")
+                        synchronized(resolveLock) {
+                            resolveInFlight = false
+                            drainResolveQueueLocked(manager)
+                        }
+                    }
+
+                    override fun onServiceResolved(resolved: NsdServiceInfo) {
+                        if (activeDiscoveryListener != null) {
+                            @Suppress("DEPRECATION")
+                            val host = resolved.host?.hostAddress
+                            if (!host.isNullOrBlank()) {
+                                val entry =
+                                    DiscoveredSyncHost(
+                                        resolved.serviceName,
+                                        host,
+                                        resolved.port,
+                                    )
+                                val updated =
+                                    _discoveredHosts.value.filterNot {
+                                        it.host == entry.host && it.port == entry.port
+                                    } + entry
+                                _discoveredHosts.value = updated
+                            }
+                        }
+                        synchronized(resolveLock) {
+                            resolveInFlight = false
+                            drainResolveQueueLocked(manager)
+                        }
+                    }
+                },
+            )
+        } catch (t: Throwable) {
+            L.w(t, "NSD resolveService failed synchronously")
+            resolveInFlight = false
+            drainResolveQueueLocked(manager)
+        }
+    }
+
     fun startDiscovery() {
         val manager = nsdManager ?: return
         if (activeDiscoveryListener != null) return
+        acquireMulticastLock()
 
         val listener =
             object : NsdManager.DiscoveryListener {
@@ -216,31 +379,11 @@ constructor(
 
                 override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                     if (serviceInfo.serviceType.contains("_tonewise._tcp")) {
-                        @Suppress("DEPRECATION")
-                        manager.resolveService(
-                            serviceInfo,
-                            object : NsdManager.ResolveListener {
-                                override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
-                                    L.w("NSD resolve failed: $errorCode")
-                                }
-
-                                override fun onServiceResolved(resolved: NsdServiceInfo) {
-                                    @Suppress("DEPRECATION")
-                                    val host = resolved.host?.hostAddress ?: return
-                                    val entry =
-                                        DiscoveredSyncHost(
-                                            resolved.serviceName,
-                                            host,
-                                            resolved.port,
-                                        )
-                                    val updated =
-                                        (_discoveredHosts.value.filterNot {
-                                            it.host == entry.host && it.port == entry.port
-                                        } + entry)
-                                    _discoveredHosts.value = updated
-                                }
-                            },
-                        )
+                        synchronized(resolveLock) {
+                            if (activeDiscoveryListener != null) {
+                                enqueueResolveLocked(manager, serviceInfo)
+                            }
+                        }
                     }
                 }
 
@@ -249,10 +392,21 @@ constructor(
                         _discoveredHosts.value.filterNot { it.serviceName == serviceInfo.serviceName }
                 }
 
-                override fun onDiscoveryStopped(serviceType: String) {}
+                override fun onDiscoveryStopped(serviceType: String) {
+                    synchronized(resolveLock) {
+                        pendingResolveQueue.clear()
+                        resolveInFlight = false
+                    }
+                    releaseMulticastLock()
+                }
 
                 override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                     activeDiscoveryListener = null
+                    synchronized(resolveLock) {
+                        pendingResolveQueue.clear()
+                        resolveInFlight = false
+                    }
+                    releaseMulticastLock()
                 }
 
                 override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
@@ -261,13 +415,21 @@ constructor(
         activeDiscoveryListener = listener
         runCatching {
             manager.discoverServices("_tonewise._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
-        }.onFailure { activeDiscoveryListener = null }
+        }.onFailure {
+            activeDiscoveryListener = null
+            releaseMulticastLock()
+        }
     }
 
     fun stopDiscovery() {
         val listener = activeDiscoveryListener ?: return
         activeDiscoveryListener = null
+        synchronized(resolveLock) {
+            pendingResolveQueue.clear()
+            resolveInFlight = false
+        }
         runCatching { nsdManager?.stopServiceDiscovery(listener) }
+        releaseMulticastLock()
     }
 
     suspend fun pairWithHost(baseUrl: String, pairingCode: String): Boolean =
@@ -279,7 +441,9 @@ constructor(
             }
             _syncStatus.value = "正在与 $cleanBase 配对…"
             try {
-                val deviceId = getOrCreateStableDeviceId()
+                syncDb.ensureLegacyMigrated(context)
+                lwwStore.ensureLoadedOnBackground(context)
+                val deviceId = lwwStore.getOrCreateStableDeviceId()
                 val deviceName = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android Phone"
                 val pairResp = LanSyncV2Client.pair(cleanBase, pairingCode.trim(), deviceId, deviceName)
                 val info =
@@ -289,10 +453,13 @@ constructor(
                         deviceId = pairResp.deviceId,
                         token = pairResp.token,
                     )
-                savePairedHost(info)
+                lwwStore.savePairedHost(info)
                 _pairedHost.value = info
                 _syncStatus.value = "配对成功：已绑定「${pairResp.hostName}」，可以开始同步"
                 true
+            } catch (e: LanSyncRateLimitException) {
+                _syncStatus.value = "配对尝试过于频繁，请等待 ${e.retryAfterSeconds} 秒后再试"
+                false
             } catch (e: LanSyncAuthException) {
                 _syncStatus.value = "配对失败：6 位配对码不正确"
                 false
@@ -303,10 +470,38 @@ constructor(
             }
         }
 
-    fun unpairHost() {
-        clearPairedHost()
+    fun unpairHost(notifyRemote: Boolean = true) {
+        val previous = _pairedHost.value
+        lwwStore.clearPairedHost()
         _pairedHost.value = null
         _syncStatus.value = "已解除电脑配对"
+        if (notifyRemote && previous != null && previous.token.isNotBlank()) {
+            syncScope.launch {
+                runCatching { LanSyncV2Client.unpair(previous.baseUrl, previous.token) }
+            }
+        }
+    }
+
+    fun startSync(baseUrl: String) {
+        val cleanBase = normalizeBaseUrl(baseUrl)
+        if (cleanBase.isBlank()) {
+            _syncStatus.value = "请先选择或填写电脑同步地址"
+            return
+        }
+        val startedViaService =
+            runCatching {
+                LanSyncForegroundService.startSync(context, cleanBase)
+                true
+            }.getOrDefault(false)
+        if (!startedViaService) {
+            syncScope.launch { syncWithHost(cleanBase) }
+        }
+    }
+
+    fun cancelSync() {
+        activeCancelToken?.cancel()
+        activeSyncJob?.cancel()
+        _syncStatus.value = "同步已取消（已下载曲目与断点缓存已保留，可随时续传）"
     }
 
     suspend fun syncWithHost(baseUrl: String) {
@@ -321,13 +516,12 @@ constructor(
                 return@withContext
             }
 
-            val paired = _pairedHost.value
-            val token =
-                paired
-                    ?.takeIf { it.baseUrl.equals(cleanBase, ignoreCase = true) }
-                    ?.token
-                    ?.takeIf { it.isNotBlank() }
-            if (token == null) {
+            syncDb.ensureLegacyMigrated(context)
+            lwwStore.ensureLoadedOnBackground(context)
+            val paired =
+                _pairedHost.value ?: lwwStore.loadPairedHost()?.also { _pairedHost.value = it }
+            val token = resolveTokenForHost(paired, cleanBase)
+            if (paired == null || token == null) {
                 _syncStatus.value = "该电脑尚未配对：请先输入电脑端显示的 6 位配对码"
                 syncInFlight.set(false)
                 return@withContext
@@ -336,223 +530,503 @@ constructor(
             _syncStatus.value = "正在连接 $cleanBase 获取同步清单…"
             _syncProgress.value =
                 SyncProgressState(isRunning = true, phase = "正在连接电脑并检查发送队列…")
-            try {
-                val outbox = LanSyncV2Client.fetchOutbox(cleanBase, token)
+            LanHttpClient.CancelToken.withCoroutineCancelToken { cancelToken ->
+                activeSyncJob = currentCoroutineContext()[Job]
+                activeCancelToken = cancelToken
+                try {
+                    cancelToken.throwIfCancelled()
+                    managedSyncStorage.invalidatePathCache()
+                    val outbox = LanSyncV2Client.fetchOutbox(cleanBase, token, cancelToken)
+                    val (uniqueOutboxTracks, clientDuplicates) =
+                        LanSyncV2Client.deduplicateOutboxTracks(outbox.tracks)
+                    val totalDeduplicated = outbox.duplicateTrackCount + clientDuplicates
 
-                val existingSynced = syncDb.syncedTrackDao().getAll().associateBy { it.trackUid }
-                val songsSnapshot = musicRepository.library?.songs.orEmpty()
-                val songsByRelSuffix = buildSongsByRelSuffixMap(songsSnapshot)
+                    val allSyncedEntities = syncDb.syncedTrackDao().getAll()
+                    val existingSyncedByUid = allSyncedEntities.associateBy { it.trackUid.lowercase() }
+                    val existingSyncedByRel =
+                        allSyncedEntities.mapNotNull { entity ->
+                            val normRel =
+                                LanSyncV2Client.sanitizeRelativePathSegments(entity.relativePath)
+                                    .joinToString("/")
+                                    .lowercase()
+                            normRel.takeIf { it.isNotEmpty() }?.let { it to entity }
+                        }.toMap()
 
-                val pendingDownloads = ArrayList<OutboxTrackDto>()
-                var skippedExisting = 0
+                    val songsSnapshot = musicRepository.library?.songs.orEmpty()
+                    val songsByRelSuffix = PlaylistM3u8Helper.buildSongsByRelSuffixMap(songsSnapshot)
+                    val cachedFpByUid =
+                        syncDb.audioFingerprintDao().getAll().associateBy { it.trackUid }.toMutableMap()
 
-                for (track in outbox.tracks) {
-                    val outboxJson = JSONArray(track.sourceOutboxIds).toString()
-                    val recorded = existingSynced[track.trackUid]
-                    if (recorded != null && managedSyncStorage.existsInManagedStorage(recorded)) {
-                        if (recorded.sourceOutboxIdsJson != outboxJson) {
-                            syncDb.syncedTrackDao().upsert(recorded.copy(sourceOutboxIdsJson = outboxJson))
+                    data class PendingSyncDownload(val track: OutboxTrackDto, val forceOverwrite: Boolean)
+                    val pendingDownloads = ArrayList<PendingSyncDownload>()
+                    val confirmedTrackUids = HashSet<String>()
+                    val overwrittenTrackMtimes = HashMap<String, Long>()
+                    var skippedExisting = 0
+
+                    for (track in uniqueOutboxTracks) {
+                        cancelToken.throwIfCancelled()
+                        val outboxJson = TonewiseCore.stringifyJson(track.sourceOutboxIds)
+                        val normTargetRel =
+                            LanSyncV2Client.sanitizeRelativePathSegments(track.targetRelPath)
+                                .joinToString("/")
+                                .lowercase()
+                        val recorded =
+                            existingSyncedByUid[track.trackUid.lowercase()]
+                                ?: existingSyncedByRel[normTargetRel]
+
+                        val recordedFile = recorded?.let { managedSyncStorage.inspectExistingManagedFile(it) }
+                        val existingLocalSong =
+                            if (recordedFile == null) {
+                                PlaylistM3u8Helper.findMatchingSongByRelPath(track.targetRelPath, songsByRelSuffix)
+                            } else {
+                                null
+                            }
+                        val managedRelFile =
+                            if (recordedFile == null && existingLocalSong == null) {
+                                managedSyncStorage.findExistingManagedFileByRelPath(track.targetRelPath)
+                            } else {
+                                null
+                            }
+
+                        val exists = recordedFile != null || existingLocalSong != null || managedRelFile != null
+                        val localDocUri =
+                            recordedFile?.documentUri
+                                ?: existingLocalSong?.uri?.toString()
+                                ?: managedRelFile?.documentUri
+                        val localFileSize =
+                            recordedFile?.fileSize
+                                ?: existingLocalSong?.size
+                                ?: managedRelFile?.fileSize
+                                ?: 0L
+                        val localMtimeMs =
+                            recordedFile?.mtimeMs?.takeIf { it > 0L }
+                                ?: recorded?.mtimeMs?.takeIf { recordedFile != null && recorded.fileSize == localFileSize }
+                                ?: existingLocalSong?.modifiedMs
+                                ?: managedRelFile?.mtimeMs
+                                ?: 0L
+
+                        var localHeaderHash =
+                            if (recorded != null && recordedFile != null &&
+                                (recorded.fileSize <= 0L || recorded.fileSize == localFileSize)
+                            ) {
+                                recorded.headerBlake3Hex
+                            } else {
+                                ""
+                            }
+                        var localAudioHash =
+                            if (recorded != null && recordedFile != null &&
+                                (recorded.fileSize <= 0L || recorded.fileSize == localFileSize)
+                            ) {
+                                recorded.audioFrameBlake3Hex
+                            } else {
+                                ""
+                            }
+
+                        if (localHeaderHash.isBlank() && existingLocalSong != null) {
+                            val cachedFp =
+                                cachedFpByUid[existingLocalSong.uid.toString()]?.takeIf {
+                                    isFingerprintCacheFresh(it, localFileSize, localMtimeMs)
+                                }
+                            if (cachedFp != null) {
+                                localHeaderHash = cachedFp.headerBlake3Hex
+                                localAudioHash = cachedFp.audioFrameBlake3Hex
+                            }
                         }
-                        skippedExisting++
-                        continue
-                    }
 
-                    val existingLocalSong = findMatchingSongByRelPath(track.targetRelPath, songsByRelSuffix)
-                    if (existingLocalSong != null &&
-                        (track.fileSize <= 0L || existingLocalSong.size == track.fileSize)
-                    ) {
-                        syncDb.syncedTrackDao().upsert(
-                            SyncedTrackEntity(
-                                trackUid = track.trackUid,
-                                relativePath = track.targetRelPath,
-                                documentUri = existingLocalSong.uri.toString(),
-                                fileSize = existingLocalSong.size,
-                                mtimeMs = track.mtimeMs,
-                                sourceOutboxIdsJson = outboxJson,
-                                syncedAtMs = System.currentTimeMillis(),
+                        if (exists &&
+                            localHeaderHash.isBlank() &&
+                            track.headerBlake3.isNotBlank() &&
+                            (track.fileSize <= 0L || localFileSize == track.fileSize) &&
+                            !localDocUri.isNullOrBlank()
+                        ) {
+                            computeLocalAudioFingerprintSafe(localDocUri)?.let { (hdr, aud) ->
+                                localHeaderHash = hdr
+                                localAudioHash = aud
+                            }
+                        }
+
+                        when (
+                            LanSyncV2Client.evaluateLocalTrackFreshness(
+                                remote = track,
+                                exists = exists,
+                                localFileSize = localFileSize,
+                                localMtimeMs = localMtimeMs,
+                                localHeaderBlake3 = localHeaderHash,
+                                localAudioFrameBlake3 = localAudioHash,
                             )
-                        )
-                        cacheFingerprintAlias(existingLocalSong, track.trackUid)
-                        skippedExisting++
-                        continue
-                    }
-
-                    pendingDownloads.add(track)
-                }
-
-                val partsDir = File(context.cacheDir, "lan_sync_parts")
-                val totalDownloadBytes = pendingDownloads.sumOf { it.fileSize.coerceAtLeast(0L) }
-                var completedBytesBeforeCurrent = 0L
-                var downloadedCount = 0
-                val failedTrackUids = HashSet<String>()
-                var firstDownloadError: String? = null
-
-                for ((index, track) in pendingDownloads.withIndex()) {
-                    _syncProgress.value =
-                        SyncProgressState(
-                            isRunning = true,
-                            phase = "正在下载曲目 (${index + 1}/${pendingDownloads.size})",
-                            completedTracks = index,
-                            totalTracks = pendingDownloads.size,
-                            downloadedBytes = completedBytesBeforeCurrent,
-                            totalBytes = totalDownloadBytes,
-                            currentTrackTitle = track.title,
-                        )
-                    val partFile = File(partsDir, "${sanitizeKey(track.trackUid)}.part")
-                    try {
-                        val fileUrl = LanSyncV2Client.buildTrackFileUrl(cleanBase, track.trackUid)
-                        LanSyncV2Client.downloadFileResumable(
-                            url = fileUrl,
-                            token = token,
-                            partFile = partFile,
-                            expectedSize = track.fileSize,
-                        ) { trackDownloaded, _ ->
-                            _syncProgress.value =
-                                SyncProgressState(
-                                    isRunning = true,
-                                    phase = "正在下载曲目 (${index + 1}/${pendingDownloads.size})",
-                                    completedTracks = index,
-                                    totalTracks = pendingDownloads.size,
-                                    downloadedBytes = completedBytesBeforeCurrent + trackDownloaded,
-                                    totalBytes = totalDownloadBytes,
-                                    currentTrackTitle = track.title,
+                        ) {
+                            LocalSyncState.UP_TO_DATE -> {
+                                syncDb.syncedTrackDao().upsert(
+                                    SyncedTrackEntity(
+                                        trackUid = track.trackUid,
+                                        relativePath = recorded?.relativePath ?: track.targetRelPath,
+                                        documentUri = localDocUri,
+                                        fileSize = if (localFileSize > 0L) localFileSize else track.fileSize,
+                                        mtimeMs = track.mtimeMs.takeIf { it > 0L } ?: localMtimeMs,
+                                        sourceOutboxIdsJson = outboxJson,
+                                        syncedAtMs = recorded?.syncedAtMs?.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                                        headerBlake3Hex = track.headerBlake3.ifBlank { localHeaderHash },
+                                        audioFrameBlake3Hex = track.audioFrameBlake3.ifBlank { localAudioHash },
+                                    )
                                 )
+                                if (existingLocalSong != null) {
+                                    cacheFingerprintAlias(existingLocalSong, track.trackUid)
+                                }
+                                confirmedTrackUids.add(track.trackUid)
+                                skippedExisting++
+                            }
+                            LocalSyncState.OUTDATED -> {
+                                pendingDownloads.add(PendingSyncDownload(track, forceOverwrite = true))
+                            }
+                            LocalSyncState.MISSING -> {
+                                pendingDownloads.add(PendingSyncDownload(track, forceOverwrite = false))
+                            }
                         }
+                    }
 
-                        val committed = managedSyncStorage.commitAudioFile(track, partFile)
-                        syncDb.syncedTrackDao().upsert(
-                            SyncedTrackEntity(
-                                trackUid = track.trackUid,
-                                relativePath = committed.relativePath,
-                                documentUri = committed.documentUri,
-                                fileSize = committed.fileSize,
-                                mtimeMs = track.mtimeMs,
-                                sourceOutboxIdsJson = JSONArray(track.sourceOutboxIds).toString(),
-                                syncedAtMs = System.currentTimeMillis(),
+                    val partsDir = File(context.cacheDir, "lan_sync_parts")
+                    runCatching { LanHttpClient.pruneStalePartFiles(partsDir) }
+                    val totalDownloadBytes = pendingDownloads.sumOf { it.track.fileSize.coerceAtLeast(0L) }
+                    var completedBytesBeforeCurrent = 0L
+                    var downloadedCount = 0
+                    var updatedExistingCount = 0
+                    val failedTrackUids = HashSet<String>()
+                    var firstDownloadError: String? = null
+
+                    for ((index, pending) in pendingDownloads.withIndex()) {
+                        cancelToken.throwIfCancelled()
+                        val track = pending.track
+                        val phaseLabel =
+                            if (pending.forceOverwrite) {
+                                "正在更新曲目 (${index + 1}/${pendingDownloads.size})"
+                            } else {
+                                "正在下载曲目 (${index + 1}/${pendingDownloads.size})"
+                            }
+                        _syncProgress.value =
+                            SyncProgressState(
+                                isRunning = true,
+                                phase = phaseLabel,
+                                completedTracks = index,
+                                totalTracks = pendingDownloads.size,
+                                downloadedBytes = completedBytesBeforeCurrent,
+                                totalBytes = totalDownloadBytes,
+                                currentTrackTitle = track.title,
                             )
-                        )
-                        downloadedCount++
-                        completedBytesBeforeCurrent += track.fileSize.coerceAtLeast(0L)
+                        val partFile = File(partsDir, "${sanitizeKey(track.trackUid)}.part")
+                        if (pending.forceOverwrite && partFile.exists()) {
+                            partFile.delete()
+                        }
+                        try {
+                            val fileUrl = LanSyncV2Client.buildTrackFileUrl(cleanBase, track.trackUid)
+                            var verified = false
+                            var lastVerifyError: String? = null
+                            for (attempt in 0 until 2) {
+                                cancelToken.throwIfCancelled()
+                                LanSyncV2Client.downloadFileResumable(
+                                    url = fileUrl,
+                                    token = token,
+                                    partFile = partFile,
+                                    expectedSize = track.fileSize,
+                                    onProgress = { trackDownloaded, _ ->
+                                        _syncProgress.value =
+                                            SyncProgressState(
+                                                isRunning = true,
+                                                phase = phaseLabel,
+                                                completedTracks = index,
+                                                totalTracks = pendingDownloads.size,
+                                                downloadedBytes = completedBytesBeforeCurrent + trackDownloaded,
+                                                totalBytes = totalDownloadBytes,
+                                                currentTrackTitle = track.title,
+                                            )
+                                    },
+                                    cancelToken = cancelToken,
+                                )
+                                if (verifyDownloadedPartIntegrity(partFile, track)) {
+                                    verified = true
+                                    break
+                                }
+                                lastVerifyError = "下载文件校验失败（期望音频/头哈希不匹配）"
+                                partFile.delete()
+                                if (attempt == 1) break
+                            }
+                            if (!verified) {
+                                throw IOException(lastVerifyError ?: "下载文件校验失败")
+                            }
+
+                            val committed =
+                                managedSyncStorage.commitAudioFile(
+                                    track = track,
+                                    partFile = partFile,
+                                    forceOverwrite = pending.forceOverwrite,
+                                )
+                            syncDb.syncedTrackDao().upsert(
+                                SyncedTrackEntity(
+                                    trackUid = track.trackUid,
+                                    relativePath = committed.relativePath,
+                                    documentUri = committed.documentUri,
+                                    fileSize = committed.fileSize,
+                                    mtimeMs = track.mtimeMs,
+                                    sourceOutboxIdsJson = TonewiseCore.stringifyJson(track.sourceOutboxIds),
+                                    syncedAtMs = System.currentTimeMillis(),
+                                    headerBlake3Hex = track.headerBlake3,
+                                    audioFrameBlake3Hex = track.audioFrameBlake3,
+                                )
+                            )
+                            confirmedTrackUids.add(track.trackUid)
+                            if (pending.forceOverwrite) {
+                                updatedExistingCount++
+                                overwrittenTrackMtimes[track.trackUid.lowercase()] =
+                                    track.mtimeMs.takeIf { it > 0L } ?: System.currentTimeMillis()
+                            } else {
+                                downloadedCount++
+                            }
+                            completedBytesBeforeCurrent += track.fileSize.coerceAtLeast(0L)
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (authErr: LanSyncAuthException) {
+                            throw authErr
+                        } catch (dlErr: Exception) {
+                            L.w(dlErr, "Track download paused/failed for ${track.title} (${track.trackUid})")
+                            failedTrackUids.add(track.trackUid)
+                            if (firstDownloadError == null) {
+                                firstDownloadError = dlErr.message
+                            }
+                        }
+                    }
+
+                    // Download missing album covers once per album directory
+                    val attemptedCoverDirs = HashSet<String>()
+                    for (track in uniqueOutboxTracks) {
+                        cancelToken.throwIfCancelled()
+                        if (!track.hasCover || track.trackUid in failedTrackUids) continue
+                        val dirKey = track.targetRelPath.substringBeforeLast('/', "")
+                        if (!attemptedCoverDirs.add(dirKey)) continue
+                        try {
+                            val coverUrl = LanSyncV2Client.buildTrackCoverUrl(cleanBase, track.trackUid)
+                            val bytes = LanSyncV2Client.downloadCoverIfPresent(coverUrl, token, cancelToken)
+                            if (bytes != null && bytes.isNotEmpty()) {
+                                managedSyncStorage.commitAlbumCoverIfMissing(track.targetRelPath, bytes)
+                            }
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (authErr: LanSyncAuthException) {
+                            throw authErr
+                        } catch (t: Throwable) {
+                            L.w(t, "Album cover fetch skipped for $dirKey")
+                        }
+                    }
+
+                    _syncProgress.value =
+                        _syncProgress.value.copy(phase = "正在双向同步播放记录、评分与歌单…")
+
+                    // Best-effort v1 metadata assets (scenes / waveforms / encyclopedia)
+                    try {
+                        cancelToken.throwIfCancelled()
+                        @Suppress("UNCHECKED_CAST")
+                        val statusObj =
+                            TonewiseCore.parseJson(httpGetString("$cleanBase/api/v1/status", token, cancelToken))
+                                as? Map<String, Any?>
+                        val scenesRaw = httpGetString("$cleanBase/api/v1/scenes", token, cancelToken)
+                        cacheFile("scenes_5d.json", scenesRaw.toByteArray(Charsets.UTF_8))
+                        _scenes.value = lwwStore.applySceneOrder(SceneRuleEvaluator.parseScenesJson(scenesRaw))
+
+                        if (statusObj?.get("has_waveforms") == true) {
+                            val remoteSha = (statusObj["waveforms_sha256"] as? String)?.trim().orEmpty()
+                            val remoteBytes = (statusObj["waveforms_bytes"] as? Number)?.toLong() ?: 0L
+                            val localWf = File(context.filesDir, ".tonewise/waveforms.bin")
+                            val localSha = syncDb.syncKvDao().getValue("waveforms_sha256").orEmpty()
+                            val needsWaveformDownload =
+                                !localWf.isFile ||
+                                    (remoteSha.isNotEmpty() && !localSha.equals(remoteSha, ignoreCase = true)) ||
+                                    (remoteSha.isEmpty() && remoteBytes > 0L && localWf.length() != remoteBytes)
+                            if (needsWaveformDownload) {
+                                LanHttpClient.downloadFileToTempAndReplace(
+                                    url = "$cleanBase/api/v1/waveforms",
+                                    bearerToken = token,
+                                    targetFile = localWf,
+                                    cancelToken = cancelToken,
+                                )
+                                if (remoteSha.isNotEmpty()) {
+                                    syncDb.syncKvDao().putValue(SyncKvEntity("waveforms_sha256", remoteSha))
+                                }
+                                waveformRepository.invalidateArchiveCache()
+                            }
+                        }
+                        if (statusObj?.get("has_encyclopedia") == true) {
+                            val encJson = httpGetString("$cleanBase/api/v1/encyclopedia", token, cancelToken)
+                            musicBioRepository.importSyncedEncyclopediaJson(encJson)
+                        }
+                    } catch (ce: CancellationException) {
+                        throw ce
                     } catch (authErr: LanSyncAuthException) {
                         throw authErr
-                    } catch (dlErr: Exception) {
-                        L.w(dlErr, "Track download paused/failed for ${track.title} (${track.trackUid})")
-                        failedTrackUids.add(track.trackUid)
-                        if (firstDownloadError == null) {
-                            firstDownloadError = dlErr.message
+                    } catch (t: Throwable) {
+                        L.w(t, "Optional v1 metadata sync partial skip")
+                    }
+
+                    // Unified S0-fixed /api/v2/report push & pull
+                    val completedCopyOutboxIds =
+                        outbox.items
+                            .filter { item ->
+                                if (!item.mode.equals("copy", ignoreCase = true)) return@filter false
+                                val memberTracks =
+                                    uniqueOutboxTracks.filter { item.id in it.sourceOutboxIds }
+                                memberTracks.all {
+                                    it.trackUid in confirmedTrackUids && it.trackUid !in failedTrackUids
+                                }
+                            }
+                            .map { it.id }
+
+                    cancelToken.throwIfCancelled()
+                    val reportSync =
+                        pushV2ReportAndApplyCounts(
+                            cleanBase = cleanBase,
+                            token = token,
+                            deviceId = paired.deviceId,
+                            completedOutboxIds = completedCopyOutboxIds,
+                            cancelToken = cancelToken,
+                        )
+                    val pushedCounts = reportSync.pushedCounts
+                    val pushedMutations = reportSync.pushedMutations
+
+                    if (overwrittenTrackMtimes.isNotEmpty()) {
+                        val currentSongs = musicRepository.library?.songs.orEmpty()
+                        val currentByUid = currentSongs.associateBy { it.uid.toString() }
+                        val currentByPcUid = buildSongByPcUidMap(currentSongs, currentByUid)
+                        val unmatchedEvicts =
+                            evictStaleOverridesForTracks(overwrittenTrackMtimes, currentByPcUid, currentByUid)
+                        if (unmatchedEvicts.isNotEmpty()) {
+                            synchronized(pendingRemoteLedgerLock) {
+                                pendingEvictTrackMtimes.putAll(unmatchedEvicts)
+                                pendingRemoteReconcileRemaining = maxOf(pendingRemoteReconcileRemaining, 3)
+                            }
                         }
                     }
-                }
 
-                // Download missing album covers once per album directory
-                val attemptedCoverDirs = HashSet<String>()
-                for (track in outbox.tracks) {
-                    if (!track.hasCover || track.trackUid in failedTrackUids) continue
-                    val dirKey = track.targetRelPath.substringBeforeLast('/', "")
-                    if (!attemptedCoverDirs.add(dirKey)) continue
-                    runCatching {
-                        val coverUrl = LanSyncV2Client.buildTrackCoverUrl(cleanBase, track.trackUid)
-                        val bytes = LanSyncV2Client.downloadCoverIfPresent(coverUrl, token)
-                        if (bytes != null && bytes.isNotEmpty()) {
-                            managedSyncStorage.commitAlbumCoverIfMissing(track.targetRelPath, bytes)
-                        }
-                    }.onFailure { L.w(it, "Album cover fetch skipped for $dirKey") }
-                }
+                    // Snapshot live Musikr playlists & run 3-way merge BEFORE committing outbox playlists
+                    snapshotUserPlaylistsForSync()
+                    val playlistSync = syncPlaylistsWithHost(cleanBase, token, cancelToken)
+                    for (deletedName in playlistSync.deletedNames) {
+                        runCatching {
+                            musicRepository.library?.findPlaylistByName(deletedName)?.let {
+                                musicRepository.deletePlaylist(it)
+                            }
+                        }.onFailure { L.w(it, "Failed removing deleted playlist $deletedName") }
+                    }
 
-                // Commit playlists received from PC outbox
-                for (pl in outbox.playlists) {
-                    managedSyncStorage.commitPlaylistM3u8(pl.name, pl.relPaths)
-                    savePlaylistMergeBase(pl.name, pl.relPaths)
-                }
-
-                _syncProgress.value =
-                    _syncProgress.value.copy(phase = "正在双向同步播放记录、评分与歌单…")
-
-                // Best-effort v1 metadata assets (scenes / waveforms / encyclopedia)
-                runCatching {
-                    val statusObj = JSONObject(httpGetString("$cleanBase/api/v1/status"))
-                    val scenesRaw = httpGetString("$cleanBase/api/v1/scenes")
-                    cacheFile("scenes_5d.json", scenesRaw.toByteArray(Charsets.UTF_8))
-                    _scenes.value = applySceneOrder(parseScenesJson(scenesRaw))
-
-                    if (statusObj.optBoolean("has_waveforms", false)) {
-                        val remoteBytes = statusObj.optLong("waveforms_bytes", 0L)
-                        val localWf = File(context.filesDir, ".tonewise/waveforms.bin")
-                        if (!localWf.isFile || (remoteBytes > 0L && localWf.length() != remoteBytes)) {
-                            val wfBytes = httpGetBytes("$cleanBase/api/v1/waveforms")
-                            cacheFile("waveforms.bin", wfBytes)
-                            waveformRepository.invalidateArchiveCache()
+                    if (!reportSync.handoffMerged) {
+                        try {
+                            val mergedSlotsJson =
+                                httpPostJson("$cleanBase/api/v1/handoff", sessionSlotStore.exportSlotsJson(), token, cancelToken)
+                            sessionSlotStore.mergeRemoteJson(mergedSlotsJson)
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (authErr: LanSyncAuthException) {
+                            throw authErr
+                        } catch (_: Throwable) {
                         }
                     }
-                    if (statusObj.optBoolean("has_encyclopedia", false)) {
-                        val encJson = httpGetString("$cleanBase/api/v1/encyclopedia")
-                        musicBioRepository.importSyncedEncyclopediaJson(encJson)
-                    }
-                }.onFailure { L.w(it, "Optional v1 metadata sync partial skip") }
 
-                // Unified S0-fixed /api/v2/report push & pull
-                val completedCopyOutboxIds =
-                    outbox.items
-                        .filter { item ->
-                            item.mode.equals("copy", ignoreCase = true) &&
-                                outbox.tracks
-                                    .filter { item.id in it.sourceOutboxIds }
-                                    .none { it.trackUid in failedTrackUids }
-                        }
-                        .map { it.id }
-
-                val (pushedCounts, pushedMutations) =
-                    pushV2ReportAndApplyCounts(
-                        cleanBase = cleanBase,
-                        token = token,
-                        deviceId = paired.deviceId,
-                        completedOutboxIds = completedCopyOutboxIds,
-                    )
-
-                // Sync local .m3u8 playlists (3-way merge using PC's real ours) & handoff slots
-                val mergedPlaylists = syncPlaylistsWithHost(cleanBase)
-                runCatching {
-                    val mergedSlotsJson =
-                        httpPostJson("$cleanBase/api/v1/handoff", sessionSlotStore.exportSlotsJson())
-                    sessionSlotStore.mergeRemoteJson(mergedSlotsJson)
-                }
-
-                // Trigger Musikr rescan so downloaded files and playlists appear in mobile library
-                if (downloadedCount > 0 || outbox.playlists.isNotEmpty()) {
-                    musicRepository.requestIndex(withCache = true)
-                    applyOutboxPlaylistsIfAlreadyIndexed(outbox.playlists)
-                }
-
-                _syncStatus.value =
-                    buildString {
-                        if (failedTrackUids.isEmpty()) {
-                            append("同步完成（").append(outbox.hostName).append("）：")
+                    // Commit non-conflicting outbox playlists & queue merged playlists for Musikr reconciliation
+                    val conflictKeys = playlistSync.conflictNames.mapTo(HashSet()) { it.lowercase() }
+                    val deletedKeys = playlistSync.deletedNames.mapTo(HashSet()) { it.lowercase() }
+                    val queuedKeys = HashSet<String>()
+                    val effectiveOutboxPlaylists = ArrayList<OutboxPlaylistDto>()
+                    for (pl in outbox.playlists) {
+                        val key = pl.name.lowercase()
+                        if (key in conflictKeys || key in deletedKeys) continue
+                        val merged = playlistSync.mergedEntriesByKey[key]
+                        if (merged != null) {
+                            effectiveOutboxPlaylists.add(pl.copy(relPaths = merged.second))
                         } else {
-                            append("部分完成（").append(failedTrackUids.size).append(" 首待续传）：")
+                            managedSyncStorage.commitPlaylistM3u8(pl.name, pl.relPaths)
+                            lwwStore.savePlaylistMergeBase(pl.name, pl.relPaths)
+                            effectiveOutboxPlaylists.add(pl)
                         }
-                        append("新增 ").append(downloadedCount).append(" 首")
-                        if (skippedExisting > 0) {
-                            append(" · 已有 ").append(skippedExisting).append(" 首")
-                        }
-                        if (outbox.playlists.isNotEmpty()) {
-                            append(" · 歌单 ").append(outbox.playlists.size).append(" 个")
-                        }
-                        append(" · 上报播放 ").append(pushedCounts).append(" 首 · 标签 ")
-                            .append(pushedMutations).append(" 条 · 合并歌单 ").append(mergedPlaylists).append(" 个")
-                        if (firstDownloadError != null) {
-                            append("（").append(firstDownloadError).append("）")
+                        queuedKeys.add(key)
+                    }
+                    for ((key, mergedPair) in playlistSync.mergedEntriesByKey) {
+                        if (key !in queuedKeys) {
+                            effectiveOutboxPlaylists.add(
+                                OutboxPlaylistDto(
+                                    outboxId = "",
+                                    name = mergedPair.first,
+                                    relPaths = mergedPair.second,
+                                    trackUids = emptyList(),
+                                )
+                            )
+                            queuedKeys.add(key)
                         }
                     }
-            } catch (authErr: LanSyncAuthException) {
-                L.w(authErr, "LAN Sync v2 unauthorized")
-                unpairHost()
-                _syncStatus.value = "配对已失效，请重新输入电脑端 6 位配对码配对"
-            } catch (e: Exception) {
-                L.w(e, "LAN sync failed")
-                _syncStatus.value = "同步失败：${e.message ?: "无法连接到电脑"}"
-            } finally {
-                _syncProgress.value = SyncProgressState()
-                syncInFlight.set(false)
+                    if (effectiveOutboxPlaylists.isNotEmpty()) {
+                        for (pl in effectiveOutboxPlaylists) {
+                            pendingOutboxPlaylists[pl.name.lowercase()] =
+                                PendingPlaylistReconcile(pl, remainingAttempts = 3)
+                        }
+                    }
+                    val hasPendingRemoteLedger =
+                        synchronized(pendingRemoteLedgerLock) {
+                            pendingRemoteCounts.isNotEmpty() ||
+                                pendingRemoteLoved.isNotEmpty() ||
+                                pendingRemoteUnloved.isNotEmpty() ||
+                                pendingEvictTrackMtimes.isNotEmpty()
+                        }
+                    if (downloadedCount > 0 || updatedExistingCount > 0 || effectiveOutboxPlaylists.isNotEmpty()) {
+                        musicRepository.requestIndex(withCache = true)
+                        reconcilePendingOutboxPlaylists()
+                        reconcilePendingRemoteLedger()
+                    } else if (hasPendingRemoteLedger) {
+                        reconcilePendingRemoteLedger()
+                    }
+
+                    _syncStatus.value =
+                        buildString {
+                            if (failedTrackUids.isEmpty()) {
+                                append("同步完成（").append(outbox.hostName).append("）：")
+                            } else {
+                                append("部分完成（").append(failedTrackUids.size).append(" 首待续传）：")
+                            }
+                            append("新增 ").append(downloadedCount).append(" 首")
+                            if (updatedExistingCount > 0) {
+                                append(" · 更新新版 ").append(updatedExistingCount).append(" 首")
+                            }
+                            if (skippedExisting > 0) {
+                                append(" · 已最新跳过 ").append(skippedExisting).append(" 首")
+                            }
+                            if (totalDeduplicated > 0) {
+                                append(" · 任务去重 ").append(totalDeduplicated).append(" 首")
+                            }
+                            if (outbox.playlists.isNotEmpty()) {
+                                append(" · 歌单 ").append(outbox.playlists.size).append(" 个")
+                            }
+                            append(" · 上报播放 ").append(pushedCounts).append(" 首 · 标签 ")
+                                .append(pushedMutations).append(" 条 · 合并歌单 ").append(playlistSync.mergedCount).append(" 个")
+                            if (playlistSync.conflictNames.isNotEmpty()) {
+                                append(" · 歌单冲突 ").append(playlistSync.conflictNames.size).append(" 个（")
+                                    .append(playlistSync.conflictNames.take(3).joinToString("、")).append("）")
+                            }
+                            if (firstDownloadError != null) {
+                                append("（").append(firstDownloadError).append("）")
+                            }
+                        }
+                } catch (ce: CancellationException) {
+                    L.i("LAN sync cancelled")
+                    _syncStatus.value = "同步已取消（已下载曲目与断点缓存已保留，可随时续传）"
+                    throw ce
+                } catch (authErr: LanSyncAuthException) {
+                    L.w(authErr, "LAN Sync v2 unauthorized")
+                    unpairHost(notifyRemote = false)
+                    _syncStatus.value = "配对已失效，请重新输入电脑端 6 位配对码配对"
+                } catch (e: Exception) {
+                    L.w(e, "LAN sync failed")
+                    _syncStatus.value = "同步失败：${e.message ?: "无法连接到电脑"}"
+                } finally {
+                    managedSyncStorage.invalidatePathCache()
+                    activeCancelToken = null
+                    activeSyncJob = null
+                    _syncProgress.value = SyncProgressState()
+                    syncInFlight.set(false)
+                }
             }
         }
     }
@@ -563,17 +1037,21 @@ constructor(
         expectedOldHeaderHex: String,
     ): Boolean =
         withContext(Dispatchers.IO) {
-            val cleanBase = baseUrl.trim().trimEnd('/')
+            val cleanBase = normalizeBaseUrl(baseUrl)
+            val token =
+                resolveTokenForBaseUrl(cleanBase)
+                    ?: throw LanSyncAuthException(401, "未配对或目标主机与已配对电脑不匹配")
             val trackUid = song.uid.toString()
             val encodedUid = URLEncoder.encode(trackUid, "UTF-8")
-            val raw = httpGetString("$cleanBase/api/v1/patch/$encodedUid")
-            val obj = JSONObject(raw)
-            val b64 = obj.optString("header_base64", "")
+            val raw = httpGetString("$cleanBase/api/v1/patch/$encodedUid", token)
+            @Suppress("UNCHECKED_CAST")
+            val obj = TonewiseCore.parseJson(raw) as? Map<String, Any?> ?: return@withContext false
+            val b64 = obj["header_base64"]?.toString().orEmpty()
             if (b64.isBlank()) return@withContext false
             val headerBytes = Base64.decode(b64, Base64.DEFAULT)
             context.contentResolver.openFileDescriptor(song.uri, "rw")?.use { pfd ->
-                TonewiseCore.applyHeaderPatch(pfd, expectedOldHeaderHex, headerBytes)
-                true
+                val resultJson = TonewiseCore.applyHeaderPatch(pfd, expectedOldHeaderHex, headerBytes)
+                isPatchApplied(resultJson)
             } ?: false
         }
 
@@ -584,23 +1062,63 @@ constructor(
         expectedOldHeaderHex: String,
     ): Boolean =
         withContext(Dispatchers.IO) {
-            val cleanBase = baseUrl.trim().trimEnd('/')
+            val cleanBase = normalizeBaseUrl(baseUrl)
+            val token =
+                resolveTokenForBaseUrl(cleanBase)
+                    ?: throw LanSyncAuthException(401, "未配对或目标主机与已配对电脑不匹配")
             val encodedUid = URLEncoder.encode(trackUid, "UTF-8")
-            val raw = httpGetString("$cleanBase/api/v1/patch/$encodedUid")
-            val obj = JSONObject(raw)
-            val b64 = obj.optString("header_base64", "")
+            val raw = httpGetString("$cleanBase/api/v1/patch/$encodedUid", token)
+            @Suppress("UNCHECKED_CAST")
+            val obj = TonewiseCore.parseJson(raw) as? Map<String, Any?> ?: return@withContext false
+            val b64 = obj["header_base64"]?.toString().orEmpty()
             if (b64.isBlank()) return@withContext false
             val headerBytes = Base64.decode(b64, Base64.DEFAULT)
-            TonewiseCore.applyHeaderPatchPath(
-                targetFile.absolutePath,
-                expectedOldHeaderHex,
-                headerBytes,
-            )
-            true
+            val resultJson =
+                TonewiseCore.applyHeaderPatchPath(
+                    targetFile.absolutePath,
+                    expectedOldHeaderHex,
+                    headerBytes,
+                )
+            isPatchApplied(resultJson)
         }
 
+    private fun resolveTokenForBaseUrl(cleanBase: String): String? {
+        val paired =
+            _pairedHost.value
+                ?: run {
+                    val mainLooper = runCatching { android.os.Looper.getMainLooper() }.getOrNull()
+                    if (mainLooper != null && mainLooper.thread === Thread.currentThread()) null
+                    else lwwStore.loadPairedHost()?.also { _pairedHost.value = it }
+                }
+        return resolveTokenForHost(paired, cleanBase)
+    }
+
+    private fun isPatchApplied(resultJson: String): Boolean =
+        runCatching {
+            @Suppress("UNCHECKED_CAST")
+            val obj = TonewiseCore.parseJson(resultJson) as? Map<String, Any?>
+            obj?.get("status")?.toString() == "applied"
+        }.getOrDefault(false)
+
+    private fun verifyDownloadedPartIntegrity(partFile: File, track: OutboxTrackDto): Boolean {
+        val expectedAudio = track.audioFrameBlake3.trim()
+        val expectedHeader = track.headerBlake3.trim()
+        if (expectedAudio.isEmpty() && expectedHeader.isEmpty()) {
+            return true
+        }
+        val fp = computeLocalAudioFingerprintSafe(partFile.absolutePath) ?: return false
+        val (actualHeader, actualAudio) = fp
+        if (expectedAudio.isNotEmpty() && !expectedAudio.equals(actualAudio, ignoreCase = true)) {
+            return false
+        }
+        if (expectedHeader.isNotEmpty() && !expectedHeader.equals(actualHeader, ignoreCase = true)) {
+            return false
+        }
+        return true
+    }
+
     fun getEffectiveDjScenes(song: Song): List<String> {
-        val rawOverride = getLwwOverride(song.uid.toString(), "dj_scene")
+        val rawOverride = lwwStore.getLwwOverride(song.uid.toString(), "dj_scene")
         if (rawOverride != null) {
             return rawOverride
                 .split(';', ',', '/', '\u0000')
@@ -612,18 +1130,18 @@ constructor(
     }
 
     fun getEffectiveDjVocals(song: Song): String =
-        getLwwOverride(song.uid.toString(), "dj_vocals") ?: (song.djVocals ?: "unknown")
+        lwwStore.getLwwOverride(song.uid.toString(), "dj_vocals") ?: (song.djVocals ?: "unknown")
 
     fun getEffectiveDjEnergy(song: Song): String =
-        getLwwOverride(song.uid.toString(), "dj_energy") ?: (song.djEnergy ?: "unknown")
+        lwwStore.getLwwOverride(song.uid.toString(), "dj_energy") ?: (song.djEnergy ?: "unknown")
 
     fun getEffectiveDjTempo(song: Song): String? =
-        getLwwOverride(song.uid.toString(), "tempo")?.takeIf { it.isNotBlank() }
-            ?: getLwwOverride(song.uid.toString(), "tempo_bucket")?.takeIf { it.isNotBlank() }
+        lwwStore.getLwwOverride(song.uid.toString(), "tempo")?.takeIf { it.isNotBlank() }
+            ?: lwwStore.getLwwOverride(song.uid.toString(), "tempo_bucket")?.takeIf { it.isNotBlank() }
             ?: song.tempoBucket
 
     fun getEffectiveMoods(song: Song): List<String> {
-        val rawOverride = getLwwOverride(song.uid.toString(), "mood")
+        val rawOverride = lwwStore.getLwwOverride(song.uid.toString(), "mood")
         if (rawOverride != null) {
             return rawOverride
                 .split(';', ',', '/', '\u0000')
@@ -646,8 +1164,6 @@ constructor(
         val now = System.currentTimeMillis()
         val deviceId = Build.MODEL ?: "android"
 
-        lwwOverrides[overrideKey(uid, cleanField)] = cleanValue
-
         if (cleanField == "rating") {
             val ratingNum = cleanValue.toIntOrNull() ?: 4
             val isNowLoved = ratingNum >= 5
@@ -655,28 +1171,18 @@ constructor(
             lastFmRepository.onLovedChanged(song, isNowLoved)
         }
 
-        val pendingSize =
-            synchronized(this) {
-                pendingMutationsList.removeAll { it.trackUid == uid && it.field == cleanField }
-                pendingMutationsList.add(
-                    TagMutationRecord(
-                        trackUid = uid,
-                        field = cleanField,
-                        value = cleanValue,
-                        updatedAtMs = now,
-                        deviceId = deviceId,
-                    )
-                )
-                lwwVersion += 1
-                pendingMutationsList.size
-            }
-        _pendingMutationCount.value = pendingSize
+        lwwStore.recordPendingMutation(
+            uid = uid,
+            field = cleanField,
+            value = cleanValue,
+            updatedAtMs = now,
+            deviceId = deviceId,
+        )
 
-        val overrideEntity = LwwOverrideEntity(uid, cleanField, cleanValue)
+        val overrideEntity = LwwOverrideEntity(uid, cleanField, cleanValue, now)
         val mutationEntity = PendingTagMutationEntity(uid, cleanField, cleanValue, now, deviceId)
         writeBackScope.launch {
-            syncDb.lwwMutationDao().upsertOverride(overrideEntity)
-            syncDb.lwwMutationDao().upsertPendingMutation(mutationEntity)
+            lwwStore.persistMutationEntities(overrideEntity, mutationEntity)
             waveformRepository.getOrComputeAudioFrameBlake3(song)
         }
     }
@@ -762,12 +1268,21 @@ constructor(
         return matchedUids.mapNotNull { byUid[it] }
     }
 
+    fun orderSongsWorkShuffle(
+        songs: List<Song>,
+        random: kotlin.random.Random = kotlin.random.Random.Default,
+    ): List<Song> {
+        if (songs.size <= 1) return songs
+        val order = WorkShuffleOrder.createWorkAwareOrder(songs, -1, random)
+        return order.map { songs[it] }
+    }
+
     private fun getOrBuildTracksJson(songs: Collection<Song>): String {
         val key =
             TracksCacheKey(
                 songsIdentityHash = System.identityHashCode(songs),
                 songCount = songs.size,
-                lwwVersion = lwwVersion,
+                lwwVersion = lwwStore.lwwVersion,
                 playCountVersion = playCountRepository.updates.value,
             )
         if (cachedTracksKey == key) {
@@ -778,52 +1293,252 @@ constructor(
                 TracksCacheKey(
                     songsIdentityHash = System.identityHashCode(songs),
                     songCount = songs.size,
-                    lwwVersion = lwwVersion,
+                    lwwVersion = lwwStore.lwwVersion,
                     playCountVersion = playCountRepository.updates.value,
                 )
             if (cachedTracksKey == recheckKey) {
                 return cachedTracksJson
             }
-            val built = buildTracksJson(songs)
+            val nowMs = System.currentTimeMillis()
+            val built =
+                SceneRuleEvaluator.buildTracksJson(
+                    songs = songs,
+                    nowMs = nowMs,
+                    getDjScenes = ::getEffectiveDjScenes,
+                    getDjVocals = ::getEffectiveDjVocals,
+                    getDjEnergy = ::getEffectiveDjEnergy,
+                    getDjTempo = ::getEffectiveDjTempo,
+                    getMoods = ::getEffectiveMoods,
+                    getPlayStats = { song ->
+                        val snap = playCountRepository.getSnapshot(song)
+                        Triple(snap.playCount, snap.lastPlayedMs, snap.loved)
+                    },
+                    getRatingOverride = { uid -> lwwStore.getLwwOverride(uid, "rating") },
+                )
             cachedTracksKey = recheckKey
             cachedTracksJson = built
             built
         }
     }
 
-    private fun buildTracksJson(songs: Collection<Song>): String {
-        val tracksJson = JSONArray()
-        val nowMs = System.currentTimeMillis()
-        for (song in songs) {
-            val uid = song.uid.toString()
-            val genres = song.genres.mapNotNull { (it.name as? Name.Known)?.raw }.firstOrNull() ?: ""
-            val snap = playCountRepository.getSnapshot(song)
-            val playCount = snap.playCount
-            val lastPlayedMs = snap.lastPlayedMs
-            val unplayedDays =
-                when {
-                    playCount == 0 -> 120
-                    lastPlayedMs > 0L -> ((nowMs - lastPlayedMs).coerceAtLeast(0L) / 86_400_000L).toInt()
-                    else -> 1
+    private data class ReportSyncResult(
+        val pushedCounts: Int,
+        val pushedMutations: Int,
+        val handoffMerged: Boolean,
+    )
+
+    suspend fun resolveCanonicalTrackUids(songs: List<Song>): List<String> =
+        withContext(Dispatchers.IO) {
+            if (songs.isEmpty()) return@withContext emptyList()
+            syncDb.ensureLegacyMigrated(context)
+            val fpByLocalUid =
+                syncDb.audioFingerprintDao().getAll().associateBy { it.trackUid }.toMutableMap()
+            val syncedAll = syncDb.syncedTrackDao().getAll()
+            val localToBlake3 = HashMap<String, String>(songs.size)
+            val localUids = ArrayList<String>(songs.size)
+            for (song in songs) {
+                val localUid = song.uid.toString()
+                localUids.add(localUid)
+                if (localToBlake3.containsKey(localUid)) continue
+                val cachedHex =
+                    fpByLocalUid[localUid]
+                        ?.takeIf { isFingerprintCacheFresh(it, song.size, song.modifiedMs) }
+                        ?.audioFrameBlake3Hex
+                        ?.takeIf { isHex64(it) }
+                if (cachedHex != null) {
+                    localToBlake3[localUid] = cachedHex.lowercase()
+                    continue
                 }
-            val rating =
-                getLwwOverride(uid, "rating")?.toIntOrNull()
-                    ?: if (snap.loved) 5 else 4
-            val obj =
-                JSONObject()
-                    .put("track_uid", uid)
-                    .put("title", song.name.raw)
-                    .put("dj_scene", JSONArray(getEffectiveDjScenes(song)))
-                    .put("dj_vocals", getEffectiveDjVocals(song))
-                    .put("dj_energy", getEffectiveDjEnergy(song))
-                    .put("tempo_bucket", getEffectiveDjTempo(song) ?: JSONObject.NULL)
-                    .put("moods", JSONArray(getEffectiveMoods(song)))
-                    .put("genre", genres)
-                    .put("rating", rating)
-                    .put("unplayed_days", unplayedDays)
-            tracksJson.put(obj)
+                val songRel =
+                    song.path.components.components.joinToString("/").replace('\\', '/').lowercase()
+                val syncedMatch =
+                    syncedAll.firstOrNull { s ->
+                        val sRel = s.relativePath.replace('\\', '/').lowercase()
+                        isHex64(s.trackUid) && (songRel == sRel || songRel.endsWith("/$sRel"))
+                    }
+                if (syncedMatch != null) {
+                    cacheFingerprintAlias(song, syncedMatch.trackUid)
+                    localToBlake3[localUid] = syncedMatch.trackUid.lowercase()
+                    continue
+                }
+                waveformRepository.getOrComputeAudioFrameBlake3(song)?.takeIf { isHex64(it) }?.let { b3 ->
+                    localToBlake3[localUid] = b3.lowercase()
+                }
+            }
+            for ((localUid, fpHex) in localToBlake3) {
+                if (syncDb.reanchorTrackByFingerprint(localUid, fpHex)) {
+                    playCountRepository.reloadTrackFromDb(localUid)
+                    lwwStore.reloadTrackOverridesFromDb(localUid)
+                }
+            }
+            translateLocalUidsToCanonical(localUids, localToBlake3)
         }
-        return tracksJson.toString()
+
+    suspend fun resolveSlotSongs(slot: SessionSlotItem): List<Song> =
+        withContext(Dispatchers.IO) {
+            syncDb.ensureLegacyMigrated(context)
+            val songs = musicRepository.library?.songs.orEmpty()
+            if (songs.isEmpty() || slot.queueTrackUids.isEmpty()) return@withContext emptyList()
+            val songsByUid = songs.associateBy { it.uid.toString() }
+            val songByPcUid = buildSongByPcUidMap(songs, songsByUid)
+            resolveCanonicalUidsToItems(
+                uids = slot.queueTrackUids,
+                blake3ToItem = songByPcUid,
+                localUidToItem = songsByUid,
+            )
+        }
+
+    private fun buildSongByPcUidMap(
+        songs: Collection<Song>,
+        songsByUid: Map<String, Song>,
+        fpByLocalUid: Map<String, AudioFingerprintCacheEntity> =
+            syncDb.audioFingerprintDao().getAll().associateBy { it.trackUid },
+        syncedAll: List<SyncedTrackEntity> = syncDb.syncedTrackDao().getAll(),
+    ): HashMap<String, Song> {
+        val songByPcUid = HashMap<String, Song>()
+        for ((localUid, fp) in fpByLocalUid) {
+            val s = songsByUid[localUid] ?: continue
+            if (!isFingerprintCacheFresh(fp, s.size, s.modifiedMs)) continue
+            val hex = fp.audioFrameBlake3Hex.trim().lowercase()
+            if (isHex64(hex)) {
+                songByPcUid[hex] = s
+            }
+        }
+        val songsByRel = PlaylistM3u8Helper.buildSongsByRelSuffixMap(songs)
+        for (synced in syncedAll) {
+            val match = PlaylistM3u8Helper.findMatchingSongByRelPath(synced.relativePath, songsByRel) ?: continue
+            val pcKey = synced.trackUid.trim().lowercase()
+            if (pcKey.isNotEmpty()) {
+                songByPcUid.putIfAbsent(pcKey, match)
+            }
+            cacheFingerprintAlias(match, synced.trackUid)
+        }
+        return songByPcUid
+    }
+
+    private data class PendingRemoteLedgerResult(
+        val unmatchedCounts: HashMap<String, Int>,
+        val unmatchedLoved: HashSet<String>,
+        val unmatchedUnloved: HashSet<String>,
+    )
+
+    private fun applyRemoteCountsAndLoved(
+        songs: Collection<Song>,
+        countsInput: Map<String, Int>,
+        lovedInput: Collection<String>,
+        unlovedInput: Collection<String>,
+        songByPcUid: Map<String, Song>,
+        songsByUid: Map<String, Song>,
+    ): PendingRemoteLedgerResult {
+        val unmatchedCounts = HashMap<String, Int>()
+        for ((pcUid, remoteCount) in countsInput) {
+            if (remoteCount <= 0) continue
+            val matchedSong = songByPcUid[pcUid.lowercase()] ?: songsByUid[pcUid]
+            if (matchedSong != null) {
+                playCountRepository.mergeRemotePlayCountAndSync(matchedSong.uid.toString(), remoteCount)
+            } else {
+                unmatchedCounts[pcUid] = remoteCount
+            }
+        }
+        val unmatchedLoved = HashSet<String>()
+        for (lovedPcUid in lovedInput) {
+            val matchedSong = songByPcUid[lovedPcUid.lowercase()] ?: songsByUid[lovedPcUid]
+            if (matchedSong != null) {
+                if (!playCountRepository.isLoved(matchedSong) &&
+                    !lwwStore.hasPendingMutation(matchedSong.uid.toString(), "rating")
+                ) {
+                    playCountRepository.setLoved(matchedSong, true)
+                }
+            } else {
+                unmatchedLoved.add(lovedPcUid)
+            }
+        }
+        val unmatchedUnloved = HashSet<String>()
+        for (unlovedPcUid in unlovedInput) {
+            val matchedSong = songByPcUid[unlovedPcUid.lowercase()] ?: songsByUid[unlovedPcUid]
+            if (matchedSong != null) {
+                if (playCountRepository.isLoved(matchedSong) &&
+                    !lwwStore.hasPendingMutation(matchedSong.uid.toString(), "rating")
+                ) {
+                    playCountRepository.setLoved(matchedSong, false)
+                }
+            } else {
+                unmatchedLoved.remove(unlovedPcUid)
+                unmatchedUnloved.add(unlovedPcUid)
+            }
+        }
+        return PendingRemoteLedgerResult(unmatchedCounts, unmatchedLoved, unmatchedUnloved)
+    }
+
+    private fun evictStaleOverridesForTracks(
+        trackMtimes: Map<String, Long>,
+        songByPcUid: Map<String, Song>,
+        songsByUid: Map<String, Song>,
+    ): HashMap<String, Long> {
+        val unmatched = HashMap<String, Long>()
+        for ((pcUidLower, mtimeMs) in trackMtimes) {
+            val matchedSong = songByPcUid[pcUidLower] ?: songsByUid[pcUidLower]
+            if (matchedSong != null) {
+                lwwStore.evictStaleOverridesForTrack(matchedSong.uid.toString(), mtimeMs)
+            } else {
+                unmatched[pcUidLower] = mtimeMs
+            }
+        }
+        return unmatched
+    }
+
+    private fun reconcilePendingRemoteLedger() {
+        val countsCopy: Map<String, Int>
+        val lovedCopy: Set<String>
+        val unlovedCopy: Set<String>
+        val evictCopy: Map<String, Long>
+        synchronized(pendingRemoteLedgerLock) {
+            if (pendingRemoteCounts.isEmpty() &&
+                pendingRemoteLoved.isEmpty() &&
+                pendingRemoteUnloved.isEmpty() &&
+                pendingEvictTrackMtimes.isEmpty()
+            ) {
+                return
+            }
+            if (pendingRemoteReconcileRemaining <= 0) {
+                pendingRemoteCounts.clear()
+                pendingRemoteLoved.clear()
+                pendingRemoteUnloved.clear()
+                pendingEvictTrackMtimes.clear()
+                return
+            }
+            countsCopy = HashMap(pendingRemoteCounts)
+            lovedCopy = HashSet(pendingRemoteLoved)
+            unlovedCopy = HashSet(pendingRemoteUnloved)
+            evictCopy = HashMap(pendingEvictTrackMtimes)
+        }
+        val songs = musicRepository.library?.songs.orEmpty()
+        if (songs.isEmpty()) return
+        val songsByUid = songs.associateBy { it.uid.toString() }
+        val songByPcUid = buildSongByPcUidMap(songs, songsByUid)
+        val res =
+            applyRemoteCountsAndLoved(
+                songs = songs,
+                countsInput = countsCopy,
+                lovedInput = lovedCopy,
+                unlovedInput = unlovedCopy,
+                songByPcUid = songByPcUid,
+                songsByUid = songsByUid,
+            )
+        val stillEvicts = evictStaleOverridesForTracks(evictCopy, songByPcUid, songsByUid)
+        synchronized(pendingRemoteLedgerLock) {
+            pendingRemoteCounts.clear()
+            pendingRemoteLoved.clear()
+            pendingRemoteUnloved.clear()
+            pendingEvictTrackMtimes.clear()
+            pendingRemoteReconcileRemaining -= 1
+            if (pendingRemoteReconcileRemaining > 0) {
+                pendingRemoteCounts.putAll(res.unmatchedCounts)
+                pendingRemoteLoved.addAll(res.unmatchedLoved)
+                pendingRemoteUnloved.addAll(res.unmatchedUnloved)
+                pendingEvictTrackMtimes.putAll(stillEvicts)
+            }
+        }
     }
 
     private fun pushV2ReportAndApplyCounts(
@@ -831,32 +1546,22 @@ constructor(
         token: String,
         deviceId: String,
         completedOutboxIds: List<String>,
-    ): Pair<Int, Int> {
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): ReportSyncResult {
         val songs = musicRepository.library?.songs.orEmpty()
         val songsByUid = songs.associateBy { it.uid.toString() }
         val fpByLocalUid =
             syncDb.audioFingerprintDao().getAll().associateBy { it.trackUid }.toMutableMap()
         val syncedAll = syncDb.syncedTrackDao().getAll()
-        val syncedByPcUid = syncedAll.associateBy { it.trackUid }
-        val songByPcUid = HashMap<String, Song>()
-
-        // Reverse map already cached blake3 & synced relative paths -> local Song
-        for ((localUid, fp) in fpByLocalUid) {
-            val s = songsByUid[localUid] ?: continue
-            songByPcUid[fp.audioFrameBlake3Hex.lowercase()] = s
-        }
-        val songsByRel = buildSongsByRelSuffixMap(songs)
-        for (synced in syncedAll) {
-            val match = findMatchingSongByRelPath(synced.relativePath, songsByRel) ?: continue
-            songByPcUid.putIfAbsent(synced.trackUid.lowercase(), match)
-            cacheFingerprintAlias(match, synced.trackUid)
-        }
+        val songByPcUid = buildSongByPcUidMap(songs, songsByUid, fpByLocalUid, syncedAll)
 
         fun resolvePcUid(song: Song): String? {
             val localUid = song.uid.toString()
-            fpByLocalUid[localUid]?.audioFrameBlake3Hex?.takeIf { it.length == 64 }?.let {
-                return it
-            }
+            fpByLocalUid[localUid]
+                ?.takeIf { isFingerprintCacheFresh(it, song.size, song.modifiedMs) }
+                ?.audioFrameBlake3Hex
+                ?.takeIf { it.length == 64 }
+                ?.let { return it }
             val songRel = song.path.components.components.joinToString("/").replace('\\', '/').lowercase()
             for (synced in syncedAll) {
                 val syncedRel = synced.relativePath.replace('\\', '/').lowercase()
@@ -870,15 +1575,22 @@ constructor(
             }
         }
 
-        // 1. Delta-only play counts (never send 0 delta, never fake current time for historical counts)
+        // 1. Delta-only play counts with Last.fm scrobble watermark split
         val playDeltas = ArrayList<PlayDeltaPayload>()
         val pushedWatermarks = ArrayList<Pair<String, Int>>()
         for (song in songs) {
             val localUid = song.uid.toString()
             val snap = playCountRepository.getSnapshot(song)
             val alreadySynced = playCountRepository.getLanSyncedCount(localUid)
-            val delta = snap.playCount - alreadySynced
-            if (delta <= 0) continue
+            val push =
+                com.shawnshi.tonewise.playback.persist.PlayLedgerWatermarkMath.computeLanPushDelta(
+                    com.shawnshi.tonewise.playback.persist.PlayLedgerWatermarkMath.WatermarkState(
+                        playCount = snap.playCount,
+                        lanSyncedCount = alreadySynced,
+                        lastFmSyncedCount = playCountRepository.getLastFmSyncedCount(localUid),
+                    )
+                )
+            if (push.totalDelta <= 0) continue
 
             val pcUid = resolvePcUid(song) ?: localUid
             val primaryArtist =
@@ -894,16 +1606,18 @@ constructor(
                     artist = primaryArtist,
                     title = song.name.raw,
                     album = albumName,
-                    playCountDelta = delta,
+                    playCountDelta = push.totalDelta,
                     lastPlayedTsMs = snap.lastPlayedMs,
                     deviceId = deviceId,
+                    scrobbledDelta = push.scrobbledDelta,
+                    devicePlayCountTotal = snap.playCount,
                 )
             )
             pushedWatermarks.add(localUid to snap.playCount)
         }
 
         // 2. Pending LWW mutations keyed by blake3 + ack key
-        val batch = snapshotPendingMutations()
+        val batch = lwwStore.snapshotPendingMutations()
         val keyByRecord = HashMap<TagMutationRecord, String>(batch.size)
         val mutPayloads = ArrayList<MutationPayload>(batch.size)
         for (m in batch) {
@@ -941,6 +1655,8 @@ constructor(
                 playDeltas = playDeltas,
                 mutations = mutPayloads,
                 completedOutboxIds = completedOutboxIds,
+                handoffSlotsRawJson = sessionSlotStore.exportSlotsJson(),
+                cancelToken = cancelToken,
             )
 
         // Advance LAN play high-water marks for pushed songs
@@ -956,282 +1672,270 @@ constructor(
                 ackKeys = reportResp.acknowledgedMutationKeys,
             )
         if (acknowledged.isNotEmpty()) {
-            removeSyncedMutations(acknowledged)
+            lwwStore.removeSyncedMutations(acknowledged)
         }
 
-        // Merge returned PC effective play counts & loved stars back into mobile ledger
-        for ((pcUid, remoteCount) in reportResp.effectiveCounts) {
-            if (remoteCount <= 0) continue
-            val matchedSong = songByPcUid[pcUid.lowercase()] ?: songsByUid[pcUid]
-            val localUid = matchedSong?.uid?.toString()
-            if (localUid != null) {
-                playCountRepository.mergeRemotePlayCountAndSync(localUid, remoteCount)
-            } else if (syncedByPcUid.containsKey(pcUid)) {
-                playCountRepository.mergeRemotePlayCountAndSync(pcUid, remoteCount)
+        var handoffMerged = false
+        val rawSlotsJson = reportResp.handoffSlotsRawJson
+        if (rawSlotsJson != null) {
+            runCatching { sessionSlotStore.mergeRemoteJson(rawSlotsJson) }
+                .onSuccess { handoffMerged = true }
+                .onFailure { L.w(it, "Report handoff_slots merge failed") }
+        }
+
+        // Merge returned PC effective play counts & loved/unloved states back into mobile ledger
+        // Defer unmatched PC UIDs until after post-sync musicRepository.requestIndex() resolves real Musikr UIDs
+        val ledgerRes =
+            applyRemoteCountsAndLoved(
+                songs = songs,
+                countsInput = reportResp.effectiveCounts,
+                lovedInput = reportResp.lovedUids,
+                unlovedInput = reportResp.unlovedUids,
+                songByPcUid = songByPcUid,
+                songsByUid = songsByUid,
+            )
+        synchronized(pendingRemoteLedgerLock) {
+            pendingRemoteCounts.clear()
+            pendingRemoteLoved.clear()
+            pendingRemoteUnloved.clear()
+            if (ledgerRes.unmatchedCounts.isNotEmpty() ||
+                ledgerRes.unmatchedLoved.isNotEmpty() ||
+                ledgerRes.unmatchedUnloved.isNotEmpty()
+            ) {
+                pendingRemoteCounts.putAll(ledgerRes.unmatchedCounts)
+                pendingRemoteLoved.addAll(ledgerRes.unmatchedLoved)
+                pendingRemoteUnloved.addAll(ledgerRes.unmatchedUnloved)
+                pendingRemoteReconcileRemaining = 3
+            } else {
+                pendingRemoteReconcileRemaining = 0
             }
         }
-        for (lovedPcUid in reportResp.lovedUids) {
-            val matchedSong = songByPcUid[lovedPcUid.lowercase()] ?: songsByUid[lovedPcUid]
-            if (matchedSong != null && !playCountRepository.isLoved(matchedSong)) {
-                playCountRepository.setLoved(matchedSong, true)
-            }
+
+        return ReportSyncResult(
+            pushedCounts = playDeltas.size,
+            pushedMutations = acknowledged.size,
+            handoffMerged = handoffMerged,
+        )
+    }
+
+    private data class PlaylistSyncSummary(
+        val mergedCount: Int = 0,
+        val mergedEntriesByKey: Map<String, Pair<String, List<String>>> = emptyMap(),
+        val conflictNames: List<String> = emptyList(),
+        val deletedNames: List<String> = emptyList(),
+    )
+
+    private fun snapshotUserPlaylistsForSync() {
+        val playlists = musicRepository.library?.playlists.orEmpty()
+        if (playlists.isEmpty()) return
+        val internalDir = File(context.filesDir, ".tonewise/playlists")
+        if (!internalDir.exists()) internalDir.mkdirs()
+        for (playlist in playlists) {
+            val rawName = playlist.name.raw.trim()
+            if (rawName.isEmpty()) continue
+            val hasBase = lwwStore.loadPlaylistMergeBase(rawName).isNotEmpty()
+            if (playlist.songs.isEmpty() && !hasBase) continue
+            val safeName = sanitizePlaylistFilename(rawName)
+            val payload = formatM3u8Content(playlist.songs, rawName).toByteArray(Charsets.UTF_8)
+            runCatching { File(internalDir, "$safeName.m3u8").writeBytes(payload) }
         }
-
-        return playDeltas.size to acknowledged.size
     }
 
-    @Synchronized
-    private fun snapshotPendingMutations(): List<TagMutationRecord> = pendingMutationsList.toList()
-
-    @Synchronized
-    private fun removeSyncedMutations(synced: List<TagMutationRecord>) {
-        if (synced.isEmpty()) return
-        pendingMutationsList.removeAll(synced.toSet())
-        savePendingMutations()
-        _pendingMutationCount.value = pendingMutationsList.size
-    }
-
-    private fun syncPlaylistsWithHost(baseUrl: String): Int {
+    private fun syncPlaylistsWithHost(
+        baseUrl: String,
+        token: String? = null,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): PlaylistSyncSummary {
         val dir = File(context.filesDir, ".tonewise/playlists")
-        if (!dir.isDirectory) return 0
+        if (!dir.isDirectory) return PlaylistSyncSummary()
         val m3uFiles = dir.listFiles { f -> f.isFile && f.extension.equals("m3u8", ignoreCase = true) }
-            ?: return 0
+            ?: return PlaylistSyncSummary()
         var syncedCount = 0
+        val mergedEntriesByKey = LinkedHashMap<String, Pair<String, List<String>>>()
+        val conflictNames = ArrayList<String>()
+        val deletedNames = ArrayList<String>()
         for (file in m3uFiles) {
-            runCatching {
-                val name = file.nameWithoutExtension
+            cancelToken?.throwIfCancelled()
+            try {
+                val rawLines = file.readLines(Charsets.UTF_8)
+                val name = PlaylistM3u8Helper.extractPlaylistNameFromM3u8(rawLines, file.nameWithoutExtension)
                 val localEntries =
-                    file.readLines(Charsets.UTF_8)
+                    rawLines
                         .map { it.trim() }
                         .filter { it.isNotEmpty() && !it.startsWith("#") }
-                        .map(::normalizePlaylistEntryForPc)
+                        .map(PlaylistM3u8Helper::normalizePlaylistEntryForPc)
                         .filter { it.isNotEmpty() }
-                if (localEntries.isEmpty()) return@runCatching
                 val baseEntries =
-                    loadPlaylistMergeBase(name)
-                        .map(::normalizePlaylistEntryForPc)
+                    lwwStore.loadPlaylistMergeBase(name)
+                        .map(PlaylistM3u8Helper::normalizePlaylistEntryForPc)
                         .filter { it.isNotEmpty() }
+                if (localEntries.isEmpty() && baseEntries.isEmpty()) continue
                 val reqJson =
-                    JSONObject()
-                        .put("playlist_name", name)
-                        .put("base", JSONArray(baseEntries))
-                        .put("ours", JSONArray(baseEntries))
-                        .put("theirs", JSONArray(localEntries))
-                        .toString()
-                val respRaw = httpPostJson("$baseUrl/api/v1/playlists/merge", reqJson)
-                val respObj = JSONObject(respRaw)
-                val conflicts = respObj.optJSONArray("conflicts")
-                if (conflicts == null || conflicts.length() == 0) {
-                    val mergedArr = respObj.optJSONArray("merged") ?: JSONArray()
-                    val mergedPaths = List(mergedArr.length()) { idx -> mergedArr.getString(idx) }
-                    managedSyncStorage.commitPlaylistM3u8(name, mergedPaths)
-                    savePlaylistMergeBase(name, mergedPaths)
-                    syncedCount++
+                    TonewiseCore.stringifyJson(
+                        linkedMapOf(
+                            "playlist_name" to name,
+                            "base" to baseEntries,
+                            "ours" to emptyList<String>(),
+                            "theirs" to localEntries,
+                        )
+                    )
+                val respRaw = httpPostJson("$baseUrl/api/v1/playlists/merge", reqJson, token, cancelToken)
+                @Suppress("UNCHECKED_CAST")
+                val respObj = TonewiseCore.parseJson(respRaw) as? Map<String, Any?> ?: continue
+                val deleted = respObj["deleted"] == true
+                val conflicts = respObj["conflicts"] as? List<*>
+                when {
+                    deleted -> {
+                        managedSyncStorage.deletePlaylistM3u8(name)
+                        lwwStore.clearPlaylistMergeBase(name)
+                        deletedNames.add(name)
+                        syncedCount++
+                    }
+                    conflicts.isNullOrEmpty() -> {
+                        val mergedPaths =
+                            (respObj["merged"] as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
+                        managedSyncStorage.commitPlaylistM3u8(name, mergedPaths)
+                        lwwStore.savePlaylistMergeBase(name, mergedPaths)
+                        mergedEntriesByKey[name.lowercase()] = name to mergedPaths
+                        syncedCount++
+                    }
+                    else -> {
+                        conflictNames.add(name)
+                    }
                 }
-            }.onFailure { L.w(it, "Playlist 3-way merge failed for ${file.name}") }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (authErr: LanSyncAuthException) {
+                throw authErr
+            } catch (t: Throwable) {
+                L.w(t, "Playlist 3-way merge failed for ${file.name}")
+            }
         }
-        return syncedCount
+        return PlaylistSyncSummary(
+            mergedCount = syncedCount,
+            mergedEntriesByKey = mergedEntriesByKey,
+            conflictNames = conflictNames,
+            deletedNames = deletedNames,
+        )
     }
 
-    private suspend fun applyOutboxPlaylistsIfAlreadyIndexed(playlists: List<OutboxPlaylistDto>) {
-        if (playlists.isEmpty()) return
-        val lib = musicRepository.library ?: return
-        val songsByRel = buildSongsByRelSuffixMap(lib.songs)
-        for (pl in playlists) {
-            runCatching {
-                val matchedSongs =
-                    pl.relPaths.mapNotNull { rel -> findMatchingSongByRelPath(rel, songsByRel) }
-                if (matchedSongs.isEmpty()) return@runCatching
-                val existing = musicRepository.library?.findPlaylistByName(pl.name)
-                if (existing == null) {
-                    musicRepository.createPlaylist(pl.name, matchedSongs)
-                } else if (existing.songs.map { it.uid } != matchedSongs.map { it.uid }) {
-                    musicRepository.rewritePlaylist(existing, matchedSongs)
+    private suspend fun reconcilePendingOutboxPlaylists() {
+        playlistReconcileMutex.withLock {
+            if (pendingOutboxPlaylists.isEmpty()) return
+            val lib = musicRepository.library ?: return
+            val songsByRel = PlaylistM3u8Helper.buildSongsByRelSuffixMap(lib.songs)
+            for ((key, pending) in pendingOutboxPlaylists.entries.toList()) {
+                val (matchedCount, totalRelCount) =
+                    applySingleOutboxPlaylist(pending.playlist, songsByRel)
+                val allMatched = totalRelCount == 0 || matchedCount >= totalRelCount
+                if (allMatched) {
+                    pendingOutboxPlaylists.remove(key)
+                } else {
+                    pending.remainingAttempts -= 1
+                    if (pending.remainingAttempts <= 0) {
+                        pendingOutboxPlaylists.remove(key)
+                    }
                 }
-            }.onFailure { L.w(it, "Direct playlist apply skipped for ${pl.name}") }
+            }
         }
     }
 
-    private fun buildSongsByRelSuffixMap(songs: Collection<Song>): List<Pair<String, Song>> =
-        songs.map { song ->
-            val pathStr =
-                song.path.components.components.joinToString("/").replace('\\', '/').lowercase()
-            pathStr to song
-        }
-
-    private fun findMatchingSongByRelPath(
-        targetRelPath: String,
-        indexedSongs: List<Pair<String, Song>>,
-    ): Song? {
-        val cleanRel =
-            LanSyncV2Client.sanitizeRelativePathSegments(targetRelPath)
-                .joinToString("/")
-                .lowercase()
-        if (cleanRel.isEmpty()) return null
-        return indexedSongs.firstOrNull { (fullRel, _) ->
-            fullRel == cleanRel ||
-                fullRel == "tonewise/$cleanRel" ||
-                fullRel.endsWith("/tonewise/$cleanRel") ||
-                fullRel.endsWith("/$cleanRel")
-        }?.second
+    private suspend fun applySingleOutboxPlaylist(
+        pl: OutboxPlaylistDto,
+        songsByRel: List<Pair<String, Song>>,
+    ): Pair<Int, Int> {
+        val totalExpected = pl.relPaths.size
+        var matchedCount = 0
+        runCatching {
+            val lib = musicRepository.library ?: return 0 to totalExpected
+            if (pl.relPaths.isEmpty()) {
+                val existing = lib.findPlaylistByName(pl.name)
+                if (existing != null && existing.songs.isNotEmpty()) {
+                    musicRepository.rewritePlaylist(existing, emptyList())
+                }
+                return 0 to 0
+            }
+            val matchedSongs =
+                pl.relPaths.mapNotNull { rel -> PlaylistM3u8Helper.findMatchingSongByRelPath(rel, songsByRel) }
+            matchedCount = matchedSongs.size
+            if (matchedSongs.isEmpty()) return 0 to totalExpected
+            val matchedUids = matchedSongs.map { it.uid }
+            val existing = lib.findPlaylistByName(pl.name)
+            val legacyName = legacyUnderscoredPlaylistFilename(pl.name)
+            if (legacyName != pl.name) {
+                val legacyPlaylist = lib.findPlaylistByName(legacyName)
+                if (existing == null && legacyPlaylist != null) {
+                    musicRepository.renamePlaylist(legacyPlaylist, pl.name)
+                    val renamed = musicRepository.library?.findPlaylistByName(pl.name)
+                    if (renamed != null && renamed.songs.map { it.uid } != matchedUids) {
+                        musicRepository.rewritePlaylist(renamed, matchedSongs)
+                    }
+                    return matchedCount to totalExpected
+                } else if (existing != null && legacyPlaylist != null) {
+                    if (
+                        legacyPlaylist.songs.isEmpty() ||
+                            legacyPlaylist.songs.map { it.uid }.toSet() == matchedUids.toSet()
+                    ) {
+                        musicRepository.deletePlaylist(legacyPlaylist)
+                    }
+                }
+            }
+            if (existing == null) {
+                musicRepository.createPlaylist(pl.name, matchedSongs)
+            } else if (existing.songs.map { it.uid } != matchedUids) {
+                musicRepository.rewritePlaylist(existing, matchedSongs)
+            }
+        }.onFailure { L.w(it, "Direct playlist apply skipped for ${pl.name}") }
+        return matchedCount to totalExpected
     }
+
+    private fun isFingerprintCacheFresh(
+        cached: AudioFingerprintCacheEntity,
+        size: Long,
+        mtimeMs: Long,
+    ): Boolean =
+        cached.fileSize == size &&
+            (cached.mtimeMs == 0L ||
+                mtimeMs <= 0L ||
+                kotlin.math.abs(cached.mtimeMs - mtimeMs) <= 2_000L)
 
     private fun cacheFingerprintAlias(song: Song, blake3Hex: String) {
         if (!isHex64(blake3Hex)) return
+        val normHex = blake3Hex.lowercase()
         val localUid = song.uid.toString()
-        if (syncDb.audioFingerprintDao().getByUid(localUid) != null) return
+        val existing = syncDb.audioFingerprintDao().getByUid(localUid)
+        val freshExisting =
+            existing?.takeIf { isFingerprintCacheFresh(it, song.size, song.modifiedMs) }
+        if (freshExisting != null &&
+            freshExisting.audioFrameBlake3Hex.equals(normHex, ignoreCase = true)
+        ) {
+            return
+        }
         syncDb.audioFingerprintDao().upsert(
             AudioFingerprintCacheEntity(
                 trackUid = localUid,
                 fileSize = song.size,
-                audioFrameBlake3Hex = blake3Hex.lowercase(),
-                headerBlake3Hex = "",
-                headerSize = 0L,
+                audioFrameBlake3Hex = normHex,
+                headerBlake3Hex = freshExisting?.headerBlake3Hex ?: "",
+                headerSize = freshExisting?.headerSize ?: 0L,
                 updatedAtMs = System.currentTimeMillis(),
+                mtimeMs = song.modifiedMs,
             )
         )
     }
 
-    private fun normalizePlaylistEntryForPc(raw: String): String {
-        val s = raw.trim().replace('\\', '/')
-        val lower = s.lowercase()
-        val tonewiseMarker = "/tonewise/"
-        val markerIdx = lower.indexOf(tonewiseMarker)
-        if (markerIdx >= 0) {
-            return s.substring(markerIdx + tonewiseMarker.length).trimStart('/')
-        }
-        if (lower.startsWith("tonewise/")) {
-            return s.substring("tonewise/".length).trimStart('/')
-        }
-        val musicMarker = "/music/"
-        val musicIdx = lower.indexOf(musicMarker)
-        if (musicIdx >= 0) {
-            return s.substring(musicIdx + musicMarker.length).trimStart('/')
-        }
-        return s.trimStart('/')
-    }
-
-    private fun loadPairedHost(): PairedHostInfo? {
-        val kv = syncDb.syncKvDao()
-        val url = kv.getValue(KEY_PAIRED_HOST_URL)?.takeIf { it.isNotBlank() } ?: return null
-        val token = kv.getValue(KEY_PAIRED_TOKEN)?.takeIf { it.isNotBlank() } ?: return null
-        val hostName = kv.getValue(KEY_PAIRED_HOST_NAME) ?: url
-        val deviceId = kv.getValue(KEY_PAIRED_DEVICE_ID) ?: getOrCreateStableDeviceId()
-        return PairedHostInfo(url, hostName, deviceId, token)
-    }
-
-    private fun savePairedHost(info: PairedHostInfo) {
-        val kv = syncDb.syncKvDao()
-        kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_URL, info.baseUrl))
-        kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_NAME, info.hostName))
-        kv.putValue(SyncKvEntity(KEY_PAIRED_DEVICE_ID, info.deviceId))
-        kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, info.token))
-    }
-
-    private fun clearPairedHost() {
-        val kv = syncDb.syncKvDao()
-        kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, ""))
-    }
-
-    private fun getOrCreateStableDeviceId(): String {
-        val kv = syncDb.syncKvDao()
-        kv.getValue(KEY_STABLE_DEVICE_ID)?.takeIf { it.isNotBlank() }?.let { return it }
-        val modelPrefix =
-            (Build.MODEL ?: "android").replace(Regex("[^A-Za-z0-9._-]+"), "-").take(20)
-        val generated = "${modelPrefix}_${UUID.randomUUID().toString().replace("-", "").take(10)}"
-        kv.putValue(SyncKvEntity(KEY_STABLE_DEVICE_ID, generated))
-        return generated
-    }
-
-    private fun normalizeBaseUrl(raw: String): String {
-        val trimmed = raw.trim().trimEnd('/')
-        if (trimmed.isEmpty()) return ""
-        return if (trimmed.startsWith("http://", ignoreCase = true) ||
-            trimmed.startsWith("https://", ignoreCase = true)
-        ) {
-            trimmed
-        } else {
-            "http://$trimmed"
-        }
-    }
-
-    private fun sanitizeKey(uid: String): String =
-        uid.replace(Regex("[^A-Za-z0-9._-]+"), "_").take(80)
-
-    private fun isHex64(s: String): Boolean =
-        s.length == 64 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
-
-    private fun overrideKey(uid: String, field: String): String = "$uid||$field"
-
-    private fun getLwwOverride(uid: String, field: String): String? =
-        lwwOverrides[overrideKey(uid, field)]
-
-    private fun saveLwwOverrides() {
-        val entities =
-            lwwOverrides.entries.mapNotNull { (k, v) ->
-                val parts = k.split("||", limit = 2)
-                if (parts.size == 2) LwwOverrideEntity(parts[0], parts[1], v) else null
-            }
-        if (entities.isNotEmpty()) {
-            syncDb.lwwMutationDao().upsertOverrides(entities)
-        }
-    }
-
-    private fun loadLwwOverrides(): Map<String, String> =
-        syncDb.lwwMutationDao().getAllOverrides().associate {
-            overrideKey(it.trackUid, it.field) to it.value
-        }
-
-    private fun savePendingMutations() {
-        val dao = syncDb.lwwMutationDao()
-        val snapshot = pendingMutationsList.toList()
-        syncDb.runInTransaction {
-            val existing = dao.getAllPendingMutations()
-            val keepKeys = snapshot.mapTo(HashSet()) { it.trackUid to it.field }
-            for (item in existing) {
-                if ((item.trackUid to item.field) !in keepKeys) {
-                    dao.deletePendingMutation(item.trackUid, item.field)
-                }
-            }
-            if (snapshot.isNotEmpty()) {
-                dao.upsertPendingMutations(
-                    snapshot.map {
-                        PendingTagMutationEntity(
-                            trackUid = it.trackUid,
-                            field = it.field,
-                            value = it.value,
-                            updatedAtMs = it.updatedAtMs,
-                            deviceId = it.deviceId,
-                        )
+    private fun computeLocalAudioFingerprintSafe(rawUriOrPath: String): Pair<String, String>? =
+        runCatching {
+            val fp =
+                if (rawUriOrPath.startsWith("content://")) {
+                    context.contentResolver.openFileDescriptor(Uri.parse(rawUriOrPath), "r")?.use { pfd ->
+                        TonewiseCore.audioFingerprint(pfd)
                     }
-                )
-            }
-        }
-    }
-
-    private fun loadPendingMutations(): List<TagMutationRecord> =
-        syncDb.lwwMutationDao().getAllPendingMutations().map {
-            TagMutationRecord(
-                trackUid = it.trackUid,
-                field = it.field,
-                value = it.value,
-                updatedAtMs = it.updatedAtMs,
-                deviceId = it.deviceId,
-            )
-        }
-
-    private fun loadPlaylistMergeBase(name: String): List<String> {
-        val raw = syncDb.syncKvDao().getValue("m3u8_base_$name") ?: return emptyList()
-        return runCatching {
-                val arr = JSONArray(raw)
-                List(arr.length()) { idx -> arr.getString(idx) }
-            }
-            .getOrDefault(emptyList())
-    }
-
-    private fun savePlaylistMergeBase(name: String, lines: List<String>) {
-        syncDb.syncKvDao().putValue(SyncKvEntity("m3u8_base_$name", JSONArray(lines).toString()))
-    }
+                } else {
+                    TonewiseCore.audioFingerprintPath(rawUriOrPath)
+                }
+            fp?.let { it.headerBlake3Hex to it.audioFrameBlake3Hex }
+        }.getOrNull()
 
     private fun cacheFile(name: String, bytes: ByteArray) {
         val dir = File(context.filesDir, ".tonewise")
@@ -1247,32 +1951,10 @@ constructor(
         val moved = current.removeAt(fromIndex)
         current.add(toIndex, moved)
         _scenes.value = current
-        val orderJson = JSONArray(current.map { it.id }).toString()
+        val ids = current.map { it.id }
         writeBackScope.launch {
-            syncDb.syncKvDao().putValue(SyncKvEntity(KEY_SCENE_ORDER, orderJson))
+            lwwStore.saveSceneOrderIds(ids)
         }
-    }
-
-    private fun applySceneOrder(list: List<SceneBanner>): List<SceneBanner> {
-        val raw = syncDb.syncKvDao().getValue(KEY_SCENE_ORDER) ?: return list
-        val savedIds =
-            runCatching {
-                    val arr = JSONArray(raw)
-                    List(arr.length()) { idx -> arr.getString(idx) }
-                }
-                .getOrNull() ?: return list
-        if (savedIds.isEmpty()) return list
-        val byId = list.associateBy { it.id }
-        val ordered = ArrayList<SceneBanner>(list.size)
-        val seen = HashSet<String>(list.size)
-        for (id in savedIds) {
-            val match = byId[id] ?: continue
-            if (seen.add(id)) ordered.add(match)
-        }
-        for (item in list) {
-            if (seen.add(item.id)) ordered.add(item)
-        }
-        return ordered
     }
 
     private fun loadCachedOrDefaultScenes(): List<SceneBanner> {
@@ -1282,78 +1964,45 @@ constructor(
                 runCatching { cached.readText(Charsets.UTF_8) }.getOrNull()
             } else {
                 null
-            } ?: DEFAULT_SCENES_JSON
-        return applySceneOrder(runCatching { parseScenesJson(raw) }.getOrDefault(emptyList()))
+            } ?: SceneRuleEvaluator.DEFAULT_SCENES_JSON
+        return lwwStore.applySceneOrder(
+            runCatching { SceneRuleEvaluator.parseScenesJson(raw) }.getOrDefault(emptyList())
+        )
     }
 
-    private fun parseScenesJson(raw: String): List<SceneBanner> {
-        val root = JSONObject(raw)
-        val arr = root.optJSONArray("scenes") ?: return emptyList()
-        val list = ArrayList<SceneBanner>(arr.length())
-        for (i in 0 until arr.length()) {
-            val obj = arr.getJSONObject(i)
-            if (obj.optBoolean("deleted", false)) continue
-            list.add(
-                SceneBanner(
-                    id = obj.getString("id"),
-                    title = obj.getString("title"),
-                    subtitle = humanizeSceneSubtitle(obj.optString("subtitle", "")),
-                    accentHex = obj.optString("accent_hex", "#005EB8"),
-                    rawSceneJson = obj.toString(),
-                )
-            )
-        }
-        return list
-    }
+    private fun sanitizeKey(uid: String): String =
+        uid.replace(Regex("[^A-Za-z0-9._-]+"), "_").take(80)
 
-    private fun humanizeSceneSubtitle(raw: String): String {
-        val clean = raw.trim()
-        return when {
-            clean.equals("DJ_SCENE = focus", ignoreCase = true) -> "器乐与低干扰声场 · 平直叙事"
-            clean.equals("DJ_SCENE = coding", ignoreCase = true) -> "作品成组漫游 · 沉浸式编码背景"
-            clean.equals("DJ_SCENE = relax", ignoreCase = true) -> "能量渐弱曲线 · 夜间慢速收束"
-            clean.equals("DJ_SCENE = energy", ignoreCase = true) -> "能量递进弧线 · 高动态节拍"
-            clean.equals("DJ_SCENE = pop", ignoreCase = true) -> "人声与旋律精选 · 明快律动"
-            else -> clean
-        }
-    }
+    private fun isHex64(s: String): Boolean =
+        s.length == 64 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 
-    private fun httpGetString(url: String): String = String(httpGetBytes(url), Charsets.UTF_8)
+    private fun normalizeBaseUrl(raw: String): String = normalizeBaseUrlStatic(raw)
 
-    private fun httpGetBytes(url: String): ByteArray {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 5_000
-            readTimeout = 15_000
-            requestMethod = "GET"
-        }
-        return try {
-            if (conn.responseCode !in 200..299) {
-                throw IllegalStateException("HTTP ${conn.responseCode} for $url")
-            }
-            conn.inputStream.readBytes()
-        } finally {
-            conn.disconnect()
-        }
-    }
+    private fun httpGetString(
+        url: String,
+        token: String? = null,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): String = LanHttpClient.getString(url = url, bearerToken = token, cancelToken = cancelToken)
 
-    private fun httpPostJson(url: String, body: String): String {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 5_000
-            readTimeout = 15_000
-            requestMethod = "POST"
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=utf-8")
-        }
-        return try {
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            if (conn.responseCode !in 200..299) {
-                throw IllegalStateException("HTTP ${conn.responseCode} for $url")
-            }
-            String(conn.inputStream.readBytes(), Charsets.UTF_8)
-        } finally {
-            conn.disconnect()
-        }
-    }
+    private fun httpGetBytes(
+        url: String,
+        token: String? = null,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): ByteArray = LanHttpClient.getBytes(url = url, bearerToken = token, cancelToken = cancelToken)
+
+    private fun httpPostJson(
+        url: String,
+        body: String,
+        token: String? = null,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): String =
+        LanHttpClient.postJson(
+            url = url,
+            body = body,
+            bearerToken = token,
+            cancelToken = cancelToken,
+            readTimeoutMs = 15_000,
+        )
 
     data class M3u8Entry(
         val durationMs: Long,
@@ -1363,139 +2012,55 @@ constructor(
     )
 
     companion object {
-        private const val KEY_SCENE_ORDER = "scene_order_ids"
-        private const val KEY_LWW_OVERRIDES = "lww_overrides"
-        private const val KEY_PENDING_MUTATIONS = "pending_mutations"
-        private const val KEY_PAIRED_HOST_URL = "lan_v2_host_url"
-        private const val KEY_PAIRED_HOST_NAME = "lan_v2_host_name"
-        private const val KEY_PAIRED_DEVICE_ID = "lan_v2_device_id"
-        private const val KEY_PAIRED_TOKEN = "lan_v2_token"
-        private const val KEY_STABLE_DEVICE_ID = "lan_v2_stable_device_id"
-
-        private fun escapeJson(value: String): String =
-            buildString {
-                for (ch in value) {
-                    when (ch) {
-                        '"' -> append("\\\"")
-                        '\\' -> append("\\\\")
-                        '\n' -> append("\\n")
-                        '\r' -> append("\\r")
-                        '\t' -> append("\\t")
-                        else -> append(ch)
-                    }
-                }
-            }
-
-        private fun predicateJsonStr(field: String, op: String, value: String): String =
-            """{"predicate":{"field":"${escapeJson(field)}","op":"${escapeJson(op)}","values":["${escapeJson(value)}"]}}"""
-
-        private fun predicateJsonList(
-            field: String,
-            op: String,
-            values: Collection<String>,
-        ): String {
-            val serialized = values.joinToString(",") { "\"${escapeJson(it)}\"" }
-            return """{"predicate":{"field":"${escapeJson(field)}","op":"${escapeJson(op)}","values":[$serialized]}}"""
-        }
-
-        private val MOOD_SYNONYM_TO_CLUSTER: Map<String, String> =
-            mapOf(
-                "calm_relaxed" to "calm_relaxed",
-                "calm" to "calm_relaxed",
-                "chill" to "calm_relaxed",
-                "mellow" to "calm_relaxed",
-                "soothing" to "calm_relaxed",
-                "peaceful" to "calm_relaxed",
-                "serene" to "calm_relaxed",
-                "tranquil" to "calm_relaxed",
-                "gentle" to "calm_relaxed",
-                "relaxed" to "calm_relaxed",
-                "ambient" to "calm_relaxed",
-                "meditative" to "calm_relaxed",
-                "bright_joyful" to "bright_joyful",
-                "cheerful" to "bright_joyful",
-                "happy" to "bright_joyful",
-                "upbeat" to "bright_joyful",
-                "bright" to "bright_joyful",
-                "sunny" to "bright_joyful",
-                "playful" to "bright_joyful",
-                "joyful" to "bright_joyful",
-                "optimistic" to "bright_joyful",
-                "warm_bright" to "bright_joyful",
-                "uplifting" to "bright_joyful",
-                "deep_introspective" to "deep_introspective",
-                "melancholic" to "deep_introspective",
-                "melancholy" to "deep_introspective",
-                "contemplative" to "deep_introspective",
-                "introspective" to "deep_introspective",
-                "somber" to "deep_introspective",
-                "wistful" to "deep_introspective",
-                "reflective" to "deep_introspective",
-                "nostalgic" to "deep_introspective",
-                "brooding" to "deep_introspective",
-                "solemn" to "deep_introspective",
-                "warm_romantic" to "warm_romantic",
-                "romantic" to "warm_romantic",
-                "intimate" to "warm_romantic",
-                "warm" to "warm_romantic",
-                "tender" to "warm_romantic",
-                "sentimental" to "warm_romantic",
-                "dreamy" to "warm_romantic",
-                "sensual" to "warm_romantic",
-                "nostalgic_warm" to "warm_romantic",
-                "lyrical" to "warm_romantic",
-                "high_tension" to "high_tension",
-                "intense" to "high_tension",
-                "energetic" to "high_tension",
-                "dramatic" to "high_tension",
-                "driving" to "high_tension",
-                "epic" to "high_tension",
-                "aggressive" to "high_tension",
-                "passionate" to "high_tension",
-                "fierce" to "high_tension",
-                "urgent" to "high_tension",
-                "dynamic" to "high_tension",
-            )
-
-        fun resolveMoodClusterId(rawMood: String): String? =
-            MOOD_SYNONYM_TO_CLUSTER[rawMood.trim().lowercase()]
-
-        fun buildFocusFilterSceneJson(spec: FocusFilterSpec): String? {
-            val predicates = ArrayList<String>()
-            fun addFacet(field: String, map: Map<String, FocusPillState>) {
-                val includes =
-                    map.entries
-                        .filter { it.value == FocusPillState.INCLUDE }
-                        .map { it.key.trim() }
-                        .filter { it.isNotEmpty() }
-                if (includes.isNotEmpty()) {
-                    predicates.add(predicateJsonList(field, "in", includes))
-                }
-                val excludes =
-                    map.entries
-                        .filter { it.value == FocusPillState.EXCLUDE }
-                        .map { it.key.trim() }
-                        .filter { it.isNotEmpty() }
-                if (excludes.isNotEmpty()) {
-                    predicates.add(predicateJsonList(field, "not_in", excludes))
-                }
-            }
-            addFacet("dj_scene", spec.scenes)
-            addFacet("dj_vocals", spec.vocals)
-            addFacet("dj_energy", spec.energies)
-            addFacet("tempo_bucket", spec.tempos)
-            addFacet("mood_cluster", spec.moods)
-            spec.unplayedDaysGte?.let { days ->
-                predicates.add(
-                    """{"predicate":{"field":"unplayed_days_gte","op":"gte","values":[$days]}}"""
-                )
-            }
-            val effectiveArc = spec.sortArc.ifBlank { "flat" }
-            if (predicates.isEmpty() && (effectiveArc == "flat" || effectiveArc == "work_shuffle")) {
+        fun resolveTokenForHost(pairedHost: PairedHostInfo?, targetBaseUrl: String): String? {
+            if (pairedHost == null) return null
+            val cleanTarget = normalizeBaseUrlStatic(targetBaseUrl)
+            val cleanPaired = normalizeBaseUrlStatic(pairedHost.baseUrl)
+            if (cleanTarget.isEmpty() || !cleanTarget.equals(cleanPaired, ignoreCase = true)) {
                 return null
             }
-            return """{"id":"00000000-0000-4000-8000-000000000003","title":"Focus Boolean Funnel","updated_at_ms":0,"sort_arc":"${escapeJson(effectiveArc)}","tempo_null_passthrough":true,"rule":{"all":[${predicates.joinToString(",")}]}}"""
+            return pairedHost.token.takeIf { it.isNotBlank() }
         }
+
+        internal fun normalizeBaseUrlStatic(raw: String): String {
+            val trimmed = raw.trim().trimEnd('/')
+            if (trimmed.isEmpty()) return ""
+            return if (
+                trimmed.startsWith("http://", ignoreCase = true) ||
+                    trimmed.startsWith("https://", ignoreCase = true)
+            ) {
+                trimmed
+            } else {
+                "http://$trimmed"
+            }
+        }
+
+        fun translateLocalUidsToCanonical(
+            localUids: List<String>,
+            localToBlake3: Map<String, String>,
+        ): List<String> =
+            localUids.mapNotNull { raw ->
+                val uid = raw.trim()
+                if (uid.isEmpty()) return@mapNotNull null
+                localToBlake3[uid]?.lowercase() ?: uid
+            }
+
+        fun <T> resolveCanonicalUidsToItems(
+            uids: List<String>,
+            blake3ToItem: Map<String, T>,
+            localUidToItem: Map<String, T>,
+        ): List<T> =
+            uids.mapNotNull { raw ->
+                val uid = raw.trim()
+                if (uid.isEmpty()) return@mapNotNull null
+                blake3ToItem[uid.lowercase()] ?: localUidToItem[uid]
+            }
+
+        fun resolveMoodClusterId(rawMood: String): String? =
+            SceneRuleEvaluator.resolveMoodClusterId(rawMood)
+
+        fun buildFocusFilterSceneJson(spec: FocusFilterSpec): String? =
+            SceneRuleEvaluator.buildFocusFilterSceneJson(spec)
 
         fun buildDjFilterSceneJson(
             scene: String?,
@@ -1505,153 +2070,33 @@ constructor(
             tempoBucket: String? = null,
             moodCluster: String? = null,
             sortArc: String = "flat",
-        ): String? {
-            val predicates = ArrayList<String>()
-            scene?.takeIf { it.isNotBlank() && it != "all" }?.let {
-                predicates.add(predicateJsonStr("dj_scene", "in", it))
-            }
-            if (excludeVocal) {
-                predicates.add("""{"not":${predicateJsonStr("dj_vocals", "eq", "vocal")}}""")
-            } else {
-                vocals?.takeIf { it.isNotBlank() && it != "all" }?.let {
-                    predicates.add(predicateJsonStr("dj_vocals", "eq", it))
-                }
-            }
-            energy?.takeIf { it.isNotBlank() && it != "all" }?.let {
-                predicates.add(predicateJsonStr("dj_energy", "eq", it))
-            }
-            tempoBucket?.takeIf { it.isNotBlank() && it != "all" }?.let {
-                predicates.add(predicateJsonStr("tempo_bucket", "eq", it))
-            }
-            moodCluster?.takeIf { it.isNotBlank() && it != "all" }?.let {
-                predicates.add(predicateJsonStr("mood_cluster", "in", it))
-            }
-            val effectiveArc = sortArc.ifBlank { "flat" }
-            if (predicates.isEmpty() && (effectiveArc == "flat" || effectiveArc == "work_shuffle")) {
-                return null
-            }
-            return """{"id":"00000000-0000-4000-8000-000000000002","title":"DJ 5D Matrix Filter","updated_at_ms":0,"sort_arc":"${escapeJson(effectiveArc)}","tempo_null_passthrough":true,"rule":{"all":[${predicates.joinToString(",")}]}}"""
-        }
-
-        fun sanitizePlaylistFilename(raw: String): String =
-            raw.trim().ifEmpty { "Default" }.replace(Regex("[\\\\/:*?\"<>|\\s]+"), "_")
-
-        fun formatM3u8Content(songs: List<Song>): String =
-            formatM3u8Entries(
-                songs.map { song ->
-                    M3u8Entry(
-                        durationMs = song.durationMs,
-                        title = song.name.raw,
-                        artists = song.artists.mapNotNull { (it.name as? Name.Known)?.raw },
-                        pathComponents = song.path.components,
-                    )
-                }
+        ): String? =
+            SceneRuleEvaluator.buildDjFilterSceneJson(
+                scene = scene,
+                vocals = vocals,
+                energy = energy,
+                excludeVocal = excludeVocal,
+                tempoBucket = tempoBucket,
+                moodCluster = moodCluster,
+                sortArc = sortArc,
             )
 
-        fun formatM3u8Entries(entries: List<M3u8Entry>): String {
-            val sb = StringBuilder()
-            sb.append("#EXTM3U\n")
-            for (entry in entries) {
-                val secs = (entry.durationMs / 1000L).coerceAtLeast(0L)
-                val artist = entry.artists.filter { it.isNotBlank() }.joinToString(", ")
-                val extinf = if (artist.isNotEmpty()) "$artist - ${entry.title}" else entry.title
-                sb.append("#EXTINF:").append(secs).append(',').append(extinf).append('\n')
-                val relPath = entry.pathComponents.components.joinToString("/").replace('\\', '/')
-                sb.append(relPath).append('\n')
-            }
-            return sb.toString()
-        }
+        fun sanitizePlaylistFilename(raw: String): String =
+            PlaylistM3u8Helper.sanitizePlaylistFilename(raw)
 
-        private const val DEFAULT_SCENES_JSON = """
-            {
-              "schema_version": 1,
-              "scenes": [
-                {
-                  "id": "11111111-1111-4111-8111-111111111111",
-                  "title": "Focus · 深度专注",
-                  "subtitle": "器乐与低干扰声场 · 平直叙事",
-                  "accent_hex": "#2B5B84",
-                  "updated_at_ms": 1763251200000,
-                  "sort_arc": "flat",
-                  "tempo_null_passthrough": true,
-                  "rule": {
-                    "all": [
-                      { "predicate": { "field": "dj_scene", "op": "in", "values": ["focus"] } }
-                    ]
-                  }
-                },
-                {
-                  "id": "22222222-2222-4222-8222-222222222222",
-                  "title": "Coding · 心流编程",
-                  "subtitle": "作品成组漫游 · 沉浸式编码背景",
-                  "accent_hex": "#3B7A57",
-                  "updated_at_ms": 1763251200000,
-                  "sort_arc": "work_shuffle",
-                  "tempo_null_passthrough": true,
-                  "rule": {
-                    "all": [
-                      { "predicate": { "field": "dj_scene", "op": "in", "values": ["coding"] } }
-                    ]
-                  }
-                },
-                {
-                  "id": "33333333-3333-4333-8333-333333333333",
-                  "title": "Relax · 松弛休憩",
-                  "subtitle": "能量渐弱曲线 · 夜间慢速收束",
-                  "accent_hex": "#5B6E8C",
-                  "updated_at_ms": 1763251200000,
-                  "sort_arc": "energy_desc_sleep",
-                  "tempo_null_passthrough": true,
-                  "rule": {
-                    "all": [
-                      { "predicate": { "field": "dj_scene", "op": "in", "values": ["relax"] } }
-                    ]
-                  }
-                },
-                {
-                  "id": "55555555-5555-4555-8555-555555555555",
-                  "title": "Energy · 高能律动",
-                  "subtitle": "能量递进弧线 · 高动态节拍",
-                  "accent_hex": "#C85A32",
-                  "updated_at_ms": 1763251200000,
-                  "sort_arc": "energy_asc",
-                  "tempo_null_passthrough": true,
-                  "rule": {
-                    "all": [
-                      { "predicate": { "field": "dj_scene", "op": "in", "values": ["energy"] } }
-                    ]
-                  }
-                },
-                {
-                  "id": "66666666-6666-4666-8666-666666666666",
-                  "title": "Pop · 流行精选",
-                  "subtitle": "人声与旋律精选 · 明快律动",
-                  "accent_hex": "#9E4770",
-                  "updated_at_ms": 1763251200000,
-                  "sort_arc": "flat",
-                  "tempo_null_passthrough": true,
-                  "rule": {
-                    "all": [
-                      { "predicate": { "field": "dj_scene", "op": "in", "values": ["pop"] } }
-                    ]
-                  }
-                },
-                {
-                  "id": "44444444-4444-4444-8444-444444444444",
-                  "title": "沉睡馆藏唤醒",
-                  "subtitle": "尚未播放或超过 90 天未重温的本地曲库",
-                  "accent_hex": "#8B5E3C",
-                  "updated_at_ms": 1763251200000,
-                  "sort_arc": "rediscovery_90d",
-                  "tempo_null_passthrough": true,
-                  "rule": {
-                    "all": [
-                      { "predicate": { "field": "unplayed_days_gte", "op": "gte", "values": [90] } }
-                    ]
-                  }
-                }
-              ]
-            }
-        """
+        fun legacyUnderscoredPlaylistFilename(raw: String): String =
+            PlaylistM3u8Helper.legacyUnderscoredPlaylistFilename(raw)
+
+        fun extractPlaylistNameFromM3u8(lines: List<String>, fallbackName: String): String =
+            PlaylistM3u8Helper.extractPlaylistNameFromM3u8(lines, fallbackName)
+
+        fun normalizePlaylistEntryForPc(raw: String): String =
+            PlaylistM3u8Helper.normalizePlaylistEntryForPc(raw)
+
+        fun formatM3u8Content(songs: List<Song>, playlistName: String? = null): String =
+            PlaylistM3u8Helper.formatM3u8Content(songs, playlistName)
+
+        fun formatM3u8Entries(entries: List<M3u8Entry>, playlistName: String? = null): String =
+            PlaylistM3u8Helper.formatM3u8Entries(entries, playlistName)
     }
 }

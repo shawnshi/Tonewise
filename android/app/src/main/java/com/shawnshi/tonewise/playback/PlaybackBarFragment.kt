@@ -25,8 +25,10 @@ import android.widget.Toast
 import androidx.core.view.doOnLayout
 import androidx.core.view.isVisible
 import androidx.fragment.app.activityViewModels
+import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentPlaybackBarBinding
 import com.shawnshi.tonewise.detail.DetailViewModel
@@ -34,6 +36,7 @@ import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.state.RepeatMode
+import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.ViewBindingFragment
 import com.shawnshi.tonewise.util.collectImmediately
@@ -50,6 +53,7 @@ import timber.log.Timber as L
 class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
     @Inject lateinit var sessionSlotStore: SessionSlotStore
     @Inject lateinit var musicRepository: MusicRepository
+    @Inject lateinit var lanSyncRepository: LanSyncRepository
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
     private var latestSong: Song? = null
@@ -145,24 +149,25 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
             requireContext().showToast(R.string.lbl_slot_empty_queue)
             return
         }
-        val allSongs =
-            musicRepository.library?.songs?.associateBy { it.uid.toString() } ?: emptyMap()
-        val resolved = next.queueTrackUids.mapNotNull { allSongs[it] }
-        if (resolved.isEmpty()) {
-            requireContext().showToast(R.string.lbl_scene_no_matches)
-            return
-        }
-        playbackModel.restoreSessionQueue(
-            songs = resolved,
-            index = next.currentIndex.coerceIn(0, resolved.lastIndex),
-            positionMs = next.positionMs,
-        )
-        Toast.makeText(
-                requireContext().applicationContext,
-                getString(R.string.fmt_scene_switched_slot, next.slotIndex, next.name),
-                Toast.LENGTH_SHORT,
+        viewLifecycleOwner.lifecycleScope.launch {
+            val resolved = lanSyncRepository.resolveSlotSongs(next)
+            if (!isAdded) return@launch
+            if (resolved.isEmpty()) {
+                requireContext().showToast(R.string.lbl_scene_no_matches)
+                return@launch
+            }
+            playbackModel.restoreSessionQueue(
+                songs = resolved,
+                index = next.currentIndex.coerceIn(0, resolved.lastIndex),
+                positionMs = next.positionMs,
             )
-            .show()
+            Toast.makeText(
+                    requireContext().applicationContext,
+                    getString(R.string.fmt_scene_switched_slot, next.slotIndex, next.name),
+                    Toast.LENGTH_SHORT,
+                )
+                .show()
+        }
     }
 
     private fun updateSong(song: Song?) {

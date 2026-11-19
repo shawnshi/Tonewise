@@ -111,14 +111,16 @@ class FocusFilterDialog : BackportBottomSheetDialogFragment() {
                             if (matchedSongs.isEmpty()) {
                                 requireContext().showToast(R.string.lbl_scene_no_matches)
                             } else {
+                                val playSongs =
+                                    if (spec.sortArc == "work_shuffle") {
+                                        lanSyncRepository.orderSongsWorkShuffle(matchedSongs)
+                                    } else {
+                                        matchedSongs
+                                    }
                                 val label = scopeTitle ?: getString(R.string.lbl_focus_filter)
                                 sessionSlotStore.setActiveScene(label)
-                                lanSyncRepository.scheduleM3u8WriteBack(label, matchedSongs)
-                                if (spec.sortArc == "work_shuffle") {
-                                    playbackModel.shuffle(matchedSongs)
-                                } else {
-                                    playbackModel.play(matchedSongs)
-                                }
+                                lanSyncRepository.scheduleM3u8WriteBack(label, playSongs)
+                                playbackModel.play(playSongs)
                                 dismiss()
                             }
                         },
@@ -126,7 +128,13 @@ class FocusFilterDialog : BackportBottomSheetDialogFragment() {
                             if (matchedSongs.isEmpty()) {
                                 requireContext().showToast(R.string.lbl_scene_no_matches)
                             } else {
-                                playbackModel.addToQueue(matchedSongs)
+                                val queuedSongs =
+                                    if (spec.sortArc == "work_shuffle") {
+                                        lanSyncRepository.orderSongsWorkShuffle(matchedSongs)
+                                    } else {
+                                        matchedSongs
+                                    }
+                                playbackModel.addToQueue(queuedSongs)
                                 requireContext().showToast(R.string.lng_queue_added)
                                 dismiss()
                             }

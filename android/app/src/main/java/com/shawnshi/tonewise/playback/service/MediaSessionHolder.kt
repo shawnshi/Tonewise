@@ -98,6 +98,9 @@ private constructor(
     val notification: ForegroundServiceNotification
         field = PlaybackNotification(context, mediaSession.sessionToken)
 
+    private var queueWindowStart = 0
+    private var queueWindowEnd = 0
+
     fun attach() {
         playbackManager.addListener(this)
         imageSettings.registerListener(this)
@@ -129,6 +132,10 @@ private constructor(
 
     override fun onIndexMoved(index: Int) {
         updateMediaMetadata(playbackManager.currentSong, playbackManager.parent)
+        val queue = playbackManager.queue
+        if (queue.size > QUEUE_WINDOW_SIZE && (index < queueWindowStart + 10 || index >= queueWindowEnd - 10)) {
+            updateQueue(queue)
+        }
         invalidateSessionState()
     }
 
@@ -223,6 +230,8 @@ private constructor(
         val title = song.name.resolve(context)
         val artist = song.artists.resolveNames(context)
         val album = song.album.name.resolve(context)
+        val composers =
+            song.composers.filter { it.isNotBlank() }.distinct().joinToString(", ").ifEmpty { artist }
         val builder =
             MediaMetadataCompat.Builder()
                 .putText(MediaMetadataCompat.METADATA_KEY_TITLE, title)
@@ -235,7 +244,7 @@ private constructor(
                     song.album.artists.resolveNames(context),
                 )
                 .putText(MediaMetadataCompat.METADATA_KEY_AUTHOR, artist)
-                .putText(MediaMetadataCompat.METADATA_KEY_COMPOSER, artist)
+                .putText(MediaMetadataCompat.METADATA_KEY_COMPOSER, composers)
                 .putText(MediaMetadataCompat.METADATA_KEY_WRITER, artist)
                 .putText(MediaMetadataCompat.METADATA_KEY_GENRE, song.genres.resolveNames(context))
                 .putText(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, title)
@@ -309,17 +318,30 @@ private constructor(
      * @param queue The current queue to upload.
      */
     private fun updateQueue(queue: List<Song>) {
-        val queueItems = queue.mapIndexed { i, song ->
-            val description =
-                song.toMediaDescription(
-                    context,
-                    { putInt(MediaSessionInterface.KEY_QUEUE_POS, i) },
-                )
-            // Store the item index so we can then use the analogous index in the
-            // playback state.
-            MediaSessionCompat.QueueItem(description, i.toLong())
+        if (queue.isEmpty()) {
+            queueWindowStart = 0
+            queueWindowEnd = 0
+            mediaSession.setQueue(emptyList())
+            return
         }
-        L.d("Uploading ${queueItems.size} songs to MediaSession queue")
+        val activeIndex = playbackManager.index.coerceIn(0, queue.lastIndex)
+        val half = QUEUE_WINDOW_SIZE / 2
+        val start = maxOf(0, minOf(activeIndex - half, queue.size - QUEUE_WINDOW_SIZE))
+        val end = minOf(queue.size, start + QUEUE_WINDOW_SIZE)
+        queueWindowStart = start
+        queueWindowEnd = end
+
+        val queueItems =
+            (start until end).map { i ->
+                val song = queue[i]
+                val description =
+                    song.toMediaDescription(
+                        context,
+                        { putInt(MediaSessionInterface.KEY_QUEUE_POS, i) },
+                    )
+                MediaSessionCompat.QueueItem(description, i.toLong())
+            }
+        L.d("Uploading ${queueItems.size}/${queue.size} songs ($start..<$end) to MediaSession queue")
         mediaSession.setQueue(queueItems)
     }
 
@@ -379,6 +401,7 @@ private constructor(
     }
 
     companion object {
+        private const val QUEUE_WINDOW_SIZE = 100
         private val emptyMetadata = MediaMetadataCompat.Builder().build()
     }
 }

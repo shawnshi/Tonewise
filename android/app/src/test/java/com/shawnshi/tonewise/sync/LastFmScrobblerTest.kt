@@ -166,4 +166,27 @@ class LastFmScrobblerTest {
         assertTrue(LastFmRepository.shouldScrobbleTrack(30_000L))
         assertTrue(LastFmRepository.shouldScrobbleTrack(240_000L))
     }
+
+    @Test
+    fun parseTotalPages_extractsPositiveIntegerOrDefaultsToOne() {
+        assertEquals(
+            7,
+            LastFmRepository.parseTotalPages(
+                """{"recenttracks":{"@attr":{"totalPages":"7"}}}""",
+                "recenttracks",
+            ),
+        )
+        assertEquals(
+            12,
+            LastFmRepository.parseTotalPages(
+                """{"lovedtracks":{"@attr":{"totalPages":12}}}""",
+                "lovedtracks",
+            ),
+        )
+        assertEquals(
+            1,
+            LastFmRepository.parseTotalPages("""{"recenttracks":{"@attr":{"totalPages":"0"}}}""", "recenttracks"),
+        )
+        assertEquals(1, LastFmRepository.parseTotalPages("not-json", "recenttracks"))
+    }
 }

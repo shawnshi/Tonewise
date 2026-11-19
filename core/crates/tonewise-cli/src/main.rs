@@ -45,6 +45,9 @@ pub struct ScannedTrackRecord {
     pub work_name: Option<String>,
     pub movement_name: Option<String>,
     pub movement_number: Option<u32>,
+    pub disc_number: u32,
+    pub track_number: u32,
+    pub publisher: Option<String>,
     pub genre: Option<String>,
     pub year: Option<u16>,
     pub original_date: Option<String>,
@@ -257,7 +260,7 @@ pub fn scan_library_with_options(
         len
     };
 
-    write_manifest_db(&tonewise_dir.join("manifest.db"), &tracks)?;
+    write_manifest_db(&tonewise_dir.join("manifest.db"), music_root, &tracks, true)?;
 
     let tempo_backfilled = tracks.iter().filter(|t| t.tempo_backfilled).count();
     let replaygain_backfilled = tracks.iter().filter(|t| t.replaygain_backfilled).count();
@@ -326,6 +329,15 @@ fn process_single_track(
     let mut work_name = None;
     let mut movement_name = None;
     let mut movement_number = None;
+    let disc_number = primary_tag.and_then(|t| t.disk()).unwrap_or(0);
+    let track_number = primary_tag.and_then(|t| t.track()).unwrap_or(0);
+    let mut publisher = primary_tag.and_then(|t| {
+        t.get_string(&ItemKey::Publisher)
+            .or_else(|| t.get_string(&ItemKey::Label))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
     let mut year = primary_tag.and_then(|t| t.year()).map(|y| y as u16);
     let mut original_date = None;
     let mut release_type = None;
@@ -355,11 +367,20 @@ fn process_single_track(
         for item in tag.get_strings(&ItemKey::Conductor) {
             conductors.extend(split_artists_preserving_whitelist(item));
         }
-        work_name = tag.get_string(&ItemKey::Work).map(str::to_string);
-        movement_name = tag.get_string(&ItemKey::Movement).map(str::to_string);
+        work_name = tag
+            .get_string(&ItemKey::Work)
+            .or_else(|| tag.get_string(&ItemKey::ContentGroup))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        movement_name = tag
+            .get_string(&ItemKey::Movement)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         movement_number = tag
             .get_string(&ItemKey::MovementNumber)
-            .and_then(|s| s.trim().parse::<u32>().ok());
+            .and_then(parse_movement_number);
 
         original_date = tag
             .get_string(&ItemKey::OriginalReleaseDate)
@@ -371,8 +392,9 @@ fn process_single_track(
             year = normalize_year(d);
         }
         release_type = tag
-            .get_string(&ItemKey::MusicBrainzReleaseGroupId)
-            .map(str::to_string);
+            .get_string(&ItemKey::FlagCompilation)
+            .filter(|v| v.trim() == "1")
+            .map(|_| "compilation".to_string());
 
         rg_track = tag
             .get_string(&ItemKey::ReplayGainTrackGain)
@@ -416,6 +438,39 @@ fn process_single_track(
                 "TEMPO" if tempo_bpm.is_none() => {
                     if let Ok(b) = val.trim().parse::<f32>() {
                         tempo_bpm = Some(b);
+                    }
+                }
+                "WORK" | "GROUPING" | "CONTENTGROUP" if work_name.is_none() => {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        work_name = Some(trimmed.to_string());
+                    }
+                }
+                "MOVEMENT" | "MOVEMENTNAME" if movement_name.is_none() => {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        movement_name = Some(trimmed.to_string());
+                    }
+                }
+                "MOVEMENTNUMBER" if movement_number.is_none() => {
+                    movement_number = parse_movement_number(val);
+                }
+                "COMPOSER" if composers.is_empty() => {
+                    composers.extend(split_artists_preserving_whitelist(val));
+                }
+                "CONDUCTOR" if conductors.is_empty() => {
+                    conductors.extend(split_artists_preserving_whitelist(val));
+                }
+                "REPLAYGAIN_ALBUM_GAIN" if rg_album.is_none() => {
+                    rg_album = parse_gain_db(val);
+                }
+                "REPLAYGAIN_TRACK_GAIN" if rg_track.is_none() => {
+                    rg_track = parse_gain_db(val);
+                }
+                "PUBLISHER" | "LABEL" | "ORGANIZATION" if publisher.is_none() => {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        publisher = Some(trimmed.to_string());
                     }
                 }
                 _ => {}
@@ -500,6 +555,9 @@ fn process_single_track(
         work_name,
         movement_name,
         movement_number,
+        disc_number,
+        track_number,
+        publisher,
         genre,
         year,
         original_date,
@@ -518,32 +576,107 @@ fn process_single_track(
     })
 }
 
-fn write_manifest_db(db_path: &Path, tracks: &[ScannedTrackRecord]) -> Result<(), String> {
+fn ensure_manifest_v2_schema(conn: &Connection) -> Result<(), String> {
+    let mut existing = HashSet::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('tracks')")
+            .map_err(|e| format!("pragma_table_info failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("pragma query failed: {e}"))?;
+        for col in rows.flatten() {
+            existing.insert(col.to_ascii_lowercase());
+        }
+    }
+
+    if existing.is_empty() {
+        return Ok(());
+    }
+
+    let v2_cols: &[(&str, &str)] = &[
+        ("disc_number", "ALTER TABLE tracks ADD COLUMN disc_number INTEGER NOT NULL DEFAULT 0"),
+        ("track_number", "ALTER TABLE tracks ADD COLUMN track_number INTEGER NOT NULL DEFAULT 0"),
+        ("publisher", "ALTER TABLE tracks ADD COLUMN publisher TEXT"),
+        ("legacy_play_count", "ALTER TABLE tracks ADD COLUMN legacy_play_count INTEGER NOT NULL DEFAULT 0"),
+        ("lastfm_pulled_count", "ALTER TABLE tracks ADD COLUMN lastfm_pulled_count INTEGER NOT NULL DEFAULT 0"),
+        ("local_unsynced_expired_count", "ALTER TABLE tracks ADD COLUMN local_unsynced_expired_count INTEGER NOT NULL DEFAULT 0"),
+    ];
+    for (col, sql) in v2_cols {
+        if !existing.contains(*col) {
+            conn.execute_batch(sql)
+                .map_err(|e| format!("manifest v2 alter column {col} failed: {e}"))?;
+        }
+    }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks (album);
+         CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks (genre);
+         CREATE INDEX IF NOT EXISTS idx_tracks_work_name ON tracks (work_name);
+         INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2')
+         ON CONFLICT(key) DO UPDATE SET value = '2';",
+    )
+    .map_err(|e| format!("manifest v2 schema stamp failed: {e}"))?;
+    Ok(())
+}
+
+fn write_manifest_db(
+    db_path: &Path,
+    music_root: &Path,
+    tracks: &[ScannedTrackRecord],
+    prune_deleted: bool,
+) -> Result<(), String> {
     let mut conn =
         Connection::open(db_path).map_err(|e| format!("sqlite open failed: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))
+        .map_err(|e| format!("sqlite busy_timeout failed: {e}"))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+    )
+    .map_err(|e| format!("sqlite pragma setup failed: {e}"))?;
     conn.execute_batch(MANIFEST_SCHEMA_SQL)
         .map_err(|e| format!("sqlite schema init failed: {e}"))?;
+    ensure_manifest_v2_schema(&conn)?;
 
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
+    let mut wf_prefixes: Vec<[u8; 16]> = tracks
+        .iter()
+        .filter(|t| !t.analysis.waveform_150.is_empty())
+        .map(|t| {
+            let mut p = [0u8; 16];
+            p.copy_from_slice(&t.audio_frame_blake3[..16]);
+            p
+        })
+        .collect();
+    wf_prefixes.sort();
+    wf_prefixes.dedup();
+    let wf_payload_base = 12usize + wf_prefixes.len() * 20usize;
+    let wf_offset_by_prefix: std::collections::HashMap<[u8; 16], i64> = wf_prefixes
+        .iter()
+        .enumerate()
+        .map(|(sorted_idx, prefix)| (*prefix, (wf_payload_base + sorted_idx * 150) as i64))
+        .collect();
+
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("sqlite tx begin failed: {e}"))?;
 
-    tx.execute("DELETE FROM tracks", [])
-        .map_err(|e| format!("sqlite clear failed: {e}"))?;
-
     {
+        let mut dedup_af_stmt = tx
+            .prepare("DELETE FROM tracks WHERE audio_frame_blake3 = ?1 AND track_uid <> ?2")
+            .map_err(|e| format!("sqlite prepare dedup failed: {e}"))?;
         let mut stmt = tx
             .prepare(
-                "INSERT OR IGNORE INTO tracks (
+                "INSERT INTO tracks (
                     track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
                     rel_path, file_size, mtime_ms, codec, sample_rate_hz, bit_depth, bitrate_kbps, duration_ms,
                     title, album, album_artist, artists_json, composers_json, conductors_json,
-                    work_name, movement_name, movement_number, genre, year, original_date, release_type,
+                    work_name, movement_name, movement_number, disc_number, track_number, publisher,
+                    genre, year, original_date, release_type,
                     replaygain_track_db, replaygain_album_db, replaygain_peak,
                     dj_scene_json, dj_scene_ts, dj_vocals, dj_vocals_ts, dj_energy, dj_energy_ts,
                     tempo_bpm, tempo_bucket, tempo_ts, mood_json, mood_ts,
@@ -552,16 +685,63 @@ fn write_manifest_db(db_path: &Path, tracks: &[ScannedTrackRecord]) -> Result<()
                     ?1, ?2, ?3, ?4, ?5,
                     ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                     ?14, ?15, ?16, ?17, ?18, ?19,
-                    ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-                    ?27, ?28, ?29,
-                    ?30, ?31, ?32, ?33, ?34, ?35,
-                    ?36, ?37, ?38, ?39, ?40,
-                    ?41
-                )",
+                    ?20, ?21, ?22, ?23, ?24, ?25,
+                    ?26, ?27, ?28, ?29,
+                    ?30, ?31, ?32,
+                    ?33, ?34, ?35, ?36, ?37, ?38,
+                    ?39, ?40, ?41, ?42, ?43,
+                    ?44
+                )
+                ON CONFLICT(track_uid) DO UPDATE SET
+                    header_size = excluded.header_size,
+                    header_blake3 = excluded.header_blake3,
+                    padding_bytes = excluded.padding_bytes,
+                    rel_path = excluded.rel_path,
+                    file_size = excluded.file_size,
+                    mtime_ms = excluded.mtime_ms,
+                    codec = excluded.codec,
+                    sample_rate_hz = excluded.sample_rate_hz,
+                    bit_depth = excluded.bit_depth,
+                    bitrate_kbps = excluded.bitrate_kbps,
+                    duration_ms = excluded.duration_ms,
+                    title = excluded.title,
+                    album = excluded.album,
+                    album_artist = excluded.album_artist,
+                    artists_json = excluded.artists_json,
+                    composers_json = excluded.composers_json,
+                    conductors_json = excluded.conductors_json,
+                    work_name = excluded.work_name,
+                    movement_name = excluded.movement_name,
+                    movement_number = excluded.movement_number,
+                    disc_number = CASE WHEN excluded.disc_number > 0 THEN excluded.disc_number ELSE tracks.disc_number END,
+                    track_number = CASE WHEN excluded.track_number > 0 THEN excluded.track_number ELSE tracks.track_number END,
+                    publisher = COALESCE(NULLIF(excluded.publisher, ''), tracks.publisher),
+                    genre = excluded.genre,
+                    year = excluded.year,
+                    original_date = excluded.original_date,
+                    release_type = COALESCE(excluded.release_type, tracks.release_type),
+                    replaygain_track_db = excluded.replaygain_track_db,
+                    replaygain_album_db = excluded.replaygain_album_db,
+                    replaygain_peak = excluded.replaygain_peak,
+                    dj_scene_json = CASE WHEN tracks.dj_scene_ts = 0 THEN excluded.dj_scene_json ELSE tracks.dj_scene_json END,
+                    dj_scene_ts = CASE WHEN tracks.dj_scene_ts = 0 THEN excluded.dj_scene_ts ELSE tracks.dj_scene_ts END,
+                    dj_vocals = CASE WHEN tracks.dj_vocals_ts = 0 THEN excluded.dj_vocals ELSE tracks.dj_vocals END,
+                    dj_vocals_ts = CASE WHEN tracks.dj_vocals_ts = 0 THEN excluded.dj_vocals_ts ELSE tracks.dj_vocals_ts END,
+                    dj_energy = CASE WHEN tracks.dj_energy_ts = 0 THEN excluded.dj_energy ELSE tracks.dj_energy END,
+                    dj_energy_ts = CASE WHEN tracks.dj_energy_ts = 0 THEN excluded.dj_energy_ts ELSE tracks.dj_energy_ts END,
+                    tempo_bpm = CASE WHEN tracks.tempo_ts = 0 THEN excluded.tempo_bpm ELSE tracks.tempo_bpm END,
+                    tempo_bucket = CASE WHEN tracks.tempo_ts = 0 THEN excluded.tempo_bucket ELSE tracks.tempo_bucket END,
+                    tempo_ts = CASE WHEN tracks.tempo_ts = 0 THEN excluded.tempo_ts ELSE tracks.tempo_ts END,
+                    mood_json = CASE WHEN tracks.mood_ts = 0 THEN excluded.mood_json ELSE tracks.mood_json END,
+                    mood_ts = CASE WHEN tracks.mood_ts = 0 THEN excluded.mood_ts ELSE tracks.mood_ts END,
+                    waveform_offset = COALESCE(excluded.waveform_offset, tracks.waveform_offset)",
             )
             .map_err(|e| format!("sqlite prepare failed: {e}"))?;
 
-        for (idx, t) in tracks.iter().enumerate() {
+        for t in tracks.iter() {
+            dedup_af_stmt
+                .execute(rusqlite::params![t.audio_frame_blake3.as_slice(), t.track_uid])
+                .map_err(|e| format!("sqlite audio_frame_blake3 dedup failed: {e}"))?;
             let dj_vocals_str = t.dj_vocals.map(DjVocals::as_str);
             let dj_energy_str = t.dj_energy.map(DjEnergy::as_str);
             let tempo_bucket_str = t.tempo_bucket.map(|b| match b {
@@ -571,6 +751,13 @@ fn write_manifest_db(db_path: &Path, tracks: &[ScannedTrackRecord]) -> Result<()
                 TempoBucket::Fast => "Fast",
                 TempoBucket::VeryFast => "Very Fast",
             });
+            let wf_offset = if t.analysis.waveform_150.is_empty() {
+                None::<i64>
+            } else {
+                let mut prefix = [0u8; 16];
+                prefix.copy_from_slice(&t.audio_frame_blake3[..16]);
+                wf_offset_by_prefix.get(&prefix).copied()
+            };
 
             stmt.execute(rusqlite::params![
                 t.track_uid,
@@ -595,6 +782,9 @@ fn write_manifest_db(db_path: &Path, tracks: &[ScannedTrackRecord]) -> Result<()
                 t.work_name,
                 t.movement_name,
                 t.movement_number.map(|v| v as i64),
+                t.disc_number as i64,
+                t.track_number as i64,
+                t.publisher,
                 t.genre,
                 t.year.map(|v| v as i64),
                 t.original_date,
@@ -613,13 +803,40 @@ fn write_manifest_db(db_path: &Path, tracks: &[ScannedTrackRecord]) -> Result<()
                 if t.tempo_bpm.is_some() { now_ms } else { 0i64 },
                 serde_json::to_string(&t.moods).unwrap(),
                 if t.moods.is_empty() { 0i64 } else { now_ms },
-                if t.analysis.waveform_150.is_empty() {
-                    None::<i64>
-                } else {
-                    Some((idx * 150) as i64)
-                },
+                wf_offset,
             ])
             .map_err(|e| format!("sqlite insert failed for {}: {e}", t.rel_path))?;
+        }
+    }
+
+    if prune_deleted {
+        let active_uids: HashSet<&str> = tracks.iter().map(|t| t.track_uid.as_str()).collect();
+        let mut to_delete: Vec<String> = Vec::new();
+        {
+            let mut q = tx
+                .prepare("SELECT track_uid, rel_path FROM tracks")
+                .map_err(|e| format!("sqlite select for prune failed: {e}"))?;
+            let rows = q
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| format!("sqlite prune row read failed: {e}"))?;
+            for (uid, rel) in rows.flatten() {
+                if !active_uids.contains(uid.as_str()) {
+                    let abs_path = music_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    if !abs_path.exists() {
+                        to_delete.push(uid);
+                    }
+                }
+            }
+        }
+        if !to_delete.is_empty() {
+            let mut del_stmt = tx
+                .prepare("DELETE FROM tracks WHERE track_uid = ?1")
+                .map_err(|e| format!("sqlite prepare delete failed: {e}"))?;
+            for uid in to_delete {
+                del_stmt
+                    .execute(rusqlite::params![uid])
+                    .map_err(|e| format!("sqlite delete pruned track failed: {e}"))?;
+            }
         }
     }
 
@@ -870,7 +1087,7 @@ mod tests {
             .unwrap();
         assert_eq!(rel_path, "Bach/01_Prelude.wav");
         assert_eq!(tempo_bucket.as_deref(), Some("Fast"));
-        assert_eq!(wf_off, 0);
+        assert_eq!(wf_off, 12 + 20);
         assert_eq!(fp_blob.len(), 32);
 
         // Verify waveforms.bin lookup matches
@@ -879,8 +1096,63 @@ mod tests {
         prefix.copy_from_slice(&fp_blob[..16]);
         let envelope = WaveformArchive::lookup_bytes(&wf_bytes, &prefix).expect("waveform found");
         assert_eq!(envelope.len(), 150);
+        assert_eq!(&wf_bytes[wf_off as usize..wf_off as usize + 150], &envelope);
         assert!(envelope.iter().any(|&v| v > 200));
 
+        drop(conn);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cli_scan_preserves_existing_ledger_and_writes_real_waveform_offsets_for_multiple_tracks() {
+        let base = std::env::temp_dir().join("tw_cli_preserve_ledger_test");
+        let _ = fs::remove_dir_all(&base);
+        let music = base.join("Music");
+        let album = music.join("Suite");
+        fs::create_dir_all(&album).unwrap();
+        let wav1 = album.join("01_Slow.wav");
+        let wav2 = album.join("02_Fast.wav");
+        write_test_wav(&wav1, 44100, 2);
+        write_test_wav(&wav2, 48000, 6);
+
+        let tonewise_dir = music.join(".tonewise");
+        scan_library(&music, &tonewise_dir, false).expect("initial scan");
+
+        let conn = Connection::open(tonewise_dir.join("manifest.db")).unwrap();
+        conn.execute(
+            "UPDATE tracks SET rating = 5, play_count_total = 42 WHERE rel_path = 'Suite/01_Slow.wav'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Rescan: must preserve rating=5 and play_count_total=42, and write accurate waveforms.bin offsets
+        scan_library(&music, &tonewise_dir, false).expect("rescan preserves ledger");
+
+        let conn = Connection::open(tonewise_dir.join("manifest.db")).unwrap();
+        let wf_bytes = fs::read(tonewise_dir.join("waveforms.bin")).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT rel_path, rating, play_count_total, waveform_offset, audio_frame_blake3 FROM tracks")
+            .unwrap();
+        let rows: Vec<(String, i64, i64, i64, Vec<u8>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        for (rel, rating, plays, off, fp_blob) in &rows {
+            if rel == "Suite/01_Slow.wav" {
+                assert_eq!(*rating, 5);
+                assert_eq!(*plays, 42);
+            }
+            let mut prefix = [0u8; 16];
+            prefix.copy_from_slice(&fp_blob[..16]);
+            let envelope = WaveformArchive::lookup_bytes(&wf_bytes, &prefix).unwrap();
+            assert_eq!(&wf_bytes[*off as usize..*off as usize + 150], &envelope);
+        }
+
+        drop(stmt);
+        drop(conn);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -947,9 +1219,155 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fast_count, 1);
-        assert_eq!(wf_off, None);
+        assert_eq!(wf_off, Some(32));
+
+        // Fresh directory scanned directly in fast mode leaves waveform_offset NULL
+        let fresh_tonewise_dir = base.join("FreshTonewise");
+        scan_library_with_options(&music, &fresh_tonewise_dir, false, true).expect("fresh fast scan");
+        let fresh_conn = Connection::open(fresh_tonewise_dir.join("manifest.db")).unwrap();
+        let fresh_wf_off: Option<i64> = fresh_conn
+            .query_row("SELECT waveform_offset FROM tracks LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fresh_wf_off, None);
+
+        drop(fresh_conn);
+        drop(conn);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parse_movement_number_handles_slash_and_text_formats() {
+        assert_eq!(parse_movement_number("1/4"), Some(1));
+        assert_eq!(parse_movement_number("03 of 4"), Some(3));
+        assert_eq!(parse_movement_number(" 2 "), Some(2));
+        assert_eq!(parse_movement_number("0"), None);
+        assert_eq!(parse_movement_number("0/4"), None);
+        assert_eq!(parse_movement_number("abc"), None);
+    }
+
+    #[test]
+    fn cli_scan_upgrades_v1_manifest_prunes_deleted_files_and_guards_blake3_conflict() {
+        let base = std::env::temp_dir().join("tw_cli_v2_prune_test");
+        let _ = fs::remove_dir_all(&base);
+        let music = base.join("Music");
+        let disc2 = music.join("AlbumCD2");
+        fs::create_dir_all(&disc2).unwrap();
+
+        let wav_keep = disc2.join("01_Keep.wav");
+        let wav_del = disc2.join("02_DeleteMe.wav");
+        write_test_wav(&wav_keep, 44100, 3);
+        write_test_wav(&wav_del, 48000, 3);
+
+        let tonewise_dir = music.join(".tonewise");
+        fs::create_dir_all(&tonewise_dir).unwrap();
+        let db_path = tonewise_dir.join("manifest.db");
+
+        // Seed synthetic v1 manifest without v2 columns (disc_number, track_number, publisher, ledger cols)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+                 CREATE TABLE tracks (
+                     track_uid TEXT PRIMARY KEY,
+                     audio_frame_blake3 BLOB NOT NULL UNIQUE,
+                     header_size INTEGER NOT NULL DEFAULT 0,
+                     header_blake3 BLOB NOT NULL,
+                     padding_bytes INTEGER NOT NULL DEFAULT 0,
+                     rel_path TEXT NOT NULL,
+                     file_size INTEGER NOT NULL,
+                     mtime_ms INTEGER NOT NULL,
+                     codec TEXT NOT NULL,
+                     sample_rate_hz INTEGER NOT NULL,
+                     bit_depth INTEGER,
+                     bitrate_kbps INTEGER,
+                     duration_ms INTEGER NOT NULL,
+                     title TEXT NOT NULL,
+                     album TEXT,
+                     album_artist TEXT,
+                     artists_json TEXT NOT NULL DEFAULT '[]',
+                     composers_json TEXT NOT NULL DEFAULT '[]',
+                     conductors_json TEXT NOT NULL DEFAULT '[]',
+                     work_name TEXT,
+                     movement_name TEXT,
+                     movement_number INTEGER,
+                     genre TEXT,
+                     year INTEGER,
+                     original_date TEXT,
+                     release_type TEXT,
+                     replaygain_track_db REAL,
+                     replaygain_album_db REAL,
+                     replaygain_peak REAL,
+                     dj_scene_json TEXT NOT NULL DEFAULT '[]',
+                     dj_scene_ts INTEGER NOT NULL DEFAULT 0,
+                     dj_vocals TEXT,
+                     dj_vocals_ts INTEGER NOT NULL DEFAULT 0,
+                     dj_energy TEXT,
+                     dj_energy_ts INTEGER NOT NULL DEFAULT 0,
+                     tempo_bpm REAL,
+                     tempo_bucket TEXT,
+                     tempo_ts INTEGER NOT NULL DEFAULT 0,
+                     mood_json TEXT NOT NULL DEFAULT '[]',
+                     mood_ts INTEGER NOT NULL DEFAULT 0,
+                     rating INTEGER DEFAULT 0,
+                     rating_ts INTEGER NOT NULL DEFAULT 0,
+                     play_count_total INTEGER NOT NULL DEFAULT 0,
+                     last_played_ts INTEGER NOT NULL DEFAULT 0,
+                     waveform_offset INTEGER
+                 );",
+            )
+            .unwrap();
+
+            // Simulate legacy track_uid != canonical hex for same audio_frame_blake3 of wav_keep
+            let fp_keep = compute_fingerprint_from_path(&wav_keep).unwrap();
+            let fp_bytes = hex_to_32(&fp_keep.audio_frame_blake3_hex).unwrap();
+            let hdr_bytes = hex_to_32(&fp_keep.header_blake3_hex).unwrap();
+            conn.execute(
+                "INSERT INTO tracks (track_uid, audio_frame_blake3, header_size, header_blake3, rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms, title, play_count_total)
+                 VALUES ('legacy-uid-keep', ?1, 0, ?2, 'AlbumCD2/01_Keep.wav', 100, 1, 'wav', 44100, 3000, 'Keep Old', 7)",
+                rusqlite::params![fp_bytes.as_slice(), hdr_bytes.as_slice()],
+            ).unwrap();
+        }
+
+        // First scan must upgrade schema_version to '2', replace conflicting audio_frame_blake3 UID without UNIQUE error, and record both tracks
+        let s1 = scan_library(&music, &tonewise_dir, false).expect("scan upgrades v1 cleanly");
+        assert_eq!(s1.scanned_tracks, 2);
+
+        // Delete wav_del on disk and rescan -> deleted track must be pruned from tracks table
+        fs::remove_file(&wav_del).unwrap();
+        let s2 = scan_library(&music, &tonewise_dir, false).expect("rescan prunes deleted file");
+        assert_eq!(s2.scanned_tracks, 1);
+
+        let conn = Connection::open(&db_path).unwrap();
+        let schema_ver: String = conn
+            .query_row("SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(schema_ver, "2");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let remaining_rel: String = conn
+            .query_row("SELECT rel_path FROM tracks LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining_rel, "AlbumCD2/01_Keep.wav");
 
         drop(conn);
         let _ = fs::remove_dir_all(&base);
     }
+}
+
+fn parse_movement_number(raw: &str) -> Option<u32> {
+    let digits: String = raw
+        .trim()
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u32>().ok().filter(|&n| n > 0)
 }

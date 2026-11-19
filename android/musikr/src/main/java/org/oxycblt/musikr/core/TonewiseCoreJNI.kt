@@ -28,7 +28,13 @@ internal object TonewiseCoreJNI {
         synchronized(this) {
             if (!isLoaded) {
                 System.loadLibrary("tonewise_core")
-                isLoaded = true
+                try {
+                    verifyAbiVersion()
+                    isLoaded = true
+                } catch (t: Throwable) {
+                    isLoaded = false
+                    throw t
+                }
             }
         }
     }
@@ -37,9 +43,20 @@ internal object TonewiseCoreJNI {
         synchronized(this) {
             if (!isLoaded) {
                 System.load(absolutePath)
-                isLoaded = true
+                try {
+                    verifyAbiVersion()
+                    isLoaded = true
+                } catch (t: Throwable) {
+                    isLoaded = false
+                    throw t
+                }
             }
         }
+    }
+
+    private fun verifyAbiVersion() {
+        val actual = nativeAbiVersion()
+        TonewiseCore.checkAbiVersionMatch(actual)
     }
 
     external fun nativeAbiVersion(): Int

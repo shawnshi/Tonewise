@@ -217,7 +217,16 @@ private class M3UImpl(private val volumeManager: VolumeManager) : M3U() {
         writer.writeLine("#EXTENC:UTF-8")
         writer.writeLine("#PLAYLIST:${playlist.name.raw}")
         for (song in playlist.songs) {
-            writer.writeLine("#EXTINF:${song.durationMs},${song.name.raw}")
+            val durationSec = (song.durationMs / 1000L).coerceAtLeast(0L)
+            val artistNames =
+                song.artists.mapNotNull { (it.name as? Name.Known)?.raw }.filter { it.isNotBlank() }
+            val extinfTitle =
+                if (artistNames.isNotEmpty()) {
+                    "${artistNames.joinToString(", ")} - ${song.name.raw}"
+                } else {
+                    song.name.raw
+                }
+            writer.writeLine("#EXTINF:$durationSec,$extinfTitle")
             val albumName = song.album.name
             if (albumName is Name.Known) {
                 writer.writeLine("#EXTALB:${albumName.raw}")

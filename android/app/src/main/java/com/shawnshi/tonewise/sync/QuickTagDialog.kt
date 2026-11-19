@@ -274,7 +274,7 @@ private fun QuickTagSheet(
                             onClick = {
                                 val next = if (selected) "" else tp
                                 tempo = next
-                                onMutate(song, "tempo", next)
+                                onMutate(song, "tempo_bucket", next)
                             },
                             label = { Text(tp) },
                         )

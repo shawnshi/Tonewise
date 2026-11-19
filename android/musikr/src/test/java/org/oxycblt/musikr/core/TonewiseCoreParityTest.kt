@@ -24,6 +24,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -53,7 +54,10 @@ class TonewiseCoreParityTest {
 
     @Test
     fun abiVersion_andArtistWhitelistParity() {
-        assertEquals(1, TonewiseCore.abiVersion())
+        assertEquals(TonewiseCore.EXPECTED_ABI_VERSION, TonewiseCore.abiVersion())
+        assertThrows(IllegalStateException::class.java) {
+            TonewiseCore.checkAbiVersionMatch(999)
+        }
         assertEquals(listOf("Above & Beyond"), TonewiseCore.splitArtists("Above & Beyond"))
         assertEquals(listOf("AC/DC", "Slash"), TonewiseCore.splitArtists("AC/DC / Slash"))
         assertEquals(listOf("卢家宏", "李宗盛"), TonewiseCore.splitArtists("卢家宏 / 李宗盛"))

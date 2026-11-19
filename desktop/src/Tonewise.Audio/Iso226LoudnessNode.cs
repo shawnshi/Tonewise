@@ -55,16 +55,18 @@ public sealed class Iso226LoudnessNode
         ActiveLowBoostDb = Math.Min(12.0, atten * 0.32 * splFactor);
         ActiveHighBoostDb = Math.Min(6.0, atten * 0.14 * splFactor);
 
-        _lowShelf = new BiquadFilter64(
-            new BiquadSpec(BiquadKind.LowShelf, 60.0, ActiveLowBoostDb, 0.707),
-            _sampleRateHz,
-            _channels
-        );
-        _highShelf = new BiquadFilter64(
-            new BiquadSpec(BiquadKind.HighShelf, 8000.0, ActiveHighBoostDb, 0.707),
-            _sampleRateHz,
-            _channels
-        );
+        var lowSpec = new BiquadSpec(BiquadKind.LowShelf, 60.0, ActiveLowBoostDb, 0.707);
+        var highSpec = new BiquadSpec(BiquadKind.HighShelf, 8000.0, ActiveHighBoostDb, 0.707);
+        if (_lowShelf is not null && _highShelf is not null)
+        {
+            _lowShelf.UpdateCoefficients(lowSpec, _sampleRateHz);
+            _highShelf.UpdateCoefficients(highSpec, _sampleRateHz);
+        }
+        else
+        {
+            _lowShelf = new BiquadFilter64(lowSpec, _sampleRateHz, _channels);
+            _highShelf = new BiquadFilter64(highSpec, _sampleRateHz, _channels);
+        }
     }
 
     public double ProcessSample(double sample, int channel)

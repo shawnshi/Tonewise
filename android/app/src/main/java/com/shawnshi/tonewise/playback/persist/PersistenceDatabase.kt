@@ -39,7 +39,7 @@ import org.oxycblt.musikr.Music
 @Database(
     entities = [PlaybackState::class, QueueHeapItem::class, QueueShuffledMappingItem::class],
     version = 38,
-    exportSchema = false,
+    exportSchema = true,
 )
 @TypeConverters(Music.UID.TypeConverters::class)
 abstract class PersistenceDatabase : RoomDatabase() {

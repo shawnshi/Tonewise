@@ -1,0 +1,34 @@
+name: Core and Desktop Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  core-and-desktop:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up .NET 9 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Run Rust workspace tests
+        working-directory: core
+        run: cargo test --workspace
+
+      - name: Build tonewise-ffi release DLL
+        working-directory: core
+        run: cargo build --release -p tonewise-ffi
+
+      - name: Run Desktop unit & integration tests
+        run: dotnet test desktop/tests/Tonewise.Desktop.Tests/Tonewise.Desktop.Tests.csproj

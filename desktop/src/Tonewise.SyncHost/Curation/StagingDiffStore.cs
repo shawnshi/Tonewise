@@ -93,11 +93,13 @@ public sealed class StagingDiffStore
         };
 
     public string DbPath { get; }
+    public string StateDbPath { get; }
     public string? MusicRoot { get; }
 
     public StagingDiffStore(string manifestDbPath, string? musicRoot = null)
     {
         DbPath = manifestDbPath;
+        StateDbPath = DesktopStateStore.ResolveStateDbPath(manifestDbPath);
         MusicRoot = musicRoot ?? InferMusicRootFromDbPath(manifestDbPath);
         EnsureSchema();
     }
@@ -150,38 +152,24 @@ public sealed class StagingDiffStore
 
     public void EnsureSchema()
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(DbPath)!);
-        using var conn = OpenConnection();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            CREATE TABLE IF NOT EXISTS staging_diff_queue (
-                proposal_id   TEXT PRIMARY KEY,
-                track_uid     TEXT NOT NULL,
-                field_name    TEXT NOT NULL,
-                original_value TEXT,
-                suggested_value TEXT NOT NULL,
-                confidence    REAL NOT NULL,
-                source_tag    TEXT NOT NULL,
-                status        TEXT NOT NULL,
-                batch_id      TEXT,
-                created_at_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS curation_batches (
-                batch_id       TEXT PRIMARY KEY,
-                committed_at_ms INTEGER NOT NULL,
-                item_count     INTEGER NOT NULL,
-                rolled_back    INTEGER NOT NULL DEFAULT 0
-            );
-            """;
-        cmd.ExecuteNonQuery();
-
-        EnsureOptionalTrackColumns(conn);
+        string? dbDir = Path.GetDirectoryName(Path.GetFullPath(DbPath));
+        if (!string.IsNullOrWhiteSpace(dbDir))
+        {
+            Directory.CreateDirectory(dbDir);
+        }
+        DesktopStateStore.EnsureSchema(StateDbPath);
+        if (File.Exists(DbPath))
+        {
+            using var conn = OpenConnection();
+            EnsureOptionalTrackColumns(conn);
+            DesktopStateStore.MigrateLegacyOperationalTablesIfPresent(DbPath, StateDbPath);
+        }
     }
 
     public int EnqueueProposals(IEnumerable<TagDiffProposal> proposals, bool forceOverwriteUnlocked = false)
     {
-        using var conn = OpenConnection();
-        using var tx = conn.BeginTransaction();
+        using var conn = OpenStateConnection();
+        using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
         int inserted = 0;
 
         foreach (var p in proposals)
@@ -228,7 +216,7 @@ public sealed class StagingDiffStore
 
     public IReadOnlyList<TagDiffProposal> GetPendingProposals(int limit = 0)
     {
-        using var conn = OpenConnection();
+        using var conn = OpenStateReadOnlyConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = limit > 0
             ? """
@@ -273,7 +261,7 @@ public sealed class StagingDiffStore
 
     public (int ApprovedCount, int PendingCount) GetPendingProposalCounts()
     {
-        using var conn = OpenConnection();
+        using var conn = OpenStateReadOnlyConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT
@@ -293,7 +281,7 @@ public sealed class StagingDiffStore
         double autoApproveThreshold = 0.80,
         int maxProposals = 500)
     {
-        using var conn = OpenConnection();
+        using var conn = OpenStateReadOnlyConnection();
         using var cmd = conn.CreateCommand();
         int limit = maxProposals > 0 ? maxProposals : 100_000;
         cmd.CommandText = """
@@ -319,7 +307,7 @@ public sealed class StagingDiffStore
 
     public void SetProposalApproval(string proposalId, bool approved)
     {
-        using var conn = OpenConnection();
+        using var conn = OpenStateConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "UPDATE staging_diff_queue SET status = $st WHERE proposal_id = $id;";
         cmd.Parameters.AddWithValue("$st", approved ? ProposalStatus.Approved : ProposalStatus.Rejected);
@@ -329,7 +317,7 @@ public sealed class StagingDiffStore
 
     public int ApproveAllHighConfidence(double minConfidence = 0.80)
     {
-        using var conn = OpenConnection();
+        using var conn = OpenStateConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             UPDATE staging_diff_queue
@@ -345,7 +333,7 @@ public sealed class StagingDiffStore
     /// </summary>
     public int ClearPendingProposals()
     {
-        using var conn = OpenConnection();
+        using var conn = OpenStateConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "DELETE FROM staging_diff_queue WHERE status IN ('Pending', 'Rejected');";
         return cmd.ExecuteNonQuery();
@@ -353,7 +341,7 @@ public sealed class StagingDiffStore
 
     public int CountPendingAtOrAbove(double minConfidence)
     {
-        using var conn = OpenConnection();
+        using var conn = OpenStateReadOnlyConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM staging_diff_queue WHERE status = 'Pending' AND confidence >= $thresh;";
         cmd.Parameters.AddWithValue("$thresh", minConfidence);
@@ -371,14 +359,10 @@ public sealed class StagingDiffStore
             : customBatchId;
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        using var conn = OpenConnection();
-        EnsureOptionalTrackColumns(conn);
-        using var tx = conn.BeginTransaction();
-
+        using var stateConn = OpenStateConnection();
         var targets = new List<TagDiffProposal>();
-        using (var selectCmd = conn.CreateCommand())
+        using (var selectCmd = stateConn.CreateCommand())
         {
-            selectCmd.Transaction = tx;
             int limit = maxProposals > 0 ? maxProposals : 100_000;
             selectCmd.CommandText = """
                 SELECT proposal_id, track_uid, field_name, original_value, suggested_value,
@@ -413,13 +397,13 @@ public sealed class StagingDiffStore
             return new CurationCommitResult(batchId, 0);
         }
 
-        int committed = 0;
+        using var conn = OpenConnection();
+        EnsureOptionalTrackColumns(conn);
+
         var updatesByTrack = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
         foreach (var item in targets)
         {
             string column = ResolveColumnName(item.FieldName);
-            ApplyTrackColumnValue(conn, tx, item.TrackUid, column, item.SuggestedValue, nowMs);
-
             if (IsPhysicalTagColumn(column))
             {
                 if (!updatesByTrack.TryGetValue(item.TrackUid, out var trackUpdates))
@@ -429,20 +413,39 @@ public sealed class StagingDiffStore
                 }
                 trackUpdates[column] = item.SuggestedValue;
             }
-
-            using var markCmd = conn.CreateCommand();
-            markCmd.Transaction = tx;
-            markCmd.CommandText = "UPDATE staging_diff_queue SET status = $st, batch_id = $bid WHERE proposal_id = $id;";
-            markCmd.Parameters.AddWithValue("$st", ProposalStatus.Committed);
-            markCmd.Parameters.AddWithValue("$bid", batchId);
-            markCmd.Parameters.AddWithValue("$id", item.ProposalId);
-            markCmd.ExecuteNonQuery();
-            committed++;
         }
 
-        using (var batchCmd = conn.CreateCommand())
+        var physicalResults = WriteBackPhysicalFilesOutsideTx(conn, updatesByTrack, maxPhysicalFiles);
+
+        int committed = 0;
+        using (var tx = TonewiseSqlite.BeginImmediateTransaction(conn))
         {
-            batchCmd.Transaction = tx;
+            foreach (var item in targets)
+            {
+                string column = ResolveColumnName(item.FieldName);
+                ApplyTrackColumnValue(conn, tx, item.TrackUid, column, item.SuggestedValue, nowMs);
+                committed++;
+            }
+
+            ApplyPhysicalFingerprintsInTx(conn, tx, physicalResults);
+            tx.Commit();
+        }
+
+        using (var stateTx = TonewiseSqlite.BeginImmediateTransaction(stateConn))
+        {
+            foreach (var item in targets)
+            {
+                using var markCmd = stateConn.CreateCommand();
+                markCmd.Transaction = stateTx;
+                markCmd.CommandText = "UPDATE staging_diff_queue SET status = $st, batch_id = $bid WHERE proposal_id = $id;";
+                markCmd.Parameters.AddWithValue("$st", ProposalStatus.Committed);
+                markCmd.Parameters.AddWithValue("$bid", batchId);
+                markCmd.Parameters.AddWithValue("$id", item.ProposalId);
+                markCmd.ExecuteNonQuery();
+            }
+
+            using var batchCmd = stateConn.CreateCommand();
+            batchCmd.Transaction = stateTx;
             batchCmd.CommandText = """
                 INSERT INTO curation_batches (batch_id, committed_at_ms, item_count, rolled_back)
                 VALUES ($bid, $ts, $cnt, 0);
@@ -451,13 +454,11 @@ public sealed class StagingDiffStore
             batchCmd.Parameters.AddWithValue("$ts", nowMs);
             batchCmd.Parameters.AddWithValue("$cnt", committed);
             batchCmd.ExecuteNonQuery();
+            stateTx.Commit();
         }
 
-        int physicalUpdated = WriteBackUpdatesToPhysicalFiles(conn, tx, updatesByTrack, maxPhysicalFiles);
         var committedUids = targets.Select(t => t.TrackUid).Distinct(StringComparer.Ordinal).ToList();
-
-        tx.Commit();
-        return new CurationCommitResult(batchId, committed, physicalUpdated, committedUids);
+        return new CurationCommitResult(batchId, committed, physicalResults.Count, committedUids);
     }
 
     public CurationCommitResult ApplyDirectCuratedEdits(
@@ -485,55 +486,12 @@ public sealed class StagingDiffStore
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         using var conn = OpenConnection();
         EnsureOptionalTrackColumns(conn);
-        using var tx = conn.BeginTransaction();
 
-        int committed = 0;
         var fileUpdatesByTrack = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
-
         foreach (string uid in uids)
         {
             foreach (var (col, val) in normalizedUpdates)
             {
-                string? origVal = null;
-                using (var origCmd = conn.CreateCommand())
-                {
-                    origCmd.Transaction = tx;
-                    origCmd.CommandText = $"SELECT {col} FROM tracks WHERE track_uid = $uid;";
-                    origCmd.Parameters.AddWithValue("$uid", uid);
-                    object? rawOrig = origCmd.ExecuteScalar();
-                    if (rawOrig is not null && rawOrig != DBNull.Value)
-                    {
-                        origVal = Convert.ToString(rawOrig, System.Globalization.CultureInfo.InvariantCulture);
-                    }
-                }
-
-                ApplyTrackColumnValue(conn, tx, uid, col, val, nowMs);
-
-                using (var qCmd = conn.CreateCommand())
-                {
-                    qCmd.Transaction = tx;
-                    qCmd.CommandText = """
-                        INSERT INTO staging_diff_queue (
-                            proposal_id, track_uid, field_name, original_value, suggested_value,
-                            confidence, source_tag, status, batch_id, created_at_ms
-                        ) VALUES ($id, $uid, $field, $orig, $sugg, 1.0, 'Lexicon-T', 'Committed', $bid, $ts)
-                        ON CONFLICT(proposal_id) DO UPDATE SET
-                            original_value = excluded.original_value,
-                            suggested_value = excluded.suggested_value,
-                            status = 'Committed',
-                            batch_id = excluded.batch_id,
-                            created_at_ms = excluded.created_at_ms;
-                        """;
-                    qCmd.Parameters.AddWithValue("$id", $"lexicon:{batchId}:{uid}:{col}");
-                    qCmd.Parameters.AddWithValue("$uid", uid);
-                    qCmd.Parameters.AddWithValue("$field", col);
-                    qCmd.Parameters.AddWithValue("$orig", (object?)origVal ?? DBNull.Value);
-                    qCmd.Parameters.AddWithValue("$sugg", val ?? "");
-                    qCmd.Parameters.AddWithValue("$bid", batchId);
-                    qCmd.Parameters.AddWithValue("$ts", nowMs);
-                    qCmd.ExecuteNonQuery();
-                }
-
                 if (IsPhysicalTagColumn(col))
                 {
                     if (!fileUpdatesByTrack.TryGetValue(uid, out var trackUpdates))
@@ -543,14 +501,73 @@ public sealed class StagingDiffStore
                     }
                     trackUpdates[col] = val;
                 }
-
-                committed++;
             }
         }
 
-        using (var batchCmd = conn.CreateCommand())
+        var physicalResults = WriteBackPhysicalFilesOutsideTx(conn, fileUpdatesByTrack);
+
+        int committed = 0;
+        var appliedAudit = new List<(string TrackUid, string Column, string? OrigVal, string NewVal)>();
+        using (var tx = TonewiseSqlite.BeginImmediateTransaction(conn))
         {
-            batchCmd.Transaction = tx;
+            foreach (string uid in uids)
+            {
+                foreach (var (col, val) in normalizedUpdates)
+                {
+                    string? origVal = null;
+                    using (var origCmd = conn.CreateCommand())
+                    {
+                        origCmd.Transaction = tx;
+                        origCmd.CommandText = $"SELECT {col} FROM tracks WHERE track_uid = $uid;";
+                        origCmd.Parameters.AddWithValue("$uid", uid);
+                        object? rawOrig = origCmd.ExecuteScalar();
+                        if (rawOrig is not null && rawOrig != DBNull.Value)
+                        {
+                            origVal = Convert.ToString(rawOrig, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                    }
+
+                    ApplyTrackColumnValue(conn, tx, uid, col, val, nowMs);
+                    appliedAudit.Add((uid, col, origVal, val ?? ""));
+                    committed++;
+                }
+            }
+
+            ApplyPhysicalFingerprintsInTx(conn, tx, physicalResults);
+            tx.Commit();
+        }
+
+        using var stateConn = OpenStateConnection();
+        using (var stateTx = TonewiseSqlite.BeginImmediateTransaction(stateConn))
+        {
+            foreach (var (uid, col, origVal, newVal) in appliedAudit)
+            {
+                using var qCmd = stateConn.CreateCommand();
+                qCmd.Transaction = stateTx;
+                qCmd.CommandText = """
+                    INSERT INTO staging_diff_queue (
+                        proposal_id, track_uid, field_name, original_value, suggested_value,
+                        confidence, source_tag, status, batch_id, created_at_ms
+                    ) VALUES ($id, $uid, $field, $orig, $sugg, 1.0, 'Lexicon-T', 'Committed', $bid, $ts)
+                    ON CONFLICT(proposal_id) DO UPDATE SET
+                        original_value = excluded.original_value,
+                        suggested_value = excluded.suggested_value,
+                        status = 'Committed',
+                        batch_id = excluded.batch_id,
+                        created_at_ms = excluded.created_at_ms;
+                    """;
+                qCmd.Parameters.AddWithValue("$id", $"lexicon:{batchId}:{uid}:{col}");
+                qCmd.Parameters.AddWithValue("$uid", uid);
+                qCmd.Parameters.AddWithValue("$field", col);
+                qCmd.Parameters.AddWithValue("$orig", (object?)origVal ?? DBNull.Value);
+                qCmd.Parameters.AddWithValue("$sugg", newVal);
+                qCmd.Parameters.AddWithValue("$bid", batchId);
+                qCmd.Parameters.AddWithValue("$ts", nowMs);
+                qCmd.ExecuteNonQuery();
+            }
+
+            using var batchCmd = stateConn.CreateCommand();
+            batchCmd.Transaction = stateTx;
             batchCmd.CommandText = """
                 INSERT INTO curation_batches (batch_id, committed_at_ms, item_count, rolled_back)
                 VALUES ($bid, $ts, $cnt, 0);
@@ -559,23 +576,19 @@ public sealed class StagingDiffStore
             batchCmd.Parameters.AddWithValue("$ts", nowMs);
             batchCmd.Parameters.AddWithValue("$cnt", committed);
             batchCmd.ExecuteNonQuery();
+            stateTx.Commit();
         }
 
-        int physicalUpdated = WriteBackUpdatesToPhysicalFiles(conn, tx, fileUpdatesByTrack);
-        tx.Commit();
-        return new CurationCommitResult(batchId, committed, physicalUpdated);
+        return new CurationCommitResult(batchId, committed, physicalResults.Count);
     }
 
     public int RollbackBatch(string batchId)
     {
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        using var conn = OpenConnection();
-        EnsureOptionalTrackColumns(conn);
-        using var tx = conn.BeginTransaction();
+        using var stateConn = OpenStateConnection();
 
-        using (var checkCmd = conn.CreateCommand())
+        using (var checkCmd = stateConn.CreateCommand())
         {
-            checkCmd.Transaction = tx;
             checkCmd.CommandText = "SELECT rolled_back FROM curation_batches WHERE batch_id = $bid;";
             checkCmd.Parameters.AddWithValue("$bid", batchId);
             object? res = checkCmd.ExecuteScalar();
@@ -586,9 +599,8 @@ public sealed class StagingDiffStore
         }
 
         var items = new List<(string ProposalId, string TrackUid, string FieldName, string? OriginalValue)>();
-        using (var listCmd = conn.CreateCommand())
+        using (var listCmd = stateConn.CreateCommand())
         {
-            listCmd.Transaction = tx;
             listCmd.CommandText = """
                 SELECT proposal_id, track_uid, field_name, original_value
                 FROM staging_diff_queue
@@ -607,94 +619,125 @@ public sealed class StagingDiffStore
             }
         }
 
+        using var conn = OpenConnection();
+        EnsureOptionalTrackColumns(conn);
+
         var rollbackUpdatesByTrack = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
         foreach (var item in items)
         {
             string column = ResolveColumnName(item.FieldName);
-            ApplyTrackColumnValue(conn, tx, item.TrackUid, column, item.OriginalValue, nowMs);
-
-            if (!rollbackUpdatesByTrack.TryGetValue(item.TrackUid, out var trackUpdates))
+            if (IsPhysicalTagColumn(column))
             {
-                trackUpdates = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-                rollbackUpdatesByTrack[item.TrackUid] = trackUpdates;
+                if (!rollbackUpdatesByTrack.TryGetValue(item.TrackUid, out var trackUpdates))
+                {
+                    trackUpdates = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                    rollbackUpdatesByTrack[item.TrackUid] = trackUpdates;
+                }
+                trackUpdates[column] = item.OriginalValue;
             }
-            trackUpdates[column] = item.OriginalValue;
-
-            using var updCmd = conn.CreateCommand();
-            updCmd.Transaction = tx;
-            updCmd.CommandText = "UPDATE staging_diff_queue SET status = $st WHERE proposal_id = $id;";
-            updCmd.Parameters.AddWithValue("$st", ProposalStatus.RolledBack);
-            updCmd.Parameters.AddWithValue("$id", item.ProposalId);
-            updCmd.ExecuteNonQuery();
         }
 
-        WriteBackUpdatesToPhysicalFiles(conn, tx, rollbackUpdatesByTrack);
+        var physicalResults = WriteBackPhysicalFilesOutsideTx(conn, rollbackUpdatesByTrack);
 
-        using (var markBatchCmd = conn.CreateCommand())
+        using (var tx = TonewiseSqlite.BeginImmediateTransaction(conn))
         {
-            markBatchCmd.Transaction = tx;
+            foreach (var item in items)
+            {
+                string column = ResolveColumnName(item.FieldName);
+                ApplyTrackColumnValue(conn, tx, item.TrackUid, column, item.OriginalValue, nowMs);
+            }
+
+            ApplyPhysicalFingerprintsInTx(conn, tx, physicalResults);
+            tx.Commit();
+        }
+
+        using (var stateTx = TonewiseSqlite.BeginImmediateTransaction(stateConn))
+        {
+            foreach (var item in items)
+            {
+                using var updCmd = stateConn.CreateCommand();
+                updCmd.Transaction = stateTx;
+                updCmd.CommandText = "UPDATE staging_diff_queue SET status = $st WHERE proposal_id = $id;";
+                updCmd.Parameters.AddWithValue("$st", ProposalStatus.RolledBack);
+                updCmd.Parameters.AddWithValue("$id", item.ProposalId);
+                updCmd.ExecuteNonQuery();
+            }
+
+            using var markBatchCmd = stateConn.CreateCommand();
+            markBatchCmd.Transaction = stateTx;
             markBatchCmd.CommandText = "UPDATE curation_batches SET rolled_back = 1 WHERE batch_id = $bid;";
             markBatchCmd.Parameters.AddWithValue("$bid", batchId);
             markBatchCmd.ExecuteNonQuery();
+            stateTx.Commit();
         }
 
-        tx.Commit();
         return items.Count;
     }
 
-    private int WriteBackUpdatesToPhysicalFiles(
+    private List<(string TrackUid, AudioFrameFingerprint Fingerprint)> WriteBackPhysicalFilesOutsideTx(
         SqliteConnection conn,
-        SqliteTransaction tx,
         Dictionary<string, Dictionary<string, string?>> updatesByTrack,
         int maxPhysicalFiles = int.MaxValue)
     {
+        var results = new List<(string TrackUid, AudioFrameFingerprint Fingerprint)>();
         if (string.IsNullOrWhiteSpace(MusicRoot) || updatesByTrack.Count == 0 || maxPhysicalFiles <= 0)
-            return 0;
+            return results;
 
-        int updatedFiles = 0;
+        string rootFull = Path.GetFullPath(MusicRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+
         foreach (var (uid, updates) in updatesByTrack)
         {
-            if (updatedFiles >= maxPhysicalFiles) break;
+            if (results.Count >= maxPhysicalFiles) break;
             string? relPath;
             using (var pathCmd = conn.CreateCommand())
             {
-                pathCmd.Transaction = tx;
                 pathCmd.CommandText = "SELECT rel_path FROM tracks WHERE track_uid = $uid;";
                 pathCmd.Parameters.AddWithValue("$uid", uid);
                 relPath = pathCmd.ExecuteScalar() as string;
             }
             if (string.IsNullOrWhiteSpace(relPath)) continue;
 
-            string fullPath = Path.Combine(MusicRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
-            if (!File.Exists(fullPath)) continue;
+            string fullPath = Path.GetFullPath(Path.Combine(MusicRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!fullPath.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) || !File.Exists(fullPath))
+                continue;
 
             try
             {
                 var fp = TonewiseCoreClient.WriteAudioTags(fullPath, updates);
-                byte[] newHeaderHash = Convert.FromHexString(fp.HeaderBlake3Hex);
-
-                using var syncCmd = conn.CreateCommand();
-                syncCmd.Transaction = tx;
-                syncCmd.CommandText = """
-                    UPDATE tracks
-                    SET header_size = $hsize,
-                        header_blake3 = $hhash,
-                        file_size = $fsize
-                    WHERE track_uid = $uid;
-                    """;
-                syncCmd.Parameters.AddWithValue("$hsize", (long)fp.HeaderSize);
-                syncCmd.Parameters.AddWithValue("$hhash", newHeaderHash);
-                syncCmd.Parameters.AddWithValue("$fsize", (long)fp.FileSize);
-                syncCmd.Parameters.AddWithValue("$uid", uid);
-                syncCmd.ExecuteNonQuery();
-                updatedFiles++;
+                results.Add((uid, fp));
             }
-            catch
+            catch (Exception ex)
             {
-                // Skip container writeback when file is missing, read-only, or non-container stub
+                System.Diagnostics.Debug.WriteLine($"Physical tag writeback skipped for {relPath}: {ex.Message}");
             }
         }
-        return updatedFiles;
+        return results;
+    }
+
+    private static void ApplyPhysicalFingerprintsInTx(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        List<(string TrackUid, AudioFrameFingerprint Fingerprint)> physicalResults)
+    {
+        foreach (var (uid, fp) in physicalResults)
+        {
+            byte[] newHeaderHash = Convert.FromHexString(fp.HeaderBlake3Hex);
+            using var syncCmd = conn.CreateCommand();
+            syncCmd.Transaction = tx;
+            syncCmd.CommandText = """
+                UPDATE tracks
+                SET header_size = $hsize,
+                    header_blake3 = $hhash,
+                    file_size = $fsize
+                WHERE track_uid = $uid;
+                """;
+            syncCmd.Parameters.AddWithValue("$hsize", (long)fp.HeaderSize);
+            syncCmd.Parameters.AddWithValue("$hhash", newHeaderHash);
+            syncCmd.Parameters.AddWithValue("$fsize", (long)fp.FileSize);
+            syncCmd.Parameters.AddWithValue("$uid", uid);
+            syncCmd.ExecuteNonQuery();
+        }
     }
 
     private static string ResolveColumnName(string fieldName)
@@ -809,44 +852,10 @@ public sealed class StagingDiffStore
         return string.IsNullOrWhiteSpace(rawValue) ? DBNull.Value : rawValue.Trim();
     }
 
-    private static void EnsureOptionalTrackColumns(SqliteConnection conn)
-    {
-        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var check = conn.CreateCommand())
-        {
-            check.CommandText = "SELECT name FROM pragma_table_info('tracks');";
-            using var reader = check.ExecuteReader();
-            while (reader.Read())
-            {
-                existing.Add(reader.GetString(0));
-            }
-        }
+    private static void EnsureOptionalTrackColumns(SqliteConnection conn) =>
+        ManifestSchemaProvider.EnsureSchemaV2(conn);
 
-        if (existing.Count == 0) return;
-
-        (string Name, string AlterSql)[] optionalCols =
-        [
-            ("publisher", "ALTER TABLE tracks ADD COLUMN publisher TEXT;"),
-            ("legacy_play_count", "ALTER TABLE tracks ADD COLUMN legacy_play_count INTEGER NOT NULL DEFAULT 0;"),
-            ("lastfm_pulled_count", "ALTER TABLE tracks ADD COLUMN lastfm_pulled_count INTEGER NOT NULL DEFAULT 0;"),
-            ("local_unsynced_expired_count", "ALTER TABLE tracks ADD COLUMN local_unsynced_expired_count INTEGER NOT NULL DEFAULT 0;"),
-        ];
-
-        foreach (var (name, sql) in optionalCols)
-        {
-            if (!existing.Contains(name))
-            {
-                using var alter = conn.CreateCommand();
-                alter.CommandText = sql;
-                alter.ExecuteNonQuery();
-            }
-        }
-    }
-
-    private SqliteConnection OpenConnection()
-    {
-        var conn = new SqliteConnection($"Data Source={DbPath}");
-        conn.Open();
-        return conn;
-    }
+    private SqliteConnection OpenConnection() => TonewiseSqlite.OpenReadWrite(DbPath);
+    private SqliteConnection OpenStateConnection() => TonewiseSqlite.OpenReadWrite(StateDbPath);
+    private SqliteConnection OpenStateReadOnlyConnection() => TonewiseSqlite.OpenReadOnly(StateDbPath);
 }

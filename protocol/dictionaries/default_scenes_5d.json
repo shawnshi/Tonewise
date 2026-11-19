@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "scenes": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "title": "Focus · 深度专注",
+      "subtitle": "器乐与低干扰声场 · 平直叙事",
+      "accent_hex": "#2B5B84",
+      "updated_at_ms": 1763251200000,
+      "sort_arc": "flat",
+      "tempo_null_passthrough": true,
+      "rule": {
+        "all": [
+          { "predicate": { "field": "dj_scene", "op": "in", "values": ["focus"] } }
+        ]
+      }
+    },
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "title": "Coding · 心流编程",
+      "subtitle": "作品成组漫游 · 沉浸式编码背景",
+      "accent_hex": "#3B7A57",
+      "updated_at_ms": 1763251200000,
+      "sort_arc": "work_shuffle",
+      "tempo_null_passthrough": true,
+      "rule": {
+        "all": [
+          { "predicate": { "field": "dj_scene", "op": "in", "values": ["coding"] } }
+        ]
+      }
+    },
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "title": "Relax · 松弛休憩",
+      "subtitle": "能量渐弱曲线 · 夜间慢速收束",
+      "accent_hex": "#5B6E8C",
+      "updated_at_ms": 1763251200000,
+      "sort_arc": "energy_desc_sleep",
+      "tempo_null_passthrough": true,
+      "rule": {
+        "all": [
+          { "predicate": { "field": "dj_scene", "op": "in", "values": ["relax"] } }
+        ]
+      }
+    },
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "title": "Energy · 高能律动",
+      "subtitle": "能量递进弧线 · 高动态节拍",
+      "accent_hex": "#C85A32",
+      "updated_at_ms": 1763251200000,
+      "sort_arc": "energy_asc",
+      "tempo_null_passthrough": true,
+      "rule": {
+        "all": [
+          { "predicate": { "field": "dj_scene", "op": "in", "values": ["energy"] } }
+        ]
+      }
+    },
+    {
+      "id": "66666666-6666-4666-8666-666666666666",
+      "title": "Pop · 流行精选",
+      "subtitle": "人声与旋律精选 · 明快律动",
+      "accent_hex": "#9E4770",
+      "updated_at_ms": 1763251200000,
+      "sort_arc": "flat",
+      "tempo_null_passthrough": true,
+      "rule": {
+        "all": [
+          { "predicate": { "field": "dj_scene", "op": "in", "values": ["pop"] } }
+        ]
+      }
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "title": "沉睡馆藏唤醒",
+      "subtitle": "尚未播放或超过 90 天未重温的本地曲库",
+      "accent_hex": "#8B5E3C",
+      "updated_at_ms": 1763251200000,
+      "sort_arc": "rediscovery_90d",
+      "tempo_null_passthrough": true,
+      "rule": {
+        "all": [
+          { "predicate": { "field": "unplayed_days_gte", "op": "gte", "values": [90] } }
+        ]
+      }
+    }
+  ]
+}

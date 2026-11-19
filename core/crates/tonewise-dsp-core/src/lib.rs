@@ -51,7 +51,7 @@ pub fn parse_equalizer_apo(text: &str) -> Result<DspProfile, DspParseError> {
                 line: line_no,
                 detail: e.to_string(),
             })?;
-        } else if let Some(rest) = line.strip_prefix("Filter:") {
+        } else if let Some(rest) = strip_apo_filter_prefix(line) {
             let tokens: Vec<&str> = rest.split_whitespace().collect();
             if tokens.len() < 4 || !tokens[0].eq_ignore_ascii_case("ON") {
                 continue;
@@ -113,6 +113,19 @@ pub fn parse_equalizer_apo(text: &str) -> Result<DspProfile, DspParseError> {
     Ok(profile)
 }
 
+fn strip_apo_filter_prefix(line: &str) -> Option<&str> {
+    if line.len() < 7 || !line[..6].eq_ignore_ascii_case("Filter") {
+        return None;
+    }
+    let after = &line[6..];
+    let colon_idx = after.find(':')?;
+    let middle = after[..colon_idx].trim();
+    if !middle.is_empty() && !middle.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(&after[colon_idx + 1..])
+}
+
 /// Computes clipping-safe total preamp gain in dB:
 /// `G_total = min(replay_gain_db - max(0, max_positive_eq_db), explicit_preamp_db)`.
 pub fn effective_preamp_db(profile: &DspProfile, replay_gain_db: f32) -> f32 {
@@ -141,5 +154,20 @@ Filter: ON HSC Fc 6000 Hz Gain -2.5 dB Q 0.71
         assert_eq!(profile.filters.len(), 2);
         assert_eq!(profile.filters[0].kind, FilterKind::LowShelf);
         assert!((effective_preamp_db(&profile, -3.0) - (-7.5)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parses_numbered_equalizer_apo_filters() {
+        let apo = "\
+Preamp: -2.0 dB
+Filter 1: ON PK Fc 1000 Hz Gain 2.5 dB Q 1.41
+Filter 12: ON LSC Fc 80 Hz Gain 3.0 dB Q 0.71
+FilterBank: ON PK Fc 500 Hz Gain 1.0 dB Q 1.0
+";
+        let profile = parse_equalizer_apo(apo).expect("numbered APO filters");
+        assert_eq!(profile.preamp_db, -2.0);
+        assert_eq!(profile.filters.len(), 2);
+        assert_eq!(profile.filters[0].kind, FilterKind::Peaking);
+        assert_eq!(profile.filters[1].kind, FilterKind::LowShelf);
     }
 }

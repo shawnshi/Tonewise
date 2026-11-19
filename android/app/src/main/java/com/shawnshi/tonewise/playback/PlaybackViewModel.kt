@@ -34,6 +34,8 @@ import com.shawnshi.tonewise.list.adapter.UpdateInstructions
 import com.shawnshi.tonewise.playback.audio.AudioOutputManager
 import com.shawnshi.tonewise.playback.audio.SignalPathState
 import com.shawnshi.tonewise.playback.persist.PlayCountRepository
+import com.shawnshi.tonewise.playback.sleep.SleepTimerController
+import com.shawnshi.tonewise.playback.sleep.SleepTimerState
 import com.shawnshi.tonewise.playback.state.DeferredPlayback
 import com.shawnshi.tonewise.playback.ui.WaveformRepository
 import com.shawnshi.tonewise.playback.state.PlaybackCommand
@@ -69,12 +71,14 @@ constructor(
     private val listSettings: ListSettings,
     private val waveformRepository: WaveformRepository,
     private val playCountRepository: PlayCountRepository,
+    private val sleepTimerController: SleepTimerController,
     audioOutputManager: AudioOutputManager,
 ) : ViewModel(), PlaybackStateManager.Listener, PlaybackSettings.Listener {
     private var lastPositionJob: Job? = null
     private var waveformJob: Job? = null
 
     val signalPath: StateFlow<SignalPathState> = audioOutputManager.signalPath
+    val sleepTimerState: StateFlow<SleepTimerState> = sleepTimerController.state
 
     val waveformEnvelope: StateFlow<FloatArray?>
         field = MutableStateFlow<FloatArray?>(null)
@@ -213,20 +217,22 @@ constructor(
     }
 
     override fun onProgressionChanged(progression: Progression) {
-        L.d("Player state changed, starting new position polling")
+        L.d("Player state changed, starting new position polling (playing=${progression.isPlaying})")
         isPlaying.value = progression.isPlaying
         // Still need to update the position now due to co-routine launch delays
         positionDs.value = progression.calculateElapsedPositionMs().msToDs()
-        // Replace the previous position co-routine with a new one that uses the new
-        // state information.
+        // Cancel polling when paused so the CPU isn't woken 10x/sec unnecessarily.
         lastPositionJob?.cancel()
         lastPositionJob =
-            viewModelScope.launch(Dispatchers.Default) {
-                while (true) {
-                    positionDs.value = progression.calculateElapsedPositionMs().msToDs()
-                    // Wait a deci-second for the next position tick.
-                    delay(100.milliseconds)
+            if (progression.isPlaying) {
+                viewModelScope.launch(Dispatchers.Default) {
+                    while (true) {
+                        positionDs.value = progression.calculateElapsedPositionMs().msToDs()
+                        delay(100.milliseconds)
+                    }
                 }
+            } else {
+                null
             }
     }
 
@@ -337,7 +343,7 @@ constructor(
         L.d(
             "Cannot use given genre parameter for $song [$genre from ${song.genres}], showing choice dialog"
         )
-        startPlaybackDecision(PlaybackDecision.PlayFromArtist(song))
+        startPlaybackDecision(PlaybackDecision.PlayFromGenre(song))
     }
 
     private fun playFromPlaylistImpl(song: Song, playlist: Playlist, shuffle: ShuffleMode) {
@@ -670,6 +676,14 @@ constructor(
         L.d("Toggling repeat mode")
         playbackManager.repeatMode(playbackManager.repeatMode.increment())
     }
+
+    fun setSleepTimerMinutes(minutes: Int) = sleepTimerController.setCountdown(minutes)
+
+    fun setSleepTimerEndOfTrack() = sleepTimerController.setEndOfTrack()
+
+    fun setSleepTimerEndOfWork() = sleepTimerController.setEndOfWork(song.value)
+
+    fun cancelSleepTimer() = sleepTimerController.cancel()
 
     // --- UI CONTROL ---
 

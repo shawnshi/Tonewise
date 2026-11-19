@@ -59,7 +59,14 @@ public sealed class SyncHostServer : IAsyncDisposable
     private string? _manifestHashPath;
     private long _manifestHashLen;
     private long _manifestHashWriteTicks;
+    private bool _manifestWalExists;
+    private long _manifestWalLen;
+    private long _manifestWalWriteTicks;
     private string? _manifestHashHex;
+    private string? _waveformsHashPath;
+    private long _waveformsHashLen;
+    private long _waveformsHashWriteTicks;
+    private string? _waveformsHashHex;
 
     public SyncOutboxAndPairingStore Store { get; }
     public event Action? SyncStateChanged;
@@ -112,8 +119,11 @@ public sealed class SyncHostServer : IAsyncDisposable
 
     private void MapRoutes(WebApplication app)
     {
-        app.MapGet("/api/v1/status", () =>
+        app.MapGet("/api/v1/status", (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
             string wfPath = Path.Combine(_tonewiseDir, "waveforms.bin");
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
             string encPath = Path.Combine(_tonewiseDir, "encyclopedia.db");
@@ -129,12 +139,16 @@ public sealed class SyncHostServer : IAsyncDisposable
                 has_waveforms = File.Exists(wfPath),
                 has_encyclopedia = File.Exists(encPath),
                 waveforms_bytes = File.Exists(wfPath) ? new FileInfo(wfPath).Length : 0L,
+                waveforms_sha256 = File.Exists(wfPath) ? GetCachedWaveformsSha256Hex(wfPath) : null,
                 manifest_sha256 = File.Exists(dbPath) ? GetCachedManifestSha256Hex(dbPath) : null,
             });
         });
 
-        app.MapGet("/api/v1/encyclopedia", (string? entityType, string? q) =>
+        app.MapGet("/api/v1/encyclopedia", (HttpRequest request, string? entityType, string? q) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
             string encPath = Path.Combine(_tonewiseDir, "encyclopedia.db");
             if (!File.Exists(encPath))
             {
@@ -145,8 +159,11 @@ public sealed class SyncHostServer : IAsyncDisposable
             return Results.Json(new { items });
         });
 
-        app.MapGet("/api/v1/patch/{trackUid}", (string trackUid) =>
+        app.MapGet("/api/v1/patch/{trackUid}", (HttpRequest request, string trackUid) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
             if (!File.Exists(dbPath) || string.IsNullOrWhiteSpace(trackUid))
             {
@@ -158,9 +175,8 @@ public sealed class SyncHostServer : IAsyncDisposable
             byte[]? headerHash = null;
             byte[]? audioHash = null;
 
-            using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            using (var conn = TonewiseSqlite.OpenReadOnly(dbPath))
             {
-                conn.Open();
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText = """
                     SELECT rel_path, header_size, header_blake3, audio_frame_blake3
@@ -184,6 +200,12 @@ public sealed class SyncHostServer : IAsyncDisposable
                 return Results.NotFound();
             }
 
+            const long maxHeaderPatchBytes = 2 * 1024 * 1024L;
+            if (headerSize > maxHeaderPatchBytes)
+            {
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+            }
+
             string rootFull = Path.GetFullPath(_musicRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             string audioFull = Path.GetFullPath(Path.Combine(_musicRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
             if (!audioFull.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) || !File.Exists(audioFull))
@@ -191,7 +213,7 @@ public sealed class SyncHostServer : IAsyncDisposable
                 return Results.NotFound();
             }
 
-            int bytesToRead = (int)Math.Min(headerSize, 2 * 1024 * 1024L);
+            int bytesToRead = (int)headerSize;
             byte[] headerBytes = new byte[bytesToRead];
             int totalRead = 0;
             using (var fs = File.OpenRead(audioFull))
@@ -204,9 +226,9 @@ public sealed class SyncHostServer : IAsyncDisposable
                 }
             }
 
-            if (totalRead < headerBytes.Length)
+            if (totalRead != bytesToRead)
             {
-                Array.Resize(ref headerBytes, totalRead);
+                return Results.StatusCode(StatusCodes.Status409Conflict);
             }
 
             return Results.Json(new
@@ -219,8 +241,11 @@ public sealed class SyncHostServer : IAsyncDisposable
             });
         });
 
-        app.MapGet("/api/v1/scenes", () =>
+        app.MapGet("/api/v1/scenes", (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
             string scenesPath = Path.Combine(_tonewiseDir, "scenes_5d.json");
             if (File.Exists(scenesPath))
             {
@@ -229,76 +254,184 @@ public sealed class SyncHostServer : IAsyncDisposable
             return Results.Text(DefaultScenesJson(), "application/json", Encoding.UTF8);
         });
 
-        app.MapGet("/api/v1/waveforms", () =>
+        app.MapGet("/api/v1/waveforms", (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
             string wfPath = Path.Combine(_tonewiseDir, "waveforms.bin");
             if (!File.Exists(wfPath)) return Results.NotFound();
             return Results.File(wfPath, "application/octet-stream", enableRangeProcessing: true);
         });
 
-        app.MapGet("/api/v1/manifest", () =>
+        app.MapGet("/api/v1/manifest", (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
             if (!File.Exists(dbPath)) return Results.NotFound();
-            CheckpointWalIfPresent(dbPath);
-            return Results.File(dbPath, "application/x-sqlite3", enableRangeProcessing: true);
+            string snapPath = Path.Combine(Path.GetTempPath(), $"tonewise_manifest_snap_{Guid.NewGuid():N}.db");
+            try
+            {
+                TonewiseSqlite.CreateConsistentSnapshot(dbPath, snapPath);
+                var stream = new FileStream(
+                    snapPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    bufferSize: 64 * 1024,
+                    options: FileOptions.DeleteOnClose | FileOptions.Asynchronous | FileOptions.SequentialScan);
+                return Results.File(stream, "application/x-sqlite3", enableRangeProcessing: true);
+            }
+            catch
+            {
+                try { if (File.Exists(snapPath)) File.Delete(snapPath); } catch { }
+                throw;
+            }
         });
 
         app.MapPost("/api/v1/playlists/merge", async (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
             var body = await JsonSerializer.DeserializeAsync<M3u8MergeApiRequest>(request.Body);
             if (body is null || string.IsNullOrWhiteSpace(body.PlaylistName))
                 return Results.BadRequest(new { error = "invalid playlist merge payload" });
 
-            string playlistsDir = Path.Combine(_musicRoot, "Playlists");
-            string safeName = Path.GetFileNameWithoutExtension(body.PlaylistName) + ".m3u8";
-            string outPath = Path.Combine(playlistsDir, safeName);
+            var (displayName, fileName) = NormalizePlaylistMergeName(body.PlaylistName);
+            if (string.IsNullOrEmpty(displayName) || string.IsNullOrEmpty(fileName))
+                return Results.BadRequest(new { error = "invalid playlist merge payload" });
 
-            List<string> normalizedBase = body.Base
+            string playlistsDir = Path.Combine(_musicRoot, "Playlists");
+            string fullPlaylistsDir = Path.GetFullPath(playlistsDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            string outPath = Path.GetFullPath(Path.Combine(playlistsDir, fileName));
+            if (!outPath.StartsWith(fullPlaylistsDir, StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest(new { error = "invalid playlist name" });
+
+            List<string> normalizedBase = (body.Base ?? [])
                 .Select(NormalizePlaylistRelPath)
                 .Where(s => !string.IsNullOrEmpty(s))
                 .ToList();
-            List<string> normalizedTheirs = body.Theirs
+            List<string> normalizedOurs = (body.Ours ?? [])
+                .Select(NormalizePlaylistRelPath)
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToList();
+            List<string> normalizedTheirs = (body.Theirs ?? [])
                 .Select(NormalizePlaylistRelPath)
                 .Where(s => !string.IsNullOrEmpty(s))
                 .ToList();
 
             List<string> effectiveOurs;
+            var extinfByNormPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var unmatchedEntries = new List<(string? ExtInf, string UnmatchedLine)>();
             lock (_fileLock)
             {
                 if (File.Exists(outPath))
                 {
-                    effectiveOurs = File.ReadAllLines(outPath, Encoding.UTF8)
-                        .Select(l => l.Trim())
-                        .Where(l => !string.IsNullOrEmpty(l) && !l.StartsWith('#'))
-                        .Select(NormalizePlaylistRelPath)
-                        .Where(s => !string.IsNullOrEmpty(s))
-                        .ToList();
+                    effectiveOurs = [];
+                    string? pendingExtInf = null;
+                    foreach (string rawLine in File.ReadAllLines(outPath, Encoding.UTF8))
+                    {
+                        string line = rawLine.Trim();
+                        if (string.IsNullOrEmpty(line)) continue;
+                        if (line.StartsWith("#EXTINF:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            pendingExtInf = line;
+                            continue;
+                        }
+                        if (line.StartsWith("#EXTTW-UNMATCHED:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            unmatchedEntries.Add((pendingExtInf, line));
+                            pendingExtInf = null;
+                            continue;
+                        }
+                        if (line.StartsWith('#'))
+                        {
+                            pendingExtInf = null;
+                            continue;
+                        }
+
+                        string norm = NormalizePlaylistRelPath(line);
+                        if (!string.IsNullOrEmpty(norm))
+                        {
+                            effectiveOurs.Add(norm);
+                            if (!string.IsNullOrEmpty(pendingExtInf))
+                            {
+                                extinfByNormPath.TryAdd(norm, pendingExtInf);
+                            }
+                        }
+                        pendingExtInf = null;
+                    }
                 }
                 else
                 {
-                    effectiveOurs = body.Ours
-                        .Select(NormalizePlaylistRelPath)
-                        .Where(s => !string.IsNullOrEmpty(s))
-                        .ToList();
+                    // Absent on PC: preserve explicit distinct `ours` overrides from stateless API callers,
+                    // while preventing Android (`ours` empty or `== base`) from resurrecting PC-deleted playlists.
+                    bool hasExplicitDistinctOurs = normalizedOurs.Count > 0
+                        && !normalizedOurs.SequenceEqual(normalizedBase, StringComparer.OrdinalIgnoreCase);
+                    effectiveOurs = hasExplicitDistinctOurs ? normalizedOurs : [];
                 }
             }
 
             var result = TonewiseCoreClient.MergeM3u8(normalizedBase, effectiveOurs, normalizedTheirs);
+            bool deleted = false;
             if (result.Conflicts.Count == 0)
             {
-                Directory.CreateDirectory(playlistsDir);
-                string m3uText = "#EXTM3U\n" + string.Join("\n", result.Merged) + "\n";
                 lock (_fileLock)
                 {
-                    File.WriteAllText(outPath, m3uText, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                    if (result.Merged.Count == 0 && unmatchedEntries.Count == 0 && normalizedBase.Count > 0)
+                    {
+                        if (File.Exists(outPath)) File.Delete(outPath);
+                        deleted = true;
+                    }
+                    else
+                    {
+                        Directory.CreateDirectory(playlistsDir);
+                        var sb = new StringBuilder();
+                        sb.Append("#EXTM3U\n#PLAYLIST:").Append(displayName).Append('\n');
+                        foreach (string trackPath in result.Merged)
+                        {
+                            if (extinfByNormPath.TryGetValue(trackPath, out string? extinf))
+                            {
+                                sb.Append(extinf).Append('\n');
+                            }
+                            sb.Append(trackPath).Append('\n');
+                        }
+                        foreach (var (extinf, unmatchedLine) in unmatchedEntries)
+                        {
+                            if (!string.IsNullOrEmpty(extinf))
+                            {
+                                sb.Append(extinf).Append('\n');
+                            }
+                            sb.Append(unmatchedLine).Append('\n');
+                        }
+                        string tmpPath = outPath + $".twtmp.{Guid.NewGuid():N}";
+                        File.WriteAllText(tmpPath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                        File.Move(tmpPath, outPath, overwrite: true);
+                    }
                 }
+                SyncStateChanged?.Invoke();
             }
-            return Results.Json(result);
+            return Results.Json(new
+            {
+                merged = result.Merged,
+                conflicts = result.Conflicts,
+                deleted,
+            });
         });
 
         app.MapPost("/api/v1/history/push", async (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
             var body = await JsonSerializer.DeserializeAsync<HistoryPushRequest>(request.Body);
             if (body is null || string.IsNullOrWhiteSpace(body.DeviceId))
                 return Results.BadRequest(new { error = "invalid history payload" });
@@ -328,6 +461,11 @@ public sealed class SyncHostServer : IAsyncDisposable
 
         app.MapPost("/api/v1/mutations/push", async (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
             var body = await JsonSerializer.DeserializeAsync<MutationsPushRequest>(request.Body);
             if (body is null || string.IsNullOrWhiteSpace(body.DeviceId))
                 return Results.BadRequest(new { error = "invalid mutations payload" });
@@ -342,7 +480,7 @@ public sealed class SyncHostServer : IAsyncDisposable
                 File.AppendAllLines(mutPath, lines, new UTF8Encoding(false));
                 if (File.Exists(dbPath) && body.Mutations.Count > 0)
                 {
-                    applyResult = ApplyLwwMutationsToManifest(dbPath, body.Mutations);
+                    applyResult = ApplyLwwMutationsToManifest(dbPath, body.Mutations, _tonewiseDir);
                 }
             }
             return Results.Json(new
@@ -354,23 +492,31 @@ public sealed class SyncHostServer : IAsyncDisposable
             });
         });
 
-        app.MapGet("/api/v1/handoff", () =>
+        app.MapGet("/api/v1/handoff", (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
             var slots = ReadSessions();
             return Results.Json(slots);
         });
 
         app.MapPost("/api/v1/handoff", async (HttpRequest request) =>
         {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
             var incoming = await JsonSerializer.DeserializeAsync<List<SessionSlotDto>>(request.Body);
             if (incoming is null) return Results.BadRequest(new { error = "invalid sessions payload" });
 
             List<SessionSlotDto> merged;
-            lock (_fileLock)
+            lock (Workbench.SessionSlotStore.SyncFileLock)
             {
-                var current = ReadSessions();
+                var current = ReadSessionsUnlocked();
                 merged = TonewiseCoreClient.MergeSessions(current, incoming);
-                WriteSessions(merged);
+                WriteSessionsUnlocked(merged);
             }
             return Results.Json(merged);
         });
@@ -383,11 +529,13 @@ public sealed class SyncHostServer : IAsyncDisposable
             host_name = _deviceId,
             port = ListeningPort,
             requires_pairing = true,
-            paired_device_count = Store.GetPairedDevices().Count,
         }));
 
         app.MapPost("/api/v2/pair", async (HttpRequest request) =>
         {
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
             PairApiRequest? body;
             try
             {
@@ -401,7 +549,23 @@ public sealed class SyncHostServer : IAsyncDisposable
             if (body is null || string.IsNullOrWhiteSpace(body.Code) || string.IsNullOrWhiteSpace(body.DeviceId))
                 return Results.BadRequest(new { error = "code and device_id are required" });
 
-            if (!Store.TryPair(body.Code, body.DeviceId, body.DeviceName, out string? issuedToken, out var device) || device is null)
+            string clientIpKey = request.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var status = Store.TryPairWithStatus(
+                body.Code,
+                body.DeviceId,
+                body.DeviceName,
+                out string? issuedToken,
+                out var device,
+                out int retryAfterSeconds,
+                clientKey: clientIpKey);
+            if (status == PairAttemptStatus.LockedOut)
+            {
+                request.HttpContext.Response.Headers.RetryAfter = retryAfterSeconds.ToString();
+                return Results.Json(
+                    new { error = "pairing_locked_out", retry_after_seconds = retryAfterSeconds },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+            if (status != PairAttemptStatus.Success || device is null)
             {
                 return Results.Json(new { error = "invalid_pairing_code" }, statusCode: StatusCodes.Status401Unauthorized);
             }
@@ -415,6 +579,16 @@ public sealed class SyncHostServer : IAsyncDisposable
                 device_name = device.DeviceName,
                 paired_at_ms = device.PairedAtMs,
             });
+        });
+
+        app.MapPost("/api/v2/unpair", (HttpRequest request) =>
+        {
+            if (!TryAuthenticateV2(request, out var device, out var errorResult))
+                return errorResult!;
+
+            Store.UnpairDevice(device!.DeviceId);
+            SyncStateChanged?.Invoke();
+            return Results.Json(new { ok = true, unpaired_device_id = device.DeviceId });
         });
 
         app.MapGet("/api/v2/outbox", (HttpRequest request) =>
@@ -449,7 +623,7 @@ public sealed class SyncHostServer : IAsyncDisposable
                 ioPath,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.ReadWrite,
+                FileShare.Read,
                 bufferSize: 64 * 1024,
                 options: FileOptions.Asynchronous | FileOptions.SequentialScan);
             return Results.File(
@@ -473,7 +647,7 @@ public sealed class SyncHostServer : IAsyncDisposable
                 ioPath,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.ReadWrite,
+                FileShare.Read,
                 bufferSize: 32 * 1024,
                 options: FileOptions.Asynchronous | FileOptions.SequentialScan);
             return Results.File(stream, contentType: mime);
@@ -483,6 +657,8 @@ public sealed class SyncHostServer : IAsyncDisposable
         {
             if (!TryAuthenticateV2(request, out var device, out var errorResult))
                 return errorResult!;
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
 
             ReportApiRequest? body;
             try
@@ -502,6 +678,7 @@ public sealed class SyncHostServer : IAsyncDisposable
 
             IncomingHistoryMergeResult histResult = new(0, new Dictionary<string, int>(StringComparer.Ordinal), []);
             LwwApplyResult mutResult = new(0, [], []);
+            List<string> unlovedUids = [];
             int completedOutbox = 0;
             List<SessionSlotDto> mergedSlots;
 
@@ -530,20 +707,33 @@ public sealed class SyncHostServer : IAsyncDisposable
                     File.AppendAllLines(mutPath, body.Mutations.Select(m => m.GetRawText()), new UTF8Encoding(false));
                     if (File.Exists(dbPath))
                     {
-                        mutResult = ApplyLwwMutationsToManifest(dbPath, body.Mutations);
+                        mutResult = ApplyLwwMutationsToManifest(dbPath, body.Mutations, _tonewiseDir);
+                        if (mutResult.AppliedCount > 0)
+                        {
+                            var (counts, loved) = LastFmLedgerService.ReadEffectiveCountsAndLoved(dbPath);
+                            histResult = new IncomingHistoryMergeResult(histResult.MergedTracks, counts, loved);
+                        }
                     }
+                }
+
+                if (File.Exists(dbPath))
+                {
+                    unlovedUids = LastFmLedgerService.ReadUnlovedTrackUids(dbPath);
                 }
 
                 if (body.CompletedOutboxIds is { Count: > 0 })
                 {
                     completedOutbox = Store.MarkCopyItemsCompleted(effectiveDeviceId, body.CompletedOutboxIds);
                 }
+            }
 
-                var currentSlots = ReadSessions();
+            lock (Workbench.SessionSlotStore.SyncFileLock)
+            {
+                var currentSlots = ReadSessionsUnlocked();
                 if (body.HandoffSlots is { Count: > 0 })
                 {
                     mergedSlots = TonewiseCoreClient.MergeSessions(currentSlots, body.HandoffSlots);
-                    WriteSessions(mergedSlots);
+                    WriteSessionsUnlocked(mergedSlots);
                 }
                 else
                 {
@@ -558,6 +748,7 @@ public sealed class SyncHostServer : IAsyncDisposable
                 merged_tracks = histResult.MergedTracks,
                 effective_counts = histResult.EffectiveCounts,
                 loved_uids = histResult.LovedUids,
+                unloved_uids = unlovedUids,
                 applied_mutations = mutResult.AppliedCount,
                 acknowledged_mutation_keys = mutResult.AcknowledgedKeys,
                 unmatched_mutation_uids = mutResult.UnmatchedUids,
@@ -579,6 +770,17 @@ public sealed class SyncHostServer : IAsyncDisposable
         return false;
     }
 
+    private static bool RequireJsonContentType(HttpRequest request, out IResult? errorResult)
+    {
+        if (request.HasJsonContentType())
+        {
+            errorResult = null;
+            return true;
+        }
+        errorResult = Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
+        return false;
+    }
+
     private string? GetCachedManifestSha256Hex(string dbPath)
     {
         lock (_fileLock)
@@ -586,19 +788,54 @@ public sealed class SyncHostServer : IAsyncDisposable
             if (!File.Exists(dbPath)) return null;
             var fi = new FileInfo(dbPath);
             long ticks = fi.LastWriteTimeUtc.Ticks;
+            string walPath = dbPath + "-wal";
+            bool walExists = File.Exists(walPath);
+            var walFi = walExists ? new FileInfo(walPath) : null;
+            long walLen = walFi?.Length ?? 0L;
+            long walTicks = walFi?.LastWriteTimeUtc.Ticks ?? 0L;
             if (string.Equals(_manifestHashPath, dbPath, StringComparison.OrdinalIgnoreCase)
                 && _manifestHashLen == fi.Length
                 && _manifestHashWriteTicks == ticks
+                && _manifestWalExists == walExists
+                && _manifestWalLen == walLen
+                && _manifestWalWriteTicks == walTicks
                 && _manifestHashHex is not null)
             {
                 return _manifestHashHex;
             }
 
-            string hex = ComputeSha256Hex(dbPath);
+            string hex = ComputeManifestAndWalSha256Hex(dbPath, walPath, walExists && walLen > 0);
             _manifestHashPath = dbPath;
             _manifestHashLen = fi.Length;
             _manifestHashWriteTicks = ticks;
+            _manifestWalExists = walExists;
+            _manifestWalLen = walLen;
+            _manifestWalWriteTicks = walTicks;
             _manifestHashHex = hex;
+            return hex;
+        }
+    }
+
+    private string? GetCachedWaveformsSha256Hex(string wfPath)
+    {
+        lock (_fileLock)
+        {
+            if (!File.Exists(wfPath)) return null;
+            var fi = new FileInfo(wfPath);
+            long ticks = fi.LastWriteTimeUtc.Ticks;
+            if (string.Equals(_waveformsHashPath, wfPath, StringComparison.OrdinalIgnoreCase)
+                && _waveformsHashLen == fi.Length
+                && _waveformsHashWriteTicks == ticks
+                && _waveformsHashHex is not null)
+            {
+                return _waveformsHashHex;
+            }
+
+            string hex = ComputeSha256Hex(wfPath);
+            _waveformsHashPath = wfPath;
+            _waveformsHashLen = fi.Length;
+            _waveformsHashWriteTicks = ticks;
+            _waveformsHashHex = hex;
             return hex;
         }
     }
@@ -607,15 +844,17 @@ public sealed class SyncHostServer : IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(raw)) return "";
         string p = raw.Trim().Replace('\\', '/');
-        while (p.StartsWith("./", StringComparison.Ordinal))
-            p = p[2..];
-        p = p.TrimStart('/');
         if (p.StartsWith("../Tracks/", StringComparison.OrdinalIgnoreCase))
             p = p["../Tracks/".Length..];
+        while (p.StartsWith("./", StringComparison.Ordinal) || p.StartsWith("../", StringComparison.Ordinal))
+            p = p.StartsWith("./", StringComparison.Ordinal) ? p[2..] : p[3..];
+        p = p.TrimStart('/');
         if (p.StartsWith("Music/Tonewise/", StringComparison.OrdinalIgnoreCase))
             p = p["Music/Tonewise/".Length..];
         else if (p.StartsWith("Tonewise/", StringComparison.OrdinalIgnoreCase))
             p = p["Tonewise/".Length..];
+        else if (p.StartsWith("Music/", StringComparison.OrdinalIgnoreCase))
+            p = p["Music/".Length..];
         return p;
     }
 
@@ -634,6 +873,14 @@ public sealed class SyncHostServer : IAsyncDisposable
 
     private List<SessionSlotDto> ReadSessions()
     {
+        lock (Workbench.SessionSlotStore.SyncFileLock)
+        {
+            return ReadSessionsUnlocked();
+        }
+    }
+
+    private List<SessionSlotDto> ReadSessionsUnlocked()
+    {
         string path = Path.Combine(_tonewiseDir, "sessions.json");
         if (!File.Exists(path)) return [];
         try
@@ -646,19 +893,35 @@ public sealed class SyncHostServer : IAsyncDisposable
         }
     }
 
-    private void WriteSessions(List<SessionSlotDto> slots)
+    private void WriteSessionsUnlocked(List<SessionSlotDto> slots)
     {
+        Directory.CreateDirectory(_tonewiseDir);
         string path = Path.Combine(_tonewiseDir, "sessions.json");
         string json = JsonSerializer.Serialize(slots, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(path, json + "\n", new UTF8Encoding(false));
+        string tmpPath = path + ".tmp." + Guid.NewGuid().ToString("N")[..8];
+        try
+        {
+            File.WriteAllText(tmpPath, json + "\n", new UTF8Encoding(false));
+            File.Move(tmpPath, path, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tmpPath)) File.Delete(tmpPath);
+            }
+            catch
+            {
+                // Ignore temp cleanup failure
+            }
+        }
     }
 
     private static void CheckpointWalIfPresent(string dbPath)
     {
         try
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
-            conn.Open();
+            using var conn = TonewiseSqlite.OpenReadWrite(dbPath);
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "PRAGMA wal_checkpoint(PASSIVE);";
             cmd.ExecuteNonQuery();
@@ -675,16 +938,18 @@ public sealed class SyncHostServer : IAsyncDisposable
         List<string> UnmatchedUids
     );
 
-    private static LwwApplyResult ApplyLwwMutationsToManifest(string dbPath, IReadOnlyList<JsonElement> mutations)
+    private static LwwApplyResult ApplyLwwMutationsToManifest(
+        string dbPath,
+        IReadOnlyList<JsonElement> mutations,
+        string? tonewiseDir = null)
     {
         int applied = 0;
         var acknowledged = new List<string>();
         var unmatched = new List<string>();
 
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
-        conn.Open();
+        using var conn = TonewiseSqlite.OpenReadWrite(dbPath);
         var resolver = LastFmLedgerService.TrackUidResolver.Build(conn);
-        using var tx = conn.BeginTransaction();
+        using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
 
         foreach (var m in mutations)
         {
@@ -695,7 +960,8 @@ public sealed class SyncHostServer : IAsyncDisposable
                 : (m.TryGetProperty("field_name", out var fnEl) ? fnEl.GetString() : null);
 
             long incomingTs = 0;
-            if (m.TryGetProperty("ts", out var tsEl) && tsEl.TryGetInt64(out long t1)) incomingTs = t1;
+            if (m.TryGetProperty("lww_ts_ms", out var lwwEl) && lwwEl.TryGetInt64(out long t0)) incomingTs = t0;
+            else if (m.TryGetProperty("ts", out var tsEl) && tsEl.TryGetInt64(out long t1)) incomingTs = t1;
             else if (m.TryGetProperty("ts_ms", out var ts2El) && ts2El.TryGetInt64(out long t2)) incomingTs = t2;
             else if (m.TryGetProperty("updated_at_ms", out var ts3El) && ts3El.TryGetInt64(out long t3)) incomingTs = t3;
 
@@ -716,55 +982,29 @@ public sealed class SyncHostServer : IAsyncDisposable
                 continue;
             }
 
-            object dbVal = DBNull.Value;
-            if (m.TryGetProperty("value", out var valEl) && valEl.ValueKind != JsonValueKind.Null && valEl.ValueKind != JsonValueKind.Undefined)
+            if (!TryNormalizeLwwValue(mapping.ValCol, m, out object dbVal))
             {
-                if (mapping.ValCol is "dj_scene_json" or "mood_json")
-                {
-                    if (valEl.ValueKind == JsonValueKind.Array)
-                    {
-                        dbVal = valEl.GetRawText();
-                    }
-                    else
-                    {
-                        string str = valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "") : valEl.ToString();
-                        dbVal = str.TrimStart().StartsWith('[')
-                            ? str
-                            : JsonSerializer.Serialize(str.Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
-                    }
-                }
-                else if (mapping.ValCol == "rating")
-                {
-                    int rVal = valEl.ValueKind == JsonValueKind.Number && valEl.TryGetInt32(out int ri) ? ri
-                        : (int.TryParse(valEl.ToString(), out int rp) ? rp : 0);
-                    dbVal = Math.Clamp(rVal, 0, 5);
-                }
-                else if (mapping.ValCol == "tempo_bpm")
-                {
-                    if (valEl.ValueKind == JsonValueKind.Number && valEl.TryGetDouble(out double dVal))
-                        dbVal = dVal;
-                    else if (double.TryParse(valEl.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double dp))
-                        dbVal = dp;
-                }
-                else
-                {
-                    dbVal = valEl.ValueKind == JsonValueKind.String ? (object)(valEl.GetString() ?? "") : valEl.ToString();
-                }
+                if (!string.IsNullOrWhiteSpace(rawUid)) unmatched.Add(rawUid);
+                continue;
             }
 
             long currentTs = 0;
+            string existingTitle = "";
+            string existingArtistsJson = "[]";
             using (var checkCmd = conn.CreateCommand())
             {
                 checkCmd.Transaction = tx;
-                checkCmd.CommandText = $"SELECT {mapping.TsCol} FROM tracks WHERE track_uid = $uid;";
+                checkCmd.CommandText = $"SELECT {mapping.TsCol}, title, artists_json FROM tracks WHERE track_uid = $uid;";
                 checkCmd.Parameters.AddWithValue("$uid", resolvedUid);
-                object? existing = checkCmd.ExecuteScalar();
-                if (existing is null || existing == DBNull.Value)
+                using var reader = checkCmd.ExecuteReader();
+                if (!reader.Read())
                 {
                     if (!string.IsNullOrWhiteSpace(rawUid)) unmatched.Add(rawUid);
                     continue;
                 }
-                currentTs = Convert.ToInt64(existing);
+                currentTs = reader.IsDBNull(0) ? 0L : reader.GetInt64(0);
+                existingTitle = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                existingArtistsJson = reader.IsDBNull(2) ? "[]" : reader.GetString(2);
             }
 
             if (incomingTs > currentTs)
@@ -775,7 +1015,29 @@ public sealed class SyncHostServer : IAsyncDisposable
                 updCmd.Parameters.AddWithValue("$val", dbVal);
                 updCmd.Parameters.AddWithValue("$ts", incomingTs);
                 updCmd.Parameters.AddWithValue("$uid", resolvedUid);
-                applied += updCmd.ExecuteNonQuery();
+                int rows = updCmd.ExecuteNonQuery();
+                applied += rows;
+
+                if (rows > 0 && mapping.ValCol == "rating" && !string.IsNullOrWhiteSpace(tonewiseDir) && dbVal is int newRating)
+                {
+                    string primaryArtist = "";
+                    try
+                    {
+                        var artists = JsonSerializer.Deserialize<List<string>>(existingArtistsJson);
+                        if (artists is { Count: > 0 }) primaryArtist = artists[0];
+                    }
+                    catch
+                    {
+                        // Ignore malformed artists_json
+                    }
+                    LastFmLedgerService.EnqueueLoveChange(
+                        tonewiseDir: tonewiseDir,
+                        trackUid: resolvedUid,
+                        artist: primaryArtist,
+                        title: existingTitle,
+                        isLoved: newRating >= 5,
+                        updatedAtUnixSec: Math.Max(1L, incomingTs / 1000L));
+                }
             }
 
             // Track matched in DB: acknowledge both applied and superseded writes so client clears them
@@ -786,6 +1048,121 @@ public sealed class SyncHostServer : IAsyncDisposable
         return new LwwApplyResult(applied, acknowledged, unmatched);
     }
 
+    private static bool TryNormalizeLwwValue(string valCol, JsonElement m, out object dbVal)
+    {
+        dbVal = DBNull.Value;
+        if (!m.TryGetProperty("value", out var valEl)
+            || valEl.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            dbVal = valCol switch
+            {
+                "dj_scene_json" or "mood_json" => "[]",
+                "rating" => 0,
+                _ => DBNull.Value,
+            };
+            return true;
+        }
+
+        switch (valCol)
+        {
+            case "dj_scene_json" or "mood_json":
+            {
+                if (valEl.ValueKind == JsonValueKind.Array)
+                {
+                    dbVal = valEl.GetRawText();
+                    return true;
+                }
+                string str = valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "") : valEl.ToString();
+                dbVal = str.TrimStart().StartsWith('[')
+                    ? str
+                    : JsonSerializer.Serialize(str.Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                return true;
+            }
+            case "rating":
+            {
+                int rVal;
+                if (valEl.ValueKind == JsonValueKind.Number && valEl.TryGetInt32(out int ri))
+                    rVal = ri;
+                else if (!int.TryParse(valEl.ToString(), out rVal))
+                    return false;
+                dbVal = Math.Clamp(rVal, 0, 5);
+                return true;
+            }
+            case "tempo_bpm":
+            {
+                string rawBpm = valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "") : valEl.ToString();
+                if (valEl.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(rawBpm))
+                {
+                    dbVal = DBNull.Value;
+                    return true;
+                }
+                double dVal;
+                if (valEl.ValueKind == JsonValueKind.Number && valEl.TryGetDouble(out double d1))
+                    dVal = d1;
+                else if (!double.TryParse(rawBpm, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out dVal))
+                    return false;
+                if (!double.IsFinite(dVal) || dVal <= 0.0 || dVal >= 400.0)
+                    return false;
+                dbVal = dVal;
+                return true;
+            }
+            case "dj_vocals":
+            {
+                string s = (valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "") : valEl.ToString()).Trim().ToLowerInvariant();
+                if (string.IsNullOrEmpty(s))
+                {
+                    dbVal = DBNull.Value;
+                    return true;
+                }
+                if (s is "vocal" or "instrumental" or "unknown")
+                {
+                    dbVal = s;
+                    return true;
+                }
+                return false;
+            }
+            case "dj_energy":
+            {
+                string s = (valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "") : valEl.ToString()).Trim().ToLowerInvariant();
+                if (string.IsNullOrEmpty(s))
+                {
+                    dbVal = DBNull.Value;
+                    return true;
+                }
+                if (s is "low" or "medium" or "high" or "unknown")
+                {
+                    dbVal = s;
+                    return true;
+                }
+                return false;
+            }
+            case "tempo_bucket":
+            {
+                string s = (valEl.ValueKind == JsonValueKind.String ? (valEl.GetString() ?? "") : valEl.ToString()).Trim();
+                if (string.IsNullOrEmpty(s))
+                {
+                    dbVal = DBNull.Value;
+                    return true;
+                }
+                string? canonical = s.ToLowerInvariant() switch
+                {
+                    "very slow" => "Very Slow",
+                    "slow" => "Slow",
+                    "moderate" => "Moderate",
+                    "fast" => "Fast",
+                    "very fast" => "Very Fast",
+                    _ => null,
+                };
+                if (canonical is null) return false;
+                dbVal = canonical;
+                return true;
+            }
+            default:
+                dbVal = valEl.ValueKind == JsonValueKind.String ? (object)(valEl.GetString() ?? "") : valEl.ToString();
+                return true;
+        }
+    }
+
     private static readonly IReadOnlyDictionary<string, (string ValCol, string TsCol)> LwwFieldColumnMap =
         new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase)
         {
@@ -794,6 +1171,7 @@ public sealed class SyncHostServer : IAsyncDisposable
             ["dj_vocals"] = ("dj_vocals", "dj_vocals_ts"),
             ["dj_energy"] = ("dj_energy", "dj_energy_ts"),
             ["tempo_bpm"] = ("tempo_bpm", "tempo_ts"),
+            ["tempo"] = ("tempo_bucket", "tempo_ts"),
             ["tempo_bucket"] = ("tempo_bucket", "tempo_ts"),
             ["mood"] = ("mood_json", "mood_ts"),
             ["mood_json"] = ("mood_json", "mood_ts"),
@@ -803,64 +1181,61 @@ public sealed class SyncHostServer : IAsyncDisposable
     private static string SanitizeId(string id) =>
         string.Concat(id.Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_'));
 
+    private static (string DisplayName, string FileName) NormalizePlaylistMergeName(string raw)
+    {
+        string display = raw.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (display.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
+            display = display[..^5].Trim();
+        else if (display.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase))
+            display = display[..^4].Trim();
+
+        if (string.IsNullOrWhiteSpace(display))
+            return ("", "");
+
+        string stem = Playlists.PlaylistStore.SanitizePlaylistFileName(display);
+        return (display, stem + ".m3u8");
+    }
+
     private static string ComputeSha256Hex(string path)
     {
-        using var fs = File.OpenRead(path);
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         return Convert.ToHexStringLower(SHA256.HashData(fs));
     }
 
-    private static string DefaultScenesJson() => """
+    private static string ComputeManifestAndWalSha256Hex(string dbPath, string walPath, bool includeWal)
+    {
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendFileToHash(hasher, dbPath);
+        if (includeWal && File.Exists(walPath))
         {
-          "schema_version": 1,
-          "scenes": [
-            {
-              "id": "11111111-1111-4111-8111-111111111111",
-              "title": "深度专注 · 纯器乐",
-              "subtitle": "低/中能量纯器乐，Tempo 空值非阻断保留",
-              "accent_hex": "#005EB8",
-              "updated_at_ms": 1763251200000,
-              "sort_arc": "flat",
-              "tempo_null_passthrough": true,
-              "rule": {
-                "all": [
-                  { "predicate": { "field": "dj_vocals", "op": "eq", "values": ["instrumental"] } },
-                  { "predicate": { "field": "dj_energy", "op": "in", "values": ["low", "medium"] } }
-                ]
-              }
-            },
-            {
-              "id": "33333333-3333-4333-8333-333333333333",
-              "title": "夜间降噪 · 松弛助眠",
-              "subtitle": "静谧松弛 Mood 簇 + 阶梯能量衰减弧线",
-              "accent_hex": "#2A6B54",
-              "updated_at_ms": 1763251200000,
-              "sort_arc": "energy_desc_sleep",
-              "tempo_null_passthrough": true,
-              "rule": {
-                "any": [
-                  { "predicate": { "field": "mood_cluster", "op": "in", "values": ["calm_relaxed"] } },
-                  { "predicate": { "field": "dj_energy", "op": "eq", "values": ["low"] } }
-                ]
-              }
-            },
-            {
-              "id": "44444444-4444-4444-8444-444444444444",
-              "title": "沉睡馆藏唤醒",
-              "subtitle": "超 90 天未播高分馆藏曲目重温",
-              "accent_hex": "#8B5E3C",
-              "updated_at_ms": 1763251200000,
-              "sort_arc": "rediscovery_90d",
-              "tempo_null_passthrough": true,
-              "rule": {
-                "all": [
-                  { "predicate": { "field": "unplayed_days_gte", "op": "gte", "values": [90] } },
-                  { "predicate": { "field": "min_rating", "op": "gte", "values": [4] } }
-                ]
-              }
-            }
-          ]
+            hasher.AppendData([0x57, 0x41, 0x4C]); // "WAL" separator
+            AppendFileToHash(hasher, walPath);
         }
-        """;
+        return Convert.ToHexStringLower(hasher.GetHashAndReset());
+    }
+
+    private static void AppendFileToHash(IncrementalHash hasher, string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        byte[] buffer = new byte[64 * 1024];
+        int n;
+        while ((n = fs.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            hasher.AppendData(buffer.AsSpan(0, n));
+        }
+    }
+
+    private static readonly Lazy<string> LazyDefaultScenesJson = new(() =>
+    {
+        var asm = typeof(SyncHostServer).Assembly;
+        const string resourceName = "Tonewise.SyncHost.protocol.default_scenes_5d.json";
+        using Stream? stream = asm.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded scenes resource '{resourceName}' not found.");
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd();
+    });
+
+    public static string DefaultScenesJson() => LazyDefaultScenesJson.Value;
 
     public async ValueTask DisposeAsync()
     {

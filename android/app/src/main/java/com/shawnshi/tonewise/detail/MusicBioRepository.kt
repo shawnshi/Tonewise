@@ -43,6 +43,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.oxycblt.musikr.Album
+import org.oxycblt.musikr.core.TonewiseCore
 import org.oxycblt.musikr.Artist
 import org.oxycblt.musikr.PersonArtist
 import org.oxycblt.musikr.PersonRole
@@ -84,6 +85,7 @@ constructor(
         if (dbWarmupStarted) return
         dbWarmupStarted = true
         scope.launch {
+            syncDb.ensureLegacyMigrated(context)
             val all = runCatching { syncDb.bioCacheDao().getAll() }.getOrDefault(emptyList())
             var loaded = 0
             for (entity in all) {
@@ -142,53 +144,56 @@ constructor(
     }
 
     override fun importSyncedEncyclopediaJson(rawJson: String): Int {
-        val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: return 0
-        val items = root.optJSONArray("items") ?: return 0
+        val entries = parseSyncedEncyclopediaEntries(rawJson)
+        if (entries.isEmpty()) return 0
         var imported = 0
         val now = System.currentTimeMillis()
         val entities = ArrayList<BioCacheEntity>()
-        for (i in 0 until items.length()) {
-            val obj = items.optJSONObject(i) ?: continue
-            val entityType = obj.optString("entity_type", "").trim().lowercase()
-            val displayName = obj.optString("display_name", "").trim()
-            val normalizedName = obj.optString("normalized_name", "").trim()
-            if (entityType.isEmpty() || (displayName.isEmpty() && normalizedName.isEmpty())) {
-                continue
-            }
-            val summaryZh = obj.optString("summary_zh", "").trim().takeIf { it.isNotEmpty() }
-            val summaryEn = obj.optString("summary_en", "").trim().takeIf { it.isNotEmpty() }
-            if (summaryZh == null && summaryEn == null) continue
-
+        for (entry in entries) {
             val kinds =
-                when (entityType) {
+                when (entry.entityType) {
                     "composer",
-                    "conductor" -> listOf(entityType, "artist")
-                    else -> listOf(entityType)
+                    "conductor" -> listOf(entry.entityType, "artist")
+                    else -> listOf(entry.entityType)
                 }
-            val names = listOfNotNull(
-                displayName.takeIf { it.isNotEmpty() },
-                normalizedName.takeIf { it.isNotEmpty() },
-            )
+            val names =
+                listOfNotNull(
+                    entry.displayName.takeIf { it.isNotEmpty() },
+                    entry.normalizedName.takeIf { it.isNotEmpty() },
+                )
             for (kind in kinds) {
                 for (name in names) {
-                    if (summaryZh != null) {
+                    val zh = entry.summaryZh
+                    if (zh != null) {
                         val zhKey = cacheKey(kind, isZh = true, rawName = name)
-                        memoryCache[zhKey] = summaryZh
+                        memoryCache[zhKey] = zh
                         missedKeys.remove(zhKey)
-                        entities.add(BioCacheEntity(zhKey, summaryZh, now))
+                        entities.add(BioCacheEntity(zhKey, zh, now))
                     }
-                    if (summaryEn != null) {
+                    val en = entry.summaryEn
+                    if (en != null) {
                         val enKey = cacheKey(kind, isZh = false, rawName = name)
-                        memoryCache[enKey] = summaryEn
+                        memoryCache[enKey] = en
                         missedKeys.remove(enKey)
-                        entities.add(BioCacheEntity(enKey, summaryEn, now))
+                        entities.add(BioCacheEntity(enKey, en, now))
                     }
                 }
             }
             imported++
         }
         if (entities.isNotEmpty()) {
-            syncDb.bioCacheDao().upsertAll(entities)
+            val mainThread =
+                runCatching { android.os.Looper.getMainLooper()?.thread === Thread.currentThread() }
+                    .getOrDefault(false)
+            if (mainThread) {
+                scope.launch {
+                    syncDb.ensureLegacyMigrated(context)
+                    syncDb.bioCacheDao().upsertAll(entities)
+                }
+            } else {
+                syncDb.ensureLegacyMigrated(context)
+                syncDb.bioCacheDao().upsertAll(entities)
+            }
         }
         if (imported > 0) {
             _updates.value += 1
@@ -1118,5 +1123,46 @@ constructor(
                     ),
                 )
             }
+
+        data class SyncedEncyclopediaEntry(
+            val entityType: String,
+            val displayName: String,
+            val normalizedName: String,
+            val summaryZh: String?,
+            val summaryEn: String?,
+        )
+
+        private fun cleanNullableJsonText(raw: Any?): String? =
+            (raw as? String)?.trim()?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+
+        fun parseSyncedEncyclopediaEntries(rawJson: String): List<SyncedEncyclopediaEntry> {
+            @Suppress("UNCHECKED_CAST")
+            val root =
+                runCatching { TonewiseCore.parseJson(rawJson) as? Map<String, Any?> }.getOrNull()
+                    ?: return emptyList()
+            val items = root["items"] as? List<*> ?: return emptyList()
+            val out = ArrayList<SyncedEncyclopediaEntry>(items.size)
+            for (rawItem in items) {
+                @Suppress("UNCHECKED_CAST")
+                val obj = rawItem as? Map<String, Any?> ?: continue
+                val entityType = cleanNullableJsonText(obj["entity_type"])?.lowercase() ?: continue
+                val displayName = cleanNullableJsonText(obj["display_name"]).orEmpty()
+                val normalizedName = cleanNullableJsonText(obj["normalized_name"]).orEmpty()
+                if (displayName.isEmpty() && normalizedName.isEmpty()) continue
+                val summaryZh = cleanNullableJsonText(obj["summary_zh"])
+                val summaryEn = cleanNullableJsonText(obj["summary_en"])
+                if (summaryZh == null && summaryEn == null) continue
+                out.add(
+                    SyncedEncyclopediaEntry(
+                        entityType = entityType,
+                        displayName = displayName,
+                        normalizedName = normalizedName,
+                        summaryZh = summaryZh,
+                        summaryEn = summaryEn,
+                    )
+                )
+            }
+            return out
+        }
     }
 }

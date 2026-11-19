@@ -1,0 +1,17 @@
+diff --git a/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java b/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java
+index 7cf699b364..c0b3e31db8 100644
+--- a/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java
++++ b/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/DefaultAudioSink.java
+@@ -755,6 +755,12 @@ public final class DefaultAudioSink implements AudioSink {
+       pipelineProcessors.addAll(availableAudioProcessors);
+       if (shouldUseFloatOutput(inputFormat.pcmEncoding)) {
+         pipelineProcessors.add(toFloatPcmAudioProcessor);
++        for (AudioProcessor processor : audioProcessorChain.getAudioProcessors()) {
++          if (!(processor instanceof SilenceSkippingAudioProcessor)
++              && !(processor instanceof SonicAudioProcessor)) {
++            pipelineProcessors.add(processor);
++          }
++        }
+       } else {
+         pipelineProcessors.add(toInt16PcmAudioProcessor);
+         pipelineProcessors.add(audioProcessorChain.getAudioProcessors());

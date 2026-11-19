@@ -290,4 +290,251 @@ class LanSyncV2Test {
             LanSyncV2Client.sanitizeRelativePathSegments("../../../secret.txt"),
         )
     }
+
+    @Test
+    fun parseOutboxResponse_extractsHashesAndDuplicateCount_andDeduplicatesTracks() {
+        val json =
+            """
+            {
+              "host_name": "DESKTOP-TW",
+              "generated_at_ms": 1760000001000,
+              "duplicate_track_count": 2,
+              "items": [
+                {"id": "ob_pl1", "device_id": "*", "kind": "playlist", "target_key": "P1", "display_name": "歌单：P1", "mode": "subscribe", "track_uids": [], "created_at_ms": 10},
+                {"id": "ob_pl2", "device_id": "*", "kind": "playlist", "target_key": "P2", "display_name": "歌单：P2", "mode": "subscribe", "track_uids": [], "created_at_ms": 20}
+              ],
+              "tracks": [
+                {
+                  "track_uid": "uid_1",
+                  "rel_path": "Artist/Album/01.flac",
+                  "target_rel_path": "Artist/Album/01.flac",
+                  "title": "Track 1",
+                  "artist": "Artist",
+                  "album": "Album",
+                  "album_artist": "Artist",
+                  "genre": "Jazz",
+                  "duration_ms": 180000,
+                  "file_size": 1000,
+                  "mtime_ms": 5000,
+                  "has_cover": true,
+                  "source_outbox_ids": ["ob_pl1"],
+                  "header_blake3": "hdr_a",
+                  "audio_frame_blake3": "aud_a"
+                },
+                {
+                  "track_uid": "UID_1",
+                  "rel_path": "Artist/Album/01.flac",
+                  "target_rel_path": "Artist/Album/01.flac",
+                  "title": "Track 1",
+                  "artist": "Artist",
+                  "album": "Album",
+                  "album_artist": "Artist",
+                  "genre": "Jazz",
+                  "duration_ms": 180000,
+                  "file_size": 1000,
+                  "mtime_ms": 5000,
+                  "has_cover": true,
+                  "source_outbox_ids": ["ob_pl2"],
+                  "header_blake3": "hdr_a",
+                  "audio_frame_blake3": "aud_a"
+                },
+                {
+                  "track_uid": "uid_path_alias",
+                  "rel_path": "Artist/Album/01.flac",
+                  "target_rel_path": "Artist/Album/01.flac",
+                  "title": "Track 1",
+                  "artist": "Artist",
+                  "album": "Album",
+                  "album_artist": "Artist",
+                  "genre": "Jazz",
+                  "duration_ms": 180000,
+                  "file_size": 1000,
+                  "mtime_ms": 8000,
+                  "has_cover": true,
+                  "source_outbox_ids": ["ob_extra"],
+                  "header_blake3": "hdr_a_v2",
+                  "audio_frame_blake3": "aud_a"
+                }
+              ],
+              "playlists": [],
+              "total_bytes": 1000
+            }
+            """.trimIndent()
+
+        val resp = LanSyncV2Client.parseOutboxResponse(json)
+        assertEquals(2, resp.duplicateTrackCount)
+        assertEquals("hdr_a", resp.tracks[0].headerBlake3)
+        assertEquals("aud_a", resp.tracks[0].audioFrameBlake3)
+
+        val (deduped, clientDups) = LanSyncV2Client.deduplicateOutboxTracks(resp.tracks)
+        assertEquals(1, deduped.size)
+        assertEquals(2, clientDups)
+        assertEquals(listOf("ob_pl1", "ob_pl2", "ob_extra"), deduped[0].sourceOutboxIds)
+        assertEquals("hdr_a_v2", deduped[0].headerBlake3)
+    }
+
+    @Test
+    fun evaluateLocalTrackFreshness_detectsMissingUpToDateAndOutdatedVersions() {
+        val remote =
+            OutboxTrackDto(
+                trackUid = "uid_fresh",
+                relPath = "Bach/Aria.flac",
+                targetRelPath = "Bach/Aria.flac",
+                title = "Aria",
+                artist = "Glenn Gould",
+                album = "Goldberg",
+                albumArtist = "Glenn Gould",
+                genre = "Classical",
+                durationMs = 180000,
+                fileSize = 20480L,
+                mtimeMs = 1760000010000L,
+                hasCover = true,
+                sourceOutboxIds = listOf("ob_1"),
+                headerBlake3 = "hdr_v2",
+                audioFrameBlake3 = "aud_same",
+            )
+
+        assertEquals(
+            LocalSyncState.MISSING,
+            LanSyncV2Client.evaluateLocalTrackFreshness(remote, exists = false, localFileSize = 0L, localMtimeMs = 0L),
+        )
+
+        assertEquals(
+            LocalSyncState.UP_TO_DATE,
+            LanSyncV2Client.evaluateLocalTrackFreshness(
+                remote = remote,
+                exists = true,
+                localFileSize = 20480L,
+                localMtimeMs = 1760000000000L,
+                localHeaderBlake3 = "HDR_V2",
+                localAudioFrameBlake3 = "AUD_SAME",
+            ),
+        )
+
+        // Tag edit inside FLAC padding: fileSize identical, audio_frame identical, header_blake3 changed -> OUTDATED
+        assertEquals(
+            LocalSyncState.OUTDATED,
+            LanSyncV2Client.evaluateLocalTrackFreshness(
+                remote = remote,
+                exists = true,
+                localFileSize = 20480L,
+                localMtimeMs = 1760000010000L,
+                localHeaderBlake3 = "hdr_v1",
+                localAudioFrameBlake3 = "aud_same",
+            ),
+        )
+
+        // File size changed -> OUTDATED
+        assertEquals(
+            LocalSyncState.OUTDATED,
+            LanSyncV2Client.evaluateLocalTrackFreshness(
+                remote = remote,
+                exists = true,
+                localFileSize = 19999L,
+                localMtimeMs = 1760000010000L,
+                localHeaderBlake3 = "hdr_v2",
+                localAudioFrameBlake3 = "aud_same",
+            ),
+        )
+
+        // Without hashes, newer remote mtime (> 2s) -> OUTDATED; equal/older -> UP_TO_DATE
+        val remoteNoHash = remote.copy(headerBlake3 = "", audioFrameBlake3 = "")
+        assertEquals(
+            LocalSyncState.OUTDATED,
+            LanSyncV2Client.evaluateLocalTrackFreshness(
+                remote = remoteNoHash,
+                exists = true,
+                localFileSize = 20480L,
+                localMtimeMs = 1760000005000L,
+            ),
+        )
+        assertEquals(
+            LocalSyncState.UP_TO_DATE,
+            LanSyncV2Client.evaluateLocalTrackFreshness(
+                remote = remoteNoHash,
+                exists = true,
+                localFileSize = 20480L,
+                localMtimeMs = 1760000009000L,
+            ),
+        )
+    }
+
+    @Test
+    fun managedSyncStorage_defaultsAudioToMusicDirAndPrefersMusicSafLocation() {
+        assertEquals(
+            "Music/Bach/Goldberg/",
+            ManagedSyncStorage.buildMediaStoreMusicRelativeDir(listOf("Bach", "Goldberg")),
+        )
+        assertEquals(
+            "Music/",
+            ManagedSyncStorage.buildMediaStoreMusicRelativeDir(emptyList()),
+        )
+        assertEquals(
+            "Music/Tonewise/Bach/Goldberg/",
+            ManagedSyncStorage.buildLegacyMediaStoreTonewiseRelativeDir(listOf("Bach", "Goldberg")),
+        )
+        assertEquals(1, ManagedSyncStorage.selectPreferredMusicSafIndex(listOf("Tonewise", "Music")))
+        assertEquals(1, ManagedSyncStorage.selectPreferredMusicSafIndex(listOf("Tonewise", "Lossless")))
+        assertEquals(0, ManagedSyncStorage.selectPreferredMusicSafIndex(listOf("Tonewise")))
+        assertEquals(-1, ManagedSyncStorage.selectPreferredMusicSafIndex(emptyList()))
+    }
+
+    @Test
+    fun cancelToken_abortsStalledDownloadQuickly_andPreservesPartFile() {
+        val firstChunk = ByteArray(8_192) { idx -> (idx % 127).toByte() }
+        val expectedTotal = 65_536L
+        val releaseServer = java.util.concurrent.CountDownLatch(1)
+        val tempDir = Files.createTempDirectory("tw_cancel_test_").toFile()
+
+        try {
+            withServer(
+                configure = { server ->
+                    server.createContext("/api/v2/tracks/u_stall/file") { ex ->
+                        ex.sendResponseHeaders(200, expectedTotal)
+                        runCatching {
+                            ex.responseBody.write(firstChunk)
+                            ex.responseBody.flush()
+                            releaseServer.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                        }
+                        runCatching { ex.close() }
+                    }
+                }
+            ) { baseUrl ->
+                val partFile = File(tempDir, "u_stall.part")
+                val cancelToken = LanHttpClient.CancelToken()
+                val canceller =
+                    java.lang.Thread {
+                        java.lang.Thread.sleep(150L)
+                        cancelToken.cancel()
+                    }
+                canceller.start()
+
+                val startNs = System.nanoTime()
+                var caughtCancellation = false
+                try {
+                    LanSyncV2Client.downloadFileResumable(
+                        url = LanSyncV2Client.buildTrackFileUrl(baseUrl, "u_stall"),
+                        token = "tok_ok",
+                        partFile = partFile,
+                        expectedSize = expectedTotal,
+                        cancelToken = cancelToken,
+                    )
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                    caughtCancellation = true
+                } finally {
+                    releaseServer.countDown()
+                    canceller.join(2_000)
+                }
+
+                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                assertTrue("Expected CancellationException on cancel", caughtCancellation)
+                assertTrue("Expected fast cancellation (<2000ms), took ${elapsedMs}ms", elapsedMs < 2_000L)
+                assertTrue(partFile.isFile)
+                assertEquals(firstChunk.size.toLong(), partFile.length())
+            }
+        } finally {
+            releaseServer.countDown()
+            tempDir.deleteRecursively()
+        }
+    }
 }

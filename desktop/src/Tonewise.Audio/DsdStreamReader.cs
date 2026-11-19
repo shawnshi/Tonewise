@@ -11,7 +11,8 @@ namespace Tonewise.Audio;
 public sealed class DsdStreamReader : ISampleProvider, IDisposable
 {
     public const int TargetDxdSampleRateHz = 352_800;
-    private const int FilterTaps = 64;
+    private const int FilterTaps = 127;
+    private const int MaxDsfBlockSizeBytes = 1_048_576;
 
     private readonly Stream _stream;
     private readonly bool _isDsf;
@@ -30,6 +31,7 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
     private long _currentBitIndex;
     private long _blockBaseBitIndex = -1;
     private int _blockValidBytesPerChannel;
+    private bool _disposed;
 
     public WaveFormat WaveFormat { get; }
     public int DsdSampleRateHz => _dsdSampleRateHz;
@@ -109,65 +111,75 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
         }
     }
 
+    private readonly object _ioLock = new();
+
     public void SeekFraction(double fraction)
     {
-        double clamped = Math.Clamp(fraction, 0.0, 1.0);
-        long targetBit = (long)(_totalDsdBitsPerChannel * clamped);
-        targetBit -= targetBit % _decimationFactor;
-        _currentBitIndex = Math.Clamp(targetBit, 0, _totalDsdBitsPerChannel);
-        _blockBaseBitIndex = -1;
-        for (int c = 0; c < Channels; c++)
+        lock (_ioLock)
         {
-            Array.Clear(_bitHistories[c]);
-            _histPos[c] = 0;
+            if (_disposed) return;
+            double clamped = Math.Clamp(fraction, 0.0, 1.0);
+            long targetBit = (long)(_totalDsdBitsPerChannel * clamped);
+            targetBit -= targetBit % _decimationFactor;
+            _currentBitIndex = Math.Clamp(targetBit, 0, _totalDsdBitsPerChannel);
+            _blockBaseBitIndex = -1;
+            for (int c = 0; c < Channels; c++)
+            {
+                Array.Clear(_bitHistories[c]);
+                _histPos[c] = 0;
+            }
         }
     }
 
     public int Read(float[] buffer, int offset, int count)
     {
-        int framesRequested = count / Channels;
-        int samplesWritten = 0;
-
-        for (int f = 0; f < framesRequested; f++)
+        lock (_ioLock)
         {
-            if (_currentBitIndex + _decimationFactor > _totalDsdBitsPerChannel)
-            {
-                break;
-            }
+            if (_disposed) return 0;
+            int framesRequested = count / Channels;
+            int samplesWritten = 0;
 
-            for (int d = 0; d < _decimationFactor; d++)
+            for (int f = 0; f < framesRequested; f++)
             {
-                EnsureBlockLoadedForBit(_currentBitIndex);
+                if (_currentBitIndex + _decimationFactor > _totalDsdBitsPerChannel)
+                {
+                    break;
+                }
+
+                for (int d = 0; d < _decimationFactor; d++)
+                {
+                    EnsureBlockLoadedForBit(_currentBitIndex);
+                    for (int ch = 0; ch < Channels; ch++)
+                    {
+                        double bitSample = ReadChannelBitSample(_currentBitIndex, ch);
+                        int p = _histPos[ch];
+                        _bitHistories[ch][p] = bitSample;
+                        _histPos[ch] = (p + 1) % FilterTaps;
+                    }
+                    _currentBitIndex++;
+                }
+
                 for (int ch = 0; ch < Channels; ch++)
                 {
-                    double bitSample = ReadChannelBitSample(_currentBitIndex, ch);
-                    int p = _histPos[ch];
-                    _bitHistories[ch][p] = bitSample;
-                    _histPos[ch] = (p + 1) % FilterTaps;
-                }
-                _currentBitIndex++;
-            }
-
-            for (int ch = 0; ch < Channels; ch++)
-            {
-                double sum = 0.0;
-                double[] hist = _bitHistories[ch];
-                int idx = _histPos[ch] - 1;
-                if (idx < 0) idx = FilterTaps - 1;
-
-                for (int k = 0; k < FilterTaps; k++)
-                {
-                    sum += hist[idx] * _firCoeffs[k];
-                    idx--;
+                    double sum = 0.0;
+                    double[] hist = _bitHistories[ch];
+                    int idx = _histPos[ch] - 1;
                     if (idx < 0) idx = FilterTaps - 1;
+
+                    for (int k = 0; k < FilterTaps; k++)
+                    {
+                        sum += hist[idx] * _firCoeffs[k];
+                        idx--;
+                        if (idx < 0) idx = FilterTaps - 1;
+                    }
+
+                    // Scale with 6 dB ultrasonic headroom to match DXD mastering norms
+                    buffer[offset + samplesWritten++] = (float)(sum * 0.5);
                 }
-
-                // Scale with 6 dB ultrasonic headroom to match DXD mastering norms
-                buffer[offset + samplesWritten++] = (float)(sum * 0.5);
             }
-        }
 
-        return samplesWritten;
+            return samplesWritten;
+        }
     }
 
     private void EnsureBlockLoadedForBit(long bitIndex)
@@ -251,6 +263,8 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
         bool lsbFirst = bps == 1;
         long sampleCount = (long)BinaryPrimitives.ReadUInt64LittleEndian(fmtHdr.Slice(36, 8));
         int blockSize = (int)BinaryPrimitives.ReadUInt32LittleEndian(fmtHdr.Slice(44, 4));
+        if (blockSize <= 0 || blockSize > MaxDsfBlockSizeBytes)
+            throw new InvalidDataException($"Invalid DSF block size: {blockSize}");
 
         Span<byte> dataHdr = stackalloc byte[12];
         if (s.Read(dataHdr) < 12 || Encoding.ASCII.GetString(dataHdr[0..4]) != "data")
@@ -258,7 +272,7 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
 
         long dataChunkSize = (long)BinaryPrimitives.ReadUInt64LittleEndian(dataHdr.Slice(4, 8));
         long payloadBytes = Math.Max(0, dataChunkSize - 12);
-        return (channels, Math.Max(sampleRate, 2_822_400), lsbFirst, sampleCount, Math.Max(blockSize, 4096), s.Position, payloadBytes);
+        return (channels, Math.Max(sampleRate, 2_822_400), lsbFirst, sampleCount, blockSize, s.Position, payloadBytes);
     }
 
     private static (int Channels, int SampleRate, long BitsPerChannel, long DataOffset, long DataLen)
@@ -282,19 +296,31 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
         {
             if (s.Read(ck) < 12) break;
             string id = Encoding.ASCII.GetString(ck[0..4]);
-            long size = (long)BinaryPrimitives.ReadUInt64BigEndian(ck.Slice(4, 8));
-            long nextPos = s.Position + size + (size & 1);
+            ulong rawSize = BinaryPrimitives.ReadUInt64BigEndian(ck.Slice(4, 8));
+            ulong remaining = (ulong)Math.Max(0L, s.Length - s.Position);
+            if (rawSize > remaining)
+                throw new InvalidDataException($"Malformed DFF chunk '{id}' size {rawSize} exceeds remaining stream {remaining}");
+
+            long size = (long)rawSize;
+            long padding = size & 1L;
+            long nextPos = s.Position + size + (s.Position + size + padding <= s.Length ? padding : 0L);
 
             if (id == "PROP")
             {
-                long propEnd = Math.Min(s.Length, s.Position + size);
+                if (size < 4) throw new InvalidDataException("Truncated DFF 'PROP' chunk");
+                long propEnd = s.Position + size;
                 s.Seek(4, SeekOrigin.Current); // 'SND '
                 while (s.Position + 12 <= propEnd)
                 {
                     if (s.Read(sub) < 12) break;
                     string subId = Encoding.ASCII.GetString(sub[0..4]);
-                    long subSz = (long)BinaryPrimitives.ReadUInt64BigEndian(sub.Slice(4, 8));
-                    long subNext = s.Position + subSz + (subSz & 1);
+                    ulong rawSubSz = BinaryPrimitives.ReadUInt64BigEndian(sub.Slice(4, 8));
+                    ulong propRem = (ulong)Math.Max(0L, propEnd - s.Position);
+                    if (rawSubSz > propRem)
+                        throw new InvalidDataException($"Malformed DFF subchunk '{subId}' size {rawSubSz} exceeds PROP chunk");
+                    long subSz = (long)rawSubSz;
+                    long subPad = subSz & 1L;
+                    long subNext = s.Position + subSz + (s.Position + subSz + subPad <= propEnd ? subPad : 0L);
                     if (subId == "FS  " && subSz >= 4)
                     {
                         if (s.Read(fsB) == 4) sampleRate = (int)BinaryPrimitives.ReadUInt32BigEndian(fsB);
@@ -303,6 +329,7 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
                     {
                         if (s.Read(chB) == 2) channels = Math.Clamp((int)BinaryPrimitives.ReadUInt16BigEndian(chB), 1, 8);
                     }
+                    if (subNext <= s.Position) break;
                     s.Position = subNext;
                 }
             }
@@ -313,6 +340,7 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
                 break;
             }
 
+            if (nextPos <= s.Position) break;
             s.Position = nextPos;
         }
 
@@ -326,7 +354,7 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
     private static double[] BuildBlackmanHarrisLowPass(int taps, double cutoffNorm)
     {
         var coeffs = new double[taps];
-        int center = (taps - 1) / 2;
+        double center = (taps - 1) / 2.0;
         double sum = 0.0;
         for (int i = 0; i < taps; i++)
         {
@@ -344,5 +372,13 @@ public sealed class DsdStreamReader : ISampleProvider, IDisposable
         return coeffs;
     }
 
-    public void Dispose() => _stream.Dispose();
+    public void Dispose()
+    {
+        lock (_ioLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _stream.Dispose();
+        }
+    }
 }

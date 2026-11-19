@@ -790,14 +790,29 @@
                                     <Button Style="{StaticResource GoldActionButtonStyle}" Click="OnNewPlaylistClick">
                                         <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE710;" FontSize="14" /><TextBlock Text="新建歌单" /></StackPanel>
                                     </Button>
-                                    <Button Style="{StaticResource StudioChipButtonStyle}" Click="OnImportPlaylistClick" ToolTipService.ToolTip="从 Apple Music / Billboard / Kworb 链接或文本文件导入">
+                                    <Button Style="{StaticResource StudioChipButtonStyle}" Click="OnImportPlaylistClick" ToolTipService.ToolTip="从 Spotify / Apple Music / Billboard / Kworb 链接或文本文件导入">
                                         <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE896;" FontSize="14" /><TextBlock Text="导入歌单" /></StackPanel>
                                     </Button>
                                     <Button Style="{StaticResource StudioChipButtonStyle}" Click="OnEditPlaylistClick">
                                         <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE70F;" FontSize="14" /><TextBlock Text="编辑" /></StackPanel>
                                     </Button>
-                                    <Button Style="{StaticResource StudioChipButtonStyle}" Click="OnSendPlaylistToPhoneClick" ToolTipService.ToolTip="将当前选中歌单加入手机同步队列（订阅）">
-                                        <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE8EA;" FontSize="14" /><TextBlock Text="发送到手机" /></StackPanel>
+                                    <ToggleButton
+                                        x:Name="PlaylistMultiSelectToggleButton"
+                                        IsChecked="{x:Bind ViewModel.IsPlaylistMultiSelectMode, Mode=TwoWay}"
+                                        Click="OnPlaylistMultiSelectToggleClick"
+                                        Padding="10,5"
+                                        FontSize="12"
+                                        CornerRadius="6"
+                                        ToolTipService.ToolTip="开启多选以同时选择多个歌单发送到手机">
+                                        <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE762;" FontSize="14" /><TextBlock Text="多选歌单" /></StackPanel>
+                                    </ToggleButton>
+                                    <Button
+                                        Style="{StaticResource StudioChipButtonStyle}"
+                                        Content="全选歌单"
+                                        Click="OnSelectAllPlaylistsClick"
+                                        Visibility="{x:Bind ViewModel.IsPlaylistMultiSelectMode, Mode=OneWay}" />
+                                    <Button Style="{StaticResource StudioChipButtonStyle}" Click="OnSendPlaylistToPhoneClick" ToolTipService.ToolTip="将选中的一个或多个歌单加入手机同步队列（订阅）">
+                                        <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE8EA;" FontSize="14" /><TextBlock Text="{x:Bind ViewModel.SendPlaylistToPhoneButtonLabel, Mode=OneWay}" /></StackPanel>
                                     </Button>
                                     <Button Style="{StaticResource GoldActionButtonStyle}" Command="{x:Bind ViewModel.SaveCurrentPlaylistOrderCommand}" Visibility="{x:Bind ViewModel.IsViewingPlaylist, Mode=OneWay}">
                                         <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE74E;" FontSize="14" /><TextBlock Text="保存排序" /></StackPanel>
@@ -809,42 +824,55 @@
                                 </StackPanel>
                             </ScrollViewer>
 
-                            <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" MaxHeight="168" Padding="0,2,14,6">
-                                <ItemsControl ItemsSource="{x:Bind ViewModel.Playlists, Mode=OneWay}">
-                                    <ItemsControl.ItemsPanel>
-                                        <ItemsPanelTemplate>
-                                            <ItemsWrapGrid Orientation="Horizontal" />
-                                        </ItemsPanelTemplate>
-                                    </ItemsControl.ItemsPanel>
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate x:DataType="playlists:PlaylistSummary">
-                                            <Button
-                                                Margin="0,0,6,6"
-                                                Background="{ThemeResource TwBg1A2232Brush}"
-                                                BorderBrush="{ThemeResource TwLine2E3A50Brush}"
-                                                BorderThickness="1"
-                                                CornerRadius="6"
-                                                Padding="10,6"
-                                                Tag="{x:Bind FilePath}"
-                                                Click="OnSelectPlaylistClick">
-                                                <Button.ContextFlyout>
-                                                    <MenuFlyout>
-                                                        <MenuFlyoutItem Text="发送到手机（订阅）" Click="OnContextSendPlaylistCardToPhoneClick">
-                                                            <MenuFlyoutItem.Icon>
-                                                                <FontIcon Glyph="&#xE8EA;" />
-                                                            </MenuFlyoutItem.Icon>
-                                                        </MenuFlyoutItem>
-                                                    </MenuFlyout>
-                                                </Button.ContextFlyout>
-                                                <StackPanel Spacing="2">
-                                                    <TextBlock Text="{x:Bind Name}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TwFgE2E8F0Brush}" />
-                                                    <TextBlock Text="{x:Bind CountBadge}" FontSize="12" Foreground="{ThemeResource TwFgD9B372Brush}" />
-                                                </StackPanel>
-                                            </Button>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                            </ScrollViewer>
+                            <ListView
+                                x:Name="PlaylistsListView"
+                                ItemsSource="{x:Bind ViewModel.Playlists, Mode=OneWay}"
+                                SelectionMode="Single"
+                                SelectionChanged="OnPlaylistsSelectionChanged"
+                                RightTapped="OnPlaylistsRightTapped"
+                                MaxHeight="168"
+                                ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListView.ContextFlyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Text="发送到手机（订阅）" Click="OnContextSendPlaylistCardToPhoneClick">
+                                            <MenuFlyoutItem.Icon>
+                                                <FontIcon Glyph="&#xE8EA;" />
+                                            </MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                        <MenuFlyoutItem Text="删除歌单" Click="OnContextDeletePlaylistCardClick">
+                                            <MenuFlyoutItem.Icon>
+                                                <FontIcon Glyph="&#xE74D;" />
+                                            </MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                    </MenuFlyout>
+                                </ListView.ContextFlyout>
+                                <ListView.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <ItemsWrapGrid Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ListView.ItemsPanel>
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="Padding" Value="2" />
+                                        <Setter Property="Margin" Value="0,0,6,6" />
+                                    </Style>
+                                </ListView.ItemContainerStyle>
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="playlists:PlaylistSummary">
+                                        <Border
+                                            Padding="10,6"
+                                            Background="{ThemeResource TwBg1A2232Brush}"
+                                            BorderBrush="{ThemeResource TwLine2E3A50Brush}"
+                                            BorderThickness="1"
+                                            CornerRadius="6">
+                                            <StackPanel Spacing="2">
+                                                <TextBlock Text="{x:Bind Name}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TwFgE2E8F0Brush}" />
+                                                <TextBlock Text="{x:Bind CountBadge}" FontSize="12" Foreground="{ThemeResource TwFgD9B372Brush}" />
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
                         </StackPanel>
                     </Border>
 
@@ -1237,6 +1265,7 @@
                                         <StackPanel Orientation="Horizontal" Spacing="8">
                                             <Button Style="{StaticResource StudioChipButtonStyle}" Content="加载 Equalizer APO (.txt)" Click="OnLoadEqClick" />
                                             <Button Style="{StaticResource StudioChipButtonStyle}" Content="加载 FIR / SOFA 卷积脉冲" Click="OnLoadFirClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="清除 FIR" Command="{x:Bind ViewModel.ClearFirImpulseCommand}" />
                                             <TextBlock Text="{x:Bind ViewModel.ActiveEqSummary, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFg94A3B8Brush}" VerticalAlignment="Center" />
                                             <TextBlock Text="{x:Bind ViewModel.FirImpulseFileName, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFg94A3B8Brush}" VerticalAlignment="Center" />
                                         </StackPanel>
@@ -1996,6 +2025,7 @@
                                     <StackPanel Orientation="Horizontal" Spacing="6">
                                         <Button Content="加载 EQ (.txt)" Click="OnLoadEqClick" />
                                         <Button Content="加载 FIR / SOFA" Click="OnLoadFirClick" />
+                                        <Button Content="清除 FIR" Command="{x:Bind ViewModel.ClearFirImpulseCommand}" />
                                     </StackPanel>
                                     <ToggleSwitch Header="24-bit TPDF 抖动" IsOn="{x:Bind ViewModel.IsTpdfDitherEnabled, Mode=TwoWay}" />
                                     <TextBlock Text="{x:Bind ViewModel.SignalPathSummary, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFg10B981Brush}" TextWrapping="Wrap" />
@@ -2106,8 +2136,38 @@
                     <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.TimeDisplay, Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource TwFg94A3B8Brush}" VerticalAlignment="Center" />
                 </Grid>
 
-                <!-- Mute + Volume (0-100%, dB in tooltip) -->
+                <!-- Sleep Timer + Mute + Volume (0-100%, dB in tooltip) -->
                 <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                    <Button
+                        Padding="8,4"
+                        CornerRadius="12"
+                        Background="Transparent"
+                        BorderThickness="1"
+                        BorderBrush="{ThemeResource TwLine202838Brush}"
+                        AutomationProperties.Name="睡眠定时"
+                        ToolTipService.ToolTip="睡眠定时（倒计时 / 本曲 / 本作品结束）">
+                        <Button.Flyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="关闭睡眠定时" Command="{x:Bind ViewModel.SetSleepTimerCommand}" CommandParameter="off" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="15 分钟" Command="{x:Bind ViewModel.SetSleepTimerCommand}" CommandParameter="15" />
+                                <MenuFlyoutItem Text="30 分钟" Command="{x:Bind ViewModel.SetSleepTimerCommand}" CommandParameter="30" />
+                                <MenuFlyoutItem Text="45 分钟" Command="{x:Bind ViewModel.SetSleepTimerCommand}" CommandParameter="45" />
+                                <MenuFlyoutItem Text="60 分钟" Command="{x:Bind ViewModel.SetSleepTimerCommand}" CommandParameter="60" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="本曲结束后暂停" Command="{x:Bind ViewModel.SetSleepTimerCommand}" CommandParameter="track" />
+                                <MenuFlyoutItem Text="本古典作品结束后暂停" Command="{x:Bind ViewModel.SetSleepTimerCommand}" CommandParameter="work" />
+                            </MenuFlyout>
+                        </Button.Flyout>
+                        <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE708;" FontSize="13" />
+                            <TextBlock Text="{x:Bind ViewModel.SleepTimerBadge, Mode=OneWay}"
+                                       FontSize="11"
+                                       FontFamily="Cascadia Mono, Consolas, Segoe UI"
+                                       Foreground="{ThemeResource TwFgD9B372Brush}"
+                                       Visibility="{x:Bind ViewModel.IsSleepTimerActive, Mode=OneWay}" />
+                        </StackPanel>
+                    </Button>
                     <ToggleButton
                         Width="36"
                         Height="36"

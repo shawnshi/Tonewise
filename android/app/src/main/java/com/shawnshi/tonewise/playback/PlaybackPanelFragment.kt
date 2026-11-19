@@ -48,6 +48,8 @@ import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.R as MaterialR
 import com.google.android.material.color.MaterialColors
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlin.math.abs
@@ -91,6 +93,7 @@ import com.shawnshi.tonewise.util.recycler
 import com.shawnshi.tonewise.util.showToast
 import com.shawnshi.tonewise.util.smoothScrollByPageTo
 import com.shawnshi.tonewise.util.systemBarInsetsCompat
+import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.MusicParent
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L
@@ -301,15 +304,50 @@ class PlaybackPanelFragment :
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
         if (item.itemId == R.id.action_desk_clock) {
-            DeskClockDialog.newInstance().show(parentFragmentManager, DeskClockDialog.TAG)
+            if (parentFragmentManager.findFragmentByTag(DeskClockDialog.TAG) == null) {
+                DeskClockDialog.newInstance().show(parentFragmentManager, DeskClockDialog.TAG)
+            }
             return true
         }
         if (item.itemId == R.id.action_open_equalizer) {
-            DspControlDialog.newInstance().show(parentFragmentManager, DspControlDialog.TAG)
+            if (parentFragmentManager.findFragmentByTag(DspControlDialog.TAG) == null) {
+                DspControlDialog.newInstance().show(parentFragmentManager, DspControlDialog.TAG)
+            }
+            return true
+        }
+        if (item.itemId == R.id.action_sleep_timer) {
+            showSleepTimerPicker()
             return true
         }
 
         return false
+    }
+
+    private fun showSleepTimerPicker() {
+        val options =
+            arrayOf(
+                getString(R.string.lbl_sleep_off),
+                getString(R.string.lbl_sleep_15m),
+                getString(R.string.lbl_sleep_30m),
+                getString(R.string.lbl_sleep_45m),
+                getString(R.string.lbl_sleep_60m),
+                getString(R.string.lbl_sleep_end_track),
+                getString(R.string.lbl_sleep_end_work),
+            )
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.lbl_sleep_timer)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> playbackModel.cancelSleepTimer()
+                    1 -> playbackModel.setSleepTimerMinutes(15)
+                    2 -> playbackModel.setSleepTimerMinutes(30)
+                    3 -> playbackModel.setSleepTimerMinutes(45)
+                    4 -> playbackModel.setSleepTimerMinutes(60)
+                    5 -> playbackModel.setSleepTimerEndOfTrack()
+                    6 -> playbackModel.setSleepTimerEndOfWork()
+                }
+            }
+            .show()
     }
 
     override fun onSeekConfirmed(positionDs: Long) {
@@ -572,7 +610,7 @@ class PlaybackPanelFragment :
                     Color.parseColor("#D9B372") to "USB BIT-PERFECT"
                 SignalQualityTier.HIGH_RES_FLOAT ->
                     Color.parseColor("#4DA3FF") to
-                        if (state.dspSummaryLabel == "Flat") "32-bit Float"
+                        if (state.dspSummaryLabel == "Flat" || state.dspSummaryLabel == "64-bit Flat") "32-bit Float"
                         else "64-bit DSP · ${state.dspSummaryLabel}"
                 SignalQualityTier.SYSTEM_MIXER ->
                     MaterialColors.getColor(containerView, MaterialR.attr.colorOnSurfaceVariant) to
@@ -615,13 +653,56 @@ class PlaybackPanelFragment :
         freezeJob?.cancel()
         freezeJob =
             viewLifecycleOwner.lifecycleScope.launch {
-                val matches =
+                val currentSong = playbackModel.song.value ?: song
+                val pqSnapshot = playbackModel.pagerQueue.value
+                val (tailMovements, remainingMatches) =
                     withContext(Dispatchers.Default) {
-                        lanSyncRepository.matchSongsByFocus(spec)
+                        val curWorkKey = ReplayGainAudioProcessor.buildWorkBlockKey(currentSong)
+                        val tail =
+                            if (curWorkKey == null) {
+                                emptyList()
+                            } else {
+                                val queuedTail =
+                                    if (pqSnapshot.index in pqSnapshot.queue.indices) {
+                                        pqSnapshot.queue
+                                            .drop(pqSnapshot.index + 1)
+                                            .takeWhile {
+                                                ReplayGainAudioProcessor.buildWorkBlockKey(it) == curWorkKey
+                                            }
+                                    } else {
+                                        emptyList()
+                                    }
+                                if (queuedTail.isNotEmpty()) {
+                                    queuedTail
+                                } else {
+                                    val recMovements =
+                                        musicRepository
+                                            .findWorkForSong(currentSong)
+                                            ?.recordings
+                                            ?.firstOrNull { it.album.uid == currentSong.album.uid }
+                                            ?.movements
+                                            .orEmpty()
+                                    val pos = recMovements.indexOfFirst { it.uid == currentSong.uid }
+                                    if (pos >= 0 && pos + 1 < recMovements.size) {
+                                        recMovements.subList(pos + 1, recMovements.size)
+                                    } else {
+                                        emptyList()
+                                    }
+                                }
+                            }
+                        val excludedUids = HashSet<Music.UID>(tail.size + 1).apply {
+                            add(currentSong.uid)
+                            tail.forEach { add(it.uid) }
+                        }
+                        val matches =
+                            lanSyncRepository
+                                .matchSongsByFocus(spec)
+                                .filter { it.uid !in excludedUids }
+                        val shuffledMatches = lanSyncRepository.orderSongsWorkShuffle(matches)
+                        tail to shuffledMatches
                     }
                 if (binding == null) return@launch
-                val currentSong = playbackModel.song.value ?: song
-                val freezeQueue = listOf(currentSong) + matches.filter { it.uid != currentSong.uid }
+                val freezeQueue = listOf(currentSong) + tailMovements + remainingMatches
                 if (freezeQueue.size <= 1) {
                     context.showToast(R.string.lbl_scene_no_matches)
                     return@launch

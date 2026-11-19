@@ -108,9 +108,9 @@ public sealed record EqualizerApoProfile(
                     preampDb = db;
                 }
             }
-            else if (line.StartsWith("Filter:", StringComparison.OrdinalIgnoreCase))
+            else if (TryExtractFilterPayload(line, out string payload))
             {
-                string[] tokens = line["Filter:".Length..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                string[] tokens = payload.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
                 if (tokens.Length < 4 || !tokens[0].Equals("ON", StringComparison.OrdinalIgnoreCase))
                     continue;
 
@@ -195,6 +195,24 @@ public sealed record EqualizerApoProfile(
             }
         }
     }
+
+    private static bool TryExtractFilterPayload(string line, out string payload)
+    {
+        payload = "";
+        if (!line.StartsWith("Filter", StringComparison.OrdinalIgnoreCase)) return false;
+        int colonIdx = line.IndexOf(':');
+        if (colonIdx < 6) return false;
+        ReadOnlySpan<char> mid = line.AsSpan(6, colonIdx - 6).Trim();
+        if (!mid.IsEmpty)
+        {
+            foreach (char c in mid)
+            {
+                if (!char.IsAsciiDigit(c)) return false;
+            }
+        }
+        payload = line[(colonIdx + 1)..];
+        return true;
+    }
 }
 
 /// <summary>
@@ -202,20 +220,25 @@ public sealed record EqualizerApoProfile(
 /// </summary>
 public sealed class BiquadFilter64
 {
-    private readonly double _b0, _b1, _b2, _a1, _a2;
+    private double _b0, _b1, _b2, _a1, _a2;
     private readonly double[] _z1;
     private readonly double[] _z2;
 
-    public BiquadChannelScope ChannelScope { get; }
+    public BiquadChannelScope ChannelScope { get; private set; }
 
     public BiquadFilter64(BiquadSpec spec, int sampleRateHz, int channels)
     {
-        ChannelScope = spec.Channel;
         _z1 = new double[Math.Max(channels, 1)];
         _z2 = new double[Math.Max(channels, 1)];
+        UpdateCoefficients(spec, sampleRateHz);
+    }
 
-        double fc = Math.Clamp(spec.FrequencyHz, 10.0, sampleRateHz * 0.49);
-        double w0 = 2.0 * Math.PI * fc / sampleRateHz;
+    public void UpdateCoefficients(BiquadSpec spec, int sampleRateHz)
+    {
+        ChannelScope = spec.Channel;
+        double fs = Math.Max(sampleRateHz, 8000);
+        double fc = Math.Clamp(spec.FrequencyHz, 10.0, fs * 0.49);
+        double w0 = 2.0 * Math.PI * fc / fs;
         double cosW0 = Math.Cos(w0);
         double sinW0 = Math.Sin(w0);
         double q = Math.Max(spec.Q, 0.05);
@@ -322,6 +345,8 @@ public sealed class DualChannelBiquadNode
     private readonly List<BiquadFilter64> _leftChain = [];
     private readonly List<BiquadFilter64> _rightChain = [];
     private readonly List<BiquadFilter64> _extraChain = [];
+    private int _configuredSampleRateHz;
+    private int _configuredChannels;
 
     public int TotalSpecCount { get; private set; }
     public int LeftBandCount => _leftChain.Count;
@@ -329,29 +354,52 @@ public sealed class DualChannelBiquadNode
 
     public void Configure(EqualizerApoProfile? profile, int sampleRateHz, int channels)
     {
-        _leftChain.Clear();
-        _rightChain.Clear();
-        _extraChain.Clear();
-        TotalSpecCount = 0;
+        if (profile is null)
+        {
+            _leftChain.Clear();
+            _rightChain.Clear();
+            _extraChain.Clear();
+            TotalSpecCount = 0;
+            _configuredSampleRateHz = sampleRateHz;
+            _configuredChannels = channels;
+            return;
+        }
 
-        if (profile is null) return;
+        var leftSpecs = new List<BiquadSpec>(profile.Filters.Count);
+        var rightSpecs = new List<BiquadSpec>(profile.Filters.Count);
+        var extraSpecs = new List<BiquadSpec>();
 
         foreach (var spec in profile.Filters)
         {
-            TotalSpecCount++;
-            if (spec.Channel is BiquadChannelScope.All or BiquadChannelScope.Left)
-            {
-                _leftChain.Add(new BiquadFilter64(spec, sampleRateHz, channels));
-            }
-            if (spec.Channel is BiquadChannelScope.All or BiquadChannelScope.Right)
-            {
-                _rightChain.Add(new BiquadFilter64(spec, sampleRateHz, channels));
-            }
-            if (channels > 2 && spec.Channel == BiquadChannelScope.All)
-            {
-                _extraChain.Add(new BiquadFilter64(spec, sampleRateHz, channels));
-            }
+            if (spec.Channel is BiquadChannelScope.All or BiquadChannelScope.Left) leftSpecs.Add(spec);
+            if (spec.Channel is BiquadChannelScope.All or BiquadChannelScope.Right) rightSpecs.Add(spec);
+            if (channels > 2 && spec.Channel == BiquadChannelScope.All) extraSpecs.Add(spec);
         }
+
+        TotalSpecCount = profile.Filters.Count;
+        bool canHotUpdate = _configuredSampleRateHz == sampleRateHz
+            && _configuredChannels == channels
+            && _leftChain.Count == leftSpecs.Count
+            && _rightChain.Count == rightSpecs.Count
+            && _extraChain.Count == extraSpecs.Count;
+
+        if (canHotUpdate)
+        {
+            for (int i = 0; i < leftSpecs.Count; i++) _leftChain[i].UpdateCoefficients(leftSpecs[i], sampleRateHz);
+            for (int i = 0; i < rightSpecs.Count; i++) _rightChain[i].UpdateCoefficients(rightSpecs[i], sampleRateHz);
+            for (int i = 0; i < extraSpecs.Count; i++) _extraChain[i].UpdateCoefficients(extraSpecs[i], sampleRateHz);
+            return;
+        }
+
+        _configuredSampleRateHz = sampleRateHz;
+        _configuredChannels = channels;
+        _leftChain.Clear();
+        _rightChain.Clear();
+        _extraChain.Clear();
+
+        foreach (var s in leftSpecs) _leftChain.Add(new BiquadFilter64(s, sampleRateHz, channels));
+        foreach (var s in rightSpecs) _rightChain.Add(new BiquadFilter64(s, sampleRateHz, channels));
+        foreach (var s in extraSpecs) _extraChain.Add(new BiquadFilter64(s, sampleRateHz, channels));
     }
 
     public double ProcessSample(double x, int channel)

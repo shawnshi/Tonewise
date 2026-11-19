@@ -1067,7 +1067,7 @@ public sealed class WorkbenchP4Tests
             }, debounceMs: 100);
 
             // 1. Internal .tonewise writes & .tmp writes must be ignored
-            File.WriteAllText(Path.Combine(tonewiseDir, "manifest.db-wal"), "ignore");
+            File.WriteAllText(Path.Combine(tonewiseDir, "cache.db-wal"), "ignore");
             File.WriteAllText(Path.Combine(tempDir, "download.tmp"), "ignore");
             await Task.Delay(260);
             Assert.Equal(0, Volatile.Read(ref fireCount));
@@ -1124,6 +1124,66 @@ public sealed class WorkbenchP4Tests
         finally
         {
             SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase2_LibraryFileWatcher_RenameDeliversBothOldAndNewPaths_AndWaitsForActiveWriter()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "tw_p2_watch_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            string oldPath = Path.Combine(tempDir, "old_song.flac");
+            string newPath = Path.Combine(tempDir, "renamed_song.flac");
+            WriteMinimalFlacWithVorbisComments(oldPath, ("TITLE", "Old Title"));
+
+            var renameTcs = new TaskCompletionSource<IReadOnlyList<string>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var watcher = new LibraryFileWatcherService(tempDir, changed =>
+            {
+                if (changed.Any(p => p.EndsWith("renamed_song.flac", StringComparison.OrdinalIgnoreCase)))
+                {
+                    renameTcs.TrySetResult(changed);
+                }
+                return Task.CompletedTask;
+            }, debounceMs: 60);
+
+            File.Move(oldPath, newPath);
+            var renameDone = await Task.WhenAny(renameTcs.Task, Task.Delay(5000));
+            Assert.Same(renameTcs.Task, renameDone);
+            var renamePaths = await renameTcs.Task;
+            Assert.Contains(renamePaths, p => string.Equals(p, oldPath, StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(renamePaths, p => string.Equals(p, newPath, StringComparison.OrdinalIgnoreCase));
+
+            // Active writer holding FileAccess.Write + FileShare.Read must cause watcher probe to wait until writer closes
+            string heldPath = Path.Combine(tempDir, "held_write.flac");
+            var writerReadyTcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var watcher2 = new LibraryFileWatcherService(tempDir, changed =>
+            {
+                if (changed.Any(p => string.Equals(p, heldPath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    writerReadyTcs.TrySetResult(new FileInfo(heldPath).Length);
+                }
+                return Task.CompletedTask;
+            }, debounceMs: 60);
+
+            using (var writer = new FileStream(heldPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+            {
+                writer.Write(new byte[64]);
+                writer.Flush();
+                await Task.Delay(220);
+                writer.Write(new byte[128]);
+                writer.Flush();
+            }
+
+            var writeDone = await Task.WhenAny(writerReadyTcs.Task, Task.Delay(5000));
+            Assert.Same(writerReadyTcs.Task, writeDone);
+            Assert.Equal(192L, await writerReadyTcs.Task);
+        }
+        finally
+        {
             if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
         }
     }

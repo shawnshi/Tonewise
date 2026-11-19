@@ -123,7 +123,7 @@ fn detect_audio_span<R: Read + Seek>(reader: &mut R, file_size: u64) -> io::Resu
         }
     }
 
-    // Check MP4/M4A top-level `ftyp` + `mdat` atom span or RIFF WAVE `data` chunk when starting at 0
+    // Check MP4/M4A top-level `ftyp` + `mdat` atom, RIFF WAVE `data`, DSF `data`, or AIFF/AIFC `SSND`
     if offset == 0 && file_size >= 12 {
         if let Some(wave_span) = find_riff_wave_data_span(reader, file_size)? {
             return Ok(wave_span);
@@ -131,13 +131,17 @@ fn detect_audio_span<R: Read + Seek>(reader: &mut R, file_size: u64) -> io::Resu
         if let Some(mdat_span) = find_mp4_mdat_span(reader, file_size)? {
             return Ok(mdat_span);
         }
+        if let Some(dsf_span) = find_dsf_data_span(reader, file_size)? {
+            return Ok(dsf_span);
+        }
+        if let Some(aiff_span) = find_aiff_ssnd_span(reader, file_size)? {
+            return Ok(aiff_span);
+        }
     }
 
     offset = offset.min(file_size);
-    Ok(AudioSpan {
-        start: offset,
-        end: file_size,
-    })
+    let end = strip_trailing_id3v1_and_apev2(reader, offset, file_size)?;
+    Ok(AudioSpan { start: offset, end })
 }
 
 fn skip_id3v2_if_present<R: Read + Seek>(reader: &mut R, file_size: u64) -> io::Result<u64> {
@@ -185,27 +189,122 @@ fn skip_ogg_header_pages<R: Read + Seek>(
     mut pos: u64,
     file_size: u64,
 ) -> io::Result<u64> {
-    // Skip Identification (page 0) and Comment/Setup header pages (page 1)
-    for _ in 0..2 {
-        if pos + 27 > file_size {
-            break;
-        }
+    // Vorbis has 3 header packets (1=ident, 3=comment, 5=setup); Opus has 2 (OpusHead, OpusTags).
+    // Header pages can span multiple OggS continuation pages (e.g., large album comments or pictures).
+    let mut target_header_packets: Option<usize> = None;
+    let mut completed_packets = 0usize;
+    let mut page_idx = 0usize;
+
+    while page_idx < 128 && pos + 27 <= file_size {
         reader.seek(SeekFrom::Start(pos))?;
         let mut page_hdr = [0u8; 27];
         reader.read_exact(&mut page_hdr)?;
         if &page_hdr[0..4] != b"OggS" {
             break;
         }
+
+        let granule_pos = u64::from_le_bytes(page_hdr[6..14].try_into().unwrap());
+        if page_idx > 0 && granule_pos != 0 && granule_pos != u64::MAX {
+            // Audio packets have begun on this page; stop before consuming it.
+            break;
+        }
+
         let seg_count = page_hdr[26] as usize;
         if pos + 27 + seg_count as u64 > file_size {
             break;
         }
         let mut seg_table = vec![0u8; seg_count];
         reader.read_exact(&mut seg_table)?;
+
+        let payload_pos = pos + 27 + seg_count as u64;
+        if page_idx == 0 {
+            let probe_len = (file_size - payload_pos).min(8) as usize;
+            let mut probe = [0u8; 8];
+            if probe_len > 0 {
+                reader.seek(SeekFrom::Start(payload_pos))?;
+                reader.read_exact(&mut probe[..probe_len])?;
+            }
+            if probe_len >= 7 && &probe[..7] == b"\x01vorbis" {
+                target_header_packets = Some(3);
+            } else if probe_len >= 8 && &probe[..8] == b"OpusHead" {
+                target_header_packets = Some(2);
+            }
+        }
+
         let body_len: u64 = seg_table.iter().map(|&b| b as u64).sum();
-        pos = (pos + 27 + seg_count as u64 + body_len).min(file_size);
+        let next_pos = payload_pos.saturating_add(body_len).min(file_size);
+        if next_pos <= pos {
+            break;
+        }
+        pos = next_pos;
+        page_idx += 1;
+        completed_packets += seg_table.iter().filter(|&&b| b < 255).count();
+
+        match target_header_packets {
+            Some(target) if completed_packets >= target => break,
+            None if page_idx >= 2 => break,
+            _ => {}
+        }
     }
     Ok(pos)
+}
+
+fn strip_trailing_id3v1_and_apev2<R: Read + Seek>(
+    reader: &mut R,
+    start: u64,
+    end: u64,
+) -> io::Result<u64> {
+    let mut cur_end = end.max(start);
+    for _ in 0..2 {
+        let mut trimmed = false;
+
+        // 1. Trailing ID3v1 / ID3v1.1 (128 bytes starting with "TAG")
+        if cur_end >= start + 128 {
+            reader.seek(SeekFrom::Start(cur_end - 128))?;
+            let mut id3v1_magic = [0u8; 3];
+            reader.read_exact(&mut id3v1_magic)?;
+            if &id3v1_magic == b"TAG" {
+                cur_end -= 128;
+                trimmed = true;
+            }
+        }
+
+        // 2. Trailing APEv1 / APEv2 tag footer (32 bytes ending at cur_end)
+        if cur_end >= start + 32 {
+            reader.seek(SeekFrom::Start(cur_end - 32))?;
+            let mut footer = [0u8; 32];
+            reader.read_exact(&mut footer)?;
+            if &footer[0..8] == b"APETAGEX" {
+                let version = u32::from_le_bytes(footer[8..12].try_into().unwrap());
+                let tag_size = u32::from_le_bytes(footer[12..16].try_into().unwrap()) as u64;
+                let flags = u32::from_le_bytes(footer[20..24].try_into().unwrap());
+                let is_footer = (flags & 0x2000_0000) == 0;
+                if (version == 1000 || version == 2000) && is_footer && tag_size >= 32 {
+                    let has_header = (flags & 0x8000_0000) != 0;
+                    let total_ape = tag_size.saturating_add(if has_header { 32 } else { 0 });
+                    if cur_end >= start + total_ape {
+                        let header_ok = if has_header {
+                            reader.seek(SeekFrom::Start(cur_end - total_ape))?;
+                            let mut hdr_magic = [0u8; 8];
+                            reader.read_exact(&mut hdr_magic)?;
+                            &hdr_magic == b"APETAGEX"
+                        } else {
+                            true
+                        };
+                        if header_ok {
+                            cur_end -= total_ape;
+                            trimmed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !trimmed {
+            break;
+        }
+    }
+    Ok(cur_end)
 }
 
 fn find_mp4_mdat_span<R: Read + Seek>(
@@ -242,7 +341,13 @@ fn find_mp4_mdat_span<R: Read + Seek>(
         if total_size < header_bytes {
             break;
         }
-        let end = (pos + total_size).min(file_size);
+        let end = pos
+            .checked_add(total_size)
+            .map(|e| e.min(file_size))
+            .unwrap_or(file_size);
+        if end <= pos {
+            break;
+        }
         if box_type == b"mdat" {
             return Ok(Some(AudioSpan {
                 start: pos + header_bytes,
@@ -280,6 +385,102 @@ fn find_riff_wave_data_span<R: Read + Seek>(
         }
         let padded = chunk_len + (chunk_len & 1);
         pos = data_start.saturating_add(padded);
+    }
+    Ok(None)
+}
+
+fn find_dsf_data_span<R: Read + Seek>(
+    reader: &mut R,
+    file_size: u64,
+) -> io::Result<Option<AudioSpan>> {
+    if file_size < 28 {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::Start(0))?;
+    let mut dsd_hdr = [0u8; 28];
+    if reader.read_exact(&mut dsd_hdr).is_err() || &dsd_hdr[0..4] != b"DSD " {
+        return Ok(None);
+    }
+    let chunk0_size = u64::from_le_bytes(dsd_hdr[4..12].try_into().unwrap());
+    if chunk0_size < 28 || chunk0_size > file_size {
+        return Ok(None);
+    }
+    let metadata_offset = u64::from_le_bytes(dsd_hdr[20..28].try_into().unwrap());
+    let audio_limit = if metadata_offset >= chunk0_size && metadata_offset <= file_size {
+        metadata_offset
+    } else {
+        file_size
+    };
+
+    let mut pos = chunk0_size;
+    while pos + 12 <= audio_limit {
+        reader.seek(SeekFrom::Start(pos))?;
+        let mut chunk_hdr = [0u8; 12];
+        reader.read_exact(&mut chunk_hdr)?;
+        let chunk_size = u64::from_le_bytes(chunk_hdr[4..12].try_into().unwrap());
+        if chunk_size < 12 {
+            break;
+        }
+        let end = pos
+            .checked_add(chunk_size)
+            .map(|e| e.min(audio_limit))
+            .unwrap_or(audio_limit);
+        if end <= pos {
+            break;
+        }
+        if &chunk_hdr[0..4] == b"data" {
+            return Ok(Some(AudioSpan {
+                start: pos + 12,
+                end,
+            }));
+        }
+        pos = end;
+    }
+    Ok(None)
+}
+
+fn find_aiff_ssnd_span<R: Read + Seek>(
+    reader: &mut R,
+    file_size: u64,
+) -> io::Result<Option<AudioSpan>> {
+    if file_size < 12 {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::Start(0))?;
+    let mut form = [0u8; 12];
+    if reader.read_exact(&mut form).is_err()
+        || &form[0..4] != b"FORM"
+        || (&form[8..12] != b"AIFF" && &form[8..12] != b"AIFC")
+    {
+        return Ok(None);
+    }
+
+    let mut pos = 12u64;
+    while pos + 8 <= file_size {
+        reader.seek(SeekFrom::Start(pos))?;
+        let mut hdr = [0u8; 8];
+        reader.read_exact(&mut hdr)?;
+        let chunk_len = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+        let body_start = pos + 8;
+        let body_end = body_start.saturating_add(chunk_len).min(file_size);
+        if &hdr[0..4] == b"SSND" {
+            // Skip 8-byte SSND offset + blockSize fields when present
+            let ssnd_start = if chunk_len >= 8 && body_start + 8 <= body_end {
+                body_start + 8
+            } else {
+                body_start
+            };
+            return Ok(Some(AudioSpan {
+                start: ssnd_start,
+                end: body_end,
+            }));
+        }
+        let padded = chunk_len + (chunk_len & 1);
+        let next_pos = body_start.saturating_add(padded);
+        if next_pos <= pos {
+            break;
+        }
+        pos = next_pos;
     }
     Ok(None)
 }
@@ -373,5 +574,205 @@ mod tests {
         assert_eq!(fp1.audio_frame_blake3_hex, fp2.audio_frame_blake3_hex);
         assert_ne!(fp1.header_blake3_hex, fp2.header_blake3_hex);
         assert_ne!(fp1.audio_frame_blake3_hex, fp3.audio_frame_blake3_hex);
+    }
+
+    #[test]
+    fn mp4_malformed_largesize_overflow_terminates_cleanly() {
+        let mut data = Vec::new();
+        // Valid 8-byte ftyp atom at offset 0 so next atom starts at pos = 8
+        data.extend_from_slice(&8u32.to_be_bytes());
+        data.extend_from_slice(b"ftyp");
+        // Malformed 64-bit largesize box (size32 == 1) with total_size = u64::MAX - 4
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(b"free");
+        data.extend_from_slice(&(u64::MAX - 4).to_be_bytes());
+        data.extend_from_slice(b"trailing_payload_bytes");
+
+        let fp = compute_audio_frame_fingerprint(&mut Cursor::new(&data)).unwrap();
+        assert_eq!(fp.file_size, data.len() as u64);
+    }
+
+    fn build_ogg_page(granule_pos: u64, payload_segments: &[&[u8]], continues_last: bool) -> Vec<u8> {
+        let mut page = Vec::new();
+        page.extend_from_slice(b"OggS");
+        page.push(0); // stream_structure_version
+        page.push(0); // header_type_flag
+        page.extend_from_slice(&granule_pos.to_le_bytes());
+        page.extend_from_slice(&1u32.to_le_bytes()); // serial
+        page.extend_from_slice(&0u32.to_le_bytes()); // page seq
+        page.extend_from_slice(&0u32.to_le_bytes()); // crc
+
+        let mut laces = Vec::new();
+        let mut body = Vec::new();
+        for (idx, seg) in payload_segments.iter().enumerate() {
+            let mut rem = seg.len();
+            while rem >= 255 {
+                laces.push(255u8);
+                rem -= 255;
+            }
+            if !continues_last || idx < payload_segments.len() - 1 {
+                laces.push(rem as u8);
+            }
+            body.extend_from_slice(seg);
+        }
+        page.push(laces.len() as u8);
+        page.extend_from_slice(&laces);
+        page.extend_from_slice(&body);
+        page
+    }
+
+    #[test]
+    fn ogg_multipage_vorbis_and_opus_headers_are_tag_invariant() {
+        let vorbis_id = b"\x01vorbis_id_header";
+        let vorbis_setup = b"\x05vorbis_setup_header";
+        let vorbis_audio = b"VORBIS_AUDIO_FRAME_BYTES_XYZ";
+        let opus_id = b"OpusHead_id_header";
+        let opus_audio = b"OPUS_AUDIO_FRAME_BYTES_XYZ";
+
+        // Case A: Small Vorbis comment fits on page 1 alongside setup packet; Case B: multi-page comment spans page 1+2 before page 3 setup
+        let mut vorbis_v1 = Vec::new();
+        vorbis_v1.extend_from_slice(&build_ogg_page(0, &[vorbis_id], false));
+        vorbis_v1.extend_from_slice(&build_ogg_page(0, &[b"\x03vorbisSMALL", vorbis_setup], false));
+        vorbis_v1.extend_from_slice(&build_ogg_page(1024, &[vorbis_audio], false));
+
+        let big_comment = vec![b'A'; 510]; // two 255-byte continuation segments
+        let mut vorbis_v2 = Vec::new();
+        vorbis_v2.extend_from_slice(&build_ogg_page(0, &[vorbis_id], false));
+        vorbis_v2.extend_from_slice(&build_ogg_page(u64::MAX, &[&big_comment], true));
+        vorbis_v2.extend_from_slice(&build_ogg_page(0, &[b"_END", vorbis_setup], false));
+        vorbis_v2.extend_from_slice(&build_ogg_page(1024, &[vorbis_audio], false));
+
+        let vfp1 = compute_audio_frame_fingerprint(&mut Cursor::new(&vorbis_v1)).unwrap();
+        let vfp2 = compute_audio_frame_fingerprint(&mut Cursor::new(&vorbis_v2)).unwrap();
+        assert_eq!(vfp1.audio_frame_blake3_hex, vfp2.audio_frame_blake3_hex);
+        assert_ne!(vfp1.header_blake3_hex, vfp2.header_blake3_hex);
+
+        // Opus: Case A 2 pages vs Case B 3 pages (multi-page OpusTags)
+        let mut opus_v1 = Vec::new();
+        opus_v1.extend_from_slice(&build_ogg_page(0, &[opus_id], false));
+        opus_v1.extend_from_slice(&build_ogg_page(0, &[b"OpusTags_small"], false));
+        opus_v1.extend_from_slice(&build_ogg_page(960, &[opus_audio], false));
+
+        let mut opus_v2 = Vec::new();
+        opus_v2.extend_from_slice(&build_ogg_page(0, &[opus_id], false));
+        opus_v2.extend_from_slice(&build_ogg_page(u64::MAX, &[&big_comment], true));
+        opus_v2.extend_from_slice(&build_ogg_page(0, &[b"OpusTags_tail"], false));
+        opus_v2.extend_from_slice(&build_ogg_page(960, &[opus_audio], false));
+
+        let ofp1 = compute_audio_frame_fingerprint(&mut Cursor::new(&opus_v1)).unwrap();
+        let ofp2 = compute_audio_frame_fingerprint(&mut Cursor::new(&opus_v2)).unwrap();
+        assert_eq!(ofp1.audio_frame_blake3_hex, ofp2.audio_frame_blake3_hex);
+        assert_ne!(ofp1.header_blake3_hex, ofp2.header_blake3_hex);
+    }
+
+    #[test]
+    fn mp3_trailing_id3v1_and_apev2_tags_are_stripped_from_audio_fingerprint() {
+        let audio = b"RAW_MP3_FRAMES_0123456789ABCDEF_PAYLOAD";
+
+        let mut ape_footer = [0u8; 32];
+        ape_footer[0..8].copy_from_slice(b"APETAGEX");
+        ape_footer[8..12].copy_from_slice(&2000u32.to_le_bytes());
+        let ape_item = b"\x05\x00\x00\x00\x00\x00\x00\x00TITLE\x00Hello";
+        let ape_size = (32 + ape_item.len()) as u32;
+        ape_footer[12..16].copy_from_slice(&ape_size.to_le_bytes());
+        ape_footer[16..20].copy_from_slice(&1u32.to_le_bytes());
+        ape_footer[20..24].copy_from_slice(&0x8000_0000u32.to_le_bytes()); // has header, this is footer
+
+        let mut ape_header = ape_footer;
+        ape_header[20..24].copy_from_slice(&0xA000_0000u32.to_le_bytes()); // header flag
+
+        let mut id3v1 = [0u8; 128];
+        id3v1[0..3].copy_from_slice(b"TAG");
+        id3v1[3..8].copy_from_slice(b"Track");
+
+        let mut tagged = Vec::new();
+        tagged.extend_from_slice(audio);
+        tagged.extend_from_slice(&ape_header);
+        tagged.extend_from_slice(ape_item);
+        tagged.extend_from_slice(&ape_footer);
+        tagged.extend_from_slice(&id3v1);
+
+        let fp_plain = compute_audio_frame_fingerprint(&mut Cursor::new(audio)).unwrap();
+        let fp_tagged = compute_audio_frame_fingerprint(&mut Cursor::new(&tagged)).unwrap();
+        assert_eq!(fp_plain.audio_frame_blake3_hex, fp_tagged.audio_frame_blake3_hex);
+        assert_ne!(fp_plain.header_blake3_hex, fp_tagged.header_blake3_hex);
+    }
+
+    #[test]
+    fn dsf_and_aiff_audio_fingerprints_are_tag_invariant() {
+        // Synthetic DSF with and without trailing ID3v2 pointed to by metadata_offset
+        let dsd_samples = b"DSD_AUDIO_STREAM_BYTES_0123456789";
+        let make_dsf = |id3_tail: &[u8]| {
+            let fmt_chunk_len = 52u64;
+            let data_chunk_len = 12u64 + dsd_samples.len() as u64;
+            let meta_offset = if id3_tail.is_empty() { 0u64 } else { 28 + fmt_chunk_len + data_chunk_len };
+            let total_size = 28 + fmt_chunk_len + data_chunk_len + id3_tail.len() as u64;
+            let mut out = Vec::new();
+            out.extend_from_slice(b"DSD ");
+            out.extend_from_slice(&28u64.to_le_bytes());
+            out.extend_from_slice(&total_size.to_le_bytes());
+            out.extend_from_slice(&meta_offset.to_le_bytes());
+            out.extend_from_slice(b"fmt ");
+            out.extend_from_slice(&fmt_chunk_len.to_le_bytes());
+            out.extend_from_slice(&[0u8; 40]);
+            out.extend_from_slice(b"data");
+            out.extend_from_slice(&data_chunk_len.to_le_bytes());
+            out.extend_from_slice(dsd_samples);
+            out.extend_from_slice(id3_tail);
+            out
+        };
+        let dsf1 = make_dsf(b"");
+        let dsf2 = make_dsf(b"ID3_TAIL_METADATA_V2");
+        let dfp1 = compute_audio_frame_fingerprint(&mut Cursor::new(&dsf1)).unwrap();
+        let dfp2 = compute_audio_frame_fingerprint(&mut Cursor::new(&dsf2)).unwrap();
+        assert_eq!(dfp1.audio_frame_blake3_hex, dfp2.audio_frame_blake3_hex);
+        assert_ne!(dfp1.header_blake3_hex, dfp2.header_blake3_hex);
+
+        // Synthetic AIFF with NAME + trailing ID3 chunks
+        let ssnd_samples = b"AIFF_PCM_SAMPLE_FRAMES";
+        let make_aiff = |name_bytes: &[u8], id3_bytes: &[u8]| {
+            let mut body = Vec::new();
+            body.extend_from_slice(b"COMM");
+            body.extend_from_slice(&18u32.to_be_bytes());
+            body.extend_from_slice(&[0u8; 18]);
+
+            body.extend_from_slice(b"NAME");
+            body.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
+            body.extend_from_slice(name_bytes);
+            if name_bytes.len() % 2 == 1 {
+                body.push(0);
+            }
+
+            let ssnd_len = (8 + ssnd_samples.len()) as u32;
+            body.extend_from_slice(b"SSND");
+            body.extend_from_slice(&ssnd_len.to_be_bytes());
+            body.extend_from_slice(&[0u8; 8]); // offset + blockSize
+            body.extend_from_slice(ssnd_samples);
+            if ssnd_samples.len() % 2 == 1 {
+                body.push(0);
+            }
+
+            if !id3_bytes.is_empty() {
+                body.extend_from_slice(b"ID3 ");
+                body.extend_from_slice(&(id3_bytes.len() as u32).to_be_bytes());
+                body.extend_from_slice(id3_bytes);
+                if id3_bytes.len() % 2 == 1 {
+                    body.push(0);
+                }
+            }
+
+            let mut out = Vec::new();
+            out.extend_from_slice(b"FORM");
+            out.extend_from_slice(&((4 + body.len()) as u32).to_be_bytes());
+            out.extend_from_slice(b"AIFF");
+            out.extend_from_slice(&body);
+            out
+        };
+        let aiff1 = make_aiff(b"A1", b"");
+        let aiff2 = make_aiff(b"RenamedTitle", b"ID3_TAG_V2");
+        let afp1 = compute_audio_frame_fingerprint(&mut Cursor::new(&aiff1)).unwrap();
+        let afp2 = compute_audio_frame_fingerprint(&mut Cursor::new(&aiff2)).unwrap();
+        assert_eq!(afp1.audio_frame_blake3_hex, afp2.audio_frame_blake3_hex);
+        assert_ne!(afp1.header_blake3_hex, afp2.header_blake3_hex);
     }
 }
