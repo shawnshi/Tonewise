@@ -54,7 +54,6 @@ import com.shawnshi.tonewise.home.list.SceneListFragment
 import com.shawnshi.tonewise.home.list.SongListFragment
 import com.shawnshi.tonewise.home.tabs.NamedTabStrategy
 import com.shawnshi.tonewise.home.tabs.Tab
-import com.shawnshi.tonewise.home.tabs.TabCustomizeDialog
 import com.shawnshi.tonewise.list.ListViewModel
 import com.shawnshi.tonewise.list.SelectionFragment
 import com.shawnshi.tonewise.list.menu.Menu
@@ -225,28 +224,6 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
             R.id.action_about -> {
                 L.d("Navigating to about")
                 homeModel.showAbout()
-                true
-            }
-
-            // Handle sort menu
-            R.id.action_sort -> {
-                if (homeModel.currentTabType.value == MusicType.SCENES) {
-                    TabCustomizeDialog().show(parentFragmentManager, "TabCustomizeDialog")
-                    return true
-                }
-                // Junk click event when opening the menu
-                val directions =
-                    when (homeModel.currentTabType.value) {
-                        MusicType.SONGS -> HomeFragmentDirections.sortSongs()
-                        MusicType.ALBUMS -> HomeFragmentDirections.sortAlbums()
-                        MusicType.ARTISTS -> HomeFragmentDirections.sortArtists()
-                        MusicType.COMPOSERS -> HomeFragmentDirections.sortComposers()
-                        MusicType.CONDUCTORS -> HomeFragmentDirections.sortConductors()
-                        MusicType.GENRES -> HomeFragmentDirections.sortGenres()
-                        MusicType.PLAYLISTS -> HomeFragmentDirections.sortPlaylists()
-                        MusicType.SCENES -> error("Handled above")
-                    }
-                findNavController().navigateSafe(directions)
                 true
             }
             else -> {

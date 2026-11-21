@@ -54,6 +54,9 @@ public sealed class TonewiseAudioEngine : IDisposable
     private bool _tpdfDitherEnabled = true;
     private volatile bool _isDsdSource;
     private bool _isAsioActive;
+    private volatile bool _pausePending;
+    private long _transportOpGen;
+    private int _outputLatencyMs = 100;
     private volatile BypassSnapshot _bypassSnapshot = new(false, 0.0, false, false, false, false);
 
     private sealed record BypassSnapshot(
@@ -70,7 +73,16 @@ public sealed class TonewiseAudioEngine : IDisposable
     public event Action<string>? PlaybackError;
 
     public string? CurrentFilePath { get; private set; }
-    public bool IsPlaying => _output?.PlaybackState == PlaybackState.Playing;
+    public bool IsPlaying
+    {
+        get
+        {
+            lock (_engineLock)
+            {
+                return !_pausePending && _output?.PlaybackState == PlaybackState.Playing;
+            }
+        }
+    }
 
     public EqualizerApoProfile? ActiveProfile
     {
@@ -478,6 +490,7 @@ public sealed class TonewiseAudioEngine : IDisposable
                 }
 
                 _isAsioActive = asioOk;
+                _outputLatencyMs = asioOk ? 40 : (exclusiveOk ? 60 : 100);
                 dsp.IsBypassed = ShouldBypassDspLocked(exclusiveOk);
 
                 var capturedSource = sourceSamples;
@@ -569,7 +582,12 @@ public sealed class TonewiseAudioEngine : IDisposable
                 signalSnapshotToNotify = UpdateSignalPathSnapshotLocked(exclusiveOk);
                 if (!startPaused)
                 {
+                    dsp.BeginTransportFadeIn(durationMs: 10.0, startFromZero: true);
                     player.Play();
+                }
+                else
+                {
+                    dsp.BeginTransportFadeIn(durationMs: 15.0, startFromZero: true);
                 }
             }
             catch (Exception ex)
@@ -830,13 +848,13 @@ public sealed class TonewiseAudioEngine : IDisposable
         lock (_engineLock)
         {
             if (_output is null) return;
-            if (_output.PlaybackState == PlaybackState.Playing)
+            if (!_pausePending && _output.PlaybackState == PlaybackState.Playing)
             {
-                _output.Pause();
+                BeginSmoothPauseLocked();
             }
             else
             {
-                _output.Play();
+                ResumeFromPauseLocked();
             }
         }
     }
@@ -845,10 +863,83 @@ public sealed class TonewiseAudioEngine : IDisposable
     {
         lock (_engineLock)
         {
-            if (_output?.PlaybackState == PlaybackState.Playing)
+            BeginSmoothPauseLocked();
+        }
+    }
+
+    private void BeginSmoothPauseLocked()
+    {
+        if (_output is null || _pausePending || _output.PlaybackState != PlaybackState.Playing)
+        {
+            return;
+        }
+
+        _pausePending = true;
+        long gen = Interlocked.Increment(ref _transportOpGen);
+        IWavePlayer capturedOutput = _output;
+        DspSampleProvider? capturedDsp = _dsp;
+        int sampleRate = Math.Max(capturedDsp?.WaveFormat.SampleRate ?? 48000, 8000);
+        int latencyMs = Math.Clamp(_outputLatencyMs, 40, 110);
+        int requiredSilenceFrames = (int)Math.Ceiling(sampleRate * (latencyMs / 1000.0));
+        int maxWaitMs = latencyMs + 45;
+
+        capturedDsp?.BeginTransportFadeOut(durationMs: 15.0);
+
+        _ = Task.Run(() =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < maxWaitMs)
             {
-                _output.Pause();
+                if (Volatile.Read(ref _transportOpGen) != gen)
+                {
+                    return;
+                }
+                if (capturedDsp is null || capturedDsp.HasDrainedPauseSilence(requiredSilenceFrames))
+                {
+                    break;
+                }
+                Thread.Sleep(5);
             }
+
+            lock (_engineLock)
+            {
+                if (Volatile.Read(ref _transportOpGen) == gen && ReferenceEquals(_output, capturedOutput))
+                {
+                    try
+                    {
+                        if (capturedOutput.PlaybackState == PlaybackState.Playing)
+                        {
+                            capturedOutput.Pause();
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore device pause transient during teardown
+                    }
+                    _pausePending = false;
+                }
+            }
+        });
+    }
+
+    private void ResumeFromPauseLocked()
+    {
+        if (_output is null) return;
+        Interlocked.Increment(ref _transportOpGen);
+
+        if (_pausePending)
+        {
+            _pausePending = false;
+            _dsp?.BeginTransportFadeIn(durationMs: 15.0, startFromZero: false);
+            if (_output.PlaybackState != PlaybackState.Playing)
+            {
+                _output.Play();
+            }
+        }
+        else if (_output.PlaybackState != PlaybackState.Playing)
+        {
+            _dsp?.BeginTransportFadeIn(durationMs: 15.0, startFromZero: true);
+            _output.Play();
         }
     }
 
@@ -884,6 +975,10 @@ public sealed class TonewiseAudioEngine : IDisposable
                 dsd.SeekFraction(clamped);
             }
             _dsp?.ResetFilterStates();
+            if (!_pausePending && _output?.PlaybackState == PlaybackState.Playing)
+            {
+                _dsp?.BeginTransportFadeIn(durationMs: 12.0, startFromZero: true);
+            }
         }
     }
 
@@ -1022,6 +1117,8 @@ public sealed class TonewiseAudioEngine : IDisposable
 
     private DetachedPlaybackHandles DetachPlaybackHandlesLocked()
     {
+        Interlocked.Increment(ref _transportOpGen);
+        _pausePending = false;
         CurrentFilePath = null;
         var detached = new DetachedPlaybackHandles(_output, _sourceDisposable, _device, _dsp);
         _output = null;

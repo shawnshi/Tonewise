@@ -19,6 +19,7 @@
 package com.shawnshi.tonewise.music
 
 import android.content.Context
+import android.content.Intent
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.UUID
 import javax.inject.Inject
@@ -27,6 +28,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import com.shawnshi.tonewise.AuxioService
+import com.shawnshi.tonewise.IntegerTable
 import com.shawnshi.tonewise.image.covers.SettingCovers
 import com.shawnshi.tonewise.music.MusicRepository.IndexingWorker
 import com.shawnshi.tonewise.music.locations.LocationMode
@@ -282,6 +285,24 @@ sealed interface IndexingState {
     data class Completed(val error: Exception?) : IndexingState
 }
 
+internal class PendingIndexCoordinator {
+    private var pendingWithCache: Boolean? = null
+
+    @Synchronized
+    fun queueOrMerge(withCache: Boolean): Boolean {
+        val merged = pendingWithCache?.let { it && withCache } ?: withCache
+        pendingWithCache = merged
+        return merged
+    }
+
+    @Synchronized
+    fun consume(): Boolean? {
+        val next = pendingWithCache
+        pendingWithCache = null
+        return next
+    }
+}
+
 class MusicRepositoryImpl
 @Inject
 constructor(
@@ -295,6 +316,7 @@ constructor(
     private val updateListeners = mutableListOf<MusicRepository.UpdateListener>()
     private val indexingListeners = mutableListOf<MusicRepository.IndexingListener>()
     @Volatile private var indexingWorker: IndexingWorker? = null
+    private val pendingIndex = PendingIndexCoordinator()
 
     @Volatile override var library: MutableLibrary? = null
     @Volatile private var composerMap: Map<String, PersonArtist> = emptyMap()
@@ -350,6 +372,11 @@ constructor(
         }
         L.d("Registering worker $worker")
         indexingWorker = worker
+        val pending = pendingIndex.consume()
+        if (pending != null) {
+            L.d("Flushing queued pending index [cache=$pending]")
+            worker.requestIndex(pending)
+        }
     }
 
     @Synchronized
@@ -431,7 +458,21 @@ constructor(
     @Synchronized
     override fun requestIndex(withCache: Boolean) {
         L.d("Requesting index operation [cache=$withCache]")
-        indexingWorker?.requestIndex(withCache)
+        val worker = indexingWorker
+        if (worker != null) {
+            pendingIndex.consume()
+            worker.requestIndex(withCache)
+        } else {
+            val queued = pendingIndex.queueOrMerge(withCache)
+            L.d("No indexing worker attached; queued pending index [cache=$queued] and starting AuxioService")
+            runCatching {
+                context.startService(
+                    Intent(context, AuxioService::class.java)
+                        .setAction(AuxioService.ACTION_START)
+                        .putExtra(AuxioService.INTENT_KEY_START_ID, IntegerTable.START_ID_ACTIVITY)
+                )
+            }.onFailure { L.w(it, "Unable to start AuxioService for pending index") }
+        }
     }
 
     override suspend fun index(worker: IndexingWorker, withCache: Boolean) {
@@ -500,7 +541,7 @@ constructor(
                 emitLibrary(cachedLibrary)
             }
         }
-        val isBackgroundRefresh = withCache && this.library != null
+        val isBackgroundRefresh = withCache && (this.library?.songs?.isNotEmpty() == true)
         L.d("Running index [background=$isBackgroundRefresh]...")
         val start = System.currentTimeMillis()
         val result =

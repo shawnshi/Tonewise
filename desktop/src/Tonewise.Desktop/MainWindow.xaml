@@ -114,33 +114,37 @@
                     ToolTipService.ToolTip="展开 / 折叠导航栏">
                     <FontIcon Glyph="&#xE700;" FontSize="16" />
                 </Button>
-                <Border
-                    Width="26"
-                    Height="26"
-                    CornerRadius="6"
-                    Background="{ThemeResource TwBg1A2232Brush}"
-                    BorderBrush="{ThemeResource TwLine55D9B372Brush}"
-                    BorderThickness="1"
-                    VerticalAlignment="Center">
-                    <Image x:Name="TitleBarLogoImage" Width="18" Height="18" Stretch="Uniform" />
-                </Border>
+                <Viewbox
+                    Width="22"
+                    Height="22"
+                    Margin="2,0,2,0"
+                    VerticalAlignment="Center"
+                    AutomationProperties.AccessibilityView="Raw">
+                    <Canvas Width="32" Height="32">
+                        <Rectangle Canvas.Left="1.8" Canvas.Top="12.6" Width="2.2" Height="5.6" RadiusX="1.1" RadiusY="1.1" Fill="{ThemeResource TwFgCBD5E1Brush}" Opacity="0.78" />
+                        <Rectangle Canvas.Left="5.4" Canvas.Top="10.0" Width="2.2" Height="10.8" RadiusX="1.1" RadiusY="1.1" Fill="{ThemeResource TwFgCBD5E1Brush}" Opacity="0.78" />
+                        <Rectangle Canvas.Left="9.0" Canvas.Top="10.0" Width="2.2" Height="14.2" RadiusX="1.1" RadiusY="1.1" Fill="{ThemeResource TwFgCBD5E1Brush}" Opacity="0.86" />
+                        <Rectangle Canvas.Left="20.8" Canvas.Top="10.0" Width="2.2" Height="14.2" RadiusX="1.1" RadiusY="1.1" Fill="{ThemeResource TwFgCBD5E1Brush}" Opacity="0.86" />
+                        <Rectangle Canvas.Left="24.4" Canvas.Top="10.0" Width="2.2" Height="10.8" RadiusX="1.1" RadiusY="1.1" Fill="{ThemeResource TwFgCBD5E1Brush}" Opacity="0.78" />
+                        <Rectangle Canvas.Left="28.0" Canvas.Top="12.6" Width="2.2" Height="5.6" RadiusX="1.1" RadiusY="1.1" Fill="{ThemeResource TwFgCBD5E1Brush}" Opacity="0.78" />
+                        <Path Data="F0 M 7,4.6 H 25 V 7.2 H 19.4 V 18.5 C 19.4,20.8 18.0,21.9 17.3,22.8 V 27.4 H 14.7 V 22.8 C 14.0,21.9 12.6,20.8 12.6,18.5 V 7.2 H 7 Z M 15.0,7.4 V 19.2 C 15.0,19.9 15.4,20.4 16.0,20.4 C 16.6,20.4 17.0,19.9 17.0,19.2 V 7.4 Z">
+                            <Path.Fill>
+                                <LinearGradientBrush StartPoint="0.1,0" EndPoint="0.9,1">
+                                    <GradientStop Color="#F0D492" Offset="0" />
+                                    <GradientStop Color="#D9B372" Offset="0.55" />
+                                    <GradientStop Color="#B88E48" Offset="1" />
+                                </LinearGradientBrush>
+                            </Path.Fill>
+                        </Path>
+                    </Canvas>
+                </Viewbox>
                 <TextBlock
                     Text="Tonewise"
                     FontSize="14"
                     FontWeight="SemiBold"
+                    CharacterSpacing="20"
                     Foreground="{ThemeResource TwFgD9B372Brush}"
                     VerticalAlignment="Center" />
-                <Button
-                    Style="{StaticResource StudioChipButtonStyle}"
-                    Click="OnOpenFolderClick"
-                    Padding="10,5"
-                    AutomationProperties.Name="打开本地曲库目录"
-                    ToolTipService.ToolTip="选择并索引本地音乐库目录">
-                    <StackPanel Orientation="Horizontal" Spacing="6">
-                        <FontIcon Glyph="&#xE8B7;" FontSize="14" />
-                        <TextBlock Text="打开曲库" />
-                    </StackPanel>
-                </Button>
             </StackPanel>
 
             <!-- Global AutoSuggestBox (isolated from TitleBar drag region) -->
@@ -584,7 +588,7 @@
                                     </StackPanel>
                                 </Border>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button Style="{StaticResource GoldActionButtonStyle}" Content="基于当前时间生成并载入 50 首 AutoDJ 歌单" Command="{x:Bind ViewModel.GenerateAutoDjPlaylistCommand}" />
+                                    <Button Style="{StaticResource GoldActionButtonStyle}" Content="基于当前时间生成并载入 50 首 AutoDJ 列表" Command="{x:Bind ViewModel.GenerateAutoDjPlaylistCommand}" />
                                     <Button Style="{StaticResource StudioChipButtonStyle}" Content="从首曲起播当前序列" Command="{x:Bind ViewModel.PlayFilteredFromStartCommand}" />
                                 </StackPanel>
                             </StackPanel>
@@ -796,6 +800,9 @@
                                     <Button Style="{StaticResource StudioChipButtonStyle}" Click="OnEditPlaylistClick">
                                         <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE70F;" FontSize="14" /><TextBlock Text="编辑" /></StackPanel>
                                     </Button>
+                                    <Button Style="{StaticResource StudioChipButtonStyle}" Click="OnRematchPlaylistsClick" ToolTipService.ToolTip="按最新匹配算法重新匹配歌单中的未匹配曲目与失效路径，并将更新写回 .m3u8">
+                                        <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE72C;" FontSize="14" /><TextBlock Text="重匹曲库" /></StackPanel>
+                                    </Button>
                                     <ToggleButton
                                         x:Name="PlaylistMultiSelectToggleButton"
                                         IsChecked="{x:Bind ViewModel.IsPlaylistMultiSelectMode, Mode=TwoWay}"
@@ -837,6 +844,11 @@
                                         <MenuFlyoutItem Text="发送到手机（订阅）" Click="OnContextSendPlaylistCardToPhoneClick">
                                             <MenuFlyoutItem.Icon>
                                                 <FontIcon Glyph="&#xE8EA;" />
+                                            </MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                        <MenuFlyoutItem Text="重匹本地曲库并保存" Click="OnContextRematchPlaylistCardClick">
+                                            <MenuFlyoutItem.Icon>
+                                                <FontIcon Glyph="&#xE72C;" />
                                             </MenuFlyoutItem.Icon>
                                         </MenuFlyoutItem>
                                         <MenuFlyoutItem Text="删除歌单" Click="OnContextDeletePlaylistCardClick">

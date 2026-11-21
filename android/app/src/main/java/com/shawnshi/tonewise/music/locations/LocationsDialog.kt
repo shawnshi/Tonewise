@@ -35,6 +35,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.DialogMusicLocationsBinding
+import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.MusicSettings
 import com.shawnshi.tonewise.ui.ViewBindingMaterialDialogFragment
 import com.shawnshi.tonewise.util.getAttrColorCompat
@@ -82,6 +83,7 @@ class LocationsDialog : ViewBindingMaterialDialogFragment<DialogMusicLocationsBi
     private var localOnlyOpenDocumentTreeLauncher: ActivityResultLauncher<Uri?>? = null
     private var storagePermissionLauncher: ActivityResultLauncher<String>? = null
     @Inject lateinit var musicSettings: MusicSettings
+    @Inject lateinit var musicRepository: MusicRepository
 
     private var isFilePickerMode = true
     private var isIncludeMode = true
@@ -179,9 +181,12 @@ class LocationsDialog : ViewBindingMaterialDialogFragment<DialogMusicLocationsBi
         // Set up add folder buttons
         binding.locationsIncludeAdd.setOnClickListener {
             pendingLocationCallback = { location ->
-                location.open(requireContext())?.let { opened ->
+                val opened = location.open(requireContext())
+                if (opened != null) {
                     includeLocationAdapter.add(opened)
                     updateSaveButtonState()
+                } else {
+                    requireContext().showToast(R.string.err_bad_location)
                 }
             }
             onNewLocation(openDocumentTreeLauncher)
@@ -580,11 +585,15 @@ class LocationsDialog : ViewBindingMaterialDialogFragment<DialogMusicLocationsBi
         musicSettings.locationMode =
             if (isFilePickerMode) LocationMode.SAF else LocationMode.MEDIA_STORE
 
-        // If no configuration changed but permission was granted in this session,
-        // force a location update
-        if (!configChanged && permissionGrantedInSession) {
-            L.d("No config changes detected, but permission was granted - forcing location update")
+        val isEmptyLibrary = musicRepository.library?.songs.isNullOrEmpty()
+        // If no configuration changed but permission was granted (or library is still empty),
+        // force a location update and ensure a rescan is dispatched.
+        if (!configChanged && (permissionGrantedInSession || isEmptyLibrary)) {
+            L.d("Forcing location update [permissionGranted=$permissionGrantedInSession, emptyLibrary=$isEmptyLibrary]")
             musicSettings.forceLocationUpdate()
+        }
+        if (configChanged || permissionGrantedInSession || isEmptyLibrary) {
+            musicRepository.requestIndex(withCache = true)
         }
     }
 

@@ -140,14 +140,6 @@ public sealed partial class MainWindow : Window
         if (File.Exists(icoPath))
         {
             AppWindow.SetIcon(icoPath);
-            if (TitleBarLogoImage is not null && Uri.TryCreate(icoPath, UriKind.Absolute, out var logoUri))
-            {
-                TitleBarLogoImage.Source = new BitmapImage
-                {
-                    DecodePixelWidth = 36,
-                    UriSource = logoUri,
-                };
-            }
         }
 
         InitializeSmtc();
@@ -859,6 +851,36 @@ public sealed partial class MainWindow : Window
         var target = _rightClickedPlaylist ?? (sender as FrameworkElement)?.DataContext as PlaylistSummary ?? ViewModel.SelectedPlaylist;
         _rightClickedPlaylist = null;
         await DeletePlaylistWithConfirmAsync(target);
+    }
+
+    private void OnRematchPlaylistsClick(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.IsPlaylistMultiSelectMode)
+        {
+            var selected = PlaylistsListView?.SelectedItems.OfType<PlaylistSummary>().ToList() ?? [];
+            ViewModel.RematchPlaylistsAndPersist(selected.Count > 0 ? selected : null);
+        }
+        else
+        {
+            ViewModel.RematchPlaylistsAndPersist(null);
+        }
+    }
+
+    private void OnContextRematchPlaylistCardClick(object sender, RoutedEventArgs e)
+    {
+        var selected = PlaylistsListView?.SelectedItems.OfType<PlaylistSummary>().ToList() ?? [];
+        if (selected.Count > 1)
+        {
+            _rightClickedPlaylist = null;
+            ViewModel.RematchPlaylistsAndPersist(selected);
+            return;
+        }
+        var target = _rightClickedPlaylist ?? (sender as FrameworkElement)?.DataContext as PlaylistSummary ?? ViewModel.SelectedPlaylist;
+        _rightClickedPlaylist = null;
+        if (target is not null)
+        {
+            ViewModel.RematchPlaylistsAndPersist([target]);
+        }
     }
 
     private void OnRemoveLanOutboxItemClick(object sender, RoutedEventArgs e)

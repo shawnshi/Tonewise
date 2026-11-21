@@ -217,7 +217,7 @@ public sealed class Batch2ProtocolAndParityTests
                 #EXTTW-UNMATCHED:Rare/02.flac
                 """, new UTF8Encoding(false));
 
-            await using var server = new SyncHostServer(tempRoot, "pc-b2-pl");
+            await using var server = new SyncHostServer(tempRoot, "pc-b2-pl", allowPhonePlaylistUpload: true);
             int port = await server.StartAsync(port: 0, enableMdns: false);
             using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
             await PairHttpClientAsync(http, server, "pixel-pl");

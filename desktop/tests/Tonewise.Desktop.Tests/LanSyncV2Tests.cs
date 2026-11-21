@@ -312,7 +312,7 @@ public sealed class LanSyncV2Tests
                 "#EXTM3U\n#PLAYLIST:Roadtrip\nArtist/Album/01.flac\nArtist/Album/02.flac\nArtist/Album/03.flac\nArtist/Album/04.flac\n",
                 new UTF8Encoding(false));
 
-            await using var server = new SyncHostServer(tempRoot, "pc-m3u");
+            await using var server = new SyncHostServer(tempRoot, "pc-m3u", allowPhonePlaylistUpload: true);
             int port = await server.StartAsync(port: 0, enableMdns: false);
             using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
             await PairHttpClientAsync(http, server);
@@ -653,7 +653,7 @@ public sealed class LanSyncV2Tests
         try
         {
             Directory.CreateDirectory(tempRoot);
-            await using var server = new SyncHostServer(tempRoot, "pc-m3u-names");
+            await using var server = new SyncHostServer(tempRoot, "pc-m3u-names", allowPhonePlaylistUpload: true);
             int port = await server.StartAsync(port: 0, enableMdns: false);
             using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
             await PairHttpClientAsync(http, server);

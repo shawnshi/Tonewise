@@ -211,10 +211,10 @@ class MusicSettingsImpl @Inject constructor(@ApplicationContext private val cont
         }
 
     override fun forceLocationUpdate() {
-        // TODO: Temporary!!! This is really dumb, just need to ship a workaround for this rn
-        val cur = sharedPreferences.getInt(getString(R.string.set_key_locations_mode), 0)
+        val key = getString(R.string.set_key_force_reload_workaround)
+        val cur = sharedPreferences.getInt(key, 0)
         sharedPreferences.edit {
-            putInt(getString(R.string.set_key_force_reload_workaround), cur + 1)
+            putInt(key, cur + 1)
             apply()
         }
     }

@@ -174,14 +174,13 @@ private constructor(
         updateMediaMetadata(playbackManager.currentSong, parent)
         updateQueue(queue)
         invalidateSessionState()
+        notification.updatePlaying(playbackManager.progression.isPlaying)
     }
 
     override fun onProgressionChanged(progression: Progression) {
         invalidateSessionState()
         notification.updatePlaying(playbackManager.progression.isPlaying)
-        if (!bitmapProvider.isBusy) {
-            foregroundListener.updateForeground(ForegroundListener.Change.MEDIA_SESSION)
-        }
+        foregroundListener.updateForeground(ForegroundListener.Change.MEDIA_SESSION)
     }
 
     override fun onRepeatModeChanged(repeatMode: RepeatMode) {
@@ -278,6 +277,14 @@ private constructor(
             builder.putLong(MediaMetadataCompat.METADATA_KEY_YEAR, it.year.toLong())
         }
 
+        // Immediately publish text metadata and promote foreground notification before async
+        // cover artwork loading so quick screen locks / background transitions never drop FGS.
+        val initialMetadata = builder.build()
+        mediaSession.setMetadata(initialMetadata)
+        notification.updateMetadata(initialMetadata)
+        notification.updatePlaying(playbackManager.progression.isPlaying)
+        foregroundListener.updateForeground(ForegroundListener.Change.MEDIA_SESSION)
+
         // We are normally supposed to use URIs for album art, but that removes some of the
         // nice things we can do like square cropping (we crop at runtime since it lets us avoid
         // heavy image processing pipelines) or high quality covers (the default lower downsamples
@@ -287,15 +294,12 @@ private constructor(
             song,
             object : BitmapProvider.Target {
                 override fun onConfigRequest(builder: ImageRequest.Builder): ImageRequest.Builder =
-                    // Android 17 optimized cover downsampling which accidentally made it so that
-                    // hardware bitmap covers would actually crash it. Fix this by manually
-                    // downsampling to whatever the system imagines, as disabling hardware bitmaps
-                    // trashes performance. If I remember correctly this is somehow still higher
-                    // quality than the URI loading.
+                    // Force software bitmaps so Notification/MediaSession parceling across Binder
+                    // never fails or stalls across Android versions and OEM frameworks.
                     builder
                         .size(MediaSessionCompat.getBitmapDimensionLimit())
                         .memoryCachePolicy(CachePolicy.READ_ONLY)
-                        .allowHardware(Build.VERSION.SDK_INT < 37)
+                        .allowHardware(false)
 
                 override fun onCompleted(bitmap: Bitmap?) {
                     L.d("Bitmap loaded, applying media session and posting notification")
@@ -306,6 +310,7 @@ private constructor(
                     val metadata = builder.build()
                     mediaSession.setMetadata(metadata)
                     notification.updateMetadata(metadata)
+                    notification.updatePlaying(playbackManager.progression.isPlaying)
                     foregroundListener.updateForeground(ForegroundListener.Change.MEDIA_SESSION)
                 }
             },
@@ -393,11 +398,7 @@ private constructor(
 
         notification.updateRepeatMode(playbackManager.repeatMode)
         notification.updateShuffled(playbackManager.isShuffled)
-
-        if (!bitmapProvider.isBusy) {
-            L.d("Not loading a bitmap, post the notification")
-            foregroundListener.updateForeground(ForegroundListener.Change.MEDIA_SESSION)
-        }
+        foregroundListener.updateForeground(ForegroundListener.Change.MEDIA_SESSION)
     }
 
     companion object {
@@ -422,6 +423,8 @@ private class PlaybackNotification(
         setCategory(NotificationCompat.CATEGORY_TRANSPORT)
         setShowWhen(false)
         setSilent(true)
+        setOngoing(true)
+        setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
         setContentIntent(context.newMainPendingIntent())
         setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 
@@ -472,6 +475,7 @@ private class PlaybackNotification(
      */
     fun updatePlaying(isPlaying: Boolean) {
         L.d("Updating playing state: $isPlaying")
+        setOngoing(isPlaying)
         mActions[2] = buildPlayPauseAction(context, isPlaying)
     }
 

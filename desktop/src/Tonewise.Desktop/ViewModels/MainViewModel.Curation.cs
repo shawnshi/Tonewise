@@ -216,7 +216,9 @@ public sealed partial class MainViewModel
         if (!string.IsNullOrWhiteSpace(_store.MusicRoot))
         {
             _allTracks = _store.LoadFromMusicRoot(_store.MusicRoot).ToList();
-            ApplyFiveDimFilter();
+            UpdateClassicalAdaptiveState();
+            RefreshPlaylists();
+            TriggerFilterRefresh();
         }
         RefreshStagingProposals();
         Notify($"已撤回 {ids.Count} 个批次共 {restored} 项标签变更。", "success");
@@ -283,7 +285,9 @@ public sealed partial class MainViewModel
             using var _watchGuard = _libraryWatcher?.SuspendWatching();
             await _store.ScanAndBuildManifestIfMissingAsync(root, forceRebuild: true, fastMode: true);
             _allTracks = await Task.Run(() => _store.LoadFromMusicRoot(root).ToList());
-            ApplyFiveDimFilter();
+            UpdateClassicalAdaptiveState();
+            RefreshPlaylists();
+            TriggerFilterRefresh();
             RefreshStagingProposals();
             StatusMessage = $"已重建指纹库并索引 {_allTracks.Count:N0} 首曲目。";
             Notify($"曲库索引重建完成：共 {_allTracks.Count:N0} 首曲目。", "success");
@@ -322,14 +326,20 @@ public sealed partial class MainViewModel
             });
 
             _allTracks = await Task.Run(() => _store.LoadFromMusicRoot(root).ToList());
-            ApplyFiveDimFilter();
-            RefreshStagingProposals();
+            var libRefs = GetLibraryRefs();
+            var rematchSummary = await Task.Run(() => PlaylistStore.RematchAllPlaylists(root, libRefs));
+            UpdateClassicalAdaptiveState();
             RefreshPlaylists();
+            TriggerFilterRefresh();
+            RefreshStagingProposals();
 
+            string rematchNote = rematchSummary.PlaylistsUpdated > 0
+                ? $"，同步修复 {rematchSummary.PlaylistsUpdated} 个歌单（新匹配 +{rematchSummary.NewlyMatchedCount}，路径修复 {rematchSummary.PathRepairedCount}）"
+                : "";
             StorageOrganizeStatus =
-                $"整理完成：检查 {res.TotalChecked:N0} 首，迁移规范 {res.MovedCount:N0} 首（收敛超长路径 {res.LongPathFixedCount:N0} 首），清理失效索引 {res.StaleRemovedCount:N0} 条，已规范跳过 {res.SkippedCount:N0} 首。";
+                $"整理完成：检查 {res.TotalChecked:N0} 首，迁移规范 {res.MovedCount:N0} 首（收敛超长路径 {res.LongPathFixedCount:N0} 首），清理失效索引 {res.StaleRemovedCount:N0} 条，已规范跳过 {res.SkippedCount:N0} 首{rematchNote}。";
             StatusMessage = StorageOrganizeStatus;
-            Notify(StorageOrganizeStatus, res.MovedCount > 0 || res.StaleRemovedCount > 0 ? "success" : "info");
+            Notify(StorageOrganizeStatus, res.MovedCount > 0 || res.StaleRemovedCount > 0 || rematchSummary.PlaylistsUpdated > 0 ? "success" : "info");
         }
         catch (Exception ex)
         {

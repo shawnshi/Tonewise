@@ -356,8 +356,9 @@ public sealed partial class MainViewModel
             StatusMessage = "当前场景筛选结果为空，无法固化为静态歌单。";
             return;
         }
-        string sceneTag = FilterScene == "all" ? "mix" : FilterScene;
-        string name = $"Scene-{sceneTag}-{DateTime.Now:MMdd-HHmm}";
+        string name = PrimaryNavId == "scenes" && SecondarySubTab == "autodj"
+            ? $"AutoDJ-{DateTime.Now:MMdd-HHmm}"
+            : $"Scene-{(FilterScene == "all" ? "mix" : FilterScene)}-{DateTime.Now:MMdd-HHmm}";
         CreatePlaylist(name, seedWithCurrentFilteredTracks: true);
         StatusMessage = $"已将当前场景 ({FilteredTracks.Count} 首) 快照固化为静态歌单: {name}";
     }
@@ -421,24 +422,17 @@ public sealed partial class MainViewModel
 
         IsViewingPlaylist = false;
         SelectedPlaylist = null;
-        string playlistName = $"AutoDJ-{res.Profile.PeriodLabel}-{DateTime.Now:MMdd-HHmm}";
-        if (!string.IsNullOrWhiteSpace(_store.MusicRoot))
-        {
-            var entries = orderedTracks.Select(ToPlaylistEntry).ToList();
-            PlaylistStore.SavePlaylist(_store.MusicRoot, playlistName, entries);
-            RefreshPlaylists();
-        }
 
         IsShuffleEnabled = false;
         FilteredTracks.ReplaceAll(orderedTracks);
         CurrentViewHeader = $"AutoDJ · {res.Profile.PeriodLabel} ({orderedTracks.Count} 首)";
         ActiveFilterPillsSummary = $"常听 {res.FrequentCount} 首 (70%) · 探索 {res.DiscoveryCount} 首 (30%) · 邻曲最大差 {res.MaxAdjacentBpmDelta:0.#} BPM";
-        AutoDjSummaryText = $"{res.SummaryText} · 歌单「{playlistName}」已保存";
+        AutoDjSummaryText = $"{res.SummaryText} · 仅载入临时播放列表（未自动保存为歌单）";
         UpdateScenesStudioAndArcTelemetry();
 
         PlayFromBrowseView(orderedTracks[0]);
         InspectTrack(orderedTracks[0]);
-        Notify($"{res.SummaryText}（已保存至歌单「{playlistName}」）", "success");
+        Notify($"{res.SummaryText}（已载入播放列表，如需保存请点击「将当前结果保存为歌单」）", "success");
     }
 
     private static string GetDefaultSubTab(string navId) => navId switch
@@ -564,8 +558,8 @@ public sealed partial class MainViewModel
     {
         if (PrimaryNavId is "sync" or "settings")
         {
-            CurrentViewHeader = PrimarySectionTitle;
-            ActiveFilterPillsSummary = PrimaryViewSummary;
+            CurrentViewHeader = "";
+            ActiveFilterPillsSummary = "";
             return;
         }
 

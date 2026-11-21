@@ -298,4 +298,86 @@ public sealed partial class MainViewModel
         StatusMessage = $"已导入歌单「{finalName}」（{parsed.SourceKind}）：共 {entries.Count} 首，本地匹配 {entries.Count(e => e.IsLocalMatched)} 首。";
     }
 
+    public PlaylistBatchRematchSummary RematchPlaylistsAndPersist(IReadOnlyList<PlaylistSummary>? targets = null)
+    {
+        if (_allTracks.Count == 0)
+        {
+            StatusMessage = "当前曲库为空，请先打开曲库后再重匹歌单。";
+            return new PlaylistBatchRematchSummary(0, 0, 0, 0, 0, 0);
+        }
+
+        var index = PlaylistTrackMatcher.BuildIndex(GetLibraryRefs());
+        PlaylistBatchRematchSummary summary;
+
+        if (targets is { Count: > 0 })
+        {
+            var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int scanned = 0;
+            int updated = 0;
+            int totalTracks = 0;
+            int totalMatched = 0;
+            int newlyMatched = 0;
+            int pathRepaired = 0;
+
+            foreach (var target in targets)
+            {
+                if (string.IsNullOrWhiteSpace(target.FilePath) || !File.Exists(target.FilePath)) continue;
+                string fullPath = Path.GetFullPath(target.FilePath);
+                if (!seenPaths.Add(fullPath)) continue;
+
+                try
+                {
+                    var res = PlaylistStore.RematchPlaylist(target.FilePath, index, _store.MusicRoot, persistIfChanged: true);
+                    scanned++;
+                    if (res.WasSaved) updated++;
+                    totalTracks += res.TotalCount;
+                    totalMatched += res.MatchedCount;
+                    newlyMatched += res.NewlyMatchedCount;
+                    pathRepaired += res.PathRepairedCount;
+                }
+                catch
+                {
+                    // Skip unreadable/corrupt playlist file
+                }
+            }
+
+            summary = new PlaylistBatchRematchSummary(
+                PlaylistsScanned: scanned,
+                PlaylistsUpdated: updated,
+                TotalTracks: totalTracks,
+                TotalMatched: totalMatched,
+                NewlyMatchedCount: newlyMatched,
+                PathRepairedCount: pathRepaired);
+        }
+        else
+        {
+            summary = PlaylistStore.RematchAllPlaylists(_store.MusicRoot, index, persistIfChanged: true);
+        }
+
+        RefreshPlaylists();
+        if (IsViewingPlaylist && SelectedPlaylist is not null && PrimaryNavId == "playlists")
+        {
+            LoadPlaylistTracksIntoView(SelectedPlaylist);
+        }
+
+        if (summary.PlaylistsScanned == 0)
+        {
+            StatusMessage = "当前曲库下暂无可重匹的 .m3u8 歌单。";
+        }
+        else if (summary.PlaylistsUpdated > 0)
+        {
+            StatusMessage =
+                $"重匹完成：检查 {summary.PlaylistsScanned} 个歌单，写回更新 {summary.PlaylistsUpdated} 个（新匹配 +{summary.NewlyMatchedCount} 首，修复路径 {summary.PathRepairedCount} 首，当前共匹配 {summary.TotalMatched} / {summary.TotalTracks} 首）。";
+            Notify(StatusMessage, "success");
+        }
+        else
+        {
+            StatusMessage =
+                $"重匹完成：检查 {summary.PlaylistsScanned} 个歌单，均已是最新匹配状态（共匹配 {summary.TotalMatched} / {summary.TotalTracks} 首）。";
+            Notify(StatusMessage, "info");
+        }
+
+        return summary;
+    }
+
 }

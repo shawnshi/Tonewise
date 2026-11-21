@@ -19,7 +19,8 @@ public sealed record ImportedTrackSeed(
     string Title,
     string Artist,
     string? Album = null,
-    string? FilePath = null
+    string? FilePath = null,
+    int DurationMs = 0
 );
 
 public sealed record ParsedExternalPlaylist(
@@ -62,6 +63,26 @@ public sealed record PlaylistSummary(
             ? $"{TotalCount} 首"
             : $"{TotalCount} 首 (本地 {LocalMatchedCount})";
 }
+
+public sealed record PlaylistRematchResult(
+    string Name,
+    string FilePath,
+    int TotalCount,
+    int PreviousMatchedCount,
+    int MatchedCount,
+    int NewlyMatchedCount,
+    int PathRepairedCount,
+    bool WasSaved
+);
+
+public sealed record PlaylistBatchRematchSummary(
+    int PlaylistsScanned,
+    int PlaylistsUpdated,
+    int TotalTracks,
+    int TotalMatched,
+    int NewlyMatchedCount,
+    int PathRepairedCount
+);
 
 public sealed record LocalLibraryTrackRef(
     string TrackUid,
@@ -441,7 +462,16 @@ public static partial class PlaylistImporter
                         artist = string.Join(", ", artistNames);
                     }
 
-                    seeds.Add(new ImportedTrackSeed(trackTitle, artist));
+                    int durationMs = 0;
+                    if (item.TryGetProperty("duration", out JsonElement durProp)
+                        && durProp.ValueKind == JsonValueKind.Number
+                        && durProp.TryGetInt64(out long rawDur)
+                        && rawDur > 0)
+                    {
+                        durationMs = (int)Math.Min(rawDur, int.MaxValue);
+                    }
+
+                    seeds.Add(new ImportedTrackSeed(trackTitle, artist, DurationMs: durationMs));
                 }
             }
 
@@ -499,6 +529,7 @@ public static partial class PlaylistImporter
 
         string? pendingArtist = null;
         string? pendingTitle = null;
+        int pendingDurationMs = 0;
 
         string normalized = content.TrimStart('\uFEFF');
         using var reader = new StringReader(normalized);
@@ -522,12 +553,32 @@ public static partial class PlaylistImporter
             if (line.StartsWith("#EXTINF:", StringComparison.OrdinalIgnoreCase))
             {
                 int comma = line.IndexOf(',');
-                if (comma >= 0 && comma + 1 < line.Length)
+                if (comma >= 0)
                 {
-                    string display = line[(comma + 1)..].Trim();
-                    var (art, ttl) = SplitArtistTitle(display);
-                    pendingArtist = art;
-                    pendingTitle = ttl;
+                    string durPart = line["#EXTINF:".Length..comma].Trim();
+                    int spaceIdx = durPart.IndexOfAny([' ', '\t']);
+                    if (spaceIdx > 0) durPart = durPart[..spaceIdx];
+                    if (long.TryParse(
+                            durPart,
+                            System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out long secs)
+                        && secs > 0)
+                    {
+                        pendingDurationMs = (int)Math.Min(secs * 1000L, int.MaxValue);
+                    }
+                    else
+                    {
+                        pendingDurationMs = 0;
+                    }
+
+                    if (comma + 1 < line.Length)
+                    {
+                        string display = line[(comma + 1)..].Trim();
+                        var (art, ttl) = SplitArtistTitle(display);
+                        pendingArtist = art;
+                        pendingTitle = ttl;
+                    }
                 }
                 continue;
             }
@@ -541,10 +592,11 @@ public static partial class PlaylistImporter
                 string? alb = parts.Length > 2 && !string.IsNullOrWhiteSpace(parts[2]) ? parts[2].Trim() : null;
                 if (!string.IsNullOrWhiteSpace(ttl))
                 {
-                    seeds.Add(new ImportedTrackSeed(ttl, art, alb));
+                    seeds.Add(new ImportedTrackSeed(ttl, art, alb, DurationMs: pendingDurationMs));
                 }
                 pendingArtist = null;
                 pendingTitle = null;
+                pendingDurationMs = 0;
                 continue;
             }
 
@@ -558,10 +610,12 @@ public static partial class PlaylistImporter
                     Title: string.IsNullOrWhiteSpace(pendingTitle) ? fallbackName : pendingTitle!,
                     Artist: pendingArtist ?? "",
                     Album: null,
-                    FilePath: line
+                    FilePath: line,
+                    DurationMs: pendingDurationMs
                 ));
                 pendingArtist = null;
                 pendingTitle = null;
+                pendingDurationMs = 0;
                 continue;
             }
 
@@ -582,6 +636,7 @@ public static partial class PlaylistImporter
                     }
                     pendingArtist = null;
                     pendingTitle = null;
+                    pendingDurationMs = 0;
                     continue;
                 }
             }
@@ -596,10 +651,11 @@ public static partial class PlaylistImporter
 
             if (!string.IsNullOrWhiteSpace(parsedTitle))
             {
-                seeds.Add(new ImportedTrackSeed(parsedTitle, parsedArtist));
+                seeds.Add(new ImportedTrackSeed(parsedTitle, parsedArtist, DurationMs: pendingDurationMs));
             }
             pendingArtist = null;
             pendingTitle = null;
+            pendingDurationMs = 0;
         }
 
         return new ParsedExternalPlaylist(title, PlaylistSourceKind.TextFile, seeds);
@@ -635,7 +691,15 @@ public static partial class PlaylistImporter
                 if (!string.IsNullOrWhiteSpace(artist))
                 {
                     string? album = ExtractFirstLinkTitle(el, "tertiaryLinks");
-                    seeds.Add(new ImportedTrackSeed(title!, artist!, album));
+                    int durationMs = 0;
+                    if (el.TryGetProperty("durationInMillis", out var durProp)
+                        && durProp.ValueKind == JsonValueKind.Number
+                        && durProp.TryGetInt64(out long rawDur)
+                        && rawDur > 0)
+                    {
+                        durationMs = (int)Math.Min(rawDur, int.MaxValue);
+                    }
+                    seeds.Add(new ImportedTrackSeed(title!, artist!, album, DurationMs: durationMs));
                     if (maxTracks > 0 && seeds.Count >= maxTracks) return;
                 }
             }
@@ -877,36 +941,52 @@ public static partial class PlaylistTrackMatcher
 {
     public sealed class LibraryIndex
     {
+        internal IReadOnlyList<IndexedTrack> Tracks { get; }
         internal Dictionary<string, LocalLibraryTrackRef> ByRelPath { get; }
         internal Dictionary<string, LocalLibraryTrackRef> ByFullPath { get; }
         internal Dictionary<string, List<LocalLibraryTrackRef>> ByFileName { get; }
-        internal Dictionary<string, List<LocalLibraryTrackRef>> ByTitle { get; }
-        internal Dictionary<string, HashSet<string>> CandidateArtistTokens { get; }
+        internal Dictionary<string, List<(IndexedTrack Track, int TitleTier)>> ByTitle { get; }
+        internal Dictionary<string, List<(IndexedTrack Track, int TitleTier)>> ByCompactTitle { get; }
+        internal Dictionary<string, List<IndexedTrack>> ByArtistToken { get; }
+        internal Dictionary<string, List<IndexedTrack>> ByArtistWord { get; }
 
         internal LibraryIndex(
+            IReadOnlyList<IndexedTrack> tracks,
             Dictionary<string, LocalLibraryTrackRef> byRelPath,
             Dictionary<string, LocalLibraryTrackRef> byFullPath,
             Dictionary<string, List<LocalLibraryTrackRef>> byFileName,
-            Dictionary<string, List<LocalLibraryTrackRef>> byTitle,
-            Dictionary<string, HashSet<string>> candidateArtistTokens)
+            Dictionary<string, List<(IndexedTrack Track, int TitleTier)>> byTitle,
+            Dictionary<string, List<(IndexedTrack Track, int TitleTier)>> byCompactTitle,
+            Dictionary<string, List<IndexedTrack>> byArtistToken,
+            Dictionary<string, List<IndexedTrack>> byArtistWord)
         {
+            Tracks = tracks;
             ByRelPath = byRelPath;
             ByFullPath = byFullPath;
             ByFileName = byFileName;
             ByTitle = byTitle;
-            CandidateArtistTokens = candidateArtistTokens;
+            ByCompactTitle = byCompactTitle;
+            ByArtistToken = byArtistToken;
+            ByArtistWord = byArtistWord;
         }
     }
 
     public static LibraryIndex BuildIndex(IReadOnlyList<LocalLibraryTrackRef> library)
     {
+        var indexedTracks = new List<IndexedTrack>(library.Count);
         var byRelPath = new Dictionary<string, LocalLibraryTrackRef>(StringComparer.OrdinalIgnoreCase);
         var byFullPath = new Dictionary<string, LocalLibraryTrackRef>(StringComparer.OrdinalIgnoreCase);
         var byFileName = new Dictionary<string, List<LocalLibraryTrackRef>>(StringComparer.OrdinalIgnoreCase);
-        var byTitle = new Dictionary<string, List<LocalLibraryTrackRef>>(StringComparer.Ordinal);
-        var candidateArtistTokens = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var byTitle = new Dictionary<string, List<(IndexedTrack Track, int TitleTier)>>(StringComparer.Ordinal);
+        var byCompactTitle = new Dictionary<string, List<(IndexedTrack Track, int TitleTier)>>(StringComparer.Ordinal);
+        var byArtistToken = new Dictionary<string, List<IndexedTrack>>(StringComparer.Ordinal);
+        var byArtistWord = new Dictionary<string, List<IndexedTrack>>(StringComparer.Ordinal);
 
-        static void AddToTitleIndex(Dictionary<string, List<LocalLibraryTrackRef>> indexMap, string key, LocalLibraryTrackRef item)
+        static void AddToTieredTitleIndex(
+            Dictionary<string, List<(IndexedTrack Track, int TitleTier)>> indexMap,
+            string key,
+            IndexedTrack indexed,
+            int tier)
         {
             if (string.IsNullOrEmpty(key)) return;
             if (!indexMap.TryGetValue(key, out var list))
@@ -914,14 +994,41 @@ public static partial class PlaylistTrackMatcher
                 list = [];
                 indexMap[key] = list;
             }
-            if (!list.Any(existing => string.Equals(existing.TrackUid, item.TrackUid, StringComparison.Ordinal)))
+            for (int i = 0; i < list.Count; i++)
             {
-                list.Add(item);
+                if (ReferenceEquals(list[i].Track, indexed)
+                    || string.Equals(list[i].Track.Track.TrackUid, indexed.Track.TrackUid, StringComparison.Ordinal))
+                {
+                    if (tier > list[i].TitleTier)
+                    {
+                        list[i] = (indexed, tier);
+                    }
+                    return;
+                }
+            }
+            list.Add((indexed, tier));
+        }
+
+        static void AddToArtistIndex(
+            Dictionary<string, List<IndexedTrack>> indexMap,
+            string key,
+            IndexedTrack indexed)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            if (!indexMap.TryGetValue(key, out var list))
+            {
+                list = [];
+                indexMap[key] = list;
+            }
+            if (list.Count == 0 || !ReferenceEquals(list[^1], indexed))
+            {
+                list.Add(indexed);
             }
         }
 
-        foreach (var item in library)
+        for (int idx = 0; idx < library.Count; idx++)
         {
+            var item = library[idx];
             string normRel = NormalizePathKey(item.RelPath);
             if (!string.IsNullOrEmpty(normRel)) byRelPath.TryAdd(normRel, item);
 
@@ -940,52 +1047,74 @@ public static partial class PlaylistTrackMatcher
                 }
             }
 
-            foreach (string titleKey in NormalizeClassicalTitleVariants(item.Title))
+            var indexed = new IndexedTrack(item, idx);
+            indexedTracks.Add(indexed);
+
+            foreach (var v in indexed.TitleVariantInfos)
             {
-                AddToTitleIndex(byTitle, titleKey, item);
+                AddToTieredTitleIndex(byTitle, v.Normalized, indexed, v.Tier);
+                AddToTieredTitleIndex(byCompactTitle, v.Compact, indexed, v.Tier);
             }
 
-            if (!string.IsNullOrWhiteSpace(item.WorkName) && !string.IsNullOrWhiteSpace(item.MovementName))
+            foreach (string artistToken in indexed.AllCreditTokens)
             {
-                AddToTitleIndex(byTitle, NormalizeTitle($"{item.WorkName} {item.MovementName}"), item);
-                AddToTitleIndex(byTitle, NormalizeTitle(item.MovementName), item);
-            }
-            else if (!string.IsNullOrWhiteSpace(item.MovementName))
-            {
-                AddToTitleIndex(byTitle, NormalizeTitle(item.MovementName), item);
+                if (string.IsNullOrEmpty(artistToken) || PlaceholderArtists.Contains(artistToken)) continue;
+                AddToArtistIndex(byArtistToken, artistToken, indexed);
             }
 
-            var artistTokens = ExtractArtistTokens(item.ArtistsDisplay);
-            if (!string.IsNullOrWhiteSpace(item.ComposersDisplay))
+            foreach (string word in ExtractSignificantCreditWords(indexed.AllCreditTokens))
             {
-                artistTokens.UnionWith(ExtractArtistTokens(item.ComposersDisplay));
+                AddToArtistIndex(byArtistWord, word, indexed);
             }
-            if (!string.IsNullOrWhiteSpace(item.ConductorsDisplay))
-            {
-                artistTokens.UnionWith(ExtractArtistTokens(item.ConductorsDisplay));
-            }
-            candidateArtistTokens[item.TrackUid] = artistTokens;
         }
 
-        return new LibraryIndex(byRelPath, byFullPath, byFileName, byTitle, candidateArtistTokens);
+        return new LibraryIndex(
+            indexedTracks,
+            byRelPath,
+            byFullPath,
+            byFileName,
+            byTitle,
+            byCompactTitle,
+            byArtistToken,
+            byArtistWord);
     }
 
     public static IReadOnlyList<string> NormalizeClassicalTitleVariants(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return [];
-        var variants = new List<string>(2);
-        string full = NormalizeTitle(raw);
+        string preNorm = PreNormalizeUnicode(raw);
+        if (string.IsNullOrEmpty(preNorm)) return [];
+
+        string cleaned = StripEditionDecorations(preNorm);
+        if (string.IsNullOrEmpty(NormalizePreNormalizedTokenText(cleaned)))
+        {
+            cleaned = preNorm;
+        }
+
+        var variants = new List<string>(3);
+        string full = NormalizePreNormalizedTokenText(cleaned);
         if (!string.IsNullOrEmpty(full)) variants.Add(full);
 
-        int colonIdx = raw.IndexOfAny([':', '：']);
-        if (colonIdx > 0 && colonIdx + 1 < raw.Length)
+        int firstColon = cleaned.IndexOfAny([':', '：']);
+        if (firstColon > 0 && firstColon + 1 < cleaned.Length)
         {
-            string afterColon = NormalizeTitle(raw[(colonIdx + 1)..]);
-            if (!string.IsNullOrEmpty(afterColon) && !variants.Contains(afterColon, StringComparer.Ordinal))
+            string afterFirst = NormalizePreNormalizedTokenText(cleaned[(firstColon + 1)..]);
+            if (!string.IsNullOrEmpty(afterFirst) && !variants.Contains(afterFirst, StringComparer.Ordinal))
             {
-                variants.Add(afterColon);
+                variants.Add(afterFirst);
+            }
+
+            int lastColon = cleaned.LastIndexOfAny([':', '：']);
+            if (lastColon > firstColon && lastColon + 1 < cleaned.Length)
+            {
+                string afterLast = NormalizePreNormalizedTokenText(cleaned[(lastColon + 1)..]);
+                if (!string.IsNullOrEmpty(afterLast) && !variants.Contains(afterLast, StringComparer.Ordinal))
+                {
+                    variants.Add(afterLast);
+                }
             }
         }
+
         return variants;
     }
 
@@ -1000,12 +1129,6 @@ public static partial class PlaylistTrackMatcher
         LibraryIndex index,
         string? musicRoot = null)
     {
-        var byRelPath = index.ByRelPath;
-        var byFullPath = index.ByFullPath;
-        var byFileName = index.ByFileName;
-        var byTitle = index.ByTitle;
-        var candidateArtistTokens = index.CandidateArtistTokens;
-
         string? normRoot = !string.IsNullOrWhiteSpace(musicRoot)
             ? musicRoot.Replace('\\', '/').TrimEnd('/') + "/"
             : null;
@@ -1013,110 +1136,11 @@ public static partial class PlaylistTrackMatcher
         var entries = new List<PlaylistEntry>(seeds.Count);
         foreach (var seed in seeds)
         {
-            LocalLibraryTrackRef? matched = null;
-
-            if (!string.IsNullOrWhiteSpace(seed.FilePath))
-            {
-                string rawPath = seed.FilePath.Trim().Trim('"').Replace('\\', '/');
-                if (byFullPath.TryGetValue(rawPath, out var exactFull))
-                {
-                    matched = exactFull;
-                }
-                else
-                {
-                    string candidateRel = rawPath;
-                    if (normRoot is not null && rawPath.StartsWith(normRoot, StringComparison.OrdinalIgnoreCase))
-                    {
-                        candidateRel = rawPath[normRoot.Length..];
-                    }
-                    else if (candidateRel.StartsWith("../Tracks/", StringComparison.OrdinalIgnoreCase))
-                    {
-                        candidateRel = candidateRel["../Tracks/".Length..];
-                    }
-                    candidateRel = NormalizePathKey(candidateRel);
-                    if (byRelPath.TryGetValue(candidateRel, out var exactRel))
-                    {
-                        matched = exactRel;
-                    }
-                    else
-                    {
-                        string fn = Path.GetFileName(rawPath);
-                        if (!string.IsNullOrEmpty(fn) && byFileName.TryGetValue(fn, out var fnMatches) && fnMatches.Count == 1)
-                        {
-                            matched = fnMatches[0];
-                        }
-                    }
-                }
-            }
+            LocalLibraryTrackRef? matched = ResolveSingleSeedByPath(seed.FilePath, index, normRoot);
 
             if (matched is null && !string.IsNullOrWhiteSpace(seed.Title))
             {
-                var candidates = new List<LocalLibraryTrackRef>();
-                var seenCandUids = new HashSet<string>(StringComparer.Ordinal);
-                foreach (string variant in NormalizeClassicalTitleVariants(seed.Title))
-                {
-                    if (byTitle.TryGetValue(variant, out var found))
-                    {
-                        foreach (var c in found)
-                        {
-                            if (seenCandUids.Add(c.TrackUid)) candidates.Add(c);
-                        }
-                    }
-                }
-
-                if (candidates.Count > 0)
-                {
-                    if (string.IsNullOrWhiteSpace(seed.Artist))
-                    {
-                        matched = candidates[0];
-                    }
-                    else
-                    {
-                        var seedTokens = ExtractArtistTokens(seed.Artist);
-                        string seedArtistFlat = NormalizeTokenText(seed.Artist);
-                        int bestScore = 0;
-                        LocalLibraryTrackRef? best = null;
-
-                        foreach (var cand in candidates)
-                        {
-                            var candTokens = candidateArtistTokens[cand.TrackUid];
-                            int overlap = 0;
-                            foreach (string st in seedTokens)
-                            {
-                                if (candTokens.Contains(st)) overlap += 2;
-                            }
-
-                            if (overlap == 0 && !string.IsNullOrEmpty(seedArtistFlat))
-                            {
-                                string combinedCredit = $"{cand.ArtistsDisplay} {cand.ComposersDisplay} {cand.ConductorsDisplay}";
-                                string candFlat = NormalizeTokenText(combinedCredit);
-                                if (!string.IsNullOrEmpty(candFlat)
-                                    && (candFlat.Contains(seedArtistFlat, StringComparison.Ordinal)
-                                        || seedArtistFlat.Contains(candFlat, StringComparison.Ordinal)))
-                                {
-                                    overlap = 1;
-                                }
-                            }
-
-                            if (overlap > bestScore)
-                            {
-                                bestScore = overlap;
-                                best = cand;
-                            }
-                        }
-
-                        if (best is not null)
-                        {
-                            matched = best;
-                        }
-                        else if (candidates.Count == 1
-                                 && string.IsNullOrWhiteSpace(candidates[0].ArtistsDisplay)
-                                 && string.IsNullOrWhiteSpace(candidates[0].ComposersDisplay))
-                        {
-                            matched = candidates[0];
-                        }
-                    }
-                }
+                matched = ResolveSingleSeedByMetadata(seed, index);
             }
 
             if (matched is not null)
@@ -1148,15 +1172,413 @@ public static partial class PlaylistTrackMatcher
         return entries;
     }
 
+    private static LocalLibraryTrackRef? ResolveSingleSeedByPath(
+        string? rawFilePath,
+        LibraryIndex index,
+        string? normRoot)
+    {
+        if (string.IsNullOrWhiteSpace(rawFilePath)) return null;
+
+        string rawPath = rawFilePath.Trim().Trim('"').Replace('\\', '/');
+        if (index.ByFullPath.TryGetValue(rawPath, out var exactFull))
+        {
+            return exactFull;
+        }
+
+        string candidateRel = rawPath;
+        if (normRoot is not null && rawPath.StartsWith(normRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            candidateRel = rawPath[normRoot.Length..];
+        }
+        else if (candidateRel.StartsWith("../Tracks/", StringComparison.OrdinalIgnoreCase))
+        {
+            candidateRel = candidateRel["../Tracks/".Length..];
+        }
+
+        candidateRel = NormalizePathKey(candidateRel);
+        if (index.ByRelPath.TryGetValue(candidateRel, out var exactRel))
+        {
+            return exactRel;
+        }
+
+        string fn = Path.GetFileName(rawPath);
+        if (!string.IsNullOrEmpty(fn)
+            && index.ByFileName.TryGetValue(fn, out var fnMatches)
+            && fnMatches.Count == 1)
+        {
+            return fnMatches[0];
+        }
+
+        return null;
+    }
+
+    private static LocalLibraryTrackRef? ResolveSingleSeedByMetadata(
+        ImportedTrackSeed seed,
+        LibraryIndex index)
+    {
+        var seedVariants = NormalizeClassicalTitleVariants(seed.Title);
+        string seedTitleFull = seedVariants.Count > 0 ? seedVariants[0] : NormalizeTitle(seed.Title);
+        if (seedVariants.Count == 0 && string.IsNullOrEmpty(seedTitleFull)) return null;
+
+        string seedPreNorm = PreNormalizeUnicode(seed.Title);
+        VersionQualifiers seedQualifiers = ExtractVersionQualifiersFromPreNorm(seedPreNorm);
+        VersionQualifiers seedHardQualifiers = seedQualifiers & HardBlockQualifierMask;
+        bool seedIsLive = (seedQualifiers & VersionQualifiers.Live) != 0;
+        StructuralMarkers seedMarkers = ExtractStructuralMarkers(seedTitleFull);
+
+        HashSet<string> seedArtistTokens = ExtractArtistTokens(seed.Artist);
+        bool artistMissingOrPlaceholder = IsPlaceholderOnlyArtist(seedArtistTokens);
+        string seedArtistFlat = artistMissingOrPlaceholder ? "" : NormalizeTokenText(seed.Artist);
+        string seedAlbumNorm = NormalizeAlbum(seed.Album);
+        int seedDurationMs = seed.DurationMs;
+
+        // Stage 2A: Exact normalized & compact title lookup
+        var stage2ACandidates = CollectStage2ACandidates(
+            seedVariants,
+            seedHardQualifiers,
+            seedMarkers,
+            index);
+
+        if (stage2ACandidates.Count > 0)
+        {
+            if (artistMissingOrPlaceholder)
+            {
+                return SelectUncreditedStage2ACandidate(
+                    stage2ACandidates,
+                    seedIsLive,
+                    seedAlbumNorm,
+                    seedDurationMs);
+            }
+
+            IndexedTrack? bestTrack = null;
+            CandidateRank bestRank = default;
+            bool hasBest = false;
+
+            foreach (var (cand, titleScore) in stage2ACandidates)
+            {
+                int artistScore = ScoreArtistMatch(seedArtistTokens, seedArtistFlat, cand);
+                if (artistScore <= 0) continue;
+
+                var rank = ComputeCandidateRank(
+                    titleScore,
+                    artistScore,
+                    seedIsLive,
+                    seedAlbumNorm,
+                    seedDurationMs,
+                    cand);
+
+                if (!hasBest || rank.CompareTo(bestRank) > 0)
+                {
+                    hasBest = true;
+                    bestRank = rank;
+                    bestTrack = cand;
+                }
+            }
+
+            if (bestTrack is not null)
+            {
+                return bestTrack.Track;
+            }
+
+            if (stage2ACandidates.Count == 1)
+            {
+                var solo = stage2ACandidates[0].Track.Track;
+                if (string.IsNullOrWhiteSpace(solo.ArtistsDisplay)
+                    && string.IsNullOrWhiteSpace(solo.ComposersDisplay)
+                    && string.IsNullOrWhiteSpace(solo.ConductorsDisplay))
+                {
+                    return solo;
+                }
+            }
+        }
+
+        // Stage 2B: Artist-anchored controlled fuzzy title recall
+        if (artistMissingOrPlaceholder || string.IsNullOrEmpty(seedTitleFull))
+        {
+            return null;
+        }
+
+        IReadOnlyList<string> effectiveVariants = seedVariants.Count > 0 ? seedVariants : [seedTitleFull];
+        return ResolveFuzzyArtistAnchored(
+            effectiveVariants,
+            seedMarkers,
+            seedHardQualifiers,
+            seedIsLive,
+            seedArtistTokens,
+            seedArtistFlat,
+            seedAlbumNorm,
+            seedDurationMs,
+            index);
+    }
+
+    private static List<(IndexedTrack Track, int TitleScore)> CollectStage2ACandidates(
+        IReadOnlyList<string> seedVariants,
+        VersionQualifiers seedHardQualifiers,
+        StructuralMarkers seedMarkers,
+        LibraryIndex index)
+    {
+        var candidates = new List<(IndexedTrack Track, int TitleScore)>();
+        var uidToIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        void UpsertCandidate(IndexedTrack cand, int titleScore)
+        {
+            if (uidToIndex.TryGetValue(cand.Track.TrackUid, out int existingIdx))
+            {
+                if (titleScore > candidates[existingIdx].TitleScore)
+                {
+                    candidates[existingIdx] = (cand, titleScore);
+                }
+                return;
+            }
+            uidToIndex[cand.Track.TrackUid] = candidates.Count;
+            candidates.Add((cand, titleScore));
+        }
+
+        for (int vi = 0; vi < seedVariants.Count; vi++)
+        {
+            if (index.ByTitle.TryGetValue(seedVariants[vi], out var found))
+            {
+                foreach (var (cand, candTier) in found)
+                {
+                    if (cand.HardQualifiers != seedHardQualifiers) continue;
+                    if ((vi > 0 || candTier < 990) && !AreStructurallyCompatible(seedMarkers, cand.WorkAndTitleMarkers))
+                    {
+                        continue;
+                    }
+
+                    int effectiveScore = (vi, candTier) switch
+                    {
+                        (0, >= 1000) => 1000,
+                        (<= 1, >= 1000) => 995,
+                        (<= 1, >= 990) => 990,
+                        _ => 960,
+                    };
+                    UpsertCandidate(cand, effectiveScore);
+                }
+            }
+
+            string compactKey = CompactText(seedVariants[vi]);
+            if (!string.IsNullOrEmpty(compactKey)
+                && index.ByCompactTitle.TryGetValue(compactKey, out var compactHits))
+            {
+                foreach (var (cand, candTier) in compactHits)
+                {
+                    if (cand.HardQualifiers != seedHardQualifiers) continue;
+                    if ((vi > 0 || candTier < 990) && !AreStructurallyCompatible(seedMarkers, cand.WorkAndTitleMarkers))
+                    {
+                        continue;
+                    }
+
+                    int effectiveScore = vi == 0 && candTier >= 990 ? 980 : 955;
+                    UpsertCandidate(cand, effectiveScore);
+                }
+            }
+        }
+
+        return candidates;
+    }
+
+    private static LocalLibraryTrackRef? SelectUncreditedStage2ACandidate(
+        List<(IndexedTrack Track, int TitleScore)> stage2ACandidates,
+        bool seedIsLive,
+        string seedAlbumNorm,
+        int seedDurationMs)
+    {
+        if (stage2ACandidates.Count == 1)
+        {
+            return stage2ACandidates[0].Track.Track;
+        }
+
+        var rankedList = new List<(IndexedTrack Cand, CandidateRank Rank)>(stage2ACandidates.Count);
+        IndexedTrack? bestCand = null;
+        CandidateRank bestRank = default;
+
+        foreach (var (cand, titleScore) in stage2ACandidates)
+        {
+            var rank = ComputeCandidateRank(
+                titleScore,
+                artistScore: 0,
+                seedIsLive,
+                seedAlbumNorm,
+                seedDurationMs,
+                cand);
+            rankedList.Add((cand, rank));
+
+            if (bestCand is null || rank.CompareTo(bestRank) > 0)
+            {
+                bestCand = cand;
+                bestRank = rank;
+            }
+        }
+
+        if (bestCand is null) return null;
+
+        bool allSameArtist = bestCand.PrimaryArtistKey.Length > 0
+            && stage2ACandidates.All(x => string.Equals(x.Track.PrimaryArtistKey, bestCand.PrimaryArtistKey, StringComparison.Ordinal));
+        if (allSameArtist)
+        {
+            return bestCand.Track;
+        }
+
+        bool uniqueByAlbum = bestRank.AlbumScore > 0;
+        bool uniqueByDuration = bestRank.DurationScore >= 2;
+
+        foreach (var (cand, rank) in rankedList)
+        {
+            if (ReferenceEquals(cand, bestCand)) continue;
+            bool sameArtist = bestCand.PrimaryArtistKey.Length > 0
+                && string.Equals(cand.PrimaryArtistKey, bestCand.PrimaryArtistKey, StringComparison.Ordinal);
+            if (sameArtist) continue;
+
+            if (rank.AlbumScore >= bestRank.AlbumScore) uniqueByAlbum = false;
+            if (rank.DurationScore >= bestRank.DurationScore) uniqueByDuration = false;
+        }
+
+        return (uniqueByAlbum || uniqueByDuration) ? bestCand.Track : null;
+    }
+
+    private static LocalLibraryTrackRef? ResolveFuzzyArtistAnchored(
+        IReadOnlyList<string> seedVariants,
+        StructuralMarkers seedMarkers,
+        VersionQualifiers seedHardQualifiers,
+        bool seedIsLive,
+        HashSet<string> seedArtistTokens,
+        string seedArtistFlat,
+        string seedAlbumNorm,
+        int seedDurationMs,
+        LibraryIndex index)
+    {
+        const int maxFuzzyPool = 2000;
+        var seenUids = new HashSet<string>(StringComparer.Ordinal);
+        var exactPool = new List<IndexedTrack>();
+
+        void AddListToPool(List<IndexedTrack> targetPool, List<IndexedTrack> source)
+        {
+            foreach (var cand in source)
+            {
+                if (targetPool.Count >= maxFuzzyPool) break;
+                if (seenUids.Add(cand.Track.TrackUid))
+                {
+                    targetPool.Add(cand);
+                }
+            }
+        }
+
+        foreach (string st in seedArtistTokens)
+        {
+            if (string.IsNullOrEmpty(st) || PlaceholderArtists.Contains(st)) continue;
+            if (index.ByArtistToken.TryGetValue(st, out var hits))
+            {
+                AddListToPool(exactPool, hits);
+            }
+        }
+
+        foreach (string word in ExtractSignificantCreditWords(seedArtistTokens))
+        {
+            if (exactPool.Count >= maxFuzzyPool) break;
+            if (index.ByArtistWord.TryGetValue(word, out var hits))
+            {
+                AddListToPool(exactPool, hits);
+            }
+        }
+
+        IndexedTrack? EvaluatePool(List<IndexedTrack> pool)
+        {
+            IndexedTrack? winner = null;
+            CandidateRank winnerRank = default;
+
+            foreach (var cand in pool)
+            {
+                if (cand.HardQualifiers != seedHardQualifiers) continue;
+
+                int artistScore = ScoreArtistMatch(seedArtistTokens, seedArtistFlat, cand);
+                if (artistScore <= 0) continue;
+
+                double fuzzySim = ComputeFuzzyTitleSimilarity(seedVariants, seedMarkers, cand);
+                if (fuzzySim <= 0.0) continue;
+
+                int fuzzyTitleScore = (int)Math.Round(fuzzySim * 900.0);
+                var rank = ComputeCandidateRank(
+                    fuzzyTitleScore,
+                    artistScore,
+                    seedIsLive,
+                    seedAlbumNorm,
+                    seedDurationMs,
+                    cand);
+
+                if (winner is null || rank.CompareTo(winnerRank) > 0)
+                {
+                    winner = cand;
+                    winnerRank = rank;
+                }
+            }
+
+            return winner;
+        }
+
+        if (exactPool.Count > 0)
+        {
+            var hit = EvaluatePool(exactPool);
+            if (hit is not null) return hit.Track;
+        }
+
+        // Bounded fuzzy-artist fallback for transliteration differences (e.g. Rachmaninoff vs Rachmaninov)
+        var longLatinTokens = seedArtistTokens
+            .Where(t => t.Length >= 5 && !ContainsEastAsianScript(t) && !PlaceholderArtists.Contains(t))
+            .ToList();
+        var longLatinWords = ExtractSignificantCreditWords(seedArtistTokens)
+            .Where(w => w.Length >= 5 && !ContainsEastAsianScript(w))
+            .ToList();
+
+        if (longLatinTokens.Count == 0 && longLatinWords.Count == 0)
+        {
+            return null;
+        }
+
+        var fuzzyArtistPool = new List<IndexedTrack>();
+        int remainingBudget = Math.Max(0, maxFuzzyPool - exactPool.Count);
+        if (remainingBudget == 0) return null;
+
+        void CollectFuzzyKeys(Dictionary<string, List<IndexedTrack>> keyMap, IReadOnlyList<string> queries)
+        {
+            if (fuzzyArtistPool.Count >= remainingBudget || queries.Count == 0) return;
+            foreach (var kv in keyMap)
+            {
+                if (fuzzyArtistPool.Count >= remainingBudget) break;
+                string key = kv.Key;
+                if (key.Length < 5 || ContainsEastAsianScript(key)) continue;
+
+                bool keyMatches = false;
+                foreach (string q in queries)
+                {
+                    if (IsFuzzyArtistTokenMatch(q, key))
+                    {
+                        keyMatches = true;
+                        break;
+                    }
+                }
+
+                if (keyMatches)
+                {
+                    AddListToPool(fuzzyArtistPool, kv.Value);
+                }
+            }
+        }
+
+        CollectFuzzyKeys(index.ByArtistToken, longLatinTokens);
+        CollectFuzzyKeys(index.ByArtistWord, longLatinWords);
+
+        return fuzzyArtistPool.Count > 0 ? EvaluatePool(fuzzyArtistPool)?.Track : null;
+    }
+
     public static string NormalizeTitle(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "";
-        string s = raw.Replace('\u00A0', ' ').ToLowerInvariant().Trim();
-        s = DashEditionSuffixRegex().Replace(s, "");
-        s = FeaturingParenRegex().Replace(s, " ");
-        s = RemasterSuffixRegex().Replace(s, " ");
-        s = SingleSuffixRegex().Replace(s, " ");
-        return NormalizeTokenText(s);
+        string preNorm = PreNormalizeUnicode(raw);
+        if (string.IsNullOrEmpty(preNorm)) return "";
+        string stripped = StripEditionDecorations(preNorm);
+        string norm = NormalizePreNormalizedTokenText(stripped);
+        return string.IsNullOrEmpty(norm) ? NormalizePreNormalizedTokenText(preNorm) : norm;
     }
 
     public static HashSet<string> ExtractArtistTokens(string? raw)
@@ -1164,56 +1586,85 @@ public static partial class PlaylistTrackMatcher
         var tokens = new HashSet<string>(StringComparer.Ordinal);
         if (string.IsNullOrWhiteSpace(raw)) return tokens;
 
-        string normalized = raw.Replace('\u00A0', ' ').ToLowerInvariant();
-        string[] parts = ArtistSplitRegex().Split(normalized);
+        string working = PreNormalizeUnicode(raw);
+        if (string.IsNullOrEmpty(working)) return tokens;
+
+        List<(string Marker, string Original)>? replacements = null;
+        var whitelist = NormalizedWhitelist.Value;
+        int seq = 0;
+
+        for (int i = 0; i < whitelist.Count; i++)
+        {
+            string protectedName = whitelist[i];
+            if (!working.Contains(protectedName, StringComparison.Ordinal)) continue;
+
+            int searchStart = 0;
+            while (searchStart < working.Length)
+            {
+                int idx = working.IndexOf(protectedName, searchStart, StringComparison.Ordinal);
+                if (idx < 0) break;
+
+                bool leftBoundary = idx == 0 || !char.IsLetterOrDigit(working[idx - 1]);
+                int end = idx + protectedName.Length;
+                bool rightBoundary = end == working.Length || !char.IsLetterOrDigit(working[end]);
+                if (!leftBoundary || !rightBoundary)
+                {
+                    searchStart = idx + 1;
+                    continue;
+                }
+
+                replacements ??= [];
+                string marker = $"__twprot{seq++}__";
+                working = string.Concat(working.AsSpan(0, idx), marker, working.AsSpan(end));
+                replacements.Add((marker, protectedName));
+                searchStart = idx + marker.Length;
+            }
+        }
+
+        string[] parts = ArtistSplitRegex().Split(working);
         foreach (string part in parts)
         {
-            string clean = NormalizeTokenText(part);
+            string restored = part;
+            if (replacements is not null)
+            {
+                foreach (var (marker, original) in replacements)
+                {
+                    if (restored.Contains(marker, StringComparison.Ordinal))
+                    {
+                        restored = restored.Replace(marker, original, StringComparison.Ordinal);
+                    }
+                }
+            }
+
+            string clean = NormalizePreNormalizedTokenText(restored);
             if (!string.IsNullOrEmpty(clean))
             {
                 tokens.Add(clean);
             }
         }
+
         return tokens;
     }
 
-    private static string NormalizeTokenText(string raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return "";
-        var sb = new StringBuilder(raw.Length);
-        bool prevSpace = true;
-        foreach (char c in raw.ToLowerInvariant())
-        {
-            if (char.IsLetterOrDigit(c))
-            {
-                sb.Append(c);
-                prevSpace = false;
-            }
-            else if (!prevSpace)
-            {
-                sb.Append(' ');
-                prevSpace = true;
-            }
-        }
-        return sb.ToString().Trim();
-    }
+    private static string NormalizeTokenText(string raw) =>
+        string.IsNullOrWhiteSpace(raw) ? "" : NormalizePreNormalizedTokenText(PreNormalizeUnicode(raw));
 
     private static string NormalizePathKey(string? path) =>
         string.IsNullOrWhiteSpace(path) ? "" : path.Replace('\\', '/').TrimStart('/');
 
-    [GeneratedRegex("""[\(\[]\s*(?:feat\.?|ft\.?|featuring|with|from\s+[^\)\]]+)(?:\s+[^\)\]]*)?[\)\]]""", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("""[\(\[【]\s*(?:feat\.?|ft\.?|featuring|with|from\s+[^\)\]】]+)(?:\s+[^\)\]】]*)?[\)\]】]""", RegexOptions.IgnoreCase)]
     private static partial Regex FeaturingParenRegex();
 
-    [GeneratedRegex("""[\(\[]\s*[^\)\]]*(?:remaster(?:ed)?|version|radio\s+edit|album\s+version|live|deluxe|mono|stereo)\s*[^\)\]]*[\)\]]""", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("""[\(\[【]\s*(?!.*?\b(?:remix(?:es|ed)?|rework|bootleg|instrumental|off\s+vocal|minus\s+one|karaoke|ktv|acoustic|unplugged|a\s*capp?ell?a|demo|cover|mashup|medley|sped\s+up|speed\s+up|slowed|nightcore)\b)(?!.*?(?:伴奏|纯音乐|消音|无人声|乐器版|卡拉ok|翻唱|不插电|木吉他版|清唱|阿卡贝拉|小样|混音|变速|加速版|降调))[^\)\]】]*(?:remaster(?:ed)?|version|radio\s+edit|album\s+version|live|deluxe|mono|stereo|重制|重置|完整版|正式版|专辑版|单曲版|原版|现场|演唱会|音乐会|母带|纯净版|无损|主题曲|插曲|片尾曲|片头曲|推广曲|影视原声)\s*[^\)\]】]*[\)\]】]""", RegexOptions.IgnoreCase)]
     private static partial Regex RemasterSuffixRegex();
 
-    [GeneratedRegex("""(?:\s+[-–—]\s+(?:(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+version)?|radio\s+edit|album\s+version|single\s+version|single|original\s+mix|live(?:\s+[^\n]*)?|mono|stereo|from\s+[^\n]*|[^\n]*\bsoundtrack\b[^\n]*))+$""", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("""(?:\s+[-–—]\s+(?!.*?\b(?:remix(?:es|ed)?|rework|bootleg|instrumental|off\s+vocal|minus\s+one|karaoke|ktv|acoustic|unplugged|a\s*capp?ell?a|demo|cover|mashup|medley|sped\s+up|speed\s+up|slowed|nightcore)\b)(?!.*?(?:伴奏|纯音乐|消音|无人声|乐器版|卡拉ok|翻唱|不插电|木吉他版|清唱|阿卡贝拉|小样|混音|变速|加速版|降调))(?:(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+(?:version|edition))?|radio\s+edit|album\s+version|single\s+version|single|original\s+mix|live(?:\s+[^\n]*)?|mono|stereo|from\s+[^\n]*|[^\n]*\bsoundtrack\b[^\n]*|(?:\d{4}\s*)?(?:重制版?|重置版?)(?:\s*\d{4})?|完整版|正式版|专辑版|单曲版|原版|(?:\d{4}\s*)?(?:现场版?|live版)|[^\n]*(?:演唱会|音乐会)[^\n]*现场[^\n]*|母带版|纯净版|无损版?|电影[^\n]*(?:主题曲|插曲|片尾曲|片头曲|推广曲)|电视剧[^\n]*(?:主题曲|插曲|片尾曲|片头曲)|影视原声))+$""", RegexOptions.IgnoreCase)]
     private static partial Regex DashEditionSuffixRegex();
 
     [GeneratedRegex("""\s+-\s+single\s*$""", RegexOptions.IgnoreCase)]
     private static partial Regex SingleSuffixRegex();
 
-    [GeneratedRegex("""(?:\s*[,&/;]\s*|\s+(?:feat\.?|ft\.?|featuring|with|x|and)\s+)""", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("""(?:\s*[,&/;+、，；／＋]\s*|\s+(?:feat\.?|ft\.?|featuring|with|x|and|vs\.?)\s+)""", RegexOptions.IgnoreCase)]
     private static partial Regex ArtistSplitRegex();
 }
 
@@ -1293,6 +1744,154 @@ public static class PlaylistStore
         string fileName = SanitizePlaylistFileName(cleanName) + ".m3u8";
         string outPath = Path.Combine(dir, fileName);
 
+        WritePlaylistAtomic(outPath, cleanName, entries);
+
+        if (!string.IsNullOrWhiteSpace(previousFilePath)
+            && !string.Equals(Path.GetFullPath(previousFilePath), Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase)
+            && File.Exists(previousFilePath))
+        {
+            File.Delete(previousFilePath);
+        }
+
+        return outPath;
+    }
+
+    public static PlaylistRematchResult RematchPlaylist(
+        string filePath,
+        IReadOnlyList<LocalLibraryTrackRef> library,
+        string? musicRoot = null,
+        bool persistIfChanged = true) =>
+        RematchPlaylist(filePath, PlaylistTrackMatcher.BuildIndex(library), musicRoot, persistIfChanged);
+
+    public static PlaylistRematchResult RematchPlaylist(
+        string filePath,
+        PlaylistTrackMatcher.LibraryIndex index,
+        string? musicRoot = null,
+        bool persistIfChanged = true)
+    {
+        string text = File.ReadAllText(filePath, Encoding.UTF8);
+        string fallbackName = Path.GetFileNameWithoutExtension(filePath);
+        var parsed = PlaylistImporter.ParseTextPlaylist(text, fallbackName, maxTracks: 50_000);
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(parsed.Tracks, index, musicRoot);
+
+        int matchedCount = 0;
+        int newlyMatchedCount = 0;
+        int pathRepairedCount = 0;
+
+        for (int i = 0; i < resolved.Count && i < parsed.Tracks.Count; i++)
+        {
+            var seed = parsed.Tracks[i];
+            var entry = resolved[i];
+            bool hadPersistedPath = !string.IsNullOrWhiteSpace(seed.FilePath);
+            bool nowMatched = entry.IsLocalMatched && !string.IsNullOrWhiteSpace(entry.RelPath);
+            if (!nowMatched) continue;
+
+            matchedCount++;
+            if (!hadPersistedPath)
+            {
+                newlyMatchedCount++;
+            }
+            else
+            {
+                string persistedClean = seed.FilePath!.Trim().Trim('"').Replace('\\', '/');
+                string canonicalRel = entry.RelPath!.Replace('\\', '/').TrimStart('/');
+                if (!string.Equals(persistedClean, canonicalRel, StringComparison.OrdinalIgnoreCase))
+                {
+                    pathRepairedCount++;
+                }
+            }
+        }
+
+        int previousMatchedCount = matchedCount - newlyMatchedCount;
+        bool needsSave = newlyMatchedCount > 0 || pathRepairedCount > 0;
+        bool wasSaved = false;
+
+        if (persistIfChanged && needsSave)
+        {
+            string cleanName = parsed.Title.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            if (string.IsNullOrWhiteSpace(cleanName))
+            {
+                cleanName = string.IsNullOrWhiteSpace(fallbackName) ? "Untitled" : fallbackName;
+            }
+            WritePlaylistAtomic(filePath, cleanName, resolved);
+            wasSaved = true;
+        }
+
+        return new PlaylistRematchResult(
+            Name: parsed.Title,
+            FilePath: filePath,
+            TotalCount: resolved.Count,
+            PreviousMatchedCount: previousMatchedCount,
+            MatchedCount: matchedCount,
+            NewlyMatchedCount: newlyMatchedCount,
+            PathRepairedCount: pathRepairedCount,
+            WasSaved: wasSaved
+        );
+    }
+
+    public static PlaylistBatchRematchSummary RematchAllPlaylists(
+        string? musicRoot,
+        IReadOnlyList<LocalLibraryTrackRef> library,
+        bool persistIfChanged = true) =>
+        RematchAllPlaylists(musicRoot, PlaylistTrackMatcher.BuildIndex(library), persistIfChanged);
+
+    public static PlaylistBatchRematchSummary RematchAllPlaylists(
+        string? musicRoot,
+        PlaylistTrackMatcher.LibraryIndex index,
+        bool persistIfChanged = true)
+    {
+        string dir = GetPlaylistsDirectory(musicRoot);
+        if (!Directory.Exists(dir))
+        {
+            return new PlaylistBatchRematchSummary(0, 0, 0, 0, 0, 0);
+        }
+
+        var files = Directory.EnumerateFiles(dir, "*.m3u8")
+            .Concat(Directory.EnumerateFiles(dir, "*.m3u"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        int scanned = 0;
+        int updated = 0;
+        int totalTracks = 0;
+        int totalMatched = 0;
+        int newlyMatched = 0;
+        int pathRepaired = 0;
+
+        foreach (string file in files)
+        {
+            try
+            {
+                var res = RematchPlaylist(file, index, musicRoot, persistIfChanged);
+                scanned++;
+                if (res.WasSaved) updated++;
+                totalTracks += res.TotalCount;
+                totalMatched += res.MatchedCount;
+                newlyMatched += res.NewlyMatchedCount;
+                pathRepaired += res.PathRepairedCount;
+            }
+            catch
+            {
+                // Skip unreadable/corrupt playlist file
+            }
+        }
+
+        return new PlaylistBatchRematchSummary(
+            PlaylistsScanned: scanned,
+            PlaylistsUpdated: updated,
+            TotalTracks: totalTracks,
+            TotalMatched: totalMatched,
+            NewlyMatchedCount: newlyMatched,
+            PathRepairedCount: pathRepaired
+        );
+    }
+
+    private static void WritePlaylistAtomic(
+        string outPath,
+        string cleanName,
+        IReadOnlyList<PlaylistEntry> entries)
+    {
         var sb = new StringBuilder();
         sb.Append("#EXTM3U\n");
         sb.Append("#PLAYLIST:").Append(cleanName).Append('\n');
@@ -1308,7 +1907,7 @@ public static class PlaylistStore
                     sb.Append(SanitizeInline(entry.Artist)).Append(" - ");
                 }
                 sb.Append(SanitizeInline(entry.Title)).Append('\n');
-                sb.Append(entry.RelPath.Replace('\\', '/')).Append('\n');
+                sb.Append(entry.RelPath.Replace('\\', '/').TrimStart('/')).Append('\n');
             }
             else
             {
@@ -1342,15 +1941,6 @@ public static class PlaylistStore
                 // Ignore temp cleanup failure
             }
         }
-
-        if (!string.IsNullOrWhiteSpace(previousFilePath)
-            && !string.Equals(Path.GetFullPath(previousFilePath), Path.GetFullPath(outPath), StringComparison.OrdinalIgnoreCase)
-            && File.Exists(previousFilePath))
-        {
-            File.Delete(previousFilePath);
-        }
-
-        return outPath;
     }
 
     public static void DeletePlaylist(string filePath)

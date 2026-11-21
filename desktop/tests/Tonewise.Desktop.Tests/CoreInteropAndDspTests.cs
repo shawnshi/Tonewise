@@ -119,7 +119,7 @@ public sealed class CoreInteropAndDspTests
 
         try
         {
-            await using var server = new SyncHostServer(tempRoot, "pc-test");
+            await using var server = new SyncHostServer(tempRoot, "pc-test", allowPhonePlaylistUpload: true);
             int port = await server.StartAsync(port: 0, enableMdns: false);
             Assert.True(port > 0);
 

@@ -30,6 +30,21 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
     private volatile bool _bypass;
     private volatile bool _reachedEndOfStream;
 
+    private enum TransportFadeState
+    {
+        SteadyFull,
+        FadingOut,
+        HoldingSilence,
+        FadingIn,
+    }
+
+    private TransportFadeState _transportFadeState = TransportFadeState.SteadyFull;
+    private int _transportFadePosFrames;
+    private int _transportFadeTotalFrames;
+    private int _transportSilenceEmittedFrames;
+    private double _transportFadeCurrentGain = 1.0;
+    private double _transportFadeStartGain = 1.0;
+
     // Extended stereo acoustic stages (Gain-Matched A/B, Bauer Crossfeed, Balance/Mono, 3ms Lookahead Limiter)
     private bool _gainMatchedBypass;
     private double _rmsShiftDb;
@@ -151,6 +166,61 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
     public bool ReachedEndOfStream => _reachedEndOfStream;
 
     public void ResetEndOfStream() => _reachedEndOfStream = false;
+
+    public void BeginTransportFadeOut(double durationMs = 15.0)
+    {
+        int sr = Math.Max(WaveFormat.SampleRate, 8000);
+        int frames = Math.Max(1, (int)Math.Round(Math.Clamp(durationMs, 2.0, 100.0) / 1000.0 * sr));
+        lock (_dspLock)
+        {
+            if (_transportFadeState == TransportFadeState.HoldingSilence)
+            {
+                return;
+            }
+            _transportFadeStartGain = _transportFadeCurrentGain;
+            _transportFadePosFrames = 0;
+            _transportFadeTotalFrames = frames;
+            _transportSilenceEmittedFrames = 0;
+            _transportFadeState = TransportFadeState.FadingOut;
+        }
+    }
+
+    public void BeginTransportFadeIn(double durationMs = 15.0, bool startFromZero = false)
+    {
+        int sr = Math.Max(WaveFormat.SampleRate, 8000);
+        int frames = Math.Max(1, (int)Math.Round(Math.Clamp(durationMs, 2.0, 100.0) / 1000.0 * sr));
+        lock (_dspLock)
+        {
+            _transportFadeStartGain = startFromZero ? 0.0 : _transportFadeCurrentGain;
+            _transportFadeCurrentGain = _transportFadeStartGain;
+            _transportFadePosFrames = 0;
+            _transportFadeTotalFrames = frames;
+            _transportSilenceEmittedFrames = 0;
+            _transportFadeState = TransportFadeState.FadingIn;
+        }
+    }
+
+    public void ResetTransportFadeFull()
+    {
+        lock (_dspLock)
+        {
+            _transportFadeState = TransportFadeState.SteadyFull;
+            _transportFadeCurrentGain = 1.0;
+            _transportFadeStartGain = 1.0;
+            _transportFadePosFrames = 0;
+            _transportSilenceEmittedFrames = 0;
+        }
+    }
+
+    public bool HasDrainedPauseSilence(int requiredSilenceFrames)
+    {
+        int threshold = Math.Max(1, requiredSilenceFrames);
+        lock (_dspLock)
+        {
+            return _transportFadeState == TransportFadeState.HoldingSilence
+                && _transportSilenceEmittedFrames >= threshold;
+        }
+    }
 
     public bool IsBypassed
     {
@@ -499,11 +569,22 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
 
     public int Read(float[] buffer, int offset, int count)
     {
+        int channels = Math.Max(WaveFormat.Channels, 1);
+        if (TryServeSilenceHold(buffer, offset, count, channels))
+        {
+            return count;
+        }
+
         if (_source is GaplessSampleProvider gapless)
         {
             int totalRead = 0;
             while (totalRead < count)
             {
+                if (TryServeSilenceHold(buffer, offset + totalRead, count - totalRead, channels))
+                {
+                    totalRead = count;
+                    break;
+                }
                 int seg = gapless.ReadSegment(buffer, offset + totalRead, count - totalRead);
                 if (seg <= 0)
                 {
@@ -517,6 +598,7 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
                 {
                     ProcessSegment(buffer, offset + totalRead, seg);
                 }
+                ApplyTransportFade(buffer, offset + totalRead, seg, channels);
                 totalRead += seg;
             }
             return totalRead;
@@ -532,7 +614,109 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
         {
             ProcessSegment(buffer, offset, read);
         }
+        ApplyTransportFade(buffer, offset, read, channels);
         return read;
+    }
+
+    private bool TryServeSilenceHold(float[] buffer, int offset, int sampleCount, int channels)
+    {
+        lock (_dspLock)
+        {
+            if (_transportFadeState != TransportFadeState.HoldingSilence)
+            {
+                return false;
+            }
+            Array.Clear(buffer, offset, sampleCount);
+            _transportSilenceEmittedFrames += sampleCount / channels;
+            return true;
+        }
+    }
+
+    private void ApplyTransportFade(float[] buffer, int offset, int sampleCount, int channels)
+    {
+        if (sampleCount <= 0) return;
+        lock (_dspLock)
+        {
+            if (_transportFadeState == TransportFadeState.SteadyFull)
+            {
+                return;
+            }
+
+            int frameCount = sampleCount / channels;
+            for (int frame = 0; frame < frameCount; frame++)
+            {
+                int baseIdx = offset + frame * channels;
+                switch (_transportFadeState)
+                {
+                    case TransportFadeState.HoldingSilence:
+                        for (int c = 0; c < channels; c++)
+                        {
+                            buffer[baseIdx + c] = 0.0f;
+                        }
+                        _transportSilenceEmittedFrames++;
+                        break;
+
+                    case TransportFadeState.FadingOut:
+                        _transportFadePosFrames++;
+                        if (_transportFadePosFrames >= _transportFadeTotalFrames)
+                        {
+                            _transportFadeCurrentGain = 0.0;
+                            _transportFadeState = TransportFadeState.HoldingSilence;
+                            for (int c = 0; c < channels; c++)
+                            {
+                                buffer[baseIdx + c] = 0.0f;
+                            }
+                            _transportSilenceEmittedFrames++;
+                        }
+                        else
+                        {
+                            double tOut = _transportFadePosFrames / (double)_transportFadeTotalFrames;
+                            double gainOut = _transportFadeStartGain * 0.5 * (1.0 + Math.Cos(Math.PI * tOut));
+                            _transportFadeCurrentGain = gainOut;
+                            float gf = (float)gainOut;
+                            for (int c = 0; c < channels; c++)
+                            {
+                                buffer[baseIdx + c] *= gf;
+                            }
+                        }
+                        break;
+
+                    case TransportFadeState.FadingIn:
+                        _transportFadePosFrames++;
+                        if (_transportFadePosFrames >= _transportFadeTotalFrames)
+                        {
+                            _transportFadeCurrentGain = 1.0;
+                            _transportFadeState = TransportFadeState.SteadyFull;
+                        }
+                        else
+                        {
+                            double tIn = _transportFadePosFrames / (double)_transportFadeTotalFrames;
+                            double gainIn = _transportFadeStartGain
+                                + (1.0 - _transportFadeStartGain) * 0.5 * (1.0 - Math.Cos(Math.PI * tIn));
+                            _transportFadeCurrentGain = gainIn;
+                            float gf = (float)gainIn;
+                            for (int c = 0; c < channels; c++)
+                            {
+                                buffer[baseIdx + c] *= gf;
+                            }
+                        }
+                        break;
+                }
+            }
+
+            // Handle any trailing odd samples if sampleCount is not a multiple of channels.
+            int remStart = frameCount * channels;
+            if (remStart < sampleCount && _transportFadeState != TransportFadeState.SteadyFull)
+            {
+                float gf = _transportFadeState == TransportFadeState.HoldingSilence
+                    ? 0.0f
+                    : (float)_transportFadeCurrentGain;
+                for (int i = remStart; i < sampleCount; i++)
+                {
+                    buffer[offset + i] *= gf;
+                }
+            }
+        }
     }
 
     private void ProcessSegment(float[] buffer, int offset, int read)

@@ -903,17 +903,6 @@ constructor(
                         }
                     }
 
-                    // Snapshot live Musikr playlists & run 3-way merge BEFORE committing outbox playlists
-                    snapshotUserPlaylistsForSync()
-                    val playlistSync = syncPlaylistsWithHost(cleanBase, token, cancelToken)
-                    for (deletedName in playlistSync.deletedNames) {
-                        runCatching {
-                            musicRepository.library?.findPlaylistByName(deletedName)?.let {
-                                musicRepository.deletePlaylist(it)
-                            }
-                        }.onFailure { L.w(it, "Failed removing deleted playlist $deletedName") }
-                    }
-
                     if (!reportSync.handoffMerged) {
                         try {
                             val mergedSlotsJson =
@@ -927,36 +916,11 @@ constructor(
                         }
                     }
 
-                    // Commit non-conflicting outbox playlists & queue merged playlists for Musikr reconciliation
-                    val conflictKeys = playlistSync.conflictNames.mapTo(HashSet()) { it.lowercase() }
-                    val deletedKeys = playlistSync.deletedNames.mapTo(HashSet()) { it.lowercase() }
-                    val queuedKeys = HashSet<String>()
-                    val effectiveOutboxPlaylists = ArrayList<OutboxPlaylistDto>()
+                    // Playlists sync strictly one-way PC -> Phone via v2 outbox; phone playlists are never synced back to PC.
+                    val effectiveOutboxPlaylists = ArrayList<OutboxPlaylistDto>(outbox.playlists.size)
                     for (pl in outbox.playlists) {
-                        val key = pl.name.lowercase()
-                        if (key in conflictKeys || key in deletedKeys) continue
-                        val merged = playlistSync.mergedEntriesByKey[key]
-                        if (merged != null) {
-                            effectiveOutboxPlaylists.add(pl.copy(relPaths = merged.second))
-                        } else {
-                            managedSyncStorage.commitPlaylistM3u8(pl.name, pl.relPaths)
-                            lwwStore.savePlaylistMergeBase(pl.name, pl.relPaths)
-                            effectiveOutboxPlaylists.add(pl)
-                        }
-                        queuedKeys.add(key)
-                    }
-                    for ((key, mergedPair) in playlistSync.mergedEntriesByKey) {
-                        if (key !in queuedKeys) {
-                            effectiveOutboxPlaylists.add(
-                                OutboxPlaylistDto(
-                                    outboxId = "",
-                                    name = mergedPair.first,
-                                    relPaths = mergedPair.second,
-                                    trackUids = emptyList(),
-                                )
-                            )
-                            queuedKeys.add(key)
-                        }
+                        managedSyncStorage.commitPlaylistM3u8(pl.name, pl.relPaths)
+                        effectiveOutboxPlaylists.add(pl)
                     }
                     if (effectiveOutboxPlaylists.isNotEmpty()) {
                         for (pl in effectiveOutboxPlaylists) {
@@ -1000,11 +964,7 @@ constructor(
                                 append(" · 歌单 ").append(outbox.playlists.size).append(" 个")
                             }
                             append(" · 上报播放 ").append(pushedCounts).append(" 首 · 标签 ")
-                                .append(pushedMutations).append(" 条 · 合并歌单 ").append(playlistSync.mergedCount).append(" 个")
-                            if (playlistSync.conflictNames.isNotEmpty()) {
-                                append(" · 歌单冲突 ").append(playlistSync.conflictNames.size).append(" 个（")
-                                    .append(playlistSync.conflictNames.take(3).joinToString("、")).append("）")
-                            }
+                                .append(pushedMutations).append(" 条")
                             if (firstDownloadError != null) {
                                 append("（").append(firstDownloadError).append("）")
                             }
@@ -1715,107 +1675,6 @@ constructor(
             pushedCounts = playDeltas.size,
             pushedMutations = acknowledged.size,
             handoffMerged = handoffMerged,
-        )
-    }
-
-    private data class PlaylistSyncSummary(
-        val mergedCount: Int = 0,
-        val mergedEntriesByKey: Map<String, Pair<String, List<String>>> = emptyMap(),
-        val conflictNames: List<String> = emptyList(),
-        val deletedNames: List<String> = emptyList(),
-    )
-
-    private fun snapshotUserPlaylistsForSync() {
-        val playlists = musicRepository.library?.playlists.orEmpty()
-        if (playlists.isEmpty()) return
-        val internalDir = File(context.filesDir, ".tonewise/playlists")
-        if (!internalDir.exists()) internalDir.mkdirs()
-        for (playlist in playlists) {
-            val rawName = playlist.name.raw.trim()
-            if (rawName.isEmpty()) continue
-            val hasBase = lwwStore.loadPlaylistMergeBase(rawName).isNotEmpty()
-            if (playlist.songs.isEmpty() && !hasBase) continue
-            val safeName = sanitizePlaylistFilename(rawName)
-            val payload = formatM3u8Content(playlist.songs, rawName).toByteArray(Charsets.UTF_8)
-            runCatching { File(internalDir, "$safeName.m3u8").writeBytes(payload) }
-        }
-    }
-
-    private fun syncPlaylistsWithHost(
-        baseUrl: String,
-        token: String? = null,
-        cancelToken: LanHttpClient.CancelToken? = null,
-    ): PlaylistSyncSummary {
-        val dir = File(context.filesDir, ".tonewise/playlists")
-        if (!dir.isDirectory) return PlaylistSyncSummary()
-        val m3uFiles = dir.listFiles { f -> f.isFile && f.extension.equals("m3u8", ignoreCase = true) }
-            ?: return PlaylistSyncSummary()
-        var syncedCount = 0
-        val mergedEntriesByKey = LinkedHashMap<String, Pair<String, List<String>>>()
-        val conflictNames = ArrayList<String>()
-        val deletedNames = ArrayList<String>()
-        for (file in m3uFiles) {
-            cancelToken?.throwIfCancelled()
-            try {
-                val rawLines = file.readLines(Charsets.UTF_8)
-                val name = PlaylistM3u8Helper.extractPlaylistNameFromM3u8(rawLines, file.nameWithoutExtension)
-                val localEntries =
-                    rawLines
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() && !it.startsWith("#") }
-                        .map(PlaylistM3u8Helper::normalizePlaylistEntryForPc)
-                        .filter { it.isNotEmpty() }
-                val baseEntries =
-                    lwwStore.loadPlaylistMergeBase(name)
-                        .map(PlaylistM3u8Helper::normalizePlaylistEntryForPc)
-                        .filter { it.isNotEmpty() }
-                if (localEntries.isEmpty() && baseEntries.isEmpty()) continue
-                val reqJson =
-                    TonewiseCore.stringifyJson(
-                        linkedMapOf(
-                            "playlist_name" to name,
-                            "base" to baseEntries,
-                            "ours" to emptyList<String>(),
-                            "theirs" to localEntries,
-                        )
-                    )
-                val respRaw = httpPostJson("$baseUrl/api/v1/playlists/merge", reqJson, token, cancelToken)
-                @Suppress("UNCHECKED_CAST")
-                val respObj = TonewiseCore.parseJson(respRaw) as? Map<String, Any?> ?: continue
-                val deleted = respObj["deleted"] == true
-                val conflicts = respObj["conflicts"] as? List<*>
-                when {
-                    deleted -> {
-                        managedSyncStorage.deletePlaylistM3u8(name)
-                        lwwStore.clearPlaylistMergeBase(name)
-                        deletedNames.add(name)
-                        syncedCount++
-                    }
-                    conflicts.isNullOrEmpty() -> {
-                        val mergedPaths =
-                            (respObj["merged"] as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
-                        managedSyncStorage.commitPlaylistM3u8(name, mergedPaths)
-                        lwwStore.savePlaylistMergeBase(name, mergedPaths)
-                        mergedEntriesByKey[name.lowercase()] = name to mergedPaths
-                        syncedCount++
-                    }
-                    else -> {
-                        conflictNames.add(name)
-                    }
-                }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (authErr: LanSyncAuthException) {
-                throw authErr
-            } catch (t: Throwable) {
-                L.w(t, "Playlist 3-way merge failed for ${file.name}")
-            }
-        }
-        return PlaylistSyncSummary(
-            mergedCount = syncedCount,
-            mergedEntriesByKey = mergedEntriesByKey,
-            conflictNames = conflictNames,
-            deletedNames = deletedNames,
         )
     }
 

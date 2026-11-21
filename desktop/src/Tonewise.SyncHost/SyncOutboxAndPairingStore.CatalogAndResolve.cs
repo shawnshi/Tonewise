@@ -42,16 +42,7 @@ public sealed partial class SyncOutboxAndPairingStore
                 rowsByUid.TryAdd(r.AudioFrameBlake3Hex, r);
         }
 
-        var libRefs = rows.Select(r => new LocalLibraryTrackRef(
-            r.TrackUid,
-            r.RelPath,
-            BuildFullPath(r.RelPath),
-            r.Title,
-            r.ArtistDisplay,
-            r.Album,
-            r.DurationMs,
-            r.SampleRateHz
-        )).ToList();
+        var libRefs = rows.Select(r => r.ToLibraryTrackRef(BuildFullPath(r.RelPath))).ToList();
 
         bool hasPlaylistItems = relevantItems.Any(i => string.Equals(i.Kind, "playlist", StringComparison.OrdinalIgnoreCase));
         var libIndex = hasPlaylistItems ? PlaylistTrackMatcher.BuildIndex(libRefs) : null;
@@ -228,10 +219,7 @@ public sealed partial class SyncOutboxAndPairingStore
                 string dir = PlaylistStore.GetPlaylistsDirectory(_musicRoot);
                 if (!Directory.Exists(dir)) return [];
 
-                var libRefs = rows.Select(r => new LocalLibraryTrackRef(
-                    r.TrackUid, r.RelPath, BuildFullPath(r.RelPath),
-                    r.Title, r.ArtistDisplay, r.Album, r.DurationMs, r.SampleRateHz
-                )).ToList();
+                var libRefs = rows.Select(r => r.ToLibraryTrackRef(BuildFullPath(r.RelPath))).ToList();
                 var libIndex = PlaylistTrackMatcher.BuildIndex(libRefs);
                 var byUid = rows.ToDictionary(r => r.TrackUid, StringComparer.OrdinalIgnoreCase);
 
@@ -542,7 +530,7 @@ public sealed partial class SyncOutboxAndPairingStore
             SELECT track_uid, lower(hex(audio_frame_blake3)), rel_path,
                    title, album, album_artist, artists_json, composers_json, conductors_json,
                    genre, duration_ms, sample_rate_hz, file_size, mtime_ms,
-                   lower(hex(header_blake3))
+                   lower(hex(header_blake3)), work_name, movement_name
             FROM tracks
             ORDER BY album, rel_path;
             """;
@@ -564,11 +552,14 @@ public sealed partial class SyncOutboxAndPairingStore
             long fileSize = reader.IsDBNull(12) ? 0L : reader.GetInt64(12);
             long mtimeMs = reader.IsDBNull(13) ? 0L : reader.GetInt64(13);
             string headerBlake3 = reader.IsDBNull(14) ? "" : reader.GetString(14);
+            string workName = reader.IsDBNull(15) ? "" : reader.GetString(15);
+            string movementName = reader.IsDBNull(16) ? "" : reader.GetString(16);
 
             result.Add(new ManifestTrackRow(
                 uid, blake3, relPath, title, album, albumArtist,
                 artistsJson, composersJson, conductorsJson,
-                genre, durationMs, sampleRate, fileSize, mtimeMs, headerBlake3));
+                genre, durationMs, sampleRate, fileSize, mtimeMs, headerBlake3,
+                workName, movementName));
         }
         return result;
     }
@@ -588,7 +579,9 @@ public sealed partial class SyncOutboxAndPairingStore
         int SampleRateHz,
         long FileSize,
         long MtimeMs,
-        string HeaderBlake3Hex = ""
+        string HeaderBlake3Hex = "",
+        string WorkName = "",
+        string MovementName = ""
     )
     {
         private List<string>? _allArtists;
@@ -597,6 +590,26 @@ public sealed partial class SyncOutboxAndPairingStore
             ParseJsonArray(ArtistsJson) is { Count: > 0 } arr
                 ? string.Join(", ", arr)
                 : AlbumArtist;
+
+        public string ComposersDisplay => string.Join(", ", ParseJsonArray(ComposersJson));
+
+        public string ConductorsDisplay => string.Join(", ", ParseJsonArray(ConductorsJson));
+
+        public LocalLibraryTrackRef ToLibraryTrackRef(string fullPath) =>
+            new(
+                TrackUid,
+                RelPath,
+                fullPath,
+                Title,
+                ArtistDisplay,
+                Album,
+                DurationMs,
+                SampleRateHz,
+                ComposersDisplay,
+                ConductorsDisplay,
+                WorkName,
+                MovementName
+            );
 
         public IReadOnlyList<string> AllArtists
         {

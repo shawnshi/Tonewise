@@ -18,12 +18,22 @@
  
 package com.shawnshi.tonewise
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.view.View
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.updatePadding
 import dagger.hilt.android.AndroidEntryPoint
@@ -54,25 +64,88 @@ import timber.log.Timber as L
 class MainActivity : AppCompatActivity() {
     private val playbackModel: PlaybackViewModel by viewModels()
     @Inject lateinit var uiSettings: UISettings
+    private var isServiceBound = false
+    private var notificationPermissionLauncher: ActivityResultLauncher<String>? = null
+    private val serviceConnection =
+        object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {}
+
+            override fun onServiceDisconnected(name: ComponentName?) {}
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        notificationPermissionLauncher =
+            registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                if (granted) {
+                    runCatching {
+                        startService(
+                            Intent(this, AuxioService::class.java)
+                                .setAction(AuxioService.ACTION_START)
+                                .putExtra(
+                                    AuxioService.INTENT_KEY_START_ID,
+                                    IntegerTable.START_ID_ACTIVITY,
+                                )
+                        )
+                    }
+                }
+            }
         setupTheme()
         // Inflate the views after setting up the theme so that the theme attributes are applied.
         val binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupEdgeToEdge(binding.root)
+        maybeRequestPostNotificationsPermission()
         L.d("Activity created")
+    }
+
+    private fun maybeRequestPostNotificationsPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val permission = Manifest.permission.POST_NOTIFICATIONS
+        if (
+            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val prefs = getSharedPreferences("tonewise_runtime_perms", Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_ASKED_POST_NOTIFICATIONS, false)) {
+            return
+        }
+        prefs.edit().putBoolean(KEY_ASKED_POST_NOTIFICATIONS, true).apply()
+        runCatching { notificationPermissionLauncher?.launch(permission) }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val bindIntent =
+            Intent(this, AuxioService::class.java)
+                .setAction(AuxioService.ACTION_BIND_LOCAL)
+                .putExtra(AuxioService.INTENT_KEY_START_ID, IntegerTable.START_ID_ACTIVITY)
+        runCatching {
+            if (bindService(bindIntent, serviceConnection, Context.BIND_AUTO_CREATE)) {
+                isServiceBound = true
+            }
+        }
+    }
+
+    override fun onStop() {
+        if (isServiceBound) {
+            isServiceBound = false
+            runCatching { unbindService(serviceConnection) }
+        }
+        super.onStop()
     }
 
     override fun onResume() {
         super.onResume()
 
-        startService(
-            Intent(this, AuxioService::class.java)
-                .setAction(AuxioService.ACTION_START)
-                .putExtra(AuxioService.INTENT_KEY_START_ID, IntegerTable.START_ID_ACTIVITY)
-        )
+        runCatching {
+            startService(
+                Intent(this, AuxioService::class.java)
+                    .setAction(AuxioService.ACTION_START)
+                    .putExtra(AuxioService.INTENT_KEY_START_ID, IntegerTable.START_ID_ACTIVITY)
+            )
+        }
 
         if (!startIntentAction(intent)) {
             // No intent action to do, just restore the previously saved state.
@@ -151,5 +224,6 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val KEY_INTENT_USED = BuildConfig.APPLICATION_ID + ".key.FILE_INTENT_USED"
+        const val KEY_ASKED_POST_NOTIFICATIONS = "asked_post_notifications"
     }
 }

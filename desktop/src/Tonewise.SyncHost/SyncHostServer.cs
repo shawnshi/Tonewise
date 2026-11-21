@@ -53,6 +53,7 @@ public sealed class SyncHostServer : IAsyncDisposable
     private readonly string _musicRoot;
     private readonly string _tonewiseDir;
     private readonly string _deviceId;
+    private readonly bool _allowPhonePlaylistUpload;
     private readonly Lock _fileLock = new();
     private WebApplication? _app;
     private MdnsAdvertiser? _mdns;
@@ -74,11 +75,16 @@ public sealed class SyncHostServer : IAsyncDisposable
     public int ListeningPort { get; private set; }
     public bool IsRunning => _app is not null;
 
-    public SyncHostServer(string musicRoot, string? deviceId = null, SyncOutboxAndPairingStore? store = null)
+    public SyncHostServer(
+        string musicRoot,
+        string? deviceId = null,
+        SyncOutboxAndPairingStore? store = null,
+        bool allowPhonePlaylistUpload = false)
     {
         _musicRoot = musicRoot;
         _tonewiseDir = Path.Combine(musicRoot, ".tonewise");
         _deviceId = deviceId ?? Environment.MachineName;
+        _allowPhonePlaylistUpload = allowPhonePlaylistUpload;
         Store = store ?? new SyncOutboxAndPairingStore(musicRoot);
     }
 
@@ -297,6 +303,12 @@ public sealed class SyncHostServer : IAsyncDisposable
                 return authErr!;
             if (!RequireJsonContentType(request, out var ctErr))
                 return ctErr!;
+            if (!_allowPhonePlaylistUpload)
+            {
+                return Results.Json(
+                    new { ok = false, disabled = true, error = "Phone-to-PC playlist sync is disabled (playlists sync PC -> Phone only)." },
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
 
             var body = await JsonSerializer.DeserializeAsync<M3u8MergeApiRequest>(request.Body);
             if (body is null || string.IsNullOrWhiteSpace(body.PlaylistName))

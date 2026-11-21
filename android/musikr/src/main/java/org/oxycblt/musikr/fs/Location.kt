@@ -42,9 +42,16 @@ sealed class Location(val uri: Uri, val path: Path) {
                             Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                     )
                 } catch (e: Exception) {
-                    // Not fully sure what happens if I'm disallowed to take the permission,
-                    // check for both circumstances (error or no-op)
-                    return null
+                    // Read-only SAF providers / SD card roots may deny persistable write permission;
+                    // retry with read-only permission so the directory can still be scanned and loaded.
+                    try {
+                        context.contentResolverSafe.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        )
+                    } catch (_: Exception) {
+                        return null
+                    }
                 }
 
                 if (isUnopened(context, uri)) {
@@ -56,7 +63,7 @@ sealed class Location(val uri: Uri, val path: Path) {
 
         private fun isUnopened(context: Context, uri: Uri) =
             context.contentResolverSafe.persistedUriPermissions.none {
-                it.uri == uri && it.isReadPermission && it.isWritePermission
+                it.uri == uri && it.isReadPermission
             }
 
         companion object {

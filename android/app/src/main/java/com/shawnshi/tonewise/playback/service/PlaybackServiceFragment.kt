@@ -173,6 +173,9 @@ private constructor(
     val isSessionOngoing: Boolean
         get() = exoHolder.sessionOngoing
 
+    val isPlaying: Boolean
+        get() = playbackManager.progression.isPlaying
+
     val fallbackNotification: ForegroundServiceNotification
         get() = sessionHolder.notification
 
@@ -193,11 +196,15 @@ private constructor(
         isShuffled: Boolean,
     ) {
         cancelAutoStop()
+        foregroundListener.updateForeground(ForegroundListener.Change.MEDIA_SESSION)
     }
 
     override fun onProgressionChanged(progression: Progression) {
         // Update timer whenever play/pause state changes
         updateAutoStopTimer(progression.isPlaying)
+        if (progression.isPlaying) {
+            foregroundListener.updateForeground(ForegroundListener.Change.MEDIA_SESSION)
+        }
     }
 
     override fun onSessionEnded() {

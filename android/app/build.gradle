@@ -17,8 +17,8 @@ android {
 
     defaultConfig {
         applicationId namespace
-        versionName "0.9.0"
-        versionCode 90
+        versionName "0.9.5"
+        versionCode 95
 
         minSdk min_sdk
         // randomly flickers between deprecated and required depending on what mood my gradle is in
@@ -51,6 +51,9 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (project.hasProperty("useDebugSigning")) {
+                signingConfig signingConfigs.debug
+            }
 
             dependenciesInfo {
                 includeInApk = false
