@@ -443,6 +443,141 @@ public sealed class LibraryStore
         return null;
     }
 
+    private sealed record PendingTrackUpsert(
+        string? PrevUidForRel,
+        string TrackUid,
+        byte[] AudioHash,
+        long HeaderSize,
+        byte[] HeaderHash,
+        string RelPath,
+        long FileSize,
+        long MtimeMs,
+        string Codec,
+        int SampleRateHz,
+        int? BitDepth,
+        int? BitrateKbps,
+        long DurationMs,
+        string Title,
+        string Album,
+        string? AlbumArtist,
+        string ArtistsJson,
+        string ComposersJson,
+        string ConductorsJson,
+        string? WorkName,
+        string? MovementName,
+        int? MovementNumber,
+        int DiscNo,
+        int TrackNo,
+        string? Genre,
+        double? RgTrack,
+        double? RgAlbum,
+        double? EstBpm,
+        string? TempoBucket
+    );
+
+    private static void FlushManifestUpsertBatch(SqliteConnection conn, List<PendingTrackUpsert> batch)
+    {
+        if (batch.Count == 0) return;
+
+        using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
+        foreach (var item in batch)
+        {
+            if (item.PrevUidForRel is not null && !string.Equals(item.PrevUidForRel, item.TrackUid, StringComparison.Ordinal))
+            {
+                using var delOld = conn.CreateCommand();
+                delOld.Transaction = tx;
+                delOld.CommandText = "DELETE FROM tracks WHERE track_uid = $oldUid AND rel_path = $rel;";
+                delOld.Parameters.AddWithValue("$oldUid", item.PrevUidForRel);
+                delOld.Parameters.AddWithValue("$rel", item.RelPath);
+                delOld.ExecuteNonQuery();
+            }
+
+            using (var dedupAf = conn.CreateCommand())
+            {
+                dedupAf.Transaction = tx;
+                dedupAf.CommandText = "DELETE FROM tracks WHERE audio_frame_blake3 = $af AND track_uid <> $uid;";
+                dedupAf.Parameters.AddWithValue("$af", item.AudioHash);
+                dedupAf.Parameters.AddWithValue("$uid", item.TrackUid);
+                dedupAf.ExecuteNonQuery();
+            }
+
+            using var ins = conn.CreateCommand();
+            ins.Transaction = tx;
+            ins.CommandText = """
+                INSERT INTO tracks (
+                    track_uid, audio_frame_blake3, header_size, header_blake3,
+                    rel_path, file_size, mtime_ms, codec, sample_rate_hz, bit_depth,
+                    bitrate_kbps, duration_ms, title, album, album_artist, artists_json,
+                    composers_json, conductors_json, work_name, movement_name, movement_number, disc_number, track_number, genre,
+                    replaygain_track_db, replaygain_album_db, tempo_bpm, tempo_bucket
+                ) VALUES (
+                    $uid, $af, $hsz, $hb,
+                    $rel, $fsz, $mt, $cdc, $sr, $bd,
+                    $br, $dur, $ti, $al, $aa, $ar,
+                    $cmp, $cnd, $wk, $mvn, $mvi, $dsc, $trk, $gen,
+                    $rg, $rga, $bpm, $bkt
+                )
+                ON CONFLICT(track_uid) DO UPDATE SET
+                    audio_frame_blake3 = excluded.audio_frame_blake3,
+                    header_size = excluded.header_size,
+                    header_blake3 = excluded.header_blake3,
+                    rel_path = excluded.rel_path,
+                    file_size = excluded.file_size,
+                    mtime_ms = excluded.mtime_ms,
+                    codec = excluded.codec,
+                    sample_rate_hz = CASE WHEN excluded.sample_rate_hz > 0 THEN excluded.sample_rate_hz ELSE tracks.sample_rate_hz END,
+                    bit_depth = COALESCE(excluded.bit_depth, tracks.bit_depth),
+                    bitrate_kbps = COALESCE(excluded.bitrate_kbps, tracks.bitrate_kbps),
+                    duration_ms = CASE WHEN excluded.duration_ms > 0 THEN excluded.duration_ms ELSE tracks.duration_ms END,
+                    title = CASE WHEN length(trim(excluded.title)) > 0 THEN excluded.title ELSE tracks.title END,
+                    album = CASE WHEN length(trim(excluded.album)) > 0 THEN excluded.album ELSE tracks.album END,
+                    album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
+                    artists_json = CASE WHEN excluded.artists_json <> '[]' THEN excluded.artists_json ELSE tracks.artists_json END,
+                    composers_json = CASE WHEN excluded.composers_json <> '[]' THEN excluded.composers_json ELSE tracks.composers_json END,
+                    conductors_json = CASE WHEN excluded.conductors_json <> '[]' THEN excluded.conductors_json ELSE tracks.conductors_json END,
+                    work_name = COALESCE(NULLIF(excluded.work_name, ''), tracks.work_name),
+                    movement_name = COALESCE(NULLIF(excluded.movement_name, ''), tracks.movement_name),
+                    movement_number = COALESCE(excluded.movement_number, tracks.movement_number),
+                    disc_number = CASE WHEN excluded.disc_number > 0 THEN excluded.disc_number ELSE tracks.disc_number END,
+                    track_number = CASE WHEN excluded.track_number > 0 THEN excluded.track_number ELSE tracks.track_number END,
+                    genre = COALESCE(NULLIF(excluded.genre, ''), tracks.genre),
+                    replaygain_track_db = COALESCE(excluded.replaygain_track_db, tracks.replaygain_track_db),
+                    replaygain_album_db = COALESCE(excluded.replaygain_album_db, tracks.replaygain_album_db);
+                """;
+            ins.Parameters.AddWithValue("$uid", item.TrackUid);
+            ins.Parameters.AddWithValue("$af", item.AudioHash);
+            ins.Parameters.AddWithValue("$hsz", item.HeaderSize);
+            ins.Parameters.AddWithValue("$hb", item.HeaderHash);
+            ins.Parameters.AddWithValue("$rel", item.RelPath);
+            ins.Parameters.AddWithValue("$fsz", item.FileSize);
+            ins.Parameters.AddWithValue("$mt", item.MtimeMs);
+            ins.Parameters.AddWithValue("$cdc", item.Codec);
+            ins.Parameters.AddWithValue("$sr", item.SampleRateHz);
+            ins.Parameters.AddWithValue("$bd", item.BitDepth.HasValue ? item.BitDepth.Value : DBNull.Value);
+            ins.Parameters.AddWithValue("$br", item.BitrateKbps.HasValue ? item.BitrateKbps.Value : DBNull.Value);
+            ins.Parameters.AddWithValue("$dur", item.DurationMs);
+            ins.Parameters.AddWithValue("$ti", item.Title);
+            ins.Parameters.AddWithValue("$al", item.Album);
+            ins.Parameters.AddWithValue("$aa", (object?)item.AlbumArtist ?? DBNull.Value);
+            ins.Parameters.AddWithValue("$ar", item.ArtistsJson);
+            ins.Parameters.AddWithValue("$cmp", item.ComposersJson);
+            ins.Parameters.AddWithValue("$cnd", item.ConductorsJson);
+            ins.Parameters.AddWithValue("$wk", (object?)item.WorkName ?? DBNull.Value);
+            ins.Parameters.AddWithValue("$mvn", (object?)item.MovementName ?? DBNull.Value);
+            ins.Parameters.AddWithValue("$mvi", item.MovementNumber.HasValue ? item.MovementNumber.Value : DBNull.Value);
+            ins.Parameters.AddWithValue("$dsc", item.DiscNo);
+            ins.Parameters.AddWithValue("$trk", item.TrackNo);
+            ins.Parameters.AddWithValue("$gen", (object?)item.Genre ?? DBNull.Value);
+            ins.Parameters.AddWithValue("$rg", item.RgTrack.HasValue ? item.RgTrack.Value : DBNull.Value);
+            ins.Parameters.AddWithValue("$rga", item.RgAlbum.HasValue ? item.RgAlbum.Value : DBNull.Value);
+            ins.Parameters.AddWithValue("$bpm", item.EstBpm.HasValue ? item.EstBpm.Value : DBNull.Value);
+            ins.Parameters.AddWithValue("$bkt", (object?)item.TempoBucket ?? DBNull.Value);
+            ins.ExecuteNonQuery();
+        }
+        tx.Commit();
+        batch.Clear();
+    }
+
     private static void BuildManifestWithFfiFallback(string musicRoot, string dbPath, bool fastMode = true)
     {
         using var conn = TonewiseSqlite.OpenReadWrite(dbPath);
@@ -466,8 +601,10 @@ public sealed class LibraryStore
 
         var seenRelPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string cleanRoot = LongPathHelper.StripExtendedPrefix(Path.GetFullPath(musicRoot)).TrimEnd('\\', '/');
+        const int batchCommitSize = 150;
+        var pendingBatch = new List<PendingTrackUpsert>(batchCommitSize);
 
-        using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
+        // Perform all disk traversal & Rust FFI work outside SQLite transactions; commit in short 150-track batches.
         foreach (string file in LongPathHelper.SafeEnumerateFiles(cleanRoot, "*.*", recursive: true, skipHiddenDirectories: true))
         {
             string ext = Path.GetExtension(file);
@@ -554,8 +691,9 @@ public sealed class LibraryStore
                     headerSize = (long)fp.HeaderSize;
                     fsz = (long)fp.FileSize;
                     codec = ext.TrimStart('.').ToLowerInvariant();
-                    sampleRateHz = 44100;
-                    durationMs = 0;
+                    sampleRateHz = embedded.SampleRateHz is > 0 ? embedded.SampleRateHz.Value : 0;
+                    bitDepth = embedded.BitDepth;
+                    durationMs = embedded.DurationMs is > 0 ? embedded.DurationMs.Value : 0;
                 }
                 else
                 {
@@ -576,95 +714,43 @@ public sealed class LibraryStore
                 }
 
                 string trackUid = Convert.ToHexStringLower(audioHash);
-
                 rgTrack ??= embedded.ReplayGainTrackDb;
-                if (prevUidForRel is not null && !string.Equals(prevUidForRel, trackUid, StringComparison.Ordinal))
-                {
-                    using var delOld = conn.CreateCommand();
-                    delOld.Transaction = tx;
-                    delOld.CommandText = "DELETE FROM tracks WHERE track_uid = $oldUid AND rel_path = $rel;";
-                    delOld.Parameters.AddWithValue("$oldUid", prevUidForRel);
-                    delOld.Parameters.AddWithValue("$rel", rel);
-                    delOld.ExecuteNonQuery();
-                }
 
-                using (var dedupAf = conn.CreateCommand())
-                {
-                    dedupAf.Transaction = tx;
-                    dedupAf.CommandText = "DELETE FROM tracks WHERE audio_frame_blake3 = $af AND track_uid <> $uid;";
-                    dedupAf.Parameters.AddWithValue("$af", audioHash);
-                    dedupAf.Parameters.AddWithValue("$uid", trackUid);
-                    dedupAf.ExecuteNonQuery();
-                }
+                pendingBatch.Add(new PendingTrackUpsert(
+                    PrevUidForRel: prevUidForRel,
+                    TrackUid: trackUid,
+                    AudioHash: audioHash,
+                    HeaderSize: headerSize,
+                    HeaderHash: headerHash,
+                    RelPath: rel,
+                    FileSize: fsz,
+                    MtimeMs: mt,
+                    Codec: codec,
+                    SampleRateHz: sampleRateHz,
+                    BitDepth: bitDepth,
+                    BitrateKbps: bitrateKbps,
+                    DurationMs: durationMs,
+                    Title: title,
+                    Album: album,
+                    AlbumArtist: albumArtist,
+                    ArtistsJson: artistsJson,
+                    ComposersJson: composersJson,
+                    ConductorsJson: conductorsJson,
+                    WorkName: workName,
+                    MovementName: movementName,
+                    MovementNumber: movementNumber,
+                    DiscNo: discNo,
+                    TrackNo: trackNo,
+                    Genre: genre,
+                    RgTrack: rgTrack,
+                    RgAlbum: rgAlbum,
+                    EstBpm: estBpm,
+                    TempoBucket: tempoBucket));
 
-                using var ins = conn.CreateCommand();
-                ins.Transaction = tx;
-                ins.CommandText = """
-                    INSERT INTO tracks (
-                        track_uid, audio_frame_blake3, header_size, header_blake3,
-                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, bit_depth,
-                        bitrate_kbps, duration_ms, title, album, album_artist, artists_json,
-                        composers_json, conductors_json, work_name, movement_name, movement_number, disc_number, track_number, genre,
-                        replaygain_track_db, replaygain_album_db, tempo_bpm, tempo_bucket
-                    ) VALUES (
-                        $uid, $af, $hsz, $hb,
-                        $rel, $fsz, $mt, $cdc, $sr, $bd,
-                        $br, $dur, $ti, $al, $aa, $ar,
-                        $cmp, $cnd, $wk, $mvn, $mvi, $dsc, $trk, $gen,
-                        $rg, $rga, $bpm, $bkt
-                    )
-                    ON CONFLICT(track_uid) DO UPDATE SET
-                        audio_frame_blake3 = excluded.audio_frame_blake3,
-                        header_size = excluded.header_size,
-                        header_blake3 = excluded.header_blake3,
-                        rel_path = excluded.rel_path,
-                        file_size = excluded.file_size,
-                        mtime_ms = excluded.mtime_ms,
-                        codec = excluded.codec,
-                        title = CASE WHEN length(trim(excluded.title)) > 0 THEN excluded.title ELSE tracks.title END,
-                        album = CASE WHEN length(trim(excluded.album)) > 0 THEN excluded.album ELSE tracks.album END,
-                        album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
-                        artists_json = CASE WHEN excluded.artists_json <> '[]' THEN excluded.artists_json ELSE tracks.artists_json END,
-                        composers_json = CASE WHEN excluded.composers_json <> '[]' THEN excluded.composers_json ELSE tracks.composers_json END,
-                        conductors_json = CASE WHEN excluded.conductors_json <> '[]' THEN excluded.conductors_json ELSE tracks.conductors_json END,
-                        work_name = COALESCE(NULLIF(excluded.work_name, ''), tracks.work_name),
-                        movement_name = COALESCE(NULLIF(excluded.movement_name, ''), tracks.movement_name),
-                        movement_number = COALESCE(excluded.movement_number, tracks.movement_number),
-                        disc_number = CASE WHEN excluded.disc_number > 0 THEN excluded.disc_number ELSE tracks.disc_number END,
-                        track_number = CASE WHEN excluded.track_number > 0 THEN excluded.track_number ELSE tracks.track_number END,
-                        genre = COALESCE(NULLIF(excluded.genre, ''), tracks.genre),
-                        replaygain_track_db = COALESCE(excluded.replaygain_track_db, tracks.replaygain_track_db),
-                        replaygain_album_db = COALESCE(excluded.replaygain_album_db, tracks.replaygain_album_db);
-                    """;
-                ins.Parameters.AddWithValue("$uid", trackUid);
-                ins.Parameters.AddWithValue("$af", audioHash);
-                ins.Parameters.AddWithValue("$hsz", headerSize);
-                ins.Parameters.AddWithValue("$hb", headerHash);
-                ins.Parameters.AddWithValue("$rel", rel);
-                ins.Parameters.AddWithValue("$fsz", fsz);
-                ins.Parameters.AddWithValue("$mt", mt);
-                ins.Parameters.AddWithValue("$cdc", codec);
-                ins.Parameters.AddWithValue("$sr", sampleRateHz);
-                ins.Parameters.AddWithValue("$bd", bitDepth.HasValue ? bitDepth.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$br", bitrateKbps.HasValue ? bitrateKbps.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$dur", durationMs);
-                ins.Parameters.AddWithValue("$ti", title);
-                ins.Parameters.AddWithValue("$al", album);
-                ins.Parameters.AddWithValue("$aa", (object?)albumArtist ?? DBNull.Value);
-                ins.Parameters.AddWithValue("$ar", artistsJson);
-                ins.Parameters.AddWithValue("$cmp", composersJson);
-                ins.Parameters.AddWithValue("$cnd", conductorsJson);
-                ins.Parameters.AddWithValue("$wk", (object?)workName ?? DBNull.Value);
-                ins.Parameters.AddWithValue("$mvn", (object?)movementName ?? DBNull.Value);
-                ins.Parameters.AddWithValue("$mvi", movementNumber.HasValue ? movementNumber.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$dsc", discNo);
-                ins.Parameters.AddWithValue("$trk", trackNo);
-                ins.Parameters.AddWithValue("$gen", (object?)genre ?? DBNull.Value);
-                ins.Parameters.AddWithValue("$rg", rgTrack.HasValue ? rgTrack.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$rga", rgAlbum.HasValue ? rgAlbum.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$bpm", estBpm.HasValue ? estBpm.Value : DBNull.Value);
-                ins.Parameters.AddWithValue("$bkt", (object?)tempoBucket ?? DBNull.Value);
-                ins.ExecuteNonQuery();
+                if (pendingBatch.Count >= batchCommitSize)
+                {
+                    FlushManifestUpsertBatch(conn, pendingBatch);
+                }
             }
             catch
             {
@@ -672,20 +758,31 @@ public sealed class LibraryStore
             }
         }
 
+        FlushManifestUpsertBatch(conn, pendingBatch);
+
+        var staleUids = new List<string>();
         foreach (var (rel, prev) in existingByRel)
         {
             if (seenRelPaths.Contains(rel)) continue;
             string expectedFull = Path.Combine(cleanRoot, rel.Replace('/', Path.DirectorySeparatorChar));
             if (!LongPathHelper.FileExists(expectedFull))
             {
-                using var del = conn.CreateCommand();
-                del.Transaction = tx;
-                del.CommandText = "DELETE FROM tracks WHERE track_uid = $uid;";
-                del.Parameters.AddWithValue("$uid", prev.Uid);
-                del.ExecuteNonQuery();
+                staleUids.Add(prev.Uid);
             }
         }
-        tx.Commit();
+        if (staleUids.Count > 0)
+        {
+            using var delTx = TonewiseSqlite.BeginImmediateTransaction(conn);
+            foreach (string uid in staleUids)
+            {
+                using var del = conn.CreateCommand();
+                del.Transaction = delTx;
+                del.CommandText = "DELETE FROM tracks WHERE track_uid = $uid;";
+                del.Parameters.AddWithValue("$uid", uid);
+                del.ExecuteNonQuery();
+            }
+            delTx.Commit();
+        }
     }
 
     public float[]? LoadWaveform(TrackItem track)

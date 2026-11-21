@@ -8,7 +8,8 @@ public sealed record AudioFrameFingerprint(
     [property: JsonPropertyName("audio_frame_blake3_hex")] string AudioFrameBlake3Hex,
     [property: JsonPropertyName("header_blake3_hex")] string HeaderBlake3Hex,
     [property: JsonPropertyName("header_size")] ulong HeaderSize,
-    [property: JsonPropertyName("file_size")] ulong FileSize
+    [property: JsonPropertyName("file_size")] ulong FileSize,
+    [property: JsonPropertyName("footer_size")] ulong FooterSize = 0
 );
 
 public sealed record M3u8MergeConflict(

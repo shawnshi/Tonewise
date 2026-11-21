@@ -306,6 +306,32 @@ fn save_tagged_file_atomically(
 
     #[cfg(windows)]
     {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        unsafe extern "system" {
+            fn MoveFileExW(
+                lp_existing_file_name: *const u16,
+                lp_new_file_name: *const u16,
+                dw_flags: u32,
+            ) -> i32;
+        }
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+        let src_w: Vec<u16> = OsStr::new(&tmp_path).encode_wide().chain(std::iter::once(0)).collect();
+        let dst_w: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+        let moved = unsafe {
+            MoveFileExW(
+                src_w.as_ptr(),
+                dst_w.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+
+        // Fall back to explicit backup swap if MoveFileExW rejects replacement under external lock/ACL
         let bak_path = parent.join(format!("{base_name}.twbak.{pid}.{seq}"));
         let _ = std::fs::remove_file(&bak_path);
         if let Err(e) = std::fs::rename(path, &bak_path) {
@@ -426,6 +452,30 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                     None => {
                         tag.remove_key(&ItemKey::Publisher);
                         tag.remove_key(&ItemKey::Label);
+                    }
+                },
+                "work" | "work_name" => {
+                    let key = if matches!(tag_type, lofty::tag::TagType::Id3v2) {
+                        ItemKey::ContentGroup
+                    } else {
+                        ItemKey::Work
+                    };
+                    match clean_val {
+                        Some(v) => {
+                            tag.insert_text(key, v.to_string());
+                        }
+                        None => {
+                            tag.remove_key(&ItemKey::Work);
+                            tag.remove_key(&ItemKey::ContentGroup);
+                        }
+                    }
+                }
+                "movement" | "movement_name" => match clean_val {
+                    Some(v) => {
+                        tag.insert_text(ItemKey::Movement, v.to_string());
+                    }
+                    None => {
+                        tag.remove_key(&ItemKey::Movement);
                     }
                 },
                 "tempo_bpm" => match clean_val.and_then(|v| v.parse::<f32>().ok()) {
@@ -1077,6 +1127,62 @@ mod tests {
         let updated = std::fs::read(&flac_path).unwrap();
         assert_eq!(&updated[..hdr_size], &new_hdr[..]);
         assert_eq!(&updated[hdr_size..], audio);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn write_audio_tags_writes_classical_work_and_movement_preserving_audio_blake3() {
+        use lofty::file::TaggedFileExt;
+        use lofty::probe::Probe;
+        use lofty::tag::ItemKey;
+
+        let dir = std::env::temp_dir().join(format!("tw_ffi_classical_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("classical.wav");
+
+        let data_len = 8000u32;
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        wav.resize(44 + data_len as usize, 128u8);
+        std::fs::write(&wav_path, &wav).unwrap();
+
+        let before: serde_json::Value =
+            serde_json::from_str(&fingerprint_path_impl(&wav_path.to_string_lossy())).unwrap();
+
+        let req = serde_json::json!({
+            "path": wav_path.to_string_lossy(),
+            "updates": {
+                "work_name": "Symphony No. 5 in C minor, Op. 67",
+                "movement_name": "I. Allegro con brio"
+            }
+        })
+        .to_string();
+        let after: serde_json::Value = serde_json::from_str(&write_audio_tags_json_impl(&req)).unwrap();
+        assert!(after.get("error").is_none(), "unexpected error: {after}");
+        assert_eq!(after["audio_frame_blake3_hex"], before["audio_frame_blake3_hex"]);
+
+        let reloaded = Probe::open(&wav_path).unwrap().read().unwrap();
+        let tag = reloaded.primary_tag().unwrap();
+        assert_eq!(
+            tag.get_string(&ItemKey::ContentGroup)
+                .or_else(|| tag.get_string(&ItemKey::Work)),
+            Some("Symphony No. 5 in C minor, Op. 67")
+        );
+        assert_eq!(tag.get_string(&ItemKey::Movement), Some("I. Allegro con brio"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

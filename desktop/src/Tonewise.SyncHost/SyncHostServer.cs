@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Net.Http.Headers;
 using Tonewise.Interop;
 using Tonewise.SyncHost.Curation;
 using Tonewise.SyncHost.Ledger;
@@ -50,20 +51,23 @@ public sealed record ReportApiRequest(
 
 public sealed class SyncHostServer : IAsyncDisposable
 {
+    private sealed record ManifestSnapshotCache(
+        string FilePath,
+        string Sha256Hex,
+        long Length,
+        string SourceStamp
+    );
+
     private readonly string _musicRoot;
     private readonly string _tonewiseDir;
     private readonly string _deviceId;
     private readonly bool _allowPhonePlaylistUpload;
     private readonly Lock _fileLock = new();
+    private readonly Lock _manifestSnapshotLock = new();
     private WebApplication? _app;
     private MdnsAdvertiser? _mdns;
-    private string? _manifestHashPath;
-    private long _manifestHashLen;
-    private long _manifestHashWriteTicks;
-    private bool _manifestWalExists;
-    private long _manifestWalLen;
-    private long _manifestWalWriteTicks;
-    private string? _manifestHashHex;
+    private ManifestSnapshotCache? _manifestSnapshot;
+    private readonly List<string> _retiredManifestSnapshots = [];
     private string? _waveformsHashPath;
     private long _waveformsHashLen;
     private long _waveformsHashWriteTicks;
@@ -119,6 +123,7 @@ public sealed class SyncHostServer : IAsyncDisposable
         {
             _mdns = new MdnsAdvertiser($"Tonewise-{_deviceId}", ListeningPort);
             _mdns.Start();
+            _ = Task.Run(() => Store.WarmResolveCache());
         }
         return ListeningPort;
     }
@@ -146,7 +151,7 @@ public sealed class SyncHostServer : IAsyncDisposable
                 has_encyclopedia = File.Exists(encPath),
                 waveforms_bytes = File.Exists(wfPath) ? new FileInfo(wfPath).Length : 0L,
                 waveforms_sha256 = File.Exists(wfPath) ? GetCachedWaveformsSha256Hex(wfPath) : null,
-                manifest_sha256 = File.Exists(dbPath) ? GetCachedManifestSha256Hex(dbPath) : null,
+                manifest_sha256 = File.Exists(dbPath) ? GetOrBuildManifestSnapshot(dbPath).Sha256Hex : null,
             });
         });
 
@@ -219,6 +224,21 @@ public sealed class SyncHostServer : IAsyncDisposable
                 return Results.NotFound();
             }
 
+            try
+            {
+                var liveFp = TonewiseCoreClient.ComputeFingerprint(audioFull);
+                if (liveFp.FooterSize > 0)
+                {
+                    return Results.Json(
+                        new { error = "trailing_metadata_requires_full_sync" },
+                        statusCode: StatusCodes.Status409Conflict);
+                }
+            }
+            catch
+            {
+                // Continue best-effort prefix read if native fingerprint probe fails on synthetic files
+            }
+
             int bytesToRead = (int)headerSize;
             byte[] headerBytes = new byte[bytesToRead];
             int totalRead = 0;
@@ -277,24 +297,21 @@ public sealed class SyncHostServer : IAsyncDisposable
 
             string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
             if (!File.Exists(dbPath)) return Results.NotFound();
-            string snapPath = Path.Combine(Path.GetTempPath(), $"tonewise_manifest_snap_{Guid.NewGuid():N}.db");
-            try
-            {
-                TonewiseSqlite.CreateConsistentSnapshot(dbPath, snapPath);
-                var stream = new FileStream(
-                    snapPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    bufferSize: 64 * 1024,
-                    options: FileOptions.DeleteOnClose | FileOptions.Asynchronous | FileOptions.SequentialScan);
-                return Results.File(stream, "application/x-sqlite3", enableRangeProcessing: true);
-            }
-            catch
-            {
-                try { if (File.Exists(snapPath)) File.Delete(snapPath); } catch { }
-                throw;
-            }
+
+            var snap = GetOrBuildManifestSnapshot(dbPath);
+            var stream = new FileStream(
+                snap.FilePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete,
+                bufferSize: 64 * 1024,
+                options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return Results.File(
+                stream,
+                contentType: "application/x-sqlite3",
+                lastModified: null,
+                entityTag: new EntityTagHeaderValue($"\"{snap.Sha256Hex}\""),
+                enableRangeProcessing: true);
         });
 
         app.MapPost("/api/v1/playlists/merge", async (HttpRequest request) =>
@@ -793,39 +810,163 @@ public sealed class SyncHostServer : IAsyncDisposable
         return false;
     }
 
-    private string? GetCachedManifestSha256Hex(string dbPath)
+    private ManifestSnapshotCache GetOrBuildManifestSnapshot(string dbPath)
     {
-        lock (_fileLock)
+        lock (_manifestSnapshotLock)
         {
-            if (!File.Exists(dbPath)) return null;
-            var fi = new FileInfo(dbPath);
-            long ticks = fi.LastWriteTimeUtc.Ticks;
-            string walPath = dbPath + "-wal";
-            bool walExists = File.Exists(walPath);
-            var walFi = walExists ? new FileInfo(walPath) : null;
-            long walLen = walFi?.Length ?? 0L;
-            long walTicks = walFi?.LastWriteTimeUtc.Ticks ?? 0L;
-            if (string.Equals(_manifestHashPath, dbPath, StringComparison.OrdinalIgnoreCase)
-                && _manifestHashLen == fi.Length
-                && _manifestHashWriteTicks == ticks
-                && _manifestWalExists == walExists
-                && _manifestWalLen == walLen
-                && _manifestWalWriteTicks == walTicks
-                && _manifestHashHex is not null)
+            TryPruneRetiredSnapshotsUnlocked();
+            string stamp = ComputeManifestSourceStamp(dbPath);
+            if (_manifestSnapshot is { } cached
+                && string.Equals(cached.SourceStamp, stamp, StringComparison.Ordinal)
+                && File.Exists(cached.FilePath))
             {
-                return _manifestHashHex;
+                return cached;
             }
 
-            string hex = ComputeManifestAndWalSha256Hex(dbPath, walPath, walExists && walLen > 0);
-            _manifestHashPath = dbPath;
-            _manifestHashLen = fi.Length;
-            _manifestHashWriteTicks = ticks;
-            _manifestWalExists = walExists;
-            _manifestWalLen = walLen;
-            _manifestWalWriteTicks = walTicks;
-            _manifestHashHex = hex;
-            return hex;
+            string snapPath = Path.Combine(
+                Path.GetTempPath(),
+                $"tonewise_manifest_cache_{Environment.ProcessId}_{Guid.NewGuid():N}.db");
+            try
+            {
+                TonewiseSqlite.CreateConsistentSnapshot(dbPath, snapPath);
+                string hex = ComputeSha256Hex(snapPath);
+                long len = new FileInfo(snapPath).Length;
+                // Re-read stamp after VACUUM INTO to detect concurrent mutations occurring mid-snapshot.
+                string finalStamp = ComputeManifestSourceStamp(dbPath);
+                var next = new ManifestSnapshotCache(snapPath, hex, len, finalStamp);
+                if (_manifestSnapshot is { } prev && !string.Equals(prev.FilePath, snapPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    _retiredManifestSnapshots.Add(prev.FilePath);
+                }
+                _manifestSnapshot = next;
+                TryPruneRetiredSnapshotsUnlocked();
+                return next;
+            }
+            catch
+            {
+                try { if (File.Exists(snapPath)) File.Delete(snapPath); } catch { }
+                throw;
+            }
         }
+    }
+
+    private void TryPruneRetiredSnapshotsUnlocked()
+    {
+        if (_retiredManifestSnapshots.Count == 0) return;
+        for (int i = _retiredManifestSnapshots.Count - 1; i >= 0; i--)
+        {
+            string path = _retiredManifestSnapshots[i];
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+                _retiredManifestSnapshots.RemoveAt(i);
+            }
+            catch
+            {
+                // Keep path queued if an active Range/stream reader still holds a handle on Windows.
+            }
+        }
+    }
+
+    private static string ComputeManifestSourceStamp(string dbPath)
+    {
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Span<byte> metaBuf = stackalloc byte[16];
+
+        try
+        {
+            using var dbFs = new FileStream(dbPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            long dbLen = dbFs.Length;
+            long dbTicks = 0L;
+            try { dbTicks = File.GetLastWriteTimeUtc(dbPath).Ticks; } catch { }
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(metaBuf[..8], dbLen);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(metaBuf.Slice(8, 8), dbTicks);
+            hasher.AppendData(metaBuf);
+
+            byte[] header = new byte[100];
+            int n = dbFs.Read(header, 0, header.Length);
+            if (n > 0) hasher.AppendData(header.AsSpan(0, n));
+        }
+        catch (FileNotFoundException)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(metaBuf[..8], -1L);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(metaBuf.Slice(8, 8), 0L);
+            hasher.AppendData(metaBuf);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(metaBuf[..8], -1L);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(metaBuf.Slice(8, 8), 0L);
+            hasher.AppendData(metaBuf);
+        }
+
+        string walPath = dbPath + "-wal";
+        Span<byte> walMetaBuf = stackalloc byte[16];
+        try
+        {
+            using var walFs = new FileStream(walPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            long walLen = walFs.Length;
+            long walTicks = 0L;
+            if (walLen > 0)
+            {
+                try { walTicks = File.GetLastWriteTimeUtc(walPath).Ticks; } catch { }
+            }
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf[..8], walLen);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf.Slice(8, 8), walTicks);
+            hasher.AppendData(walMetaBuf);
+
+            if (walLen > 0)
+            {
+                if (walLen <= 8 * 1024 * 1024)
+                {
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = walFs.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        hasher.AppendData(buf.AsSpan(0, n));
+                    }
+                }
+                else
+                {
+                    byte[] edge = new byte[64 * 1024];
+                    int headN = walFs.Read(edge, 0, edge.Length);
+                    if (headN > 0) hasher.AppendData(edge.AsSpan(0, headN));
+                    long tailPos = Math.Max(0, walLen - edge.Length);
+                    walFs.Seek(tailPos, SeekOrigin.Begin);
+                    int tailN = walFs.Read(edge, 0, edge.Length);
+                    if (tailN > 0) hasher.AppendData(edge.AsSpan(0, tailN));
+                }
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf[..8], -1L);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf.Slice(8, 8), 0L);
+            hasher.AppendData(walMetaBuf);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf[..8], -1L);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf.Slice(8, 8), 0L);
+            hasher.AppendData(walMetaBuf);
+        }
+        catch (IOException) when (!File.Exists(walPath))
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf[..8], -1L);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf.Slice(8, 8), 0L);
+            hasher.AppendData(walMetaBuf);
+        }
+        catch (UnauthorizedAccessException) when (!File.Exists(walPath))
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf[..8], -1L);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(walMetaBuf.Slice(8, 8), 0L);
+            hasher.AppendData(walMetaBuf);
+        }
+
+        return Convert.ToHexStringLower(hasher.GetHashAndReset());
     }
 
     private string? GetCachedWaveformsSha256Hex(string wfPath)
@@ -1214,29 +1355,6 @@ public sealed class SyncHostServer : IAsyncDisposable
         return Convert.ToHexStringLower(SHA256.HashData(fs));
     }
 
-    private static string ComputeManifestAndWalSha256Hex(string dbPath, string walPath, bool includeWal)
-    {
-        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        AppendFileToHash(hasher, dbPath);
-        if (includeWal && File.Exists(walPath))
-        {
-            hasher.AppendData([0x57, 0x41, 0x4C]); // "WAL" separator
-            AppendFileToHash(hasher, walPath);
-        }
-        return Convert.ToHexStringLower(hasher.GetHashAndReset());
-    }
-
-    private static void AppendFileToHash(IncrementalHash hasher, string path)
-    {
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        byte[] buffer = new byte[64 * 1024];
-        int n;
-        while ((n = fs.Read(buffer, 0, buffer.Length)) > 0)
-        {
-            hasher.AppendData(buffer.AsSpan(0, n));
-        }
-    }
-
     private static readonly Lazy<string> LazyDefaultScenesJson = new(() =>
     {
         var asm = typeof(SyncHostServer).Assembly;
@@ -1261,6 +1379,15 @@ public sealed class SyncHostServer : IAsyncDisposable
             await _app.StopAsync();
             await _app.DisposeAsync();
             _app = null;
+        }
+        lock (_manifestSnapshotLock)
+        {
+            if (_manifestSnapshot is { } current)
+            {
+                _retiredManifestSnapshots.Add(current.FilePath);
+                _manifestSnapshot = null;
+            }
+            TryPruneRetiredSnapshotsUnlocked();
         }
     }
 }

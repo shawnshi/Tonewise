@@ -33,18 +33,44 @@ public sealed class MdnsAdvertiser : IAsyncDisposable
 
     private async Task RunLoopAsync(CancellationToken ct)
     {
-        UdpClient? udp = null;
-        Task<UdpReceiveResult>? recvTask = null;
+        var bindings = new List<(UdpClient Udp, IPAddress LanIp, Task<UdpReceiveResult>? RecvTask)>();
         var target = new IPEndPoint(MdnsMulticast, MdnsPort);
         try
         {
-            udp = new UdpClient(AddressFamily.InterNetwork);
-            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            udp.Client.Bind(new IPEndPoint(IPAddress.Any, MdnsPort));
-            udp.JoinMulticastGroup(MdnsMulticast);
+            var lanIps = SyncOutboxAndPairingStore.ResolveAllLanIpv4Addresses().ToList();
+            if (lanIps.Count == 0)
+            {
+                IPAddress fallback = ResolveLanIpv4();
+                if (!IPAddress.IsLoopback(fallback)) lanIps.Add(fallback);
+            }
 
-            byte[] initial = BuildAnnouncementPacket();
-            await udp.SendAsync(initial.AsMemory(), target, ct);
+            foreach (var lanIp in lanIps)
+            {
+                UdpClient? udp = null;
+                try
+                {
+                    udp = new UdpClient(AddressFamily.InterNetwork);
+                    udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                    udp.Client.Bind(new IPEndPoint(IPAddress.Any, MdnsPort));
+                    udp.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface, lanIp.GetAddressBytes());
+                    udp.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 255);
+                    udp.JoinMulticastGroup(MdnsMulticast, lanIp);
+
+                    byte[] initial = BuildAnnouncementPacket(ttlSeconds: 120, overrideIp: lanIp);
+                    await udp.SendAsync(initial.AsMemory(), target, ct);
+                    bindings.Add((udp, lanIp, null));
+                    udp = null;
+                }
+                catch
+                {
+                    udp?.Dispose();
+                }
+            }
+
+            if (bindings.Count == 0)
+            {
+                return;
+            }
 
             DateTime nextAnnounceUtc = DateTime.UtcNow.AddSeconds(15);
             DateTime lastQueryReplyUtc = DateTime.MinValue;
@@ -52,38 +78,95 @@ public sealed class MdnsAdvertiser : IAsyncDisposable
 
             while (!ct.IsCancellationRequested)
             {
-                recvTask ??= udp.ReceiveAsync(ct).AsTask();
+                var waitTasks = new List<Task>(bindings.Count + 1);
+                for (int i = 0; i < bindings.Count; i++)
+                {
+                    var b = bindings[i];
+                    if (b.RecvTask is null)
+                    {
+                        b.RecvTask = b.Udp.ReceiveAsync(ct).AsTask();
+                        bindings[i] = b;
+                    }
+                    waitTasks.Add(b.RecvTask);
+                }
+
                 TimeSpan remaining = nextAnnounceUtc - DateTime.UtcNow;
                 if (remaining <= TimeSpan.Zero)
                 {
-                    byte[] keepalive = BuildAnnouncementPacket();
-                    await udp.SendAsync(keepalive.AsMemory(), target, ct);
+                    foreach (var b in bindings)
+                    {
+                        byte[] keepalive = BuildAnnouncementPacket(ttlSeconds: 120, overrideIp: b.LanIp);
+                        await b.Udp.SendAsync(keepalive.AsMemory(), target, ct);
+                    }
                     nextAnnounceUtc = DateTime.UtcNow.AddSeconds(15);
                     continue;
                 }
 
                 var delayTask = Task.Delay(remaining, ct);
-                var completed = await Task.WhenAny(recvTask, delayTask);
-                if (completed == recvTask)
+                waitTasks.Add(delayTask);
+                var completed = await Task.WhenAny(waitTasks);
+                if (completed == delayTask)
                 {
-                    UdpReceiveResult pkt = await recvTask;
-                    recvTask = null;
+                    await delayTask;
+                    foreach (var b in bindings)
+                    {
+                        byte[] keepalive = BuildAnnouncementPacket(ttlSeconds: 120, overrideIp: b.LanIp);
+                        await b.Udp.SendAsync(keepalive.AsMemory(), target, ct);
+                    }
+                    nextAnnounceUtc = DateTime.UtcNow.AddSeconds(15);
+                    continue;
+                }
+
+                for (int i = 0; i < bindings.Count; i++)
+                {
+                    var b = bindings[i];
+                    if (b.RecvTask != completed) continue;
+
+                    UdpReceiveResult pkt;
+                    try
+                    {
+                        pkt = await b.RecvTask;
+                    }
+                    finally
+                    {
+                        b.RecvTask = null;
+                        bindings[i] = b;
+                    }
+
                     DateTime now = DateTime.UtcNow;
                     if ((now - lastQueryReplyUtc).TotalMilliseconds >= 500
-                        && IsMatchingMdnsQuery(pkt.Buffer, _instanceName, hostFqdn))
+                        && IsMatchingMdnsQuery(pkt.Buffer, _instanceName, hostFqdn, out bool unicastRequested))
                     {
-                        byte[] reply = BuildAnnouncementPacket();
-                        await udp.SendAsync(reply.AsMemory(), target, ct);
+                        foreach (var tx in bindings)
+                        {
+                            byte[] reply = BuildAnnouncementPacket(ttlSeconds: 120, overrideIp: tx.LanIp);
+                            try
+                            {
+                                await tx.Udp.SendAsync(reply.AsMemory(), target, ct);
+                            }
+                            catch
+                            {
+                                // Best-effort multicast announcement per NIC
+                            }
+                        }
+
+                        if (unicastRequested || pkt.RemoteEndPoint.Port != MdnsPort)
+                        {
+                            byte[] unicastReply = BuildAnnouncementPacket(ttlSeconds: 120, overrideIp: b.LanIp);
+                            try
+                            {
+                                await b.Udp.SendAsync(unicastReply.AsMemory(), pkt.RemoteEndPoint, ct);
+                            }
+                            catch
+                            {
+                                // Best-effort unicast reply
+                            }
+                        }
+
                         lastQueryReplyUtc = now;
                         nextAnnounceUtc = now.AddSeconds(15);
                     }
-                }
-                else
-                {
-                    await delayTask;
-                    byte[] keepalive = BuildAnnouncementPacket();
-                    await udp.SendAsync(keepalive.AsMemory(), target, ct);
-                    nextAnnounceUtc = DateTime.UtcNow.AddSeconds(15);
+                    break;
                 }
             }
         }
@@ -97,21 +180,21 @@ public sealed class MdnsAdvertiser : IAsyncDisposable
         }
         finally
         {
-            if (udp is not null)
+            foreach (var b in bindings)
             {
                 try
                 {
-                    byte[] goodbye = BuildAnnouncementPacket(ttlSeconds: 0);
-                    await udp.SendAsync(goodbye, goodbye.Length, target);
+                    byte[] goodbye = BuildAnnouncementPacket(ttlSeconds: 0, overrideIp: b.LanIp);
+                    await b.Udp.SendAsync(goodbye, goodbye.Length, target);
                 }
                 catch
                 {
                     // Ignore best-effort shutdown goodbye failure
                 }
-                udp.Dispose();
-                if (recvTask is not null)
+                b.Udp.Dispose();
+                if (b.RecvTask is not null)
                 {
-                    try { await recvTask; } catch { /* observe disposal/cancellation */ }
+                    try { await b.RecvTask; } catch { /* observe disposal/cancellation */ }
                 }
             }
         }
@@ -175,8 +258,12 @@ public sealed class MdnsAdvertiser : IAsyncDisposable
         return ms.ToArray();
     }
 
-    public static bool IsMatchingMdnsQuery(ReadOnlySpan<byte> packet, string instanceName, string hostFqdn)
+    public static bool IsMatchingMdnsQuery(ReadOnlySpan<byte> packet, string instanceName, string hostFqdn) =>
+        IsMatchingMdnsQuery(packet, instanceName, hostFqdn, out _);
+
+    public static bool IsMatchingMdnsQuery(ReadOnlySpan<byte> packet, string instanceName, string hostFqdn, out bool unicastRequested)
     {
+        unicastRequested = false;
         if (packet.Length < 12) return false;
         ushort flags = BinaryPrimitives.ReadUInt16BigEndian(packet[2..4]);
         if ((flags & 0x8000) != 0) return false; // Must be DNS query (QR=0)
@@ -194,12 +281,14 @@ public sealed class MdnsAdvertiser : IAsyncDisposable
             if (afterName + 4 > packet.Length)
                 return false;
 
+            ushort qclass = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(afterName + 2, 2));
             offset = afterName + 4; // skip QTYPE & QCLASS
             if (string.Equals(qname, ServiceType, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(qname, "_services._dns-sd._udp.local", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(qname, fullService, StringComparison.OrdinalIgnoreCase)
                 || (!string.IsNullOrEmpty(cleanHost) && string.Equals(qname, cleanHost, StringComparison.OrdinalIgnoreCase)))
             {
+                unicastRequested = (qclass & 0x8000) != 0;
                 return true;
             }
         }

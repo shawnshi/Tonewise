@@ -17,8 +17,8 @@ android {
 
     defaultConfig {
         applicationId namespace
-        versionName "0.9.5"
-        versionCode 95
+        versionName "0.9.9"
+        versionCode 99
 
         minSdk min_sdk
         // randomly flickers between deprecated and required depending on what mood my gradle is in
@@ -41,6 +41,28 @@ android {
         }
     }
 
+    def releaseStoreFilePath = (System.getenv("TONEWISE_RELEASE_STORE_FILE") ?: findProperty("tonewise.release.storeFile"))?.toString()?.trim()
+    def releaseStorePassword = (System.getenv("TONEWISE_RELEASE_STORE_PASSWORD") ?: findProperty("tonewise.release.storePassword"))?.toString()
+    def releaseKeyAlias = (System.getenv("TONEWISE_RELEASE_KEY_ALIAS") ?: findProperty("tonewise.release.keyAlias"))?.toString()?.trim()
+    def releaseKeyPassword = (System.getenv("TONEWISE_RELEASE_KEY_PASSWORD") ?: findProperty("tonewise.release.keyPassword"))?.toString()
+    def hasValidReleaseSigning =
+        releaseStoreFilePath &&
+        file(releaseStoreFilePath).isFile() &&
+        releaseStorePassword &&
+        releaseKeyAlias &&
+        releaseKeyPassword
+
+    signingConfigs {
+        release {
+            if (hasValidReleaseSigning) {
+                storeFile file(releaseStoreFilePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix ".debug"
@@ -51,8 +73,17 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
-            if (project.hasProperty("useDebugSigning")) {
+            if (hasValidReleaseSigning) {
+                signingConfig signingConfigs.release
+            } else if (project.hasProperty("useDebugSigning")) {
+                logger.warn("TONEWISE_RELEASE_* keystore not configured; signing release APK with debug key due to -PuseDebugSigning.")
                 signingConfig signingConfigs.debug
+            } else if (project.hasProperty("requireReleaseSigning")) {
+                throw new GradleException(
+                    "Missing release signing config. Set TONEWISE_RELEASE_STORE_FILE, " +
+                    "TONEWISE_RELEASE_STORE_PASSWORD, TONEWISE_RELEASE_KEY_ALIAS, and TONEWISE_RELEASE_KEY_PASSWORD " +
+                    "(or pass -PuseDebugSigning for local smoke builds)."
+                )
             }
 
             dependenciesInfo {

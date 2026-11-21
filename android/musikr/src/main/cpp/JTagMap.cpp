@@ -19,14 +19,18 @@
 #include "JTagMap.h"
 
 #include "JStringRef.h"
+#include "util.h"
 
 JTagMap::JTagMap(JNIEnv *env) : env(env) {
     auto jTagMapClass = std::make_unique < JClassRef
             > (env, "org/oxycblt/musikr/metadata/NativeTagMap");
     auto jTagMapInitMethod = jTagMapClass->method("<init>", "()V");
-    jTagMap = std::move(
-            std::make_unique < JObjectRef
-                    > (env, env->NewObject(**jTagMapClass, jTagMapInitMethod)));
+    jobject mapObj = env->NewObject(**jTagMapClass, jTagMapInitMethod);
+    throwOnJniException(env, "JTagMap::NativeTagMap.<init>");
+    if (mapObj == nullptr) {
+        throw std::runtime_error("Failed to instantiate NativeTagMap");
+    }
+    jTagMap = std::make_unique<JObjectRef>(env, mapObj);
     jTagMapAddIdSingleMethod = jTagMapClass->method("addID",
             "(Ljava/lang/String;Ljava/lang/String;)V");
     jTagMapAddIdListMethod = jTagMapClass->method("addID",
@@ -53,17 +57,34 @@ void JTagMap::add_id(const TagLib::String id, const TagLib::String value) {
     JStringRef jId { env, id };
     JStringRef jValue { env, value };
     env->CallVoidMethod(**jTagMap, jTagMapAddIdSingleMethod, *jId, *jValue);
+    throwOnJniException(env, "JTagMap::addID(single)");
 }
 
 void JTagMap::add_id(const TagLib::String id, const TagLib::StringList values) {
     JStringRef jId { env, id };
-    JObjectRef jValues { env, env->NewObject(**jArrayListClass,
-            jArrayListInitMethod) };
+    jobject listObj = env->NewObject(**jArrayListClass, jArrayListInitMethod);
+    throwOnJniException(env, "JTagMap::ArrayList.<init>");
+    if (listObj == nullptr) {
+        throw std::runtime_error("Failed to allocate ArrayList");
+    }
+    JObjectRef jValues { env, listObj };
     for (auto &value : values) {
-        JStringRef jValue { env, value };
-        env->CallBooleanMethod(*jValues, jArrayListAddMethod, *jValue);
+        if (env->PushLocalFrame(16) != 0) {
+            throwOnJniException(env, "JTagMap::PushLocalFrame");
+            throw std::runtime_error("JNI local frame overflow");
+        }
+        try {
+            JStringRef jValue { env, value };
+            env->CallBooleanMethod(*jValues, jArrayListAddMethod, *jValue);
+            throwOnJniException(env, "JTagMap::ArrayList.add");
+        } catch (...) {
+            env->PopLocalFrame(nullptr);
+            throw;
+        }
+        env->PopLocalFrame(nullptr);
     }
     env->CallVoidMethod(**jTagMap, jTagMapAddIdListMethod, *jId, *jValues);
+    throwOnJniException(env, "JTagMap::addID(list)");
 }
 
 void JTagMap::add_custom(const TagLib::String description,
@@ -72,19 +93,36 @@ void JTagMap::add_custom(const TagLib::String description,
     JStringRef jValue { env, value };
     env->CallVoidMethod(**jTagMap, jTagMapAddCustomSingleMethod, *jDescription,
             *jValue);
+    throwOnJniException(env, "JTagMap::addCustom(single)");
 }
 
 void JTagMap::add_custom(const TagLib::String description,
         const TagLib::StringList values) {
     JStringRef jDescription { env, description };
-    JObjectRef jValues { env, env->NewObject(**jArrayListClass,
-            jArrayListInitMethod) };
+    jobject listObj = env->NewObject(**jArrayListClass, jArrayListInitMethod);
+    throwOnJniException(env, "JTagMap::ArrayList.<init>");
+    if (listObj == nullptr) {
+        throw std::runtime_error("Failed to allocate ArrayList");
+    }
+    JObjectRef jValues { env, listObj };
     for (auto &value : values) {
-        JStringRef jValue { env, value };
-        env->CallBooleanMethod(*jValues, jArrayListAddMethod, *jValue);
+        if (env->PushLocalFrame(16) != 0) {
+            throwOnJniException(env, "JTagMap::PushLocalFrame");
+            throw std::runtime_error("JNI local frame overflow");
+        }
+        try {
+            JStringRef jValue { env, value };
+            env->CallBooleanMethod(*jValues, jArrayListAddMethod, *jValue);
+            throwOnJniException(env, "JTagMap::ArrayList.add");
+        } catch (...) {
+            env->PopLocalFrame(nullptr);
+            throw;
+        }
+        env->PopLocalFrame(nullptr);
     }
     env->CallVoidMethod(**jTagMap, jTagMapAddCustomListMethod, *jDescription,
             *jValues);
+    throwOnJniException(env, "JTagMap::addCustom(list)");
 }
 
 void JTagMap::add_combined(const TagLib::String id,
@@ -94,25 +132,41 @@ void JTagMap::add_combined(const TagLib::String id,
     JStringRef jValue { env, value };
     env->CallVoidMethod(**jTagMap, jTagMapAddCombinedSingleMethod, *jId,
             *jDescription, *jValue);
+    throwOnJniException(env, "JTagMap::addCombined(single)");
 }
 
 void JTagMap::add_combined(const TagLib::String id,
         const TagLib::String description, const TagLib::StringList values) {
     JStringRef jId { env, id };
     JStringRef jDescription { env, description };
-    JObjectRef jValues { env, env->NewObject(**jArrayListClass,
-            jArrayListInitMethod) };
+    jobject listObj = env->NewObject(**jArrayListClass, jArrayListInitMethod);
+    throwOnJniException(env, "JTagMap::ArrayList.<init>");
+    if (listObj == nullptr) {
+        throw std::runtime_error("Failed to allocate ArrayList");
+    }
+    JObjectRef jValues { env, listObj };
     for (auto &value : values) {
-        JStringRef jValue { env, value };
-        env->CallBooleanMethod(*jValues, jArrayListAddMethod, *jValue);
+        if (env->PushLocalFrame(16) != 0) {
+            throwOnJniException(env, "JTagMap::PushLocalFrame");
+            throw std::runtime_error("JNI local frame overflow");
+        }
+        try {
+            JStringRef jValue { env, value };
+            env->CallBooleanMethod(*jValues, jArrayListAddMethod, *jValue);
+            throwOnJniException(env, "JTagMap::ArrayList.add");
+        } catch (...) {
+            env->PopLocalFrame(nullptr);
+            throw;
+        }
+        env->PopLocalFrame(nullptr);
     }
     env->CallVoidMethod(**jTagMap, jTagMapAddCombinedListMethod, *jId,
             *jDescription, *jValues);
+    throwOnJniException(env, "JTagMap::addCombined(list)");
 }
 
 std::unique_ptr<JObjectRef> JTagMap::getObject() {
-    return std::move(
-            std::make_unique < JObjectRef
-                    > (env, env->CallObjectMethod(**jTagMap,
-                            jTagMapGetObjectMethod)));
+    jobject mapObj = env->CallObjectMethod(**jTagMap, jTagMapGetObjectMethod);
+    throwOnJniException(env, "JTagMap::getObject");
+    return std::make_unique<JObjectRef>(env, mapObj);
 }

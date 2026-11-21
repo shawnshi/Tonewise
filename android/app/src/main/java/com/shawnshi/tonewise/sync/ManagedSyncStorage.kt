@@ -61,9 +61,13 @@ constructor(
 ) {
     private val resolver = context.contentResolver
     private val safCache = SafPathCache()
+    private val uriInspectCache = ConcurrentHashMap<String, ExistingManagedFile>()
+    @Volatile private var legacyMediaStoreTonewiseAbsent: Boolean? = null
 
     fun invalidatePathCache() {
         safCache.clear()
+        uriInspectCache.clear()
+        legacyMediaStoreTonewiseAbsent = null
     }
 
     fun commitAudioFile(
@@ -94,6 +98,7 @@ constructor(
                     commitAudioLegacy(parentDirs, fileName, safeRelPath, partFile)
             }
         cleanupLegacyTonewiseDuplicate(safLocation, parentDirs, fileName)
+        uriInspectCache.remove(committed.documentUri)
         return committed
     }
 
@@ -432,11 +437,17 @@ constructor(
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            runCatching {
-                val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                val legacyDir = buildLegacyMediaStoreTonewiseRelativeDir(parentDirs)
-                findExistingMediaStoreEntry(collection, legacyDir, fileName)?.let { stale ->
-                    resolver.delete(stale.uri, null, null)
+            val legacyAbsent =
+                legacyMediaStoreTonewiseAbsent ?: probeLegacyMediaStoreTonewiseAbsent().also {
+                    legacyMediaStoreTonewiseAbsent = it
+                }
+            if (!legacyAbsent) {
+                runCatching {
+                    val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                    val legacyDir = buildLegacyMediaStoreTonewiseRelativeDir(parentDirs)
+                    findExistingMediaStoreEntry(collection, legacyDir, fileName)?.let { stale ->
+                        resolver.delete(stale.uri, null, null)
+                    }
                 }
             }
         }
@@ -512,39 +523,84 @@ constructor(
         }
     }
 
+    private fun probeLegacyMediaStoreTonewiseAbsent(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
+        val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val prefix = "${Environment.DIRECTORY_MUSIC ?: "Music"}/Tonewise/%"
+        return runCatching {
+            resolver.query(
+                collection,
+                arrayOf(MediaStore.Audio.Media._ID),
+                "${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?",
+                arrayOf(prefix),
+                null,
+            )?.use { cursor -> !cursor.moveToFirst() } ?: true
+        }.getOrDefault(false)
+    }
+
     private fun inspectUriOrPath(rawUri: String): ExistingManagedFile? {
+        uriInspectCache[rawUri]?.let { return it }
         return try {
             if (rawUri.startsWith("content://")) {
                 val uri = Uri.parse(rawUri)
                 var queriedSize = -1L
                 var queriedMtime = 0L
+                var cursorMatchedRow = false
+                val projection =
+                    arrayOf(
+                        OpenableColumns.SIZE,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                        MediaStore.MediaColumns.DATE_MODIFIED,
+                    )
+                val cursor =
+                    try {
+                        resolver.query(uri, projection, null, null, null)
+                    } catch (_: IllegalArgumentException) {
+                        resolver.query(uri, null, null, null, null)
+                    }
                 runCatching {
-                    resolver.query(uri, null, null, null, null)?.use { cursor ->
-                        if (cursor.moveToFirst()) {
-                            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                            if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
-                                queriedSize = cursor.getLong(sizeIdx)
+                    cursor?.use { c ->
+                        if (c.moveToFirst()) {
+                            cursorMatchedRow = true
+                            val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                            if (sizeIdx >= 0 && !c.isNull(sizeIdx)) {
+                                queriedSize = c.getLong(sizeIdx)
                             }
-                            val docModIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
-                            if (docModIdx >= 0 && !cursor.isNull(docModIdx)) {
-                                queriedMtime = cursor.getLong(docModIdx)
+                            val docModIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                            if (docModIdx >= 0 && !c.isNull(docModIdx)) {
+                                queriedMtime = c.getLong(docModIdx)
                             } else {
-                                val msModIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
-                                if (msModIdx >= 0 && !cursor.isNull(msModIdx)) {
-                                    queriedMtime = cursor.getLong(msModIdx) * 1000L
+                                val msModIdx = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                                if (msModIdx >= 0 && !c.isNull(msModIdx)) {
+                                    queriedMtime = c.getLong(msModIdx) * 1000L
                                 }
                             }
                         }
                     }
                 }
-                val statSize =
-                    resolver.openFileDescriptor(uri, "r")?.use { pfd -> pfd.statSize }
-                        ?: return null
-                val finalSize = if (statSize > 0L) statSize else queriedSize.coerceAtLeast(0L)
-                ExistingManagedFile(rawUri, finalSize, queriedMtime)
+                val finalSize =
+                    if (cursorMatchedRow && queriedSize > 0L) {
+                        queriedSize
+                    } else {
+                        val statSize =
+                            resolver.openFileDescriptor(uri, "r")?.use { pfd -> pfd.statSize }
+                                ?: return null
+                        if (statSize > 0L) statSize else queriedSize.coerceAtLeast(0L)
+                    }
+                ExistingManagedFile(rawUri, finalSize, queriedMtime).also {
+                    if (uriInspectCache.size > 8192) uriInspectCache.clear()
+                    uriInspectCache[rawUri] = it
+                }
             } else {
                 val f = File(rawUri)
-                if (f.isFile) ExistingManagedFile(rawUri, f.length(), f.lastModified()) else null
+                if (f.isFile) {
+                    ExistingManagedFile(rawUri, f.length(), f.lastModified()).also {
+                        if (uriInspectCache.size > 8192) uriInspectCache.clear()
+                        uriInspectCache[rawUri] = it
+                    }
+                } else {
+                    null
+                }
             }
         } catch (_: Exception) {
             null
@@ -922,6 +978,9 @@ constructor(
         }
 
         fun putDir(treeKey: String, parentDocId: String, entries: Map<String, SafChildInfo>) {
+            if (dirs.size > 2048) {
+                dirs.clear()
+            }
             val copy = ConcurrentHashMap<String, SafChildInfo>(entries.size.coerceAtLeast(4))
             for ((k, v) in entries) {
                 copy[k.lowercase()] = v

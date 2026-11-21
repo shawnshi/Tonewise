@@ -174,7 +174,7 @@ private constructor(
         get() = exoHolder.sessionOngoing
 
     val isPlaying: Boolean
-        get() = playbackManager.progression.isPlaying
+        get() = playbackManager.progression.isPlaying || exoHolder.wantsPlayback
 
     val fallbackNotification: ForegroundServiceNotification
         get() = sessionHolder.notification

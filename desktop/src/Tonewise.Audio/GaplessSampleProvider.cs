@@ -15,6 +15,7 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
     private string _currentPath;
     private WaveStream? _currentWaveStream;
     private ISampleProvider _currentSamples;
+    private volatile DecodeReadAheadSampleProvider? _currentReadAhead;
     private IDisposable? _currentDisposable;
 
     private string? _nextPath;
@@ -35,6 +36,7 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
         _currentPath = initialPath;
         _currentWaveStream = initialWaveStream;
         _currentSamples = initialSamples;
+        _currentReadAhead = initialSamples as DecodeReadAheadSampleProvider;
         _currentDisposable = initialDisposable;
         _onTransitionSync = onTransitionSync;
         WaveFormat = initialSamples.WaveFormat;
@@ -62,6 +64,8 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
     {
         get
         {
+            var ra = _currentReadAhead;
+            if (ra is not null) return ra.Position;
             lock (_sourceLock)
             {
                 try
@@ -80,6 +84,8 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
     {
         get
         {
+            var ra = _currentReadAhead;
+            if (ra is not null) return ra.Duration;
             lock (_sourceLock)
             {
                 try
@@ -144,10 +150,17 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
 
     public void Seek(double fraction)
     {
+        double clamped = Math.Clamp(fraction, 0.0, 1.0);
+        var ra = _currentReadAhead;
+        if (ra is not null)
+        {
+            _reachedEndOfStream = false;
+            ra.Seek(clamped);
+            return;
+        }
         lock (_sourceLock)
         {
             _reachedEndOfStream = false;
-            double clamped = Math.Clamp(fraction, 0.0, 1.0);
             if (_currentWaveStream is not null && _currentWaveStream.TotalTime.TotalSeconds > 0)
             {
                 _currentWaveStream.CurrentTime = TimeSpan.FromSeconds(_currentWaveStream.TotalTime.TotalSeconds * clamped);
@@ -207,6 +220,7 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
                 _currentPath = _nextPath;
                 _currentWaveStream = _nextWaveStream;
                 _currentSamples = _nextSamples;
+                _currentReadAhead = _nextSamples as DecodeReadAheadSampleProvider;
                 _currentDisposable = _nextDisposable;
                 transitionedPath = _currentPath;
                 transitionedRg = _nextReplayGainDb;
@@ -231,7 +245,10 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
             {
                 _onTransitionSync?.Invoke(transitionedPath, transitionedRg);
                 string captured = transitionedPath;
-                ThreadPool.QueueUserWorkItem(_ => TrackTransitioned?.Invoke(captured));
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try { TrackTransitioned?.Invoke(captured); } catch { }
+                });
             }
         }
 
@@ -257,6 +274,7 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
             var cur = _currentDisposable;
             _currentDisposable = null;
             _currentWaveStream = null;
+            _currentReadAhead = null;
             try { cur?.Dispose(); } catch { }
         }
     }

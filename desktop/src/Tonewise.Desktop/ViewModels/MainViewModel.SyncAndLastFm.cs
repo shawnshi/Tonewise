@@ -266,6 +266,8 @@ public sealed partial class MainViewModel
         }
     }
 
+    private bool _lanSyncManuallyStopped;
+
     private SyncOutboxAndPairingStore? EnsureSyncStore()
     {
         if (string.IsNullOrWhiteSpace(_store.MusicRoot)) return null;
@@ -278,6 +280,7 @@ public sealed partial class MainViewModel
         var existing = Interlocked.Exchange(ref _syncHost, null);
         if (existing is not null)
         {
+            _lanSyncManuallyStopped = true;
             StopPairingCodeRefreshTimer();
             existing.SyncStateChanged -= OnSyncHostStateChanged;
             await existing.DisposeAsync();
@@ -286,14 +289,16 @@ public sealed partial class MainViewModel
             LanPairingCode = "------";
             return;
         }
+        _lanSyncManuallyStopped = false;
         await EnsureLanSyncHostRunningAsync();
     }
 
-    public async Task<bool> EnsureLanSyncHostRunningAsync()
+    public async Task<bool> EnsureLanSyncHostRunningAsync(bool silent = false)
     {
+        if (!silent) _lanSyncManuallyStopped = false;
         if (string.IsNullOrWhiteSpace(_store.MusicRoot))
         {
-            Notify("请先打开曲库，再开启局域网同步服务。", "warning");
+            if (!silent) Notify("请先打开曲库，再开启局域网同步服务。", "warning");
             return false;
         }
         if (_syncHost is { IsRunning: true })
@@ -321,7 +326,7 @@ public sealed partial class MainViewModel
         catch (Exception ex)
         {
             LanSyncStatus = $"局域网同步服务启动失败：{ex.Message}";
-            Notify(LanSyncStatus, "error");
+            if (!silent) Notify(LanSyncStatus, "error");
             return false;
         }
     }
@@ -416,41 +421,48 @@ public sealed partial class MainViewModel
     {
         async void ApplyAsync()
         {
-            RefreshLanSyncUiState();
-            ReloadSessionSlots();
-            string? musicRoot = _store.MusicRoot;
-            if (!string.IsNullOrWhiteSpace(musicRoot) && LongPathHelper.DirectoryExists(musicRoot))
+            try
             {
-                try
+                RefreshLanSyncUiState();
+                ReloadSessionSlots();
+                string? musicRoot = _store.MusicRoot;
+                if (!string.IsNullOrWhiteSpace(musicRoot) && LongPathHelper.DirectoryExists(musicRoot))
                 {
-                    var refreshed = await Task.Run(() => _store.LoadFromMusicRoot(musicRoot).ToList());
-                    if (string.Equals(_store.MusicRoot, musicRoot, StringComparison.OrdinalIgnoreCase))
+                    try
                     {
-                        _allTracks = refreshed;
-                        if (CurrentTrack is not null)
+                        var refreshed = await Task.Run(() => _store.LoadFromMusicRoot(musicRoot).ToList());
+                        if (string.Equals(_store.MusicRoot, musicRoot, StringComparison.OrdinalIgnoreCase))
                         {
-                            var updatedCur = _allTracks.FirstOrDefault(t => string.Equals(t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal));
-                            if (updatedCur is not null) CurrentTrack = updatedCur;
+                            _allTracks = refreshed;
+                            if (CurrentTrack is not null)
+                            {
+                                var updatedCur = _allTracks.FirstOrDefault(t => string.Equals(t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal));
+                                if (updatedCur is not null) CurrentTrack = updatedCur;
+                            }
+                            if (InspectedTrack is not null)
+                            {
+                                var updatedSel = _allTracks.FirstOrDefault(t => string.Equals(t.TrackUid, InspectedTrack.TrackUid, StringComparison.Ordinal));
+                                if (updatedSel is not null) InspectTrack(updatedSel);
+                            }
+                            UpdateClassicalAdaptiveState();
+                            TriggerFilterRefresh();
+                            RefreshPlaylists();
+                            RefreshLastFmAuthStatus();
                         }
-                        if (InspectedTrack is not null)
-                        {
-                            var updatedSel = _allTracks.FirstOrDefault(t => string.Equals(t.TrackUid, InspectedTrack.TrackUid, StringComparison.Ordinal));
-                            if (updatedSel is not null) InspectTrack(updatedSel);
-                        }
-                        UpdateClassicalAdaptiveState();
-                        TriggerFilterRefresh();
+                    }
+                    catch
+                    {
                         RefreshPlaylists();
-                        RefreshLastFmAuthStatus();
                     }
                 }
-                catch
+                else
                 {
                     RefreshPlaylists();
                 }
             }
-            else
+            catch (Exception ex)
             {
-                RefreshPlaylists();
+                App.WriteCrashLog("OnSyncHostStateChanged", ex);
             }
         }
 

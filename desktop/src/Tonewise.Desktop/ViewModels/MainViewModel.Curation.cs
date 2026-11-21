@@ -91,6 +91,7 @@ public sealed partial class MainViewModel
         int filesTotal = 0;
         int batchIndex = 0;
         var batchIds = new List<string>();
+        var physicalFailures = new List<string>();
         bool cancelled = false;
         try
         {
@@ -123,6 +124,10 @@ public sealed partial class MainViewModel
                         maxPhysicalFiles: maxFiles));
                 }
 
+                if (result.PhysicalWriteFailures is { Count: > 0 })
+                {
+                    physicalFailures.AddRange(result.PhysicalWriteFailures);
+                }
                 if (result.CommittedCount == 0) break;
                 committedTotal += result.CommittedCount;
                 filesTotal += result.PhysicalFilesUpdated;
@@ -156,7 +161,11 @@ public sealed partial class MainViewModel
         RefreshStagingProposals();
         EndBusy();
 
-        if (committedTotal == 0)
+        if (physicalFailures.Count > 0)
+        {
+            Notify($"部分物理文件写入失败（已保留待审状态，成功 {committedTotal} 条）：{physicalFailures[0]}", "warning");
+        }
+        else if (committedTotal == 0)
         {
             Notify("没有可应用的变更：请先批准至少一条提案。", "warning");
         }
@@ -207,9 +216,15 @@ public sealed partial class MainViewModel
         }
 
         int restored = 0;
-        for (int i = ids.Count - 1; i >= 0; i--)
+        var suspendPaths = CurrentTrack is not null && !string.IsNullOrWhiteSpace(CurrentTrack.FullPath)
+            ? new[] { CurrentTrack.FullPath }
+            : Array.Empty<string>();
+        using (_engine.SuspendIfPlayingFile(suspendPaths))
         {
-            restored += diffStore.RollbackBatch(ids[i]);
+            for (int i = ids.Count - 1; i >= 0; i--)
+            {
+                restored += diffStore.RollbackBatch(ids[i]);
+            }
         }
         _lastCommitBatchIds.Clear();
         LastCommittedBatchId = null;
@@ -918,6 +933,12 @@ public sealed partial class MainViewModel
             }
         }
         RefreshStagingProposals();
+        if (result.PhysicalWriteFailures is { Count: > 0 })
+        {
+            StatusMessage = $"部分物理文件写入失败 ({result.PhysicalWriteFailures.Count} 个)：{result.PhysicalWriteFailures[0]}";
+            Notify(StatusMessage, "warning");
+            return;
+        }
         StatusMessage = $"元数据编辑已写入 {uids.Count} 首曲目 ({result.CommittedCount} 项字段 · 物理文件更新 {result.PhysicalFilesUpdated} 个 · 批次 {result.BatchId})";
     }
 

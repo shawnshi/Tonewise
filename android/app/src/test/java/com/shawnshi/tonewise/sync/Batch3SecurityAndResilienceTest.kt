@@ -167,6 +167,14 @@ class Batch3SecurityAndResilienceTest {
                 writeText("tmp")
                 setLastModified(nowMs - maxAgeMs - 1_000L)
             }
+            val staleMidTwTmp = File(tempRoot, "song.flac.twtmp.999.1").apply {
+                writeText("tmp2")
+                setLastModified(nowMs - maxAgeMs - 1_000L)
+            }
+            val staleTwBak = File(tempRoot, "song.flac.twbak.999.1").apply {
+                writeText("bak")
+                setLastModified(nowMs - maxAgeMs - 1_000L)
+            }
             val freshPart = File(tempRoot, "fresh.part").apply {
                 writeText("active")
                 setLastModified(nowMs - 60_000L)
@@ -177,9 +185,11 @@ class Batch3SecurityAndResilienceTest {
             }
 
             val removed = LanHttpClient.pruneStalePartFiles(tempRoot, maxAgeMs = maxAgeMs, nowMs = nowMs)
-            assertEquals(2, removed)
+            assertEquals(4, removed)
             assertFalse(stalePart.exists())
             assertFalse(staleTwTmp.exists())
+            assertFalse(staleMidTwTmp.exists())
+            assertFalse(staleTwBak.exists())
             assertTrue(freshPart.exists())
             assertTrue(normalFlac.exists())
         } finally {
@@ -198,5 +208,74 @@ class Batch3SecurityAndResilienceTest {
                 LastFmRepository.classifyLastFmErrorCode(code),
             )
         }
+    }
+
+    @Test
+    fun tonewiseDspEngine_concurrentConfigResetAndProcess_noException() {
+        val engine = com.shawnshi.tonewise.playback.dsp.TonewiseDspEngine()
+        engine.configure(48_000, 2)
+        val band =
+            com.shawnshi.tonewise.playback.dsp.BiquadBand(
+                freqHz = 1000.0,
+                gainDb = 3.0,
+                q = 1.41,
+                enabled = true,
+            )
+        val cfgA =
+            com.shawnshi.tonewise.playback.dsp.DspChainConfig(
+                enabled = true,
+                bands = listOf(band),
+                crossfeedEnabled = true,
+            )
+        val cfgB =
+            com.shawnshi.tonewise.playback.dsp.DspChainConfig(
+                enabled = true,
+                bands = listOf(band, band.copy(freqHz = 4000.0, gainDb = -2.5)),
+                crossfeedEnabled = false,
+            )
+
+        val running = java.util.concurrent.atomic.AtomicBoolean(true)
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val audioThread =
+            Thread {
+                val buf = DoubleArray(256)
+                try {
+                    while (running.get()) {
+                        for (i in buf.indices) {
+                            buf[i] = if ((i and 1) == 0) 0.25 else -0.25
+                        }
+                        engine.processInterleaved(buf, 128, -1.0)
+                    }
+                } catch (t: Throwable) {
+                    failure.compareAndSet(null, t)
+                }
+            }
+        val controlThread =
+            Thread {
+                try {
+                    var step = 0
+                    while (running.get()) {
+                        engine.updateConfig(if ((step and 1) == 0) cfgA else cfgB)
+                        if (step % 25 == 0) {
+                            engine.resetState()
+                        }
+                        if (step % 60 == 0) {
+                            engine.configure(if ((step and 2) == 0) 48_000 else 96_000, 2)
+                        }
+                        step++
+                    }
+                } catch (t: Throwable) {
+                    failure.compareAndSet(null, t)
+                }
+            }
+
+        audioThread.start()
+        controlThread.start()
+        Thread.sleep(250)
+        running.set(false)
+        audioThread.join(5_000)
+        controlThread.join(5_000)
+
+        assertEquals(null, failure.get())
     }
 }

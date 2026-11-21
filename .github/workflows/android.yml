@@ -39,9 +39,11 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
-    - name: Build tonewise-core Android JNI libraries
+    - name: Build tonewise-core Android and desktop JNI libraries
       shell: pwsh
-      run: .\scripts\build-core-android.ps1
+      run: |
+        .\scripts\build-core-android.ps1
+        .\scripts\build-core-desktop.ps1
     - name: Set up MSYS2 for Android FFmpeg build
       uses: msys2/setup-msys2@v2
       with:
@@ -60,9 +62,15 @@ jobs:
         sdk="$(cygpath -u "$ANDROID_HOME")"
         ndk="$sdk/ndk/28.2.13676358"
         bash "$module/jni/build_ffmpeg.sh" "$module" "$ndk" windows-x86_64 21 flac alac
+    - name: Run Android unit tests with Gradle
+      working-directory: android
+      run: .\gradlew.bat :musikr:testDebugUnitTest :app:testDebugUnitTest
     - name: Build debug APK with Gradle
       working-directory: android
       run: .\gradlew.bat app:packageDebug
+    - name: Verify R8 minified release APK build
+      working-directory: android
+      run: .\gradlew.bat :app:assembleRelease -PuseDebugSigning
     - name: Upload debug APK artifact
       uses: actions/upload-artifact@v4
       with:

@@ -107,11 +107,16 @@ void JMetadataBuilder::setXiph(TagLib::Ogg::XiphComment &tag) {
 template<typename T>
 void mp4AddImpl(JTagMap &map, TagLib::String &itemName, T itemValue) {
     if (itemName.startsWith("----")) {
-        // Split this into it's atom name and description
+        // Split this into its atom name and description; guard missing ':' (-1 -> npos wraparound).
         auto split = itemName.find(':');
-        auto atomName = itemName.substr(0, split);
-        auto atomDescription = itemName.substr(split + 1);
-        map.add_combined(atomName, atomDescription, itemValue);
+        if (split >= 0) {
+            auto splitIdx = static_cast<unsigned int>(split);
+            auto atomName = itemName.substr(0, splitIdx);
+            auto atomDescription = itemName.substr(splitIdx + 1);
+            map.add_combined(atomName, atomDescription, itemValue);
+        } else {
+            map.add_id(itemName, itemValue);
+        }
     } else {
         map.add_id(itemName, itemValue);
     }
@@ -119,23 +124,23 @@ void mp4AddImpl(JTagMap &map, TagLib::String &itemName, T itemValue) {
 
 void JMetadataBuilder::setMp4(TagLib::MP4::Tag &tag) {
     auto map = tag.itemMap();
-    std::optional < TagLib::MP4::CoverArt > firstCover;
     for (auto item : map) {
         auto itemName = item.first;
         auto itemValue = item.second;
         if (itemName == "covr") {
-            // Special cover case.
-            // MP4 has no types, so just prioritize easier to decode covers (PNG, JPEG)
+            // MP4 has no picture types; prioritize PNG/JPEG and only fall back to front() if absent.
             auto pics = itemValue.toCoverArtList();
+            bool foundPreferred = false;
             for (auto &pic : pics) {
                 auto format = pic.format();
                 if (format == TagLib::MP4::CoverArt::PNG
                         || format == TagLib::MP4::CoverArt::JPEG) {
                     cover = pic.data();
-                    continue;
+                    foundPreferred = true;
+                    break;
                 }
             }
-            if (!pics.isEmpty()) {
+            if (!foundPreferred && !pics.isEmpty()) {
                 cover = pics.front().data();
             }
             continue;
@@ -196,10 +201,15 @@ jobject JMetadataBuilder::build() {
             "(Ljava/lang/String;JII)V");
     JStringRef jMimeType { env, this->mimeType };
 
-    JObjectRef jProperties { env, env->NewObject(*jPropertiesClass,
+    jobject propsObj = env->NewObject(*jPropertiesClass,
             jPropertiesInitMethod, *jMimeType,
             (jlong) properties->lengthInMilliseconds(), properties->bitrate(),
-            properties->sampleRate()) };
+            properties->sampleRate());
+    throwOnJniException(env, "JMetadataBuilder::Properties.<init>");
+    if (propsObj == nullptr) {
+        throw std::runtime_error("Failed to allocate Properties");
+    }
+    JObjectRef jProperties { env, propsObj };
 
     JClassRef jMetadataClass { env, "org/oxycblt/musikr/metadata/Metadata" };
     jmethodID jMetadataInitMethod = jMetadataClass.method("<init>",
@@ -208,12 +218,18 @@ jobject JMetadataBuilder::build() {
     auto jId3v2Map = id3v2.getObject();
     auto jXiphMap = xiph.getObject();
     auto jMp4Map = mp4.getObject();
+    jobject result = nullptr;
     if (cover.has_value()) {
         JByteArrayRef jCoverArray { env, cover.value() };
-        jobject result = env->NewObject(*jMetadataClass, jMetadataInitMethod,
+        result = env->NewObject(*jMetadataClass, jMetadataInitMethod,
                 **jId3v2Map, **jXiphMap, **jMp4Map, *jCoverArray, *jProperties);
-        return result;
+    } else {
+        result = env->NewObject(*jMetadataClass, jMetadataInitMethod, **jId3v2Map,
+                **jXiphMap, **jMp4Map, nullptr, *jProperties);
     }
-    return env->NewObject(*jMetadataClass, jMetadataInitMethod, **jId3v2Map,
-            **jXiphMap, **jMp4Map, nullptr, *jProperties);
+    throwOnJniException(env, "JMetadataBuilder::Metadata.<init>");
+    if (result == nullptr) {
+        throw std::runtime_error("Failed to allocate Metadata");
+    }
+    return result;
 }

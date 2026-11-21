@@ -390,6 +390,7 @@ class BiquadFilter64(band: BiquadBand, sampleRateHz: Int, channels: Int) {
  * 5. Lookahead -0.2 dBFS soft-knee limiter
  */
 class TonewiseDspEngine {
+    private val stateLock = Any()
     private var sampleRateHz: Int = 48000
     private var channels: Int = 2
     private var config: DspChainConfig = DspChainConfig()
@@ -432,27 +433,30 @@ class TonewiseDspEngine {
     private var limiterReleaseCoeff = 0.999
     private var limiterCeiling = 10.0.pow(-0.2 / 20.0)
 
-    fun configure(sampleRateHz: Int, channels: Int) {
-        this.sampleRateHz = max(sampleRateHz, 8000)
-        this.channels = max(channels, 1)
-        if (frameWork.size < this.channels) {
-            frameWork = DoubleArray(this.channels)
-        }
-        rebuildStages()
-        resetState()
-    }
-
-    fun updateConfig(newConfig: DspChainConfig) {
-        if (this.config != newConfig) {
-            this.config = newConfig
+    fun configure(sampleRateHz: Int, channels: Int) =
+        synchronized(stateLock) {
+            this.sampleRateHz = max(sampleRateHz, 8000)
+            this.channels = max(channels, 1)
+            if (frameWork.size < this.channels) {
+                frameWork = DoubleArray(this.channels)
+            }
             rebuildStages()
+            resetState()
         }
-    }
 
-    fun shouldProcessStages(replayGainLinear: Double): Boolean {
-        if (config.hasNonIdentityProcessing()) return true
-        return abs(replayGainLinear - 1.0) > 1e-6
-    }
+    fun updateConfig(newConfig: DspChainConfig) =
+        synchronized(stateLock) {
+            if (this.config != newConfig) {
+                this.config = newConfig
+                rebuildStages()
+            }
+        }
+
+    fun shouldProcessStages(replayGainLinear: Double): Boolean =
+        synchronized(stateLock) {
+            if (config.hasNonIdentityProcessing()) return@synchronized true
+            abs(replayGainLinear - 1.0) > 1e-6
+        }
 
     fun computeStage1LinearGain(replayGainDb: Double): Double {
         if (replayGainDb == lastStage1ReplayGainDb) {
@@ -474,7 +478,12 @@ class TonewiseDspEngine {
         return gain
     }
 
-    fun processInterleaved(samples: DoubleArray, frameCount: Int, replayGainDb: Double) {
+    fun processInterleaved(samples: DoubleArray, frameCount: Int, replayGainDb: Double) =
+        synchronized(stateLock) {
+            processInterleavedLocked(samples, frameCount, replayGainDb)
+        }
+
+    private fun processInterleavedLocked(samples: DoubleArray, frameCount: Int, replayGainDb: Double) {
         val stage1Gain = computeStage1LinearGain(replayGainDb)
         val chCount = channels
         val activeInternal =
@@ -600,9 +609,14 @@ class TonewiseDspEngine {
         }
     }
 
-    fun pendingLimiterFrames(): Int = limiterBufferedFrames
+    fun pendingLimiterFrames(): Int = synchronized(stateLock) { limiterBufferedFrames }
 
-    fun drainLimiterTail(outSamples: DoubleArray): Int {
+    fun drainLimiterTail(outSamples: DoubleArray): Int =
+        synchronized(stateLock) {
+            drainLimiterTailLocked(outSamples)
+        }
+
+    private fun drainLimiterTailLocked(outSamples: DoubleArray): Int {
         val framesToDrain = limiterBufferedFrames
         if (framesToDrain <= 0) return 0
         val chCount = channels
@@ -644,20 +658,21 @@ class TonewiseDspEngine {
         return count
     }
 
-    fun resetState() {
-        for (f in filters) f.reset()
-        crossLpL = 0.0
-        crossLpR = 0.0
-        crossDelayBufL.fill(0.0)
-        crossDelayBufR.fill(0.0)
-        crossDelayPos = 0
-        for (buf in limiterDelayBuf) buf.fill(0.0)
-        limiterPeakRing.fill(0.0)
-        limiterRunningMax = 0.0
-        limiterDelayPos = 0
-        limiterBufferedFrames = 0
-        limiterEnvelope = 1.0
-    }
+    fun resetState() =
+        synchronized(stateLock) {
+            for (f in filters) f.reset()
+            crossLpL = 0.0
+            crossLpR = 0.0
+            crossDelayBufL.fill(0.0)
+            crossDelayBufR.fill(0.0)
+            crossDelayPos = 0
+            for (buf in limiterDelayBuf) buf.fill(0.0)
+            limiterPeakRing.fill(0.0)
+            limiterRunningMax = 0.0
+            limiterDelayPos = 0
+            limiterBufferedFrames = 0
+            limiterEnvelope = 1.0
+        }
 
     private fun rebuildStages() {
         val targetBands =

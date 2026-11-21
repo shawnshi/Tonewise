@@ -53,13 +53,33 @@ object SecretBox {
 
     fun isEncrypted(value: String?): Boolean = !value.isNullOrEmpty() && value.startsWith(PREFIX)
 
+    private fun hasAndroidKeystoreProvider(): Boolean = Security.getProvider(ANDROID_KEYSTORE) != null
+
     fun encrypt(plaintext: String): String {
         if (plaintext.isEmpty()) return ""
-        val key = getOrCreateKey() ?: return plaintext
+        val androidKeystore = hasAndroidKeystoreProvider()
+        val key =
+            try {
+                getOrCreateKey()
+            } catch (t: Throwable) {
+                if (androidKeystore) {
+                    throw IllegalStateException("Android Keystore 加密失败，已阻止明文写入", t)
+                }
+                null
+            }
+        if (key == null) {
+            if (androidKeystore) {
+                throw IllegalStateException("Android Keystore 密钥不可用，已阻止明文写入")
+            }
+            return encryptWithKey(plaintext, getOrCreateJvmFallbackKey())
+        }
         return try {
             encryptWithKey(plaintext, key)
-        } catch (_: Throwable) {
-            plaintext
+        } catch (t: Throwable) {
+            if (androidKeystore) {
+                throw IllegalStateException("Android Keystore 加密失败，已阻止明文写入", t)
+            }
+            throw t
         }
     }
 
@@ -115,7 +135,7 @@ object SecretBox {
                 }
                 generateAndroidKey()
             } catch (_: KeyStoreException) {
-                getOrCreateJvmFallbackKey()
+                null
             } catch (_: Throwable) {
                 // Corrupt or invalidated alias: wipe and regenerate once.
                 runCatching {

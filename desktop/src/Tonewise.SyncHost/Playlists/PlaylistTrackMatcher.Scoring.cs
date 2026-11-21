@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -635,6 +636,137 @@ public static partial class PlaylistTrackMatcher
             return false;
         }
         return true;
+    }
+
+    internal readonly record struct FuzzyArtistKeyEntry(
+        string Key,
+        bool HasSpace,
+        uint CharMask,
+        string[] LongWords,
+        uint[] LongWordMasks,
+        string Surname,
+        uint SurnameMask,
+        List<IndexedTrack> Tracks
+    );
+
+    internal static uint ComputeAsciiLetterMask(ReadOnlySpan<char> text)
+    {
+        uint mask = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (c >= 'a' && c <= 'z')
+            {
+                mask |= 1u << (c - 'a');
+            }
+            else if (c >= '0' && c <= '9')
+            {
+                mask |= 1u << 26;
+            }
+            else if (c == ' ')
+            {
+                mask |= 1u << 27;
+            }
+            else
+            {
+                mask |= 1u << 28;
+            }
+        }
+        return mask;
+    }
+
+    internal static bool IsLevenshteinAtLeast80(ReadOnlySpan<char> a, uint maskA, ReadOnlySpan<char> b, uint maskB)
+    {
+        int maxLen = Math.Max(a.Length, b.Length);
+        if (maxLen == 0) return false;
+        int maxAllowedDist = maxLen / 5;
+        if (Math.Abs(a.Length - b.Length) > maxAllowedDist) return false;
+        int minDiffChars = Math.Max(BitOperations.PopCount(maskA & ~maskB), BitOperations.PopCount(maskB & ~maskA));
+        if (minDiffChars > maxAllowedDist) return false;
+        return BoundedLevenshtein(a, b, maxAllowedDist) <= maxAllowedDist;
+    }
+
+    internal static FuzzyArtistKeyEntry BuildFuzzyArtistKeyEntry(string key, List<IndexedTrack> tracks)
+    {
+        bool hasSpace = key.Contains(' ', StringComparison.Ordinal);
+        uint charMask = ComputeAsciiLetterMask(key);
+        if (!hasSpace)
+        {
+            return new FuzzyArtistKeyEntry(key, false, charMask, [], [], "", 0, tracks);
+        }
+
+        string[] rawWords = key.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var longWordList = new List<string>(rawWords.Length);
+        for (int i = 0; i < rawWords.Length; i++)
+        {
+            if (rawWords[i].Length >= 5)
+            {
+                longWordList.Add(rawWords[i]);
+            }
+        }
+        string[] longWords = longWordList.Count > 0 ? [.. longWordList] : [];
+        uint[] longWordMasks = longWords.Length > 0
+            ? Array.ConvertAll(longWords, static w => ComputeAsciiLetterMask(w))
+            : [];
+
+        int lastSpace = key.LastIndexOf(' ');
+        string sur = key[(lastSpace + 1)..];
+        string surname = sur.Length >= 7 ? sur : "";
+        uint surnameMask = surname.Length >= 7 ? ComputeAsciiLetterMask(surname) : 0;
+
+        return new FuzzyArtistKeyEntry(key, true, charMask, longWords, longWordMasks, surname, surnameMask, tracks);
+    }
+
+    internal static bool IsFuzzyArtistQueryMatchEntry(
+        string q,
+        bool qHasSpace,
+        uint qMask,
+        string[] qLongWords,
+        uint[] qLongWordMasks,
+        string qSurname,
+        uint qSurnameMask,
+        in FuzzyArtistKeyEntry entry)
+    {
+        if (q.Length < 5 || entry.Key.Length < 5 || ContainsEastAsianScript(q) || ContainsEastAsianScript(entry.Key))
+        {
+            return false;
+        }
+
+        if (IsLevenshteinAtLeast80(q, qMask, entry.Key, entry.CharMask))
+        {
+            return true;
+        }
+
+        if (!qHasSpace && entry.HasSpace)
+        {
+            for (int i = 0; i < entry.LongWords.Length; i++)
+            {
+                if (IsLevenshteinAtLeast80(q, qMask, entry.LongWords[i], entry.LongWordMasks[i]))
+                {
+                    return true;
+                }
+            }
+        }
+        else if (qHasSpace && !entry.HasSpace)
+        {
+            for (int i = 0; i < qLongWords.Length; i++)
+            {
+                if (IsLevenshteinAtLeast80(entry.Key, entry.CharMask, qLongWords[i], qLongWordMasks[i]))
+                {
+                    return true;
+                }
+            }
+        }
+        else if (qHasSpace && entry.HasSpace)
+        {
+            if (qSurname.Length >= 7 && entry.Surname.Length >= 7
+                && IsLevenshteinAtLeast80(qSurname, qSurnameMask, entry.Surname, entry.SurnameMask))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static bool IsFuzzyArtistTokenMatch(string a, string b)

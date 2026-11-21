@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Tonewise.SyncHost.Playlists;
 
 namespace Tonewise.SyncHost;
 
@@ -81,6 +82,7 @@ public sealed partial class SyncOutboxAndPairingStore
 {
     private static readonly TimeSpan PairingCodeTtl = TimeSpan.FromMinutes(10);
     private const int MaxFailedPairAttempts = 5;
+    private const int MaxGlobalFailedPairAttempts = 15;
     private static readonly TimeSpan PairLockoutDuration = TimeSpan.FromSeconds(60);
 
     private static readonly string[] CoverCandidateNames =
@@ -95,9 +97,31 @@ public sealed partial class SyncOutboxAndPairingStore
     private readonly string _devicesPath;
     private readonly string _outboxPath;
     private readonly Lock _gate = new();
+    private readonly Lock _resolveCacheLock = new();
+    private readonly record struct ManifestFileStamp(bool Exists, long DbTicks, long DbLength, long WalTicks, long WalLength);
+    private readonly record struct PlaylistFileStamp(long LastWriteTicks, long Length);
+    private ManifestFileStamp _cachedManifestStamp;
+    private List<ManifestTrackRow>? _cachedManifestRows;
+    private PlaylistTrackMatcher.LibraryIndex? _cachedLibraryIndex;
+    private readonly Dictionary<string, (PlaylistFileStamp Stamp, PlaylistDocument Doc)> _cachedPlaylists =
+        new(StringComparer.OrdinalIgnoreCase);
+    private long _outboxMutationVersion;
+    private Dictionary<string, ManifestTrackRow>? _cachedRowsByUid;
+    private sealed record CachedResolvedOutbox(
+        ManifestFileStamp ManifestStamp,
+        long OutboxFileTicks,
+        long OutboxFileLength,
+        long OutboxMutationVersion,
+        string PlaylistStampsFingerprint,
+        DateTime ComputedAtUtc,
+        ResolvedOutboxPayload Payload);
+    private readonly Dictionary<string, CachedResolvedOutbox> _cachedResolvedOutboxes =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan ResolvedOutboxCacheTtl = TimeSpan.FromSeconds(15);
     private string _pairingCode;
     private DateTimeOffset _pairingCodeIssuedAtUtc;
-    private readonly Dictionary<string, (int FailedAttempts, DateTimeOffset LockedUntilUtc)> _pairLockoutsByClient =
+    private int _globalFailedPairAttempts;
+    private readonly Dictionary<string, (int FailedAttempts, DateTimeOffset LockedUntilUtc, DateTimeOffset LastFailedUtc)> _pairLockoutsByClient =
         new(StringComparer.OrdinalIgnoreCase);
 
     public SyncOutboxAndPairingStore(string musicRoot)
@@ -128,6 +152,7 @@ public sealed partial class SyncOutboxAndPairingStore
         {
             _pairingCode = GenerateSixDigitCode();
             _pairingCodeIssuedAtUtc = DateTimeOffset.UtcNow;
+            _globalFailedPairAttempts = 0;
             _pairLockoutsByClient.Clear();
             return _pairingCode;
         }
@@ -170,10 +195,23 @@ public sealed partial class SyncOutboxAndPairingStore
             if (_pairLockoutsByClient.Count > 256)
             {
                 var staleKeys = _pairLockoutsByClient
-                    .Where(kv => kv.Value.LockedUntilUtc != DateTimeOffset.MinValue && kv.Value.LockedUntilUtc <= nowUtc)
+                    .Where(kv =>
+                        (kv.Value.LockedUntilUtc != DateTimeOffset.MinValue && kv.Value.LockedUntilUtc <= nowUtc)
+                        || (kv.Value.LockedUntilUtc == DateTimeOffset.MinValue && kv.Value.LastFailedUtc <= nowUtc - PairLockoutDuration))
                     .Select(kv => kv.Key)
                     .ToList();
                 foreach (string k in staleKeys) _pairLockoutsByClient.Remove(k);
+
+                if (_pairLockoutsByClient.Count > 256)
+                {
+                    int overflow = _pairLockoutsByClient.Count - 256;
+                    var oldestKeys = _pairLockoutsByClient
+                        .OrderBy(kv => kv.Value.LastFailedUtc)
+                        .Take(overflow)
+                        .Select(kv => kv.Key)
+                        .ToList();
+                    foreach (string k in oldestKeys) _pairLockoutsByClient.Remove(k);
+                }
             }
 
             if (_pairLockoutsByClient.TryGetValue(bucketKey, out var state) && nowUtc < state.LockedUntilUtc)
@@ -186,15 +224,26 @@ public sealed partial class SyncOutboxAndPairingStore
 
             if (!ConstantTimeEqualsUtf8(submitted, _pairingCode))
             {
+                _globalFailedPairAttempts++;
+                if (_globalFailedPairAttempts >= MaxGlobalFailedPairAttempts)
+                {
+                    _pairingCode = GenerateSixDigitCode();
+                    _pairingCodeIssuedAtUtc = nowUtc;
+                    _globalFailedPairAttempts = 0;
+                    _pairLockoutsByClient.Clear();
+                    retryAfterSeconds = (int)PairLockoutDuration.TotalSeconds;
+                    return PairAttemptStatus.LockedOut;
+                }
+
                 int failed = (state.LockedUntilUtc <= nowUtc ? state.FailedAttempts : 0) + 1;
                 if (failed >= MaxFailedPairAttempts)
                 {
                     DateTimeOffset lockedUntil = nowUtc + PairLockoutDuration;
-                    _pairLockoutsByClient[bucketKey] = (0, lockedUntil);
+                    _pairLockoutsByClient[bucketKey] = (0, lockedUntil, nowUtc);
                     retryAfterSeconds = (int)PairLockoutDuration.TotalSeconds;
                     return PairAttemptStatus.LockedOut;
                 }
-                _pairLockoutsByClient[bucketKey] = (failed, DateTimeOffset.MinValue);
+                _pairLockoutsByClient[bucketKey] = (failed, DateTimeOffset.MinValue, nowUtc);
                 return PairAttemptStatus.InvalidCode;
             }
 
@@ -211,6 +260,7 @@ public sealed partial class SyncOutboxAndPairingStore
             // Rotate pairing code after successful pairing to prevent stale code reuse
             _pairingCode = GenerateSixDigitCode();
             _pairingCodeIssuedAtUtc = nowUtc;
+            _globalFailedPairAttempts = 0;
             _pairLockoutsByClient.Remove(bucketKey);
 
             issuedToken = token;
@@ -225,6 +275,7 @@ public sealed partial class SyncOutboxAndPairingStore
         {
             _pairingCode = GenerateSixDigitCode();
             _pairingCodeIssuedAtUtc = nowUtc;
+            _globalFailedPairAttempts = 0;
             _pairLockoutsByClient.Clear();
         }
     }
@@ -580,6 +631,7 @@ public sealed partial class SyncOutboxAndPairingStore
         Directory.CreateDirectory(_tonewiseDir);
         string json = JsonSerializer.Serialize(items, JsonWriteOptions);
         WriteTextAtomic(_outboxPath, json + "\n");
+        Interlocked.Increment(ref _outboxMutationVersion);
     }
 
     private static void WriteTextAtomic(string path, string content)

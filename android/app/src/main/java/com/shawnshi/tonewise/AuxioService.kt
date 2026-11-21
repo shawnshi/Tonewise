@@ -56,6 +56,45 @@ class AuxioService :
     private val localBinder = android.os.Binder()
     private var localClientCount = 0
     private var isServiceStarted = false
+    @Volatile private var instanceForeground = false
+    private val pendingIdleDemoteLock = Any()
+    private var pendingIdleDemote: Runnable? = null
+
+    private fun setInstanceForeground(active: Boolean) {
+        if (active) {
+            if (!instanceForeground) {
+                instanceForeground = true
+                foregroundInstanceCount.incrementAndGet()
+            }
+        } else if (instanceForeground) {
+            instanceForeground = false
+            foregroundInstanceCount.updateAndGet { cur -> if (cur > 0) cur - 1 else 0 }
+        }
+    }
+
+    private fun cancelPendingIdleDemote() {
+        synchronized(pendingIdleDemoteLock) {
+            pendingIdleDemote?.let { mainHandler.removeCallbacks(it) }
+            pendingIdleDemote = null
+        }
+    }
+
+    private fun scheduleIdleDemote() {
+        cancelPendingIdleDemote()
+        val task =
+            Runnable {
+                synchronized(pendingIdleDemoteLock) { pendingIdleDemote = null }
+                if (!playbackFragment.isSessionOngoing && !playbackFragment.isPlaying) {
+                    updateForeground(ForegroundListener.Change.MEDIA_SESSION)
+                    if (!playbackFragment.isSessionOngoing && !playbackFragment.isPlaying && instanceForeground) {
+                        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                        setInstanceForeground(false)
+                    }
+                }
+            }
+        synchronized(pendingIdleDemoteLock) { pendingIdleDemote = task }
+        mainHandler.postDelayed(task, 1500L)
+    }
 
     @SuppressLint("WrongConstant")
     override fun onCreate() {
@@ -70,26 +109,30 @@ class AuxioService :
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         isServiceStarted = true
+        val forceForeground = intent?.getBooleanExtra(EXTRA_FORCE_FOREGROUND, false) == true
         onHandleForeground(intent)
-        val startExtra = intent?.getIntExtra(INTENT_KEY_START_ID, -1)
-        if ((playbackFragment.isSessionOngoing || playbackFragment.isPlaying) && !isForeground) {
-            val activeNotification =
-                playbackFragment.notification ?: playbackFragment.fallbackNotification
-            promoteForegroundSafe(activeNotification)
-        } else if (
-            (startExtra == IntegerTable.START_ID_MEDIA_BUTTON ||
-                startExtra == IntegerTable.START_ID_TASKER) && !isForeground
-        ) {
+        val hasActiveSessionOrPlay = playbackFragment.isSessionOngoing || playbackFragment.isPlaying
+        if (hasActiveSessionOrPlay) {
+            cancelPendingIdleDemote()
+            if (!instanceForeground) {
+                val activeNotification =
+                    playbackFragment.notification ?: playbackFragment.fallbackNotification
+                promoteForegroundSafe(activeNotification)
+            }
+        } else if (forceForeground) {
+            cancelPendingIdleDemote()
+            if (!instanceForeground) {
+                val activeNotification =
+                    playbackFragment.notification ?: playbackFragment.fallbackNotification
+                promoteForegroundSafe(activeNotification)
+            }
+            scheduleIdleDemote()
+        } else if (intent != null) {
             // Guarantees startForeground() completes synchronously within Android's 5s deadline.
-            promoteForegroundSafe(playbackFragment.fallbackNotification)
-            mainHandler.postDelayed(
-                {
-                    if (!playbackFragment.isSessionOngoing && !playbackFragment.isPlaying) {
-                        updateForeground(ForegroundListener.Change.MEDIA_SESSION)
-                    }
-                },
-                2500L,
-            )
+            if (!instanceForeground) {
+                promoteForegroundSafe(playbackFragment.fallbackNotification)
+            }
+            scheduleIdleDemote()
         }
         return START_NOT_STICKY
     }
@@ -118,7 +161,8 @@ class AuxioService :
             localClientCount = (localClientCount - 1).coerceAtLeast(0)
             if (localClientCount == 0) {
                 if (playbackFragment.isSessionOngoing || playbackFragment.isPlaying) {
-                    if (!isForeground) {
+                    cancelPendingIdleDemote()
+                    if (!instanceForeground) {
                         updateForeground(ForegroundListener.Change.MEDIA_SESSION)
                     }
                 } else {
@@ -141,8 +185,9 @@ class AuxioService :
     }
 
     override fun onDestroy() {
+        cancelPendingIdleDemote()
         mainHandler.removeCallbacksAndMessages(null)
-        isForeground = false
+        setInstanceForeground(false)
         isServiceStarted = false
         localClientCount = 0
         super.onDestroy()
@@ -200,7 +245,7 @@ class AuxioService :
     private fun promoteForegroundSafe(notification: ForegroundServiceNotification): Boolean =
         try {
             startForegroundCompat(notification)
-            isForeground = true
+            setInstanceForeground(true)
             true
         } catch (e: Exception) {
             Timber.w(e, "Unable to promote foreground notification")
@@ -215,20 +260,22 @@ class AuxioService :
         val hasActivePlayback = playbackFragment.isSessionOngoing || playbackFragment.isPlaying
         val mediaNotification =
             playbackFragment.notification
-                ?: if (playbackFragment.isPlaying) playbackFragment.fallbackNotification else null
+                ?: if (hasActivePlayback) playbackFragment.fallbackNotification else null
         if (mediaNotification != null || hasActivePlayback) {
+            cancelPendingIdleDemote()
             val resolvedNotification = mediaNotification ?: playbackFragment.fallbackNotification
+            if (change == ForegroundListener.Change.MEDIA_SESSION || !instanceForeground) {
+                promoteForegroundSafe(resolvedNotification)
+            }
             if (ServiceLifecyclePolicy.shouldEnsureStartedForPlayback(isServiceStarted, hasMediaNotification = true)) {
                 val startIntent =
                     Intent(this, AuxioService::class.java)
                         .setAction(ACTION_START)
                         .putExtra(INTENT_KEY_START_ID, IntegerTable.START_ID_ACTIVITY)
+                        .putExtra(EXTRA_FORCE_FOREGROUND, true)
                 runCatching { ContextCompat.startForegroundService(this, startIntent) }
                     .onFailure { runCatching { startService(startIntent) } }
                 isServiceStarted = true
-            }
-            if (change == ForegroundListener.Change.MEDIA_SESSION || !isForeground) {
-                promoteForegroundSafe(resolvedNotification)
             }
         } else {
             musicFragment.createNotification {
@@ -247,8 +294,14 @@ class AuxioService :
                         }
                     }
                 } else {
-                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                    isForeground = false
+                    if (playbackFragment.isSessionOngoing || playbackFragment.isPlaying) {
+                        updateForeground(ForegroundListener.Change.MEDIA_SESSION)
+                        return@createNotification
+                    }
+                    if (instanceForeground) {
+                        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                        setInstanceForeground(false)
+                    }
                     if (
                         ServiceLifecyclePolicy.shouldStopWhenIdle(
                             localClientCount = localClientCount,
@@ -271,10 +324,12 @@ class AuxioService :
     companion object {
         const val ACTION_START = BuildConfig.APPLICATION_ID + ".service.START"
         const val ACTION_BIND_LOCAL = BuildConfig.APPLICATION_ID + ".service.BIND_LOCAL"
+        const val EXTRA_FORCE_FOREGROUND = BuildConfig.APPLICATION_ID + ".service.FORCE_FOREGROUND"
 
-        @Volatile
-        var isForeground = false
-            private set
+        private val foregroundInstanceCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        val isForeground: Boolean
+            get() = foregroundInstanceCount.get() > 0
 
         // This is only meant for Auxio to internally ensure that it's state management will work.
         const val INTENT_KEY_START_ID = BuildConfig.APPLICATION_ID + ".service.START_ID"

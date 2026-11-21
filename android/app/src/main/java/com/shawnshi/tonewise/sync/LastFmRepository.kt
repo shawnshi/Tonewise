@@ -1106,12 +1106,14 @@ constructor(
             (storedSecret.isNotEmpty() && !SecretBox.isEncrypted(storedSecret) && sharedSecret.isNotEmpty()) ||
                 (storedSessionKey.isNotEmpty() && !SecretBox.isEncrypted(storedSessionKey) && sessionKey.isNotEmpty())
         if (needsSecretUpgrade) {
-            prefs.edit {
-                if (storedSecret.isNotEmpty() && !SecretBox.isEncrypted(storedSecret)) {
-                    putString(KEY_SHARED_SECRET, SecretBox.encrypt(sharedSecret))
-                }
-                if (storedSessionKey.isNotEmpty() && !SecretBox.isEncrypted(storedSessionKey)) {
-                    putString(KEY_SESSION_KEY, SecretBox.encrypt(sessionKey))
+            runCatching {
+                prefs.edit {
+                    if (storedSecret.isNotEmpty() && !SecretBox.isEncrypted(storedSecret)) {
+                        putString(KEY_SHARED_SECRET, SecretBox.encrypt(sharedSecret))
+                    }
+                    if (storedSessionKey.isNotEmpty() && !SecretBox.isEncrypted(storedSessionKey)) {
+                        putString(KEY_SESSION_KEY, SecretBox.encrypt(sessionKey))
+                    }
                 }
             }
         }

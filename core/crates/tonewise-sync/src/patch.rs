@@ -18,27 +18,44 @@ pub struct LwwTrackState {
     pub dj_scene: Vec<String>,
     #[serde(default)]
     pub dj_scene_ts: u64,
+    #[serde(default)]
+    pub dj_scene_device: String,
     pub dj_vocals: Option<String>,
     #[serde(default)]
     pub dj_vocals_ts: u64,
+    #[serde(default)]
+    pub dj_vocals_device: String,
     pub dj_energy: Option<String>,
     #[serde(default)]
     pub dj_energy_ts: u64,
+    #[serde(default)]
+    pub dj_energy_device: String,
     pub tempo_bucket: Option<String>,
     #[serde(default)]
     pub tempo_ts: u64,
+    #[serde(default)]
+    pub tempo_device: String,
     #[serde(default)]
     pub mood: Vec<String>,
     #[serde(default)]
     pub mood_ts: u64,
     #[serde(default)]
+    pub mood_device: String,
+    #[serde(default)]
     pub rating: u8,
     #[serde(default)]
     pub rating_ts: u64,
+    #[serde(default)]
+    pub rating_device: String,
+}
+
+fn should_apply_lww(ev_ts: u64, ev_dev: &str, cur_ts: u64, cur_dev: &str) -> bool {
+    ev_ts > cur_ts || (ev_ts == cur_ts && ev_dev >= cur_dev)
 }
 
 /// Applies per-tag LWW vector clock mutations onto `state`, ensuring concurrent edits across
-/// distinct 5D dimensions never clobber one another.
+/// distinct 5D dimensions never clobber one another, and breaking same-millisecond ties
+/// deterministically by `(lww_ts_ms, device_id)`.
 pub fn apply_lww_mutations(state: &mut LwwTrackState, mutations: &[TagMutationEvent]) -> usize {
     let mut applied = 0usize;
     for ev in mutations {
@@ -46,45 +63,103 @@ pub fn apply_lww_mutations(state: &mut LwwTrackState, mutations: &[TagMutationEv
             continue;
         }
         match ev.field.as_str() {
-            "dj_scene" if ev.lww_ts_ms >= state.dj_scene_ts => {
-                if let Some(arr) = ev.value.as_array() {
+            "dj_scene"
+                if should_apply_lww(
+                    ev.lww_ts_ms,
+                    &ev.device_id,
+                    state.dj_scene_ts,
+                    &state.dj_scene_device,
+                ) =>
+            {
+                if ev.value.is_null() {
+                    state.dj_scene.clear();
+                    state.dj_scene_ts = ev.lww_ts_ms;
+                    state.dj_scene_device = ev.device_id.clone();
+                    applied += 1;
+                } else if let Some(arr) = ev.value.as_array() {
                     state.dj_scene = arr
                         .iter()
                         .filter_map(|v| v.as_str().map(str::to_string))
                         .collect();
                     state.dj_scene_ts = ev.lww_ts_ms;
+                    state.dj_scene_device = ev.device_id.clone();
                     applied += 1;
                 }
             }
-            "dj_vocals" if ev.lww_ts_ms >= state.dj_vocals_ts => {
+            "dj_vocals"
+                if should_apply_lww(
+                    ev.lww_ts_ms,
+                    &ev.device_id,
+                    state.dj_vocals_ts,
+                    &state.dj_vocals_device,
+                ) =>
+            {
                 state.dj_vocals = ev.value.as_str().map(str::to_string);
                 state.dj_vocals_ts = ev.lww_ts_ms;
+                state.dj_vocals_device = ev.device_id.clone();
                 applied += 1;
             }
-            "dj_energy" if ev.lww_ts_ms >= state.dj_energy_ts => {
+            "dj_energy"
+                if should_apply_lww(
+                    ev.lww_ts_ms,
+                    &ev.device_id,
+                    state.dj_energy_ts,
+                    &state.dj_energy_device,
+                ) =>
+            {
                 state.dj_energy = ev.value.as_str().map(str::to_string);
                 state.dj_energy_ts = ev.lww_ts_ms;
+                state.dj_energy_device = ev.device_id.clone();
                 applied += 1;
             }
-            "tempo_bucket" if ev.lww_ts_ms >= state.tempo_ts => {
+            "tempo_bucket"
+                if should_apply_lww(
+                    ev.lww_ts_ms,
+                    &ev.device_id,
+                    state.tempo_ts,
+                    &state.tempo_device,
+                ) =>
+            {
                 state.tempo_bucket = ev.value.as_str().map(str::to_string);
                 state.tempo_ts = ev.lww_ts_ms;
+                state.tempo_device = ev.device_id.clone();
                 applied += 1;
             }
-            "mood" if ev.lww_ts_ms >= state.mood_ts => {
-                if let Some(arr) = ev.value.as_array() {
+            "mood"
+                if should_apply_lww(
+                    ev.lww_ts_ms,
+                    &ev.device_id,
+                    state.mood_ts,
+                    &state.mood_device,
+                ) =>
+            {
+                if ev.value.is_null() {
+                    state.mood.clear();
+                    state.mood_ts = ev.lww_ts_ms;
+                    state.mood_device = ev.device_id.clone();
+                    applied += 1;
+                } else if let Some(arr) = ev.value.as_array() {
                     state.mood = arr
                         .iter()
                         .filter_map(|v| v.as_str().map(str::to_string))
                         .collect();
                     state.mood_ts = ev.lww_ts_ms;
+                    state.mood_device = ev.device_id.clone();
                     applied += 1;
                 }
             }
-            "rating" if ev.lww_ts_ms >= state.rating_ts => {
+            "rating"
+                if should_apply_lww(
+                    ev.lww_ts_ms,
+                    &ev.device_id,
+                    state.rating_ts,
+                    &state.rating_device,
+                ) =>
+            {
                 if let Some(r) = ev.value.as_u64() {
                     state.rating = (r.min(5)) as u8;
                     state.rating_ts = ev.lww_ts_ms;
+                    state.rating_device = ev.device_id.clone();
                     applied += 1;
                 }
             }
@@ -126,6 +201,13 @@ pub fn apply_header_delta_patch<RW: Read + Write + Seek>(
         return Ok(HeaderPatchOutcome::HeaderHashMismatch {
             expected: expected_old_header_blake3_hex.to_string(),
             actual: fp.header_blake3_hex,
+        });
+    }
+
+    if fp.footer_size > 0 {
+        return Ok(HeaderPatchOutcome::PaddingInsufficient {
+            required: new_header_bytes.len(),
+            available: 0,
         });
     }
 
@@ -273,5 +355,63 @@ mod tests {
         .unwrap();
         assert!(matches!(res_mismatch, HeaderPatchOutcome::HeaderHashMismatch { .. }));
         assert_eq!(cursor_mismatch.get_ref(), &initial);
+    }
+
+    #[test]
+    fn lww_equal_timestamp_tiebreaks_commutatively_supports_null_clear_and_rejects_footer_patch() {
+        let m_a = TagMutationEvent {
+            track_uid: "trk_tie".into(),
+            field: "dj_scene".into(),
+            value: serde_json::json!(["focus"]),
+            lww_ts_ms: 500,
+            device_id: "device_a".into(),
+        };
+        let m_z = TagMutationEvent {
+            track_uid: "trk_tie".into(),
+            field: "dj_scene".into(),
+            value: serde_json::json!(["relax"]),
+            lww_ts_ms: 500,
+            device_id: "device_z".into(),
+        };
+
+        let mut s1 = LwwTrackState {
+            track_uid: "trk_tie".into(),
+            ..Default::default()
+        };
+        apply_lww_mutations(&mut s1, &[m_a.clone(), m_z.clone()]);
+
+        let mut s2 = LwwTrackState {
+            track_uid: "trk_tie".into(),
+            ..Default::default()
+        };
+        apply_lww_mutations(&mut s2, &[m_z, m_a]);
+        assert_eq!(s1.dj_scene, vec!["relax"]);
+        assert_eq!(s1.dj_scene, s2.dj_scene);
+        assert_eq!(s1.dj_scene_device, "device_z");
+
+        // Null explicitly clears array tags
+        let clear_mood = TagMutationEvent {
+            track_uid: "trk_tie".into(),
+            field: "mood".into(),
+            value: serde_json::Value::Null,
+            lww_ts_ms: 600,
+            device_id: "device_a".into(),
+        };
+        s1.mood = vec!["calm".into()];
+        s1.mood_ts = 100;
+        let applied = apply_lww_mutations(&mut s1, &[clear_mood]);
+        assert_eq!(applied, 1);
+        assert!(s1.mood.is_empty());
+        assert_eq!(s1.mood_ts, 600);
+
+        // File with trailing ID3v1 footer rejects prefix-only delta patch
+        let mut mp3_tail = b"RAW_MP3_FRAMES".to_vec();
+        let mut id3v1 = [0u8; 128];
+        id3v1[0..3].copy_from_slice(b"TAG");
+        mp3_tail.extend_from_slice(&id3v1);
+        let fp_tail = compute_audio_frame_fingerprint(&mut Cursor::new(&mp3_tail)).unwrap();
+        let mut cur = Cursor::new(mp3_tail);
+        let res = apply_header_delta_patch(&mut cur, &fp_tail.header_blake3_hex, &[]).unwrap();
+        assert!(matches!(res, HeaderPatchOutcome::PaddingInsufficient { .. }));
     }
 }

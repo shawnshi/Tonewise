@@ -39,6 +39,7 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
     }
 
     private TransportFadeState _transportFadeState = TransportFadeState.SteadyFull;
+    private volatile int _transportFadeStateInt = (int)TransportFadeState.SteadyFull;
     private int _transportFadePosFrames;
     private int _transportFadeTotalFrames;
     private int _transportSilenceEmittedFrames;
@@ -74,8 +75,12 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
     private double _limiterCeilingLinear = Math.Pow(10.0, -0.2 / 20.0);
     private int _limiterDelaySamples = 144;
     private double[][] _limiterDelayBuf = [];
-    private double[] _limiterPeakRing = new double[160];
-    private double _limiterRunningMax;
+    private long[] _limiterDequePos = new long[162];
+    private double[] _limiterDequeVal = new double[162];
+    private int _limiterDequeCapacity = 162;
+    private int _limiterDequeHead;
+    private int _limiterDequeTail;
+    private long _limiterSampleClock;
     private int _limiterDelayPos;
     private double _limiterEnvelope = 1.0;
     private double _limiterAttackCoeff = 0.98;
@@ -139,15 +144,16 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
         {
             for (int c = 0; c < channels; c++) Array.Clear(_limiterDelayBuf[c]);
         }
-        if (_limiterPeakRing.Length < _limiterDelaySamples)
+        int neededDequeCap = _limiterDelaySamples + 2;
+        if (_limiterDequePos.Length < neededDequeCap)
         {
-            _limiterPeakRing = new double[_limiterDelaySamples];
+            _limiterDequePos = new long[neededDequeCap];
+            _limiterDequeVal = new double[neededDequeCap];
         }
-        else
-        {
-            Array.Clear(_limiterPeakRing);
-        }
-        _limiterRunningMax = 0.0;
+        _limiterDequeCapacity = Math.Max(neededDequeCap, _limiterDequePos.Length);
+        _limiterDequeHead = 0;
+        _limiterDequeTail = 0;
+        _limiterSampleClock = 0;
         _limiterDelayPos = 0;
         _limiterEnvelope = 1.0;
         _limiterAttackCoeff = Math.Exp(-Math.Log(20.0) / Math.Max(_limiterDelaySamples, 1));
@@ -182,6 +188,21 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
             _transportFadeTotalFrames = frames;
             _transportSilenceEmittedFrames = 0;
             _transportFadeState = TransportFadeState.FadingOut;
+            _transportFadeStateInt = (int)TransportFadeState.FadingOut;
+        }
+    }
+
+    public void BeginSeekSilenceHold()
+    {
+        lock (_dspLock)
+        {
+            _transportFadeStartGain = 0.0;
+            _transportFadeCurrentGain = 0.0;
+            _transportFadePosFrames = 0;
+            _transportFadeTotalFrames = 0;
+            _transportSilenceEmittedFrames = 0;
+            _transportFadeState = TransportFadeState.HoldingSilence;
+            _transportFadeStateInt = (int)TransportFadeState.HoldingSilence;
         }
     }
 
@@ -191,13 +212,19 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
         int frames = Math.Max(1, (int)Math.Round(Math.Clamp(durationMs, 2.0, 100.0) / 1000.0 * sr));
         lock (_dspLock)
         {
-            _transportFadeStartGain = startFromZero ? 0.0 : _transportFadeCurrentGain;
-            _transportFadeCurrentGain = _transportFadeStartGain;
-            _transportFadePosFrames = 0;
-            _transportFadeTotalFrames = frames;
-            _transportSilenceEmittedFrames = 0;
-            _transportFadeState = TransportFadeState.FadingIn;
+            BeginTransportFadeInUnlocked(frames, startFromZero);
         }
+    }
+
+    private void BeginTransportFadeInUnlocked(int frames, bool startFromZero)
+    {
+        _transportFadeStartGain = startFromZero ? 0.0 : _transportFadeCurrentGain;
+        _transportFadeCurrentGain = _transportFadeStartGain;
+        _transportFadePosFrames = 0;
+        _transportFadeTotalFrames = frames;
+        _transportSilenceEmittedFrames = 0;
+        _transportFadeState = TransportFadeState.FadingIn;
+        _transportFadeStateInt = (int)TransportFadeState.FadingIn;
     }
 
     public void ResetTransportFadeFull()
@@ -205,6 +232,7 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
         lock (_dspLock)
         {
             _transportFadeState = TransportFadeState.SteadyFull;
+            _transportFadeStateInt = (int)TransportFadeState.SteadyFull;
             _transportFadeCurrentGain = 1.0;
             _transportFadeStartGain = 1.0;
             _transportFadePosFrames = 0;
@@ -451,7 +479,13 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
         }
     }
 
-    public void Dispose() => _vst3Bridge.Dispose();
+    public void Dispose()
+    {
+        lock (_dspLock)
+        {
+            _vst3Bridge.Dispose();
+        }
+    }
 
     public double MasterLinearGain
     {
@@ -470,26 +504,43 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
     {
         lock (_dspLock)
         {
-            _biquadNode.Reset();
-            _iso226.Reset();
-            _firConvolver.ResetState();
-            Array.Clear(_crossDelayBufL);
-            Array.Clear(_crossDelayBufR);
-            _crossDelayPos = 0;
-            _crossLpL = 0.0;
-            _crossLpR = 0.0;
-            for (int c = 0; c < _limiterDelayBuf.Length; c++)
-            {
-                Array.Clear(_limiterDelayBuf[c]);
-            }
-            Array.Clear(_limiterPeakRing);
-            _limiterRunningMax = 0.0;
-            _limiterDelayPos = 0;
-            _limiterEnvelope = 1.0;
-            _currentPreampLinear = _targetPreampLinear;
-            _currentMasterLinear = _targetMasterLinear;
-            _currentGainMatchedBypassLinear = _targetGainMatchedBypassLinear;
+            ResetFilterStatesUnlocked();
         }
+    }
+
+    public void ResetFilterStatesAndBeginFadeIn(double durationMs = 12.0, bool startFromZero = true)
+    {
+        int sr = Math.Max(WaveFormat.SampleRate, 8000);
+        int frames = Math.Max(1, (int)Math.Round(Math.Clamp(durationMs, 2.0, 100.0) / 1000.0 * sr));
+        lock (_dspLock)
+        {
+            ResetFilterStatesUnlocked();
+            BeginTransportFadeInUnlocked(frames, startFromZero);
+        }
+    }
+
+    private void ResetFilterStatesUnlocked()
+    {
+        _biquadNode.Reset();
+        _iso226.Reset();
+        _firConvolver.ResetState();
+        Array.Clear(_crossDelayBufL);
+        Array.Clear(_crossDelayBufR);
+        _crossDelayPos = 0;
+        _crossLpL = 0.0;
+        _crossLpR = 0.0;
+        for (int c = 0; c < _limiterDelayBuf.Length; c++)
+        {
+            Array.Clear(_limiterDelayBuf[c]);
+        }
+        _limiterDequeHead = 0;
+        _limiterDequeTail = 0;
+        _limiterSampleClock = 0;
+        _limiterDelayPos = 0;
+        _limiterEnvelope = 1.0;
+        _currentPreampLinear = _targetPreampLinear;
+        _currentMasterLinear = _targetMasterLinear;
+        _currentGainMatchedBypassLinear = _targetGainMatchedBypassLinear;
     }
 
     public void ConfigureFirImpulse(double[]? leftIr, double[]? rightIr, double dryWetMix = 1.0, string? sourceLabel = null)
@@ -620,13 +671,22 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
 
     private bool TryServeSilenceHold(float[] buffer, int offset, int sampleCount, int channels)
     {
+        if (_transportFadeStateInt != (int)TransportFadeState.HoldingSilence)
+        {
+            return false;
+        }
         lock (_dspLock)
         {
             if (_transportFadeState != TransportFadeState.HoldingSilence)
             {
                 return false;
             }
-            Array.Clear(buffer, offset, sampleCount);
+            // Element-wise zeroing required: NAudio's WaveBuffer aliases byte[] as float[], where
+            // Array.Clear would zero byte counts instead of float sample counts.
+            for (int i = 0; i < sampleCount; i++)
+            {
+                buffer[offset + i] = 0f;
+            }
             _transportSilenceEmittedFrames += sampleCount / channels;
             return true;
         }
@@ -634,7 +694,7 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
 
     private void ApplyTransportFade(float[] buffer, int offset, int sampleCount, int channels)
     {
-        if (sampleCount <= 0) return;
+        if (sampleCount <= 0 || _transportFadeStateInt == (int)TransportFadeState.SteadyFull) return;
         lock (_dspLock)
         {
             if (_transportFadeState == TransportFadeState.SteadyFull)
@@ -662,6 +722,7 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
                         {
                             _transportFadeCurrentGain = 0.0;
                             _transportFadeState = TransportFadeState.HoldingSilence;
+                            _transportFadeStateInt = (int)TransportFadeState.HoldingSilence;
                             for (int c = 0; c < channels; c++)
                             {
                                 buffer[baseIdx + c] = 0.0f;
@@ -687,6 +748,7 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
                         {
                             _transportFadeCurrentGain = 1.0;
                             _transportFadeState = TransportFadeState.SteadyFull;
+                            _transportFadeStateInt = (int)TransportFadeState.SteadyFull;
                         }
                         else
                         {
@@ -848,30 +910,31 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
                         if (absS > futurePeak) futurePeak = absS;
                         frameWork[c] = delayed;
                     }
-                    double evicted = _limiterPeakRing[_limiterDelayPos];
-                    _limiterPeakRing[_limiterDelayPos] = futurePeak;
                     _limiterDelayPos = (_limiterDelayPos + 1) % _limiterDelaySamples;
 
-                    double windowPeak;
-                    if (futurePeak >= _limiterRunningMax)
+                    long clock = _limiterSampleClock++;
+                    long minValidClock = clock - _limiterDelaySamples + 1;
+                    int cap = _limiterDequeCapacity;
+                    while (_limiterDequeHead != _limiterDequeTail && _limiterDequePos[_limiterDequeHead] < minValidClock)
                     {
-                        _limiterRunningMax = futurePeak;
-                        windowPeak = futurePeak;
+                        _limiterDequeHead = (_limiterDequeHead + 1) % cap;
                     }
-                    else if (evicted >= _limiterRunningMax - 1e-12)
+                    while (_limiterDequeHead != _limiterDequeTail)
                     {
-                        double m = 0.0;
-                        for (int k = 0; k < _limiterDelaySamples; k++)
+                        int back = (_limiterDequeTail - 1 + cap) % cap;
+                        if (_limiterDequeVal[back] <= futurePeak)
                         {
-                            if (_limiterPeakRing[k] > m) m = _limiterPeakRing[k];
+                            _limiterDequeTail = back;
                         }
-                        _limiterRunningMax = m;
-                        windowPeak = m;
+                        else
+                        {
+                            break;
+                        }
                     }
-                    else
-                    {
-                        windowPeak = _limiterRunningMax;
-                    }
+                    _limiterDequePos[_limiterDequeTail] = clock;
+                    _limiterDequeVal[_limiterDequeTail] = futurePeak;
+                    _limiterDequeTail = (_limiterDequeTail + 1) % cap;
+                    double windowPeak = _limiterDequeVal[_limiterDequeHead];
 
                     double delayedPeak = 0.0;
                     for (int c = 0; c < channels; c++)

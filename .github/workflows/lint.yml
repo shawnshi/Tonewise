@@ -43,6 +43,6 @@ jobs:
     - name: Check formatting with spotless
       working-directory: android
       run: .\gradlew.bat spotlessCheck
-    - name: Test musikr with Gradle
+    - name: Test musikr and app unit tests with Gradle
       working-directory: android
-      run: .\gradlew.bat musikr:testDebugUnitTest
+      run: .\gradlew.bat :musikr:testDebugUnitTest :app:testDebugUnitTest

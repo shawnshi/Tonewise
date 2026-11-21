@@ -19,6 +19,8 @@
 package com.shawnshi.tonewise.sync
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
@@ -30,6 +32,10 @@ import com.shawnshi.tonewise.playback.service.WorkShuffleOrder
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.io.IOException
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.SocketTimeoutException
+import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -201,6 +207,17 @@ constructor(
     private var pendingRemoteReconcileRemaining = 0
 
     init {
+        LanHttpClient.lanConnectionOpener = opener@{ targetUrl ->
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return@opener null
+            val wifiNet =
+                cm.allNetworks.firstOrNull { net ->
+                    val caps = cm.getNetworkCapabilities(net) ?: return@firstOrNull false
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                } ?: return@opener null
+            wifiNet.openConnection(targetUrl, java.net.Proxy.NO_PROXY) as? java.net.HttpURLConnection
+        }
         syncScope.launch {
             runCatching { syncDb.ensureLegacyMigrated(context) }
             runCatching { lwwStore.ensureLoadedOnBackground(context) }
@@ -336,8 +353,7 @@ constructor(
 
                     override fun onServiceResolved(resolved: NsdServiceInfo) {
                         if (activeDiscoveryListener != null) {
-                            @Suppress("DEPRECATION")
-                            val host = resolved.host?.hostAddress
+                            val host = selectPreferredResolvedHost(resolved)
                             if (!host.isNullOrBlank()) {
                                 val entry =
                                     DiscoveredSyncHost(
@@ -465,7 +481,7 @@ constructor(
                 false
             } catch (e: Exception) {
                 L.w(e, "Pairing failed")
-                _syncStatus.value = "连接失败：${e.message ?: "请检查网络与 Windows 防火墙端口 45820"}"
+                _syncStatus.value = formatConnectionError(cleanBase, e, vpnActive = isVpnActive())
                 false
             }
         }
@@ -509,6 +525,7 @@ constructor(
             if (!syncInFlight.compareAndSet(false, true)) {
                 return@withContext
             }
+            managedSyncStorage.invalidatePathCache()
             val cleanBase = normalizeBaseUrl(baseUrl)
             if (cleanBase.isBlank()) {
                 _syncStatus.value = "请先选择或填写电脑同步地址"
@@ -979,7 +996,7 @@ constructor(
                     _syncStatus.value = "配对已失效，请重新输入电脑端 6 位配对码配对"
                 } catch (e: Exception) {
                     L.w(e, "LAN sync failed")
-                    _syncStatus.value = "同步失败：${e.message ?: "无法连接到电脑"}"
+                    _syncStatus.value = formatConnectionError(cleanBase, e, vpnActive = isVpnActive())
                 } finally {
                     managedSyncStorage.invalidatePathCache()
                     activeCancelToken = null
@@ -1122,7 +1139,7 @@ constructor(
         val cleanField = field.trim().lowercase()
         val cleanValue = value.trim()
         val now = System.currentTimeMillis()
-        val deviceId = Build.MODEL ?: "android"
+        val provisionalDeviceId = lwwStore.getCachedStableDeviceId()
 
         if (cleanField == "rating") {
             val ratingNum = cleanValue.toIntOrNull() ?: 4
@@ -1136,12 +1153,13 @@ constructor(
             field = cleanField,
             value = cleanValue,
             updatedAtMs = now,
-            deviceId = deviceId,
+            deviceId = provisionalDeviceId,
         )
 
         val overrideEntity = LwwOverrideEntity(uid, cleanField, cleanValue, now)
-        val mutationEntity = PendingTagMutationEntity(uid, cleanField, cleanValue, now, deviceId)
         writeBackScope.launch {
+            val stableDeviceId = runCatching { lwwStore.getOrCreateStableDeviceId() }.getOrDefault(provisionalDeviceId)
+            val mutationEntity = PendingTagMutationEntity(uid, cleanField, cleanValue, now, stableDeviceId)
             lwwStore.persistMutationEntities(overrideEntity, mutationEntity)
             waveformRepository.getOrComputeAudioFrameBlake3(song)
         }
@@ -1832,6 +1850,15 @@ constructor(
     private fun sanitizeKey(uid: String): String =
         uid.replace(Regex("[^A-Za-z0-9._-]+"), "_").take(80)
 
+    private fun isVpnActive(): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        return cm.allNetworks.any { net ->
+            val caps = cm.getNetworkCapabilities(net)
+            caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        }
+    }
+
     private fun isHex64(s: String): Boolean =
         s.length == 64 && s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 
@@ -1882,16 +1909,120 @@ constructor(
         }
 
         internal fun normalizeBaseUrlStatic(raw: String): String {
-            val trimmed = raw.trim().trimEnd('/')
+            var trimmed = raw.trim().replace('：', ':').trimEnd('/')
             if (trimmed.isEmpty()) return ""
-            return if (
-                trimmed.startsWith("http://", ignoreCase = true) ||
-                    trimmed.startsWith("https://", ignoreCase = true)
+            if (
+                !trimmed.startsWith("http://", ignoreCase = true) &&
+                    !trimmed.startsWith("https://", ignoreCase = true)
             ) {
-                trimmed
-            } else {
-                "http://$trimmed"
+                trimmed = "http://$trimmed"
             }
+            val uri = runCatching { URI(trimmed) }.getOrNull()
+            val host = uri?.host?.takeIf { it.isNotBlank() }
+            if (
+                uri != null &&
+                    uri.scheme?.equals("http", ignoreCase = true) == true &&
+                    host != null &&
+                    uri.port == -1
+            ) {
+                val formattedHost = if (host.contains(':') && !host.startsWith("[")) "[$host]" else host
+                val path = uri.rawPath?.trimEnd('/').orEmpty()
+                return "http://$formattedHost:45820$path"
+            }
+            return trimmed
+        }
+
+        internal fun formatConnectionError(
+            baseUrl: String,
+            error: Throwable,
+            vpnActive: Boolean = false,
+        ): String {
+            val combinedMsg =
+                generateSequence(error) { it.cause }
+                    .mapNotNull { it.message }
+                    .joinToString(" ")
+            val isConnRefused =
+                combinedMsg.contains("ECONNREFUSED", ignoreCase = true) ||
+                    combinedMsg.contains("Connection refused", ignoreCase = true)
+            if (isConnRefused) {
+                return "无法连接 $baseUrl（45820 端口未监听）：请确认电脑端 Tonewise 已打开且局域网同步服务已启动"
+            }
+            val isReadTimeout =
+                combinedMsg.contains("Read timed out", ignoreCase = true) ||
+                    combinedMsg.contains("Read timedout", ignoreCase = true)
+            if (isReadTimeout) {
+                return "连接 $baseUrl 已建立，但电脑端响应超时（Read timed out）：请稍候重试，若歌单或同步队列较大请等待电脑端完成解析"
+            }
+            val isTimeoutOrUnreachable =
+                error is SocketTimeoutException ||
+                    generateSequence(error) { it.cause }.any { it is SocketTimeoutException } ||
+                    combinedMsg.contains("ETIMEDOUT", ignoreCase = true) ||
+                    combinedMsg.contains("EHOSTUNREACH", ignoreCase = true) ||
+                    combinedMsg.contains("ENETUNREACH", ignoreCase = true) ||
+                    combinedMsg.contains("timed out", ignoreCase = true)
+            val isStreamResetOrConnectFailure =
+                error is java.io.EOFException ||
+                    generateSequence(error) { it.cause }.any {
+                        it is java.io.EOFException || it is java.net.SocketException
+                    } ||
+                    combinedMsg.contains("unexpected end of stream", ignoreCase = true) ||
+                    combinedMsg.contains("failed to connect", ignoreCase = true) ||
+                    combinedMsg.contains("ECONNRESET", ignoreCase = true)
+            if (vpnActive && (isStreamResetOrConnectFailure || isTimeoutOrUnreachable)) {
+                return "检测到手机开启了全局 VPN（tun0）正在拦截局域网流量（$baseUrl）：请将 Tonewise（知律）加入 VPN 分应用绕行白名单，或关闭 VPN 后重试"
+            }
+            if (isTimeoutOrUnreachable) {
+                return "连接 $baseUrl 超时或不可达：请确认手机与电脑在同一 Wi-Fi、未开启代理/VPN 拦截且电脑防火墙已放行 45820 端口"
+            }
+            val detail = error.message?.takeIf { it.isNotBlank() } ?: "请检查网络与电脑端 45820 端口"
+            return "连接 $baseUrl 失败：$detail"
+        }
+
+        private fun selectPreferredResolvedHost(resolved: NsdServiceInfo): String? {
+            val candidates =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    resolved.hostAddresses
+                } else {
+                    @Suppress("DEPRECATION")
+                    listOfNotNull(resolved.host)
+                }
+            return selectPreferredResolvedHostFromAddresses(candidates)
+        }
+
+        internal fun selectPreferredResolvedHostFromAddresses(addresses: List<InetAddress>): String? {
+            val best =
+                addresses
+                    .asSequence()
+                    .filter { addr ->
+                        if (addr.isLoopbackAddress || addr.isLinkLocalAddress || addr.isAnyLocalAddress) {
+                            return@filter false
+                        }
+                        if (addr is Inet4Address) {
+                            val b = addr.address
+                            val b0 = b[0].toInt() and 0xFF
+                            val b1 = b[1].toInt() and 0xFF
+                            // Exclude RFC 2544 / fake-IP VPN TUN ranges (198.18.0.0/15)
+                            if (b0 == 198 && b1 in 18..19) return@filter false
+                        }
+                        true
+                    }
+                    .minByOrNull { addr ->
+                        if (addr is Inet4Address) {
+                            val b = addr.address
+                            val b0 = b[0].toInt() and 0xFF
+                            val b1 = b[1].toInt() and 0xFF
+                            when {
+                                b0 == 192 && b1 == 168 -> 0
+                                b0 == 10 -> 1
+                                b0 == 172 && b1 in 16..31 -> 2
+                                else -> 3
+                            }
+                        } else {
+                            10
+                        }
+                    } ?: return null
+            val rawHost = best.hostAddress?.substringBefore('%')?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            return if (rawHost.contains(':') && !rawHost.startsWith("[")) "[$rawHost]" else rawHost
         }
 
         fun translateLocalUidsToCanonical(

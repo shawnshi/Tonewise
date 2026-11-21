@@ -11,6 +11,265 @@ namespace Tonewise.SyncHost;
 
 public sealed partial class SyncOutboxAndPairingStore
 {
+    private ManifestFileStamp ReadManifestFileStamp()
+    {
+        string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
+        var dbInfo = new FileInfo(dbPath);
+        if (!dbInfo.Exists)
+        {
+            return new ManifestFileStamp(false, 0, 0, 0, 0);
+        }
+
+        var walInfo = new FileInfo(dbPath + "-wal");
+        return new ManifestFileStamp(
+            Exists: true,
+            DbTicks: dbInfo.LastWriteTimeUtc.Ticks,
+            DbLength: dbInfo.Length,
+            WalTicks: walInfo.Exists ? walInfo.LastWriteTimeUtc.Ticks : 0,
+            WalLength: walInfo.Exists ? walInfo.Length : 0);
+    }
+
+    private static Dictionary<string, ManifestTrackRow> BuildRowsByUid(IReadOnlyList<ManifestTrackRow> rows)
+    {
+        var dict = new Dictionary<string, ManifestTrackRow>(rows.Count * 2, StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var r = rows[i];
+            dict[r.TrackUid] = r;
+            if (!string.IsNullOrWhiteSpace(r.AudioFrameBlake3Hex))
+            {
+                dict.TryAdd(r.AudioFrameBlake3Hex, r);
+            }
+        }
+        return dict;
+    }
+
+    private (IReadOnlyList<ManifestTrackRow> Rows, Dictionary<string, ManifestTrackRow> RowsByUid, PlaylistTrackMatcher.LibraryIndex? LibraryIndex) GetCachedManifestRowsAndIndex(bool requirePlaylistIndex)
+    {
+        ManifestFileStamp stamp = ReadManifestFileStamp();
+        List<ManifestTrackRow>? rows;
+        Dictionary<string, ManifestTrackRow>? rowsByUid;
+        PlaylistTrackMatcher.LibraryIndex? libIndex;
+
+        lock (_resolveCacheLock)
+        {
+            if (_cachedManifestRows is not null && _cachedManifestStamp.Equals(stamp))
+            {
+                rows = _cachedManifestRows;
+                rowsByUid = _cachedRowsByUid;
+                libIndex = _cachedLibraryIndex;
+            }
+            else
+            {
+                rows = null;
+                rowsByUid = null;
+                libIndex = null;
+            }
+        }
+
+        if (rows is null || rowsByUid is null)
+        {
+            ManifestFileStamp beforeStamp = ReadManifestFileStamp();
+            var loadedRows = LoadManifestRows();
+            var builtByUid = BuildRowsByUid(loadedRows);
+            ManifestFileStamp afterStamp = ReadManifestFileStamp();
+            if (afterStamp.Equals(beforeStamp))
+            {
+                lock (_resolveCacheLock)
+                {
+                    if (_cachedManifestRows is null || _cachedRowsByUid is null || !_cachedManifestStamp.Equals(afterStamp))
+                    {
+                        _cachedManifestStamp = afterStamp;
+                        _cachedManifestRows = loadedRows;
+                        _cachedRowsByUid = builtByUid;
+                        _cachedLibraryIndex = null;
+                        _cachedPlaylists.Clear();
+                        _cachedResolvedOutboxes.Clear();
+                    }
+                    rows = _cachedManifestRows;
+                    rowsByUid = _cachedRowsByUid;
+                    libIndex = _cachedLibraryIndex;
+                    stamp = _cachedManifestStamp;
+                }
+            }
+            else
+            {
+                rows = loadedRows;
+                rowsByUid = builtByUid;
+                libIndex = null;
+                stamp = afterStamp;
+            }
+        }
+
+        if (requirePlaylistIndex && libIndex is null)
+        {
+            var libRefs = new List<LocalLibraryTrackRef>(rows.Count);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                libRefs.Add(r.ToLibraryTrackRef(BuildFullPath(r.RelPath)));
+            }
+            var builtIndex = PlaylistTrackMatcher.BuildIndex(libRefs);
+            lock (_resolveCacheLock)
+            {
+                if (_cachedManifestStamp.Equals(stamp) && ReferenceEquals(_cachedManifestRows, rows))
+                {
+                    _cachedLibraryIndex ??= builtIndex;
+                    libIndex = _cachedLibraryIndex;
+                }
+                else
+                {
+                    libIndex = builtIndex;
+                }
+            }
+        }
+
+        return (rows, rowsByUid, libIndex);
+    }
+
+    private PlaylistDocument LoadPlaylistCached(string filePath, PlaylistTrackMatcher.LibraryIndex libIndex)
+    {
+        var fi = new FileInfo(filePath);
+        var fileStamp = fi.Exists
+            ? new PlaylistFileStamp(fi.LastWriteTimeUtc.Ticks, fi.Length)
+            : new PlaylistFileStamp(0, -1);
+
+        lock (_resolveCacheLock)
+        {
+            if (ReferenceEquals(_cachedLibraryIndex, libIndex)
+                && _cachedPlaylists.TryGetValue(filePath, out var cached)
+                && cached.Stamp.Equals(fileStamp))
+            {
+                return cached.Doc;
+            }
+        }
+
+        var doc = PlaylistStore.LoadPlaylist(filePath, libIndex, _musicRoot);
+        var afterFi = new FileInfo(filePath);
+        var afterStamp = afterFi.Exists
+            ? new PlaylistFileStamp(afterFi.LastWriteTimeUtc.Ticks, afterFi.Length)
+            : new PlaylistFileStamp(0, -1);
+
+        if (fileStamp.Length >= 0 && afterStamp.Equals(fileStamp))
+        {
+            lock (_resolveCacheLock)
+            {
+                if (ReferenceEquals(_cachedLibraryIndex, libIndex))
+                {
+                    _cachedPlaylists[filePath] = (fileStamp, doc);
+                }
+            }
+        }
+
+        return doc;
+    }
+
+    private static List<(string FilePath, string Name, string BaseName)> ListPlaylistFileHeaders(string musicRoot)
+    {
+        string dir = PlaylistStore.GetPlaylistsDirectory(musicRoot);
+        if (!Directory.Exists(dir)) return [];
+
+        var files = Directory.EnumerateFiles(dir, "*.m3u8")
+            .Concat(Directory.EnumerateFiles(dir, "*.m3u"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var headers = new List<(string FilePath, string Name, string BaseName)>(files.Count);
+        foreach (string file in files)
+        {
+            string baseName = Path.GetFileNameWithoutExtension(file);
+            string name = baseName.Trim();
+            try
+            {
+                using var reader = new StreamReader(file, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                string? rawLine;
+                while ((rawLine = reader.ReadLine()) is not null)
+                {
+                    string line = rawLine.Trim().TrimStart('\uFEFF');
+                    if (string.IsNullOrEmpty(line)) continue;
+                    if (line.StartsWith("#PLAYLIST:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string declared = line["#PLAYLIST:".Length..].Trim();
+                        if (!string.IsNullOrWhiteSpace(declared))
+                        {
+                            name = declared;
+                        }
+                        break;
+                    }
+                    if (!line.StartsWith('#'))
+                    {
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                // Fall back to base filename if header cannot be inspected
+            }
+            headers.Add((file, name, baseName));
+        }
+        return headers;
+    }
+
+    private void PreloadPlaylistsParallel(IEnumerable<string> filePaths, PlaylistTrackMatcher.LibraryIndex libIndex)
+    {
+        var unique = filePaths
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (unique.Count == 0) return;
+
+        var stamps = new List<(string Path, PlaylistFileStamp Stamp)>(unique.Count);
+        foreach (string path in unique)
+        {
+            var fi = new FileInfo(path);
+            var st = fi.Exists
+                ? new PlaylistFileStamp(fi.LastWriteTimeUtc.Ticks, fi.Length)
+                : new PlaylistFileStamp(0, -1);
+            stamps.Add((path, st));
+        }
+
+        var uncached = new List<string>(unique.Count);
+        lock (_resolveCacheLock)
+        {
+            bool indexMatches = ReferenceEquals(_cachedLibraryIndex, libIndex);
+            foreach (var (path, st) in stamps)
+            {
+                if (!indexMatches
+                    || !_cachedPlaylists.TryGetValue(path, out var cached)
+                    || !cached.Stamp.Equals(st))
+                {
+                    uncached.Add(path);
+                }
+            }
+        }
+
+        if (uncached.Count == 0) return;
+        if (uncached.Count == 1)
+        {
+            try { LoadPlaylistCached(uncached[0], libIndex); } catch { }
+            return;
+        }
+
+        Parallel.ForEach(uncached, path =>
+        {
+            try { LoadPlaylistCached(path, libIndex); } catch { }
+        });
+    }
+
+    public void WarmResolveCache()
+    {
+        try
+        {
+            ResolveOutbox();
+        }
+        catch
+        {
+            // Non-fatal background cache warmup guard
+        }
+    }
+
     public OutboxSummary GetOutboxSummary(string? deviceId = null)
     {
         var resolved = ResolveOutbox(deviceId);
@@ -20,8 +279,15 @@ public sealed partial class SyncOutboxAndPairingStore
     public ResolvedOutboxPayload ResolveOutbox(string? deviceId = null, string? hostName = null)
     {
         List<SyncOutboxItem> relevantItems;
+        long outboxVer;
+        long outboxFileTicks;
+        long outboxFileLength;
         lock (_gate)
         {
+            outboxVer = Interlocked.Read(ref _outboxMutationVersion);
+            var obFi = new FileInfo(_outboxPath);
+            outboxFileTicks = obFi.Exists ? obFi.LastWriteTimeUtc.Ticks : 0L;
+            outboxFileLength = obFi.Exists ? obFi.Length : -1L;
             relevantItems = FilterOutboxForDevice(LoadOutboxUnlocked(), deviceId);
         }
 
@@ -33,22 +299,69 @@ public sealed partial class SyncOutboxAndPairingStore
             return new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, [], [], 0, 0);
         }
 
-        var rows = LoadManifestRows();
-        var rowsByUid = new Dictionary<string, ManifestTrackRow>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in rows)
+        bool hasPlaylistItems = relevantItems.Any(i => string.Equals(i.Kind, "playlist", StringComparison.OrdinalIgnoreCase));
+        ManifestFileStamp manifestStamp = ReadManifestFileStamp();
+        List<(string FilePath, string Name, string BaseName)> playlistHeaders = hasPlaylistItems
+            ? ListPlaylistFileHeaders(_musicRoot)
+            : [];
+
+        var resolvedItemPlaylists = new Dictionary<string, (string FilePath, string Name)>(StringComparer.OrdinalIgnoreCase);
+        string playlistStampsFingerprint = "";
+        if (hasPlaylistItems)
         {
-            rowsByUid[r.TrackUid] = r;
-            if (!string.IsNullOrWhiteSpace(r.AudioFrameBlake3Hex))
-                rowsByUid.TryAdd(r.AudioFrameBlake3Hex, r);
+            var sbFp = new StringBuilder();
+            foreach (var item in relevantItems)
+            {
+                if (!string.Equals(item.Kind, "playlist", StringComparison.OrdinalIgnoreCase)) continue;
+                var plHeader = playlistHeaders.FirstOrDefault(p =>
+                    string.Equals(p.Name, item.TargetKey, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(p.BaseName, item.TargetKey, StringComparison.OrdinalIgnoreCase));
+                if (string.IsNullOrEmpty(plHeader.FilePath)) continue;
+
+                resolvedItemPlaylists[item.Id] = (plHeader.FilePath, plHeader.Name);
+                var pfi = new FileInfo(plHeader.FilePath);
+                sbFp.Append(plHeader.FilePath).Append('|')
+                    .Append(pfi.Exists ? pfi.LastWriteTimeUtc.Ticks : 0L).Append('|')
+                    .Append(pfi.Exists ? pfi.Length : -1L).Append('\n');
+            }
+            playlistStampsFingerprint = sbFp.ToString();
         }
 
-        var libRefs = rows.Select(r => r.ToLibraryTrackRef(BuildFullPath(r.RelPath))).ToList();
+        string cacheKey = $"{deviceId ?? ""}\u001f{effectiveHost}";
+        lock (_resolveCacheLock)
+        {
+            if (_cachedResolvedOutboxes.TryGetValue(cacheKey, out var cachedOutbox)
+                && cachedOutbox.ManifestStamp.Equals(manifestStamp)
+                && cachedOutbox.OutboxFileTicks == outboxFileTicks
+                && cachedOutbox.OutboxFileLength == outboxFileLength
+                && cachedOutbox.OutboxMutationVersion == outboxVer
+                && string.Equals(cachedOutbox.PlaylistStampsFingerprint, playlistStampsFingerprint, StringComparison.Ordinal)
+                && (DateTime.UtcNow - cachedOutbox.ComputedAtUtc) < ResolvedOutboxCacheTtl)
+            {
+                return cachedOutbox.Payload;
+            }
+        }
 
-        bool hasPlaylistItems = relevantItems.Any(i => string.Equals(i.Kind, "playlist", StringComparison.OrdinalIgnoreCase));
-        var libIndex = hasPlaylistItems ? PlaylistTrackMatcher.BuildIndex(libRefs) : null;
-        var playlistsInDir = libIndex is not null
-            ? PlaylistStore.ListPlaylists(_musicRoot, libIndex)
-            : [];
+        var (rows, rowsByUid, libIndex) = GetCachedManifestRowsAndIndex(hasPlaylistItems);
+        if (hasPlaylistItems && resolvedItemPlaylists.Count > 0)
+        {
+            PreloadPlaylistsParallel(resolvedItemPlaylists.Values.Select(v => v.FilePath), libIndex!);
+        }
+
+        var physicalInfoCache = new Dictionary<string, (bool Valid, string FullPath, long Size, long Mtime)>(StringComparer.OrdinalIgnoreCase);
+        bool TryGetCachedPhysicalFileInfo(string relPath, out string resolvedFullPath, out long realSize, out long realMtime)
+        {
+            if (!physicalInfoCache.TryGetValue(relPath, out var info))
+            {
+                bool ok = TryGetValidPhysicalFileInfo(relPath, out string fp, out long sz, out long mt);
+                info = (ok, fp, sz, mt);
+                physicalInfoCache[relPath] = info;
+            }
+            resolvedFullPath = info.FullPath;
+            realSize = info.Size;
+            realMtime = info.Mtime;
+            return info.Valid;
+        }
 
         var outboxIdsByUid = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var canonicalUidByTargetPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -58,10 +371,10 @@ public sealed partial class SyncOutboxAndPairingStore
         var coverCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         int duplicateTrackCount = 0;
 
-        void AttachTrack(ManifestTrackRow row, string outboxId)
+        bool AttachTrack(ManifestTrackRow row, string outboxId)
         {
-            if (!TryGetValidPhysicalFileInfo(row.RelPath, out string resolvedFullPath, out long realSize, out long realMtime))
-                return;
+            if (!TryGetCachedPhysicalFileInfo(row.RelPath, out string resolvedFullPath, out long realSize, out long realMtime))
+                return false;
 
             string targetRel = BuildTargetRelPath(row);
             string canonicalUid = row.TrackUid;
@@ -99,6 +412,7 @@ public sealed partial class SyncOutboxAndPairingStore
                     owners.Add(outboxId);
                 }
             }
+            return true;
         }
 
         foreach (var item in relevantItems)
@@ -107,12 +421,9 @@ public sealed partial class SyncOutboxAndPairingStore
             {
                 case "playlist":
                 {
-                    var plSummary = playlistsInDir.FirstOrDefault(p =>
-                        string.Equals(p.Name, item.TargetKey, StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(Path.GetFileNameWithoutExtension(p.FilePath), item.TargetKey, StringComparison.OrdinalIgnoreCase));
-                    if (plSummary is null) break;
+                    if (!resolvedItemPlaylists.TryGetValue(item.Id, out var plMeta)) break;
 
-                    var doc = PlaylistStore.LoadPlaylist(plSummary.FilePath, libIndex!, _musicRoot);
+                    var doc = LoadPlaylistCached(plMeta.FilePath, libIndex!);
                     var plTrackUids = new List<string>();
                     var plRelPaths = new List<string>();
                     foreach (var entry in doc.Entries)
@@ -121,14 +432,13 @@ public sealed partial class SyncOutboxAndPairingStore
                             continue;
                         if (!rowsByUid.TryGetValue(entry.MatchedTrackUid, out var row))
                             continue;
-                        if (!TryGetValidPhysicalFileInfo(row.RelPath, out _, out _, out _))
+                        if (!AttachTrack(row, item.Id))
                             continue;
 
-                        AttachTrack(row, item.Id);
                         plTrackUids.Add(row.TrackUid);
                         plRelPaths.Add(BuildTargetRelPath(row));
                     }
-                    resolvedPlaylists.Add(new ResolvedSyncPlaylist(item.Id, plSummary.Name, plRelPaths, plTrackUids));
+                    resolvedPlaylists.Add(new ResolvedSyncPlaylist(item.Id, plMeta.Name, plRelPaths, plTrackUids));
                     break;
                 }
                 case "genre":
@@ -206,22 +516,34 @@ public sealed partial class SyncOutboxAndPairingStore
             ));
         }
 
-        return new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, resolvedTracks, resolvedPlaylists, totalBytes, duplicateTrackCount);
+        var payload = new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, resolvedTracks, resolvedPlaylists, totalBytes, duplicateTrackCount);
+        if (Interlocked.Read(ref _outboxMutationVersion) == outboxVer && ReadManifestFileStamp().Equals(manifestStamp))
+        {
+            lock (_resolveCacheLock)
+            {
+                _cachedResolvedOutboxes[cacheKey] = new CachedResolvedOutbox(
+                    manifestStamp,
+                    outboxFileTicks,
+                    outboxFileLength,
+                    outboxVer,
+                    playlistStampsFingerprint,
+                    DateTime.UtcNow,
+                    payload);
+            }
+        }
+        return payload;
     }
 
     public IReadOnlyList<CatalogEntry> GetCatalog(string kind)
     {
-        var rows = LoadManifestRows();
-        switch (kind.Trim().ToLowerInvariant())
+        string normalizedKind = kind.Trim().ToLowerInvariant();
+        var (rows, byUid, libIndex) = GetCachedManifestRowsAndIndex(requirePlaylistIndex: normalizedKind == "playlists");
+        switch (normalizedKind)
         {
             case "playlists":
             {
                 string dir = PlaylistStore.GetPlaylistsDirectory(_musicRoot);
                 if (!Directory.Exists(dir)) return [];
-
-                var libRefs = rows.Select(r => r.ToLibraryTrackRef(BuildFullPath(r.RelPath))).ToList();
-                var libIndex = PlaylistTrackMatcher.BuildIndex(libRefs);
-                var byUid = rows.ToDictionary(r => r.TrackUid, StringComparer.OrdinalIgnoreCase);
 
                 var files = Directory.EnumerateFiles(dir, "*.m3u8")
                     .Concat(Directory.EnumerateFiles(dir, "*.m3u"))
@@ -229,12 +551,14 @@ public sealed partial class SyncOutboxAndPairingStore
                     .OrderBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
+                PreloadPlaylistsParallel(files, libIndex!);
+
                 var result = new List<CatalogEntry>(files.Count);
                 foreach (string file in files)
                 {
                     try
                     {
-                        var doc = PlaylistStore.LoadPlaylist(file, libIndex, _musicRoot);
+                        var doc = LoadPlaylistCached(file, libIndex!);
                         int matched = 0;
                         long bytes = 0;
                         foreach (var entry in doc.Entries)
@@ -370,50 +694,55 @@ public sealed partial class SyncOutboxAndPairingStore
         return true;
     }
 
+    public sealed record LanInterfaceCandidate(
+        string Name,
+        string Description,
+        NetworkInterfaceType InterfaceType,
+        bool IsUp,
+        bool HasIpv4Gateway,
+        IPAddress Address);
+
+    private static readonly string[] VirtualAdapterTokens =
+    [
+        "vethernet", "vmware", "virtualbox", "wsl", "tailscale", "zerotier",
+        "hyper-v", "meta tunnel", "wintun", "wireguard", "clash", "mihomo",
+        "sing-box", "openvpn", "docker", "bluetooth", "nexgen", "tunnel",
+        "tap-", "utun", "npcap", "vpn"
+    ];
+
     public static IReadOnlyList<string> GetLocalLanUrls(int port)
     {
         if (port <= 0) return [];
-        return GetScoredLanIpv4Candidates()
-            .Select(c => $"http://{c.Address}:{port}")
+        return ResolveAllLanIpv4Addresses()
+            .Select(ip => $"http://{ip}:{port}")
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
     public static IPAddress? ResolvePreferredLanIpv4() =>
-        GetScoredLanIpv4Candidates().FirstOrDefault().Address;
+        ResolveAllLanIpv4Addresses().FirstOrDefault();
 
-    private static List<(int Score, IPAddress Address)> GetScoredLanIpv4Candidates()
+    public static IReadOnlyList<IPAddress> ResolveAllLanIpv4Addresses()
     {
-        var scored = new List<(int Score, IPAddress Address)>();
+        var raw = new List<LanInterfaceCandidate>();
         try
         {
             foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
             {
-                if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel) continue;
-
-                string desc = (ni.Name + " " + ni.Description).ToLowerInvariant();
-                int ifacePenalty = (desc.Contains("vethernet") || desc.Contains("vmware") || desc.Contains("virtualbox")
-                                    || desc.Contains("wsl") || desc.Contains("tailscale") || desc.Contains("zerotier")
-                                    || desc.Contains("hyper-v"))
-                    ? 100
-                    : (ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 || ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet ? 0 : 20);
-
+                bool isUp = ni.OperationalStatus == OperationalStatus.Up;
                 var ipProps = ni.GetIPProperties();
+                bool hasGateway = ipProps.GatewayAddresses.Any(g =>
+                    g.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.Any.Equals(g.Address));
                 foreach (var uni in ipProps.UnicastAddresses)
                 {
                     if (uni.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-                    byte[] b = uni.Address.GetAddressBytes();
-                    if (b[0] == 127 || (b[0] == 169 && b[1] == 254)) continue;
-
-                    int netRank = (b[0], b[1]) switch
-                    {
-                        (192, 168) => 1,
-                        (10, _) => 2,
-                        (172, >= 16 and <= 31) => 3,
-                        _ => 10
-                    };
-                    scored.Add((ifacePenalty + netRank, uni.Address));
+                    raw.Add(new LanInterfaceCandidate(
+                        ni.Name ?? "",
+                        ni.Description ?? "",
+                        ni.NetworkInterfaceType,
+                        isUp,
+                        hasGateway,
+                        uni.Address));
                 }
             }
         }
@@ -422,9 +751,68 @@ public sealed partial class SyncOutboxAndPairingStore
             // Ignore interface enumeration failures
         }
 
-        return scored
-            .OrderBy(s => s.Score)
-            .ToList();
+        return FilterAndRankLanIpv4Candidates(raw);
+    }
+
+    public static IReadOnlyList<IPAddress> FilterAndRankLanIpv4Candidates(IEnumerable<LanInterfaceCandidate> candidates)
+    {
+        var scored = new List<(int Score, int NicKindRank, IPAddress Address)>();
+        foreach (var c in candidates)
+        {
+            if (!c.IsUp || c.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+            // Exclude Loopback, Tunnel, and IF_TYPE_PROP_VIRTUAL (53 - WinTun / Clash / Meta Tunnel)
+            if (c.InterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel || (int)c.InterfaceType == 53)
+                continue;
+
+            string desc = (c.Name + " " + c.Description).ToLowerInvariant();
+            bool isVirtual = false;
+            foreach (string token in VirtualAdapterTokens)
+            {
+                if (desc.Contains(token, StringComparison.Ordinal))
+                {
+                    isVirtual = true;
+                    break;
+                }
+            }
+            if (isVirtual) continue;
+
+            byte[] b = c.Address.GetAddressBytes();
+            if (b.Length != 4) continue;
+            // Exclude loopback (127/8), link-local (169.254/16), unspecified (0/8), benchmark/fake-IP TUN (198.18/15), multicast+ (>=224)
+            if (b[0] == 127 || b[0] == 0 || b[0] >= 224) continue;
+            if (b[0] == 169 && b[1] == 254) continue;
+            if (b[0] == 198 && b[1] is 18 or 19) continue;
+
+            int netRank = (b[0], b[1]) switch
+            {
+                (192, 168) => 1,
+                (10, _) => 2,
+                (172, >= 16 and <= 31) => 3,
+                _ => 0,
+            };
+            if (netRank == 0) continue; // Only advertise RFC1918 private LAN IPv4 addresses
+
+            int gatewayPenalty = c.HasIpv4Gateway ? 0 : 10;
+            int ifacePenalty = c.InterfaceType is NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet ? 0 : 20;
+            int nicKindRank = c.InterfaceType switch
+            {
+                NetworkInterfaceType.Wireless80211 => 0,
+                NetworkInterfaceType.Ethernet => 1,
+                _ => 2,
+            };
+            scored.Add((gatewayPenalty + ifacePenalty + netRank, nicKindRank, c.Address));
+        }
+
+        var result = new List<IPAddress>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in scored.OrderBy(s => s.Score).ThenBy(s => s.NicKindRank))
+        {
+            if (seen.Add(item.Address.ToString()))
+            {
+                result.Add(item.Address);
+            }
+        }
+        return result;
     }
 
     private bool TryGetValidPhysicalFileInfo(string relPath, out string fullPath, out long fileSize, out long mtimeMs)
@@ -442,10 +830,10 @@ public sealed partial class SyncOutboxAndPairingStore
             if (!resolved.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            if (!LongPathHelper.FileExists(resolved))
+            var fi = new FileInfo(LongPathHelper.ToExtendedIfLong(resolved));
+            if (!fi.Exists)
                 return false;
 
-            var fi = new FileInfo(LongPathHelper.ToExtendedIfLong(resolved));
             fileSize = fi.Length;
             mtimeMs = new DateTimeOffset(fi.LastWriteTimeUtc).ToUnixTimeMilliseconds();
             fullPath = resolved;

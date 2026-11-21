@@ -23,7 +23,9 @@ use walkdir::WalkDir;
 
 const MANIFEST_SCHEMA_SQL: &str = include_str!("../../../../protocol/schemas/manifest.sql");
 
-const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "m4a", "mp4", "alac", "aac", "ogg", "opus", "wav"];
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "flac", "mp3", "m4a", "mp4", "alac", "aac", "ogg", "opus", "wav", "aiff", "aif", "dsf", "dff",
+];
 
 #[derive(Debug, Clone)]
 pub struct ScannedTrackRecord {
@@ -286,31 +288,61 @@ fn process_single_track(
         .to_string_lossy()
         .replace('\\', "/");
 
-    let mut tagged = Probe::open(path)
-        .map_err(|e| format!("{}: lofty open failed: {e}", path.display()))?
-        .read()
-        .map_err(|e| format!("{}: lofty read failed: {e}", path.display()))?;
+    let ext_lower = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_dsd = matches!(ext_lower.as_str(), "dsf" | "dff");
 
-    let analysis = if fast_mode {
-        let props = tagged.properties();
-        AudioAnalysisResult {
-            codec: format!("{:?}", tagged.file_type()),
-            duration_ms: props.duration().as_millis() as u64,
-            sample_rate_hz: props.sample_rate().unwrap_or(44100),
-            bit_depth: props.bit_depth().map(|b| b as u32),
-            bitrate_kbps: props.audio_bitrate().or_else(|| props.overall_bitrate()),
-            waveform_150: Vec::new(),
-            estimated_bpm: None,
-            tempo_bucket: None,
-            replaygain_track_db: None,
-            peak_linear: 0.0,
-        }
-    } else {
-        analyze_audio_file(path)
-            .map_err(|e| format!("{}: analysis failed: {e}", path.display()))?
+    let mut tagged = match Probe::open(path).and_then(|p| p.read()) {
+        Ok(t) => Some(t),
+        Err(_) if is_dsd => None,
+        Err(e) => return Err(format!("{}: lofty read failed: {e}", path.display())),
     };
 
-    let primary_tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    let dsd_fallback_analysis = |codec: &str| AudioAnalysisResult {
+        codec: codec.to_string(),
+        duration_ms: 0,
+        sample_rate_hz: 2_822_400,
+        bit_depth: Some(1),
+        bitrate_kbps: None,
+        waveform_150: Vec::new(),
+        estimated_bpm: None,
+        tempo_bucket: None,
+        replaygain_track_db: None,
+        peak_linear: 0.0,
+    };
+
+    let analysis = if fast_mode {
+        if let Some(ref t) = tagged {
+            let props = t.properties();
+            AudioAnalysisResult {
+                codec: format!("{:?}", t.file_type()),
+                duration_ms: props.duration().as_millis() as u64,
+                sample_rate_hz: props.sample_rate().unwrap_or(44100),
+                bit_depth: props.bit_depth().map(|b| b as u32),
+                bitrate_kbps: props.audio_bitrate().or_else(|| props.overall_bitrate()),
+                waveform_150: Vec::new(),
+                estimated_bpm: None,
+                tempo_bucket: None,
+                replaygain_track_db: None,
+                peak_linear: 0.0,
+            }
+        } else {
+            dsd_fallback_analysis(&ext_lower)
+        }
+    } else {
+        match analyze_audio_file(path) {
+            Ok(res) => res,
+            Err(_) if is_dsd => dsd_fallback_analysis(&ext_lower),
+            Err(e) => return Err(format!("{}: analysis failed: {e}", path.display())),
+        }
+    };
+
+    let primary_tag = tagged
+        .as_ref()
+        .and_then(|t| t.primary_tag().or_else(|| t.first_tag()));
 
     let fallback_title = path
         .file_stem()
@@ -496,12 +528,15 @@ fn process_single_track(
         replaygain_backfilled = true;
     }
 
-    if write_tags && (tempo_backfilled || replaygain_backfilled) {
-        let tag_type = tagged.primary_tag_type();
-        if tagged.primary_tag_mut().is_none() {
-            tagged.insert_tag(Tag::new(tag_type));
+    if write_tags
+        && (tempo_backfilled || replaygain_backfilled)
+        && let Some(ref mut tf) = tagged
+    {
+        let tag_type = tf.primary_tag_type();
+        if tf.primary_tag_mut().is_none() {
+            tf.insert_tag(Tag::new(tag_type));
         }
-        if let Some(tag) = tagged.primary_tag_mut() {
+        if let Some(tag) = tf.primary_tag_mut() {
             if tempo_backfilled && let Some(bpm) = tempo_bpm {
                 tag.insert_text(ItemKey::Bpm, format!("{bpm:.1}"));
             }
@@ -512,10 +547,7 @@ fn process_single_track(
                 }
             }
         }
-        let write_opts = WriteOptions::default();
-        tagged
-            .save_to_path(path, write_opts)
-            .map_err(|e| format!("{}: tag writeback failed: {e}", path.display()))?;
+        save_tagged_file_atomically(path, tf)?;
     }
 
     let fp = compute_fingerprint_from_path(path)?;
@@ -574,6 +606,87 @@ fn process_single_track(
         tempo_backfilled,
         replaygain_backfilled,
     })
+}
+
+fn save_tagged_file_atomically(
+    path: &Path,
+    tagged: &lofty::file::TaggedFile,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let base_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "audio".to_string());
+    let tmp_path = parent.join(format!("{base_name}.twtmp.{pid}.{seq}"));
+
+    fs::copy(path, &tmp_path)
+        .map_err(|e| format!("{}: temp copy failed: {e}", path.display()))?;
+    if let Err(e) = tagged.save_to_path(&tmp_path, WriteOptions::default()) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("{}: tag writeback failed: {e}", path.display()));
+    }
+    if let Ok(f) = fs::File::open(&tmp_path) {
+        let _ = f.sync_data();
+    }
+
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        unsafe extern "system" {
+            fn MoveFileExW(
+                lp_existing_file_name: *const u16,
+                lp_new_file_name: *const u16,
+                dw_flags: u32,
+            ) -> i32;
+        }
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+        let src_w: Vec<u16> = OsStr::new(&tmp_path).encode_wide().chain(std::iter::once(0)).collect();
+        let dst_w: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+        let moved = unsafe {
+            MoveFileExW(
+                src_w.as_ptr(),
+                dst_w.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+
+        let bak_path = parent.join(format!("{base_name}.twbak.{pid}.{seq}"));
+        let _ = fs::remove_file(&bak_path);
+        if let Err(e) = fs::rename(path, &bak_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("{}: backup rename failed: {e}", path.display()));
+        }
+        if let Err(e) = fs::rename(&tmp_path, path) {
+            let _ = fs::rename(&bak_path, path);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("{}: atomic replace failed: {e}", path.display()));
+        }
+        let _ = fs::remove_file(&bak_path);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(e) = fs::rename(&tmp_path, path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("{}: atomic rename failed: {e}", path.display()));
+        }
+        Ok(())
+    }
 }
 
 fn ensure_manifest_v2_schema(conn: &Connection) -> Result<(), String> {
@@ -710,9 +823,9 @@ fn write_manifest_db(
                     artists_json = excluded.artists_json,
                     composers_json = excluded.composers_json,
                     conductors_json = excluded.conductors_json,
-                    work_name = excluded.work_name,
-                    movement_name = excluded.movement_name,
-                    movement_number = excluded.movement_number,
+                    work_name = COALESCE(NULLIF(excluded.work_name, ''), tracks.work_name),
+                    movement_name = COALESCE(NULLIF(excluded.movement_name, ''), tracks.movement_name),
+                    movement_number = COALESCE(excluded.movement_number, tracks.movement_number),
                     disc_number = CASE WHEN excluded.disc_number > 0 THEN excluded.disc_number ELSE tracks.disc_number END,
                     track_number = CASE WHEN excluded.track_number > 0 THEN excluded.track_number ELSE tracks.track_number END,
                     publisher = COALESCE(NULLIF(excluded.publisher, ''), tracks.publisher),

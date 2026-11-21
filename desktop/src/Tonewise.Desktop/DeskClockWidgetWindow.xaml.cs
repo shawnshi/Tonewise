@@ -30,6 +30,7 @@ public sealed partial class DeskClockWidgetWindow : Window
     private bool _alwaysOnTop;
     private bool _keepAwakeActive;
     private bool _sleepExpiredAllowSleep;
+    private bool _isWindowVisibleAndNotMinimized = true;
     private DateTime? _pausedSinceUtc;
     private DateTime _lastInteractionUtc = DateTime.UtcNow;
     private long _lastRenderedSecond = -1;
@@ -84,7 +85,6 @@ public sealed partial class DeskClockWidgetWindow : Window
             UpdateKeepAwakeState();
             UpdateFullscreenChromeAutoHide();
         };
-        _clockTimer.Start();
 
         _waveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         _waveTimer.Tick += (_, _) =>
@@ -94,15 +94,17 @@ public sealed partial class DeskClockWidgetWindow : Window
                 WidgetWaveformCanvas.Invalidate();
             }
         };
-        _waveTimer.Start();
 
         _burnInTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(60) };
         _burnInTimer.Tick += (_, _) => ApplyOledBurnInShift(++_burnInTick);
-        _burnInTimer.Start();
+
+        AppWindow.Changed += OnAppWindowChanged;
+        UpdateTimerActivity();
 
         Closed += (_, _) =>
         {
             SaveWindowPlacementIfNormal();
+            AppWindow.Changed -= OnAppWindowChanged;
             _clockTimer.Stop();
             _waveTimer.Stop();
             _burnInTimer.Stop();
@@ -136,6 +138,10 @@ public sealed partial class DeskClockWidgetWindow : Window
             or nameof(MainViewModel.CurrentTrackLoved))
         {
             SyncTransportControlAppearance();
+            if (e.PropertyName == nameof(MainViewModel.IsPlaying))
+            {
+                UpdateTimerActivity();
+            }
         }
         else if (e.PropertyName is nameof(MainViewModel.CurrentTrack)
             or nameof(MainViewModel.ActiveFilterPillsSummary))
@@ -253,8 +259,66 @@ public sealed partial class DeskClockWidgetWindow : Window
         EyebrowTextBlock.FontSize = _isFullscreenWallClock ? 13.0 : 10.0;
     }
 
+    private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        bool minimized = sender.Presenter is OverlappedPresenter ov && ov.State == OverlappedPresenterState.Minimized;
+        bool visible = sender.IsVisible && !minimized;
+        if (visible != _isWindowVisibleAndNotMinimized)
+        {
+            _isWindowVisibleAndNotMinimized = visible;
+            UpdateTimerActivity();
+        }
+    }
+
+    private void UpdateTimerActivity()
+    {
+        if (!_isWindowVisibleAndNotMinimized)
+        {
+            _clockTimer.Stop();
+            _waveTimer.Stop();
+            _burnInTimer.Stop();
+            if (_keepAwakeActive)
+            {
+                try { _ = SetThreadExecutionState(ES_CONTINUOUS); } catch { }
+                _keepAwakeActive = false;
+            }
+            return;
+        }
+
+        if (!_clockTimer.IsEnabled)
+        {
+            UpdateClockText(force: true);
+            _clockTimer.Start();
+        }
+        if (!_burnInTimer.IsEnabled)
+        {
+            _burnInTimer.Start();
+        }
+        if (ViewModel.IsPlaying)
+        {
+            if (!_waveTimer.IsEnabled)
+            {
+                _waveTimer.Start();
+            }
+        }
+        else if (_waveTimer.IsEnabled)
+        {
+            _waveTimer.Stop();
+        }
+        UpdateKeepAwakeState();
+    }
+
     private void UpdateKeepAwakeState()
     {
+        if (!_isWindowVisibleAndNotMinimized)
+        {
+            if (_keepAwakeActive)
+            {
+                try { _ = SetThreadExecutionState(ES_CONTINUOUS); } catch { }
+                _keepAwakeActive = false;
+            }
+            return;
+        }
         if (ViewModel.IsPlaying)
         {
             _sleepExpiredAllowSleep = false;

@@ -48,9 +48,35 @@ public sealed partial class MainWindow : Window
     private bool _suppressSubTabSync;
 
     private readonly DispatcherTimer _notificationTimer;
+    private readonly SemaphoreSlim _dialogGate = new(1, 1);
+
+    private async Task<ContentDialogResult> ShowDialogSafeAsync(ContentDialog dialog)
+    {
+        dialog.XamlRoot ??= RootWorkbench.XamlRoot;
+        if (dialog.XamlRoot is null)
+        {
+            return ContentDialogResult.None;
+        }
+
+        await _dialogGate.WaitAsync();
+        try
+        {
+            return await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            ViewModel.Notify($"对话框显示失败: {ex.Message}", "warning");
+            return ContentDialogResult.None;
+        }
+        finally
+        {
+            _dialogGate.Release();
+        }
+    }
     private bool _isSeekDragging;
     private bool _updatingSeekSlider;
     private bool _syncingNavSelection;
+    private double _lastWaveformProgress = -1.0;
 
     private static readonly SKColor ActiveBarColor = new(0xD9, 0xB3, 0x72);
     private static readonly SKColor InactiveBarColor = new(0x64, 0x74, 0x8B, 0x60);
@@ -215,14 +241,25 @@ public sealed partial class MainWindow : Window
                 ScheduleNotificationAutoClose();
             }
         };
-        ViewModel.WaveformUpdated += () => WaveformCanvas.Invalidate();
+        ViewModel.WaveformUpdated += () =>
+        {
+            _lastWaveformProgress = -1.0;
+            WaveformCanvas.Invalidate();
+        };
         ViewModel.TrackChanged += async track =>
         {
-            UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
-            UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
-            RefreshQueuePlayingHighlights();
-            await UpdateSmtcMetadataAsync(ViewModel.CurrentTrack);
-            await LoadBookletForTrackAsync(track);
+            try
+            {
+                UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
+                UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
+                RefreshQueuePlayingHighlights();
+                await UpdateSmtcMetadataAsync(ViewModel.CurrentTrack);
+                await LoadBookletForTrackAsync(track);
+            }
+            catch (Exception ex)
+            {
+                App.WriteCrashLog("MainWindow.TrackChanged", ex);
+            }
         };
 
         _notificationTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
@@ -266,9 +303,14 @@ public sealed partial class MainWindow : Window
         {
             ViewModel.RefreshProgress();
             SyncSeekSliderFromEngine();
-            if (ViewModel.IsPlaying)
+            if (ViewModel.IsPlaying && ViewModel.CurrentWaveform is not null)
             {
-                WaveformCanvas.Invalidate();
+                double progress = ViewModel.PlaybackProgress;
+                if (Math.Abs(progress - _lastWaveformProgress) >= 0.001)
+                {
+                    _lastWaveformProgress = progress;
+                    WaveformCanvas.Invalidate();
+                }
             }
         };
         _progressTimer.Start();
@@ -468,32 +510,46 @@ public sealed partial class MainWindow : Window
 
     private async void OnBookletPrevClick(object sender, RoutedEventArgs e)
     {
-        if (_bookletDoc is null || _bookletPageIndex <= 0) return;
-        _bookletPageIndex--;
-        await RenderCurrentBookletPageAsync();
+        try
+        {
+            if (_bookletDoc is null || _bookletPageIndex <= 0) return;
+            _bookletPageIndex--;
+            await RenderCurrentBookletPageAsync();
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnBookletPrevClick", ex);
+        }
     }
 
     private async void OnBookletNextClick(object sender, RoutedEventArgs e)
     {
-        if (_bookletDoc is null || _bookletPageIndex + 1 >= (int)_bookletDoc.PageCount) return;
-        _bookletPageIndex++;
-        await RenderCurrentBookletPageAsync();
+        try
+        {
+            if (_bookletDoc is null || _bookletPageIndex + 1 >= (int)_bookletDoc.PageCount) return;
+            _bookletPageIndex++;
+            await RenderCurrentBookletPageAsync();
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnBookletNextClick", ex);
+        }
     }
 
     private async void OnOpenFolderClick(object sender, RoutedEventArgs e)
     {
-        var picker = new FolderPicker();
-        picker.FileTypeFilter.Add("*");
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is null) return;
-
-        _folderLoadCts?.Cancel();
-        _folderLoadCts?.Dispose();
-        var cts = new CancellationTokenSource();
-        _folderLoadCts = cts;
         try
         {
+            var picker = new FolderPicker();
+            picker.FileTypeFilter.Add("*");
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is null) return;
+
+            _folderLoadCts?.Cancel();
+            _folderLoadCts?.Dispose();
+            var cts = new CancellationTokenSource();
+            _folderLoadCts = cts;
             await ViewModel.LoadMusicFolderAsync(folder.Path, cts.Token);
         }
         catch (OperationCanceledException)
@@ -502,181 +558,214 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            App.WriteCrashLog("OnOpenFolderClick", ex);
             ViewModel.StatusMessage = $"Failed to load folder: {ex.Message}";
         }
     }
 
     private async void OnLoadEqClick(object sender, RoutedEventArgs e)
     {
-        var picker = new FileOpenPicker();
-        picker.FileTypeFilter.Add(".txt");
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-        var file = await picker.PickSingleFileAsync();
-        if (file is not null)
+        try
         {
-            ViewModel.LoadEqualizerApoFile(file.Path);
+            var picker = new FileOpenPicker();
+            picker.FileTypeFilter.Add(".txt");
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            var file = await picker.PickSingleFileAsync();
+            if (file is not null)
+            {
+                ViewModel.LoadEqualizerApoFile(file.Path);
+            }
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnLoadEqClick", ex);
+            ViewModel.Notify($"加载 EQ 配置失败：{ex.Message}", "error");
         }
     }
 
     private async void OnLoadFirClick(object sender, RoutedEventArgs e)
     {
-        var picker = new FileOpenPicker();
-        picker.FileTypeFilter.Add(".wav");
-        picker.FileTypeFilter.Add(".sofa");
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-        var file = await picker.PickSingleFileAsync();
-        if (file is not null)
+        try
         {
-            ViewModel.LoadFirImpulseFile(file.Path);
+            var picker = new FileOpenPicker();
+            picker.FileTypeFilter.Add(".wav");
+            picker.FileTypeFilter.Add(".sofa");
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            var file = await picker.PickSingleFileAsync();
+            if (file is not null)
+            {
+                ViewModel.LoadFirImpulseFile(file.Path);
+            }
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnLoadFirClick", ex);
+            ViewModel.Notify($"加载 FIR 脉冲失败：{ex.Message}", "error");
         }
     }
 
     private async void OnLastFmSetupClick(object sender, RoutedEventArgs e)
     {
-        var saved = ViewModel.GetSavedLastFmConfig();
-        var apiKeyBox = new TextBox
+        try
         {
-            Header = "Last.fm API Key",
-            PlaceholderText = "32 位 Web API Key (last.fm/api/account)",
-            Text = saved?.ApiKey ?? "",
-        };
-        var secretBox = new PasswordBox
-        {
-            Header = "Shared Secret (API Secret)",
-            PlaceholderText = "双向读写推送必填（Scrobble / Loved / 浏览器 OAuth）",
-            Password = saved?.ApiSecret ?? "",
-        };
-        var userBox = new TextBox
-        {
-            Header = "Last.fm 用户名",
-            PlaceholderText = "使用浏览器授权时可留空自动识别",
-            Text = saved?.Username ?? "",
-        };
-
-        string? pendingToken = null;
-        var oauthStatusText = new TextBlock
-        {
-            Text = string.IsNullOrWhiteSpace(saved?.SessionKey)
-                ? "推荐使用浏览器一键授权（兼容二步验证与谷歌登录），即可自动推送播放记录与 Loved tracks。"
-                : "当前已配置 SessionKey（读写已就绪）。若推送异常，可重新执行浏览器授权刷新会话。",
-            FontSize = 12,
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8)),
-        };
-
-        var openBrowserAuthBtn = new Button
-        {
-            Content = "1. 打开浏览器授权 (推荐)",
-        };
-        openBrowserAuthBtn.Click += async (_, _) =>
-        {
-            string k = apiKeyBox.Text.Trim();
-            string s = secretBox.Password.Trim();
-            if (string.IsNullOrWhiteSpace(k) || string.IsNullOrWhiteSpace(s))
+            var saved = ViewModel.GetSavedLastFmConfig();
+            var apiKeyBox = new TextBox
             {
-                oauthStatusText.Text = "请先填写上方的 API Key 与 Shared Secret。";
-                return;
-            }
-            try
+                Header = "Last.fm API Key",
+                PlaceholderText = "32 位 Web API Key (last.fm/api/account)",
+                Text = saved?.ApiKey ?? "",
+            };
+            var secretBox = new PasswordBox
             {
-                openBrowserAuthBtn.IsEnabled = false;
-                oauthStatusText.Text = "正在向 Last.fm 申请授权令牌…";
-                var client = new LastFmWebApiClient();
-                var (token, url) = await client.RequestAuthTokenAsync(k, s);
-                pendingToken = token;
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-                oauthStatusText.Text = "已在浏览器打开 Last.fm 授权页面：点击「Yes, allow access」后，回到本窗口点击下方「保存 / 完成授权并同步」。";
-            }
-            catch (Exception ex)
+                Header = "Shared Secret (API Secret)",
+                PlaceholderText = "双向读写推送必填（Scrobble / Loved / 浏览器 OAuth）",
+                Password = saved?.ApiSecret ?? "",
+            };
+            var userBox = new TextBox
             {
-                oauthStatusText.Text = $"申请浏览器授权失败：{ex.Message}";
-            }
-            finally
-            {
-                openBrowserAuthBtn.IsEnabled = true;
-            }
-        };
+                Header = "Last.fm 用户名",
+                PlaceholderText = "使用浏览器授权时可留空自动识别",
+                Text = saved?.Username ?? "",
+            };
 
-        var passwordBox = new PasswordBox
-        {
-            Header = "备选：密码登录或手动 SessionKey（无需浏览器）",
-            PlaceholderText = "留空则保留当前 SessionKey 或仅只读拉取",
-        };
-        var rawSessionCheck = new CheckBox
-        {
-            Content = "上述输入框填写的是已有 SessionKey 原文",
-            IsChecked = false,
-        };
-        var fallbackExpander = new Expander
-        {
-            Header = "备选方式：密码登录 / 手动 SessionKey",
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Content = new StackPanel
+            string? pendingToken = null;
+            var oauthStatusText = new TextBlock
             {
-                Spacing = 8,
-                Children = { passwordBox, rawSessionCheck },
-            },
-        };
+                Text = string.IsNullOrWhiteSpace(saved?.SessionKey)
+                    ? "推荐使用浏览器一键授权（兼容二步验证与谷歌登录），即可自动推送播放记录与 Loved tracks。"
+                    : "当前已配置 SessionKey（读写已就绪）。若推送异常，可重新执行浏览器授权刷新会话。",
+                FontSize = 12,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8)),
+            };
 
-        var panel = new StackPanel { Spacing = 10, MinWidth = 420 };
-        panel.Children.Add(apiKeyBox);
-        panel.Children.Add(secretBox);
-        panel.Children.Add(userBox);
-        panel.Children.Add(openBrowserAuthBtn);
-        panel.Children.Add(oauthStatusText);
-        panel.Children.Add(fallbackExpander);
-
-        var dialog = new ContentDialog
-        {
-            Title = "配置并授权 Last.fm",
-            Content = panel,
-            PrimaryButtonText = "保存 / 完成授权并同步",
-            CloseButtonText = "取消",
-            DefaultButton = ContentDialogButton.Primary,
-            XamlRoot = RootWorkbench.XamlRoot,
-            RequestedTheme = RootWorkbench.ActualTheme,
-        };
-
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
-        {
-            try
+            var openBrowserAuthBtn = new Button
             {
-                if (!string.IsNullOrWhiteSpace(pendingToken) && string.IsNullOrWhiteSpace(passwordBox.Password))
+                Content = "1. 打开浏览器授权 (推荐)",
+            };
+            openBrowserAuthBtn.Click += async (_, _) =>
+            {
+                string k = apiKeyBox.Text.Trim();
+                string s = secretBox.Password.Trim();
+                if (string.IsNullOrWhiteSpace(k) || string.IsNullOrWhiteSpace(s))
                 {
+                    oauthStatusText.Text = "请先填写上方的 API Key 与 Shared Secret。";
+                    return;
+                }
+                try
+                {
+                    openBrowserAuthBtn.IsEnabled = false;
+                    oauthStatusText.Text = "正在向 Last.fm 申请授权令牌…";
                     var client = new LastFmWebApiClient();
-                    var (sk, returnedUser) = await client.ExchangeAuthTokenForSessionAsync(
-                        apiKeyBox.Text.Trim(),
-                        secretBox.Password.Trim(),
-                        pendingToken);
-                    string finalUser = !string.IsNullOrWhiteSpace(returnedUser) ? returnedUser : userBox.Text.Trim();
-                    await ViewModel.SaveLastFmSessionAndSyncAsync(apiKeyBox.Text, secretBox.Password, finalUser, sk);
+                    var (token, url) = await client.RequestAuthTokenAsync(k, s);
+                    pendingToken = token;
+                    Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                    oauthStatusText.Text = "已在浏览器打开 Last.fm 授权页面：点击「Yes, allow access」后，回到本窗口点击下方「保存 / 完成授权并同步」。";
                 }
-                else
+                catch (Exception ex)
                 {
-                    await ViewModel.ConfigureAndSyncLastFmAsync(
-                        apiKeyBox.Text,
-                        secretBox.Password,
-                        userBox.Text,
-                        passwordBox.Password,
-                        isRawSessionKey: rawSessionCheck.IsChecked == true);
+                    oauthStatusText.Text = $"申请浏览器授权失败：{ex.Message}";
+                }
+                finally
+                {
+                    openBrowserAuthBtn.IsEnabled = true;
+                }
+            };
+
+            var passwordBox = new PasswordBox
+            {
+                Header = "备选：密码登录或手动 SessionKey（无需浏览器）",
+                PlaceholderText = "留空则保留当前 SessionKey 或仅只读拉取",
+            };
+            var rawSessionCheck = new CheckBox
+            {
+                Content = "上述输入框填写的是已有 SessionKey 原文",
+                IsChecked = false,
+            };
+            var fallbackExpander = new Expander
+            {
+                Header = "备选方式：密码登录 / 手动 SessionKey",
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Content = new StackPanel
+                {
+                    Spacing = 8,
+                    Children = { passwordBox, rawSessionCheck },
+                },
+            };
+
+            var panel = new StackPanel { Spacing = 10, MinWidth = 420 };
+            panel.Children.Add(apiKeyBox);
+            panel.Children.Add(secretBox);
+            panel.Children.Add(userBox);
+            panel.Children.Add(openBrowserAuthBtn);
+            panel.Children.Add(oauthStatusText);
+            panel.Children.Add(fallbackExpander);
+
+            var dialog = new ContentDialog
+            {
+                Title = "配置并授权 Last.fm",
+                Content = panel,
+                PrimaryButtonText = "保存 / 完成授权并同步",
+                CloseButtonText = "取消",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = RootWorkbench.XamlRoot,
+                RequestedTheme = RootWorkbench.ActualTheme,
+            };
+
+            if (await ShowDialogSafeAsync(dialog) == ContentDialogResult.Primary)
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(pendingToken) && string.IsNullOrWhiteSpace(passwordBox.Password))
+                    {
+                        var client = new LastFmWebApiClient();
+                        var (sk, returnedUser) = await client.ExchangeAuthTokenForSessionAsync(
+                            apiKeyBox.Text.Trim(),
+                            secretBox.Password.Trim(),
+                            pendingToken);
+                        string finalUser = !string.IsNullOrWhiteSpace(returnedUser) ? returnedUser : userBox.Text.Trim();
+                        await ViewModel.SaveLastFmSessionAndSyncAsync(apiKeyBox.Text, secretBox.Password, finalUser, sk);
+                    }
+                    else
+                    {
+                        await ViewModel.ConfigureAndSyncLastFmAsync(
+                            apiKeyBox.Text,
+                            secretBox.Password,
+                            userBox.Text,
+                            passwordBox.Password,
+                            isRawSessionKey: rawSessionCheck.IsChecked == true);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ViewModel.Notify($"Last.fm 配置或同步失败：{ex.Message}", "error");
                 }
             }
-            catch (Exception ex)
-            {
-                ViewModel.Notify($"Last.fm 配置或同步失败：{ex.Message}", "error");
-            }
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnLastFmSetupClick", ex);
+            ViewModel.Notify($"打开 Last.fm 配置窗口失败：{ex.Message}", "error");
         }
     }
 
     private async void OnExportUsbCarClick(object sender, RoutedEventArgs e)
     {
-        var picker = new FolderPicker();
-        picker.FileTypeFilter.Add("*");
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is not null)
+        try
         {
-            ViewModel.ExportFilteredToUsb(folder.Path);
+            var picker = new FolderPicker();
+            picker.FileTypeFilter.Add("*");
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is not null)
+            {
+                ViewModel.ExportFilteredToUsb(folder.Path);
+            }
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnExportUsbCarClick", ex);
+            ViewModel.Notify($"导出至 USB 失败：{ex.Message}", "error");
         }
     }
 
@@ -925,7 +1014,7 @@ public sealed partial class MainWindow : Window
             XamlRoot = RootWorkbench.XamlRoot,
         };
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogSafeAsync(dialog) == ContentDialogResult.Primary)
         {
             string name = nameBox.Text.Trim();
             if (string.IsNullOrWhiteSpace(name))
@@ -1048,7 +1137,7 @@ public sealed partial class MainWindow : Window
         };
         dialog.Resources["ContentDialogMaxWidth"] = 620.0;
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogSafeAsync(dialog) == ContentDialogResult.Primary)
         {
             int maxTracks = int.TryParse(maxBox.Text.Trim(), out int parsedMax) && parsedMax > 0 ? parsedMax : 200;
             try
@@ -1273,7 +1362,7 @@ public sealed partial class MainWindow : Window
         };
         dialog.Resources["ContentDialogMaxWidth"] = 760.0;
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogSafeAsync(dialog) == ContentDialogResult.Primary)
         {
             string newName = string.IsNullOrWhiteSpace(nameBox.Text) ? doc.Name : nameBox.Text.Trim();
             try
@@ -1310,7 +1399,7 @@ public sealed partial class MainWindow : Window
             XamlRoot = RootWorkbench.XamlRoot,
         };
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogSafeAsync(dialog) == ContentDialogResult.Primary)
         {
             try
             {
@@ -1605,7 +1694,7 @@ public sealed partial class MainWindow : Window
             CloseButtonText = "取消",
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogSafeAsync(dialog) == ContentDialogResult.Primary)
         {
             ViewModel.ApproveAllHighConfidenceCommand.Execute(null);
         }
@@ -1629,7 +1718,7 @@ public sealed partial class MainWindow : Window
             CloseButtonText = "取消",
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogSafeAsync(dialog) == ContentDialogResult.Primary)
         {
             ViewModel.ClearPendingStagingCommand.Execute(null);
         }
@@ -3099,7 +3188,7 @@ public sealed partial class MainWindow : Window
             XamlRoot = RootWorkbench.XamlRoot,
         };
         dialog.Resources["ContentDialogMaxWidth"] = 920.0;
-        await dialog.ShowAsync();
+        await ShowDialogSafeAsync(dialog);
     }
 
     private void OnRejectProposalClick(object sender, RoutedEventArgs e)

@@ -78,16 +78,7 @@ class MainActivity : AppCompatActivity() {
         notificationPermissionLauncher =
             registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
                 if (granted) {
-                    runCatching {
-                        startService(
-                            Intent(this, AuxioService::class.java)
-                                .setAction(AuxioService.ACTION_START)
-                                .putExtra(
-                                    AuxioService.INTENT_KEY_START_ID,
-                                    IntegerTable.START_ID_ACTIVITY,
-                                )
-                        )
-                    }
+                    ensurePlaybackForegroundIfActive()
                 }
             }
         setupTheme()
@@ -139,17 +130,35 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        runCatching {
-            startService(
-                Intent(this, AuxioService::class.java)
-                    .setAction(AuxioService.ACTION_START)
-                    .putExtra(AuxioService.INTENT_KEY_START_ID, IntegerTable.START_ID_ACTIVITY)
-            )
-        }
-
         if (!startIntentAction(intent)) {
             // No intent action to do, just restore the previously saved state.
             playbackModel.playDeferred(DeferredPlayback.RestoreState(false))
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        ensurePlaybackForegroundIfActive()
+    }
+
+    override fun onPause() {
+        ensurePlaybackForegroundIfActive()
+        super.onPause()
+    }
+
+    private fun ensurePlaybackForegroundIfActive() {
+        if (
+            playbackModel.song.value != null &&
+                playbackModel.isPlaying.value &&
+                !AuxioService.isForeground
+        ) {
+            val startIntent =
+                Intent(this, AuxioService::class.java)
+                    .setAction(AuxioService.ACTION_START)
+                    .putExtra(AuxioService.INTENT_KEY_START_ID, IntegerTable.START_ID_ACTIVITY)
+                    .putExtra(AuxioService.EXTRA_FORCE_FOREGROUND, true)
+            runCatching { ContextCompat.startForegroundService(this, startIntent) }
+                .onFailure { runCatching { startService(startIntent) } }
         }
     }
 

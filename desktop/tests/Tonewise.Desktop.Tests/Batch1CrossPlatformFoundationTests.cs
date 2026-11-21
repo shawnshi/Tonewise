@@ -263,6 +263,108 @@ public sealed class Batch1CrossPlatformFoundationTests
     }
 
     [Fact]
+    public async Task LibraryStore_StreamInfoProbesRealFlacRates_AndPatchRejectsFooterFilesWith409()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_b1_streaminfo_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            // Valid FLAC fLaC + STREAMINFO block (96kHz, 2ch, 24-bit, 480_000 samples = 5000ms)
+            byte[] flac = new byte[4 + 4 + 34 + 512];
+            Encoding.ASCII.GetBytes("fLaC").CopyTo(flac, 0);
+            flac[4] = 0x80; // last metadata block = true, blockType = 0 (STREAMINFO)
+            flac[5] = 0x00;
+            flac[6] = 0x00;
+            flac[7] = 34;   // STREAMINFO length
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(flac.AsSpan(8, 2), 4096);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(flac.AsSpan(10, 2), 4096);
+            ulong packed = (96_000UL << 44) | (1UL << 41) | (23UL << 36) | 480_000UL;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(flac.AsSpan(18, 8), packed);
+            for (int i = 0; i < 512; i++)
+            {
+                flac[42 + i] = (byte)(i & 0x7F);
+            }
+            File.WriteAllBytes(Path.Combine(tempRoot, "96khz.flac"), flac);
+
+            var libStore = new Tonewise.Desktop.Services.LibraryStore();
+            bool built = libStore.ScanAndBuildManifestIfMissing(tempRoot, forceRebuild: false, fastMode: true);
+            Assert.True(built);
+
+            string dbPath = Path.Combine(tempRoot, ".tonewise", "manifest.db");
+            using (var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            {
+                conn.Open();
+                using var q = conn.CreateCommand();
+                q.CommandText = "SELECT sample_rate_hz, bit_depth, duration_ms FROM tracks WHERE rel_path = '96khz.flac';";
+                using var r = q.ExecuteReader();
+                Assert.True(r.Read());
+                Assert.Equal(96_000, r.GetInt32(0));
+                Assert.Equal(24, r.GetInt32(1));
+                Assert.Equal(5_000, r.GetInt64(2));
+            }
+
+            // Build synthetic MP3 with ID3v2 header (20 bytes) + audio + trailing ID3v1 "TAG" footer (128 bytes)
+            byte[] mp3 = new byte[20 + 512 + 128];
+            Encoding.ASCII.GetBytes("ID3").CopyTo(mp3, 0);
+            mp3[3] = 3; // ID3v2.3
+            mp3[9] = 10; // synchsafe header payload = 10 bytes
+            Encoding.ASCII.GetBytes("TPE1").CopyTo(mp3, 10);
+            for (int i = 0; i < 512; i++)
+            {
+                mp3[20 + i] = i % 2 == 0 ? (byte)0xFF : (byte)0xFB;
+            }
+            Encoding.ASCII.GetBytes("TAG").CopyTo(mp3, 20 + 512);
+            string mp3Path = Path.Combine(tempRoot, "footer.mp3");
+            File.WriteAllBytes(mp3Path, mp3);
+
+            var mp3Fp = Tonewise.Interop.TonewiseCoreClient.ComputeFingerprint(mp3Path);
+            Assert.Equal(20UL, mp3Fp.HeaderSize);
+            Assert.Equal(128UL, mp3Fp.FooterSize);
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                        title, artists_json
+                    ) VALUES (
+                        'uid_footer_mp3', $ah, $hsize, $hh, 0,
+                        'footer.mp3', $fsize, 1000, 'mp3', 44100, 1000,
+                        'Footer Track', '["Tester"]'
+                    );
+                    """;
+                ins.Parameters.AddWithValue("$ah", Convert.FromHexString(mp3Fp.AudioFrameBlake3Hex));
+                ins.Parameters.AddWithValue("$hsize", (long)mp3Fp.HeaderSize);
+                ins.Parameters.AddWithValue("$hh", Convert.FromHexString(mp3Fp.HeaderBlake3Hex));
+                ins.Parameters.AddWithValue("$fsize", (long)mp3Fp.FileSize);
+                ins.ExecuteNonQuery();
+            }
+
+            await using var server = new Tonewise.SyncHost.SyncHostServer(tempRoot, deviceId: "test-pc");
+            int port = await server.StartAsync(port: 0, enableMdns: false);
+            Assert.Equal(
+                Tonewise.SyncHost.PairAttemptStatus.Success,
+                server.Store.TryPairWithStatus(server.Store.CurrentPairingCode, "dev-footer", "Phone", out string? token, out _, out _, clientKey: "127.0.0.1"));
+
+            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            using var resp = await http.GetAsync("/api/v1/patch/uid_footer_mp3");
+            Assert.Equal(System.Net.HttpStatusCode.Conflict, resp.StatusCode);
+            string respBody = await resp.Content.ReadAsStringAsync();
+            Assert.Contains("trailing_metadata_requires_full_sync", respBody);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task LastFmWebApi_LoopD_RecentBeforeTopTracks_NoDoubleAdd_AndIdleSyncDoesNotRefetch()
     {
         string tempRoot = Path.Combine(Path.GetTempPath(), "tw_b1_loopd_" + Guid.NewGuid().ToString("N"));

@@ -143,6 +143,9 @@ class ExoPlaybackStateHolder(
     var sessionOngoing = false
         private set
 
+    val wantsPlayback: Boolean
+        get() = player.playWhenReady
+
     fun attach() {
         playbackManager.registerStateHolder(this)
         musicRepository.addUpdateListener(this)
@@ -322,6 +325,7 @@ class ExoPlaybackStateHolder(
     override fun playing(playing: Boolean) {
         if (playing) {
             consecutiveErrorCount = 0
+            sessionOngoing = true
         }
         player.playWhenReady = playing
         if (!playing) {
@@ -363,6 +367,7 @@ class ExoPlaybackStateHolder(
             )
         }
         val target = startIndex ?: player.currentTimeline.getFirstWindowIndex(command.shuffled)
+        sessionOngoing = true
         player.seekTo(target, C.TIME_UNSET)
         player.prepare()
         player.play()
@@ -538,6 +543,7 @@ class ExoPlaybackStateHolder(
             player.seekTo(rawQueue.heapIndex, C.TIME_UNSET)
             player.prepare()
             if (wasPlaying) {
+                sessionOngoing = true
                 player.play()
             } else {
                 player.pause()

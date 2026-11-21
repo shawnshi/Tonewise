@@ -22,7 +22,9 @@ JObjectRef::JObjectRef(JNIEnv *env, jobject object) : env(env), object(object) {
 }
 
 JObjectRef::~JObjectRef() {
-    env->DeleteLocalRef(object);
+    if (object != nullptr) {
+        env->DeleteLocalRef(object);
+    }
 }
 
 jobject& JObjectRef::operator*() {

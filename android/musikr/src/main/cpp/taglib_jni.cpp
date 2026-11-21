@@ -316,7 +316,13 @@ Java_org_oxycblt_musikr_metadata_TagLibJNI_openNative(JNIEnv *env,
         delete overriddenFile;
         return metadataResultSuccess(env, *jMetadata);
     } catch (std::exception &e) {
+        checkAndClearJniException(env, "openNative(std::exception)");
         LOGE("Unable to parse metadata in %s: %s", name.c_str(), e.what());
+        delete overriddenFile;
+        return metadataResultProviderFailed(env);
+    } catch (...) {
+        checkAndClearJniException(env, "openNative(unknown)");
+        LOGE("Unable to parse metadata in %s: unknown native exception", name.c_str());
         delete overriddenFile;
         return metadataResultProviderFailed(env);
     }

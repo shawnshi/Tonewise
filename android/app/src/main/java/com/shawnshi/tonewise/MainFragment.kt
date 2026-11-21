@@ -241,12 +241,24 @@ class MainFragment :
         // Override the back pressed listener so we can map back navigation to collapsing
         // navigation, navigation out of detail views, etc. We have to do this here in
         // onResume or otherwise the FragmentManager will have precedence.
+        speedDialBackCallback?.remove()
+        selectionBackCallback?.remove()
+        detailBackCallback?.remove()
+        sheetBackCallback?.remove()
         requireActivity().onBackPressedDispatcher.apply {
             addCallback(viewLifecycleOwner, requireNotNull(speedDialBackCallback))
             addCallback(viewLifecycleOwner, requireNotNull(selectionBackCallback))
             addCallback(viewLifecycleOwner, requireNotNull(detailBackCallback))
             addCallback(viewLifecycleOwner, requireNotNull(sheetBackCallback))
         }
+    }
+
+    override fun onPause() {
+        speedDialBackCallback?.remove()
+        selectionBackCallback?.remove()
+        detailBackCallback?.remove()
+        sheetBackCallback?.remove()
+        super.onPause()
     }
 
     override fun onStop() {
@@ -725,13 +737,16 @@ class MainFragment :
         override fun handleOnBackPressed() {
             if (queueSheetShown()) {
                 unlikelyToBeNull(queueSheetBehavior).handleBackInvoked()
+                invalidateEnabled()
                 return
             }
 
             if (playbackSheetShown()) {
                 playbackSheetBehavior.handleBackInvoked()
+                invalidateEnabled()
                 return
             }
+            invalidateEnabled()
         }
 
         override fun handleOnBackCancelled() {
@@ -751,13 +766,14 @@ class MainFragment :
         }
 
         private fun playbackSheetShown() =
-            playbackSheetBehavior.targetState != BackportBottomSheetBehavior.STATE_COLLAPSED &&
-                playbackSheetBehavior.targetState != BackportBottomSheetBehavior.STATE_HIDDEN
+            playbackSheetBehavior.targetState == BackportBottomSheetBehavior.STATE_EXPANDED ||
+                playbackSheetBehavior.state == BackportBottomSheetBehavior.STATE_EXPANDED
 
         private fun queueSheetShown() =
             queueSheetBehavior != null &&
                 playbackSheetBehavior.state == BackportBottomSheetBehavior.STATE_EXPANDED &&
-                queueSheetBehavior.targetState != BackportBottomSheetBehavior.STATE_COLLAPSED
+                (queueSheetBehavior.targetState == BackportBottomSheetBehavior.STATE_EXPANDED ||
+                    queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_EXPANDED)
     }
 
     private class DetailBackPressedCallback(private val detailModel: DetailViewModel) :

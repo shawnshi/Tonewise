@@ -20,8 +20,6 @@ package com.shawnshi.tonewise.sync
 
 import java.io.File
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 import kotlinx.coroutines.CancellationException
 import org.oxycblt.musikr.core.RawJson
@@ -138,7 +136,7 @@ object LanSyncV2Client {
         if (!LanHttpClient.isSafeLanOrHttpsUrl(pingUrl)) return false
         return try {
             val conn =
-                (URL(pingUrl).openConnection() as HttpURLConnection).apply {
+                LanHttpClient.openConnectionForUrl(pingUrl).apply {
                     instanceFollowRedirects = false
                     connectTimeout = 4_000
                     readTimeout = 4_000
@@ -229,6 +227,8 @@ object LanSyncV2Client {
                 url = "$clean/api/v2/outbox",
                 bearerToken = token,
                 cancelToken = cancelToken,
+                connectTimeoutMs = 5_000,
+                readTimeoutMs = 60_000,
             )
         return parseOutboxResponse(respText)
     }
@@ -415,6 +415,8 @@ object LanSyncV2Client {
                 body = body,
                 bearerToken = token,
                 cancelToken = cancelToken,
+                connectTimeoutMs = 5_000,
+                readTimeoutMs = 30_000,
             )
         return parseReportResponse(respText)
     }

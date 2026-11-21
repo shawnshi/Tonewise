@@ -10,7 +10,7 @@
 
 **Tonewise（知律）** 是一款面向古典、爵士与摇滚本地无损曲库打造的开源跨端本地音乐系统（GPL-3.0）。项目以 **Rust 同源核心库 (`core/`) + Windows 11 原生桌面端 (`desktop/`) + Android 深度定制端 (`android/`, 基于 [Auxio](https://github.com/OxygenCobalt/Auxio)) + `.tonewise/` 双端同步协议 (`protocol/`)** 构成“PC 重算力策展与母带直通 + 手机随身零摩擦入景 + 局域网无云同步”的完整本地听音体系。
 
-### 当前实现状态（Tonewise `v0.9.5` · `com.shawnshi.tonewise` `versionCode 95`）
+### 当前实现状态（Tonewise `v0.9.9` · `com.shawnshi.tonewise` `versionCode 99`）
 
 * **Rust 同源内核 (`core/`)**：完成 `tonewise-metadata`、`tonewise-rules`、`tonewise-dsp-core`、`tonewise-sync`、`tonewise-ffi`、`tonewise-cli` 六大 crate 构建与双端 JNI/FFI 对齐（`build-core-android.ps1` / `build-core-desktop.ps1`），支持 EqualizerAPO 编号行 `Filter <n>:` 跨端统一解析及共享五维场景字典（`protocol/dictionaries/default_scenes_5d.json`）。
 * **Windows 11 桌面端 (`desktop/`)**：完成 P1–P4、R1–R8、数据库拆库治理、播放/挂钟全链重构与歌单匹配引擎升级：
@@ -29,10 +29,10 @@
 
 | 平台 | 安装包 / 发行归档 | 版本与运行环境 | 文件大小 | SHA-256 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v0.9.5` (`versionCode 95`) | `15,925,898` bytes (~15.19 MiB) | `ce1cb01c9369c8fd4deae6808ff9577d0871809fad6714e9f1d61cd36f574f2c` |
-| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | `v0.9.5` · WinUI 3 (`net9.0-windows10.0.26100.0` + 含 `tonewise_core.dll` & `tonewise-cli.exe`) | `50,567,771` bytes (~48.23 MiB) | `68f50dd07d96e22bd97f1f24f70da62ecdbee6cceb16011f5f635783669ebd43` |
+| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v0.9.9` (`versionCode 99`) | `16,012,806` bytes (~15.27 MiB) | `a2c47f543ec010b0222edb1145f938bde96128996f19ba597a7c8783431cd08b` |
+| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | `v0.9.9` · WinUI 3 (`net9.0-windows10.0.26100.0` + 含 `tonewise_core.dll` & `tonewise-cli.exe`) | `49,033,604` bytes (~46.76 MiB) | `01b6e8da089f9f69eda067b5a9256b82e6bd3caa8b1e710d42f017357b706dce` |
 
-* **Android 签名说明**：已通过 `zipalign` 4 字节对齐与 `apksigner` v2 签名校验（当前使用开发者本机调试签名密钥 `CN=Android Debug, O=Android, C=US` 封装，可直接侧载安装体验；正式商店分发请替换为独立发布密钥签章）。
+* **Android 签名说明**：已通过 `zipalign` 4 字节对齐与 `apksigner` v2 签名校验（当前随包产物使用本地调试签名密钥封装；仓库已支持 `TONEWISE_RELEASE_*` 独立发布签名与 `-PrequireReleaseSigning` 严格校验，本地无签名调试构建可传 `-PuseDebugSigning`）。
 * **Windows x64 运行说明**：解压 `tonewise-windows-x64-release.zip` 后直接运行 `Tonewise.Desktop.exe`（需安装 .NET 9 Desktop Runtime；Windows App SDK 1.7 与 Rust `tonewise_core.dll` / `tonewise-cli.exe` 已随压缩包自包含打包）。
 
 ## Screenshots
@@ -115,7 +115,10 @@ bash "$module/jni/build_ffmpeg.sh" "$module" "$ndk" windows-x86_64 21 flac alac
 ```powershell
 Set-Location android
 .\gradlew.bat :musikr:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug
-.\gradlew.bat :app:assembleRelease
+# Release APK (requires TONEWISE_RELEASE_STORE_FILE / TONEWISE_RELEASE_STORE_PASSWORD / TONEWISE_RELEASE_KEY_ALIAS / TONEWISE_RELEASE_KEY_PASSWORD; fail-closed with -PrequireReleaseSigning)
+.\gradlew.bat :app:assembleRelease -PrequireReleaseSigning
+# Local smoke-test Release APK signed with debug keystore when no release keystore is configured:
+.\gradlew.bat :app:assembleRelease -PuseDebugSigning
 ```
 
 ### 4. Connecting and installing on an Android device

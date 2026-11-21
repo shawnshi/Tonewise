@@ -9,6 +9,8 @@ pub struct AudioFrameFingerprint {
     pub audio_frame_blake3_hex: String,
     pub header_blake3_hex: String,
     pub header_size: u64,
+    #[serde(default)]
+    pub footer_size: u64,
     pub file_size: u64,
 }
 
@@ -18,9 +20,10 @@ struct AudioSpan {
     end: u64,
 }
 
-/// Computes `audio_frame_blake3` over pure audio frames while skipping metadata headers
-/// (ID3v2, FLAC metadata/padding blocks, MP4 non-`mdat` atoms, Ogg init/comment pages).
-/// Spans larger than 256 KB hash length + head/mid/tail 64 KB windows to bound I/O on lossless files.
+/// Computes `audio_frame_blake3` over pure audio frames while hashing the full header and
+/// trailing metadata intervals into `header_blake3` (never sampling metadata, so large album
+/// covers never mask tag mutations). Audio spans larger than 256 KB hash length + head/mid/tail
+/// 64 KB windows to bound I/O on lossless files.
 pub fn compute_audio_frame_fingerprint<R: Read + Seek>(
     reader: &mut R,
 ) -> io::Result<AudioFrameFingerprint> {
@@ -31,10 +34,11 @@ pub fn compute_audio_frame_fingerprint<R: Read + Seek>(
 
     let mut header_hasher = blake3::Hasher::new();
     if span.start > 0 {
-        hash_span_bounded(reader, &mut header_hasher, 0, span.start)?;
+        hash_exact_span(reader, &mut header_hasher, 0, span.start)?;
     }
-    if span.end < file_size {
-        hash_span_bounded(reader, &mut header_hasher, span.end, file_size)?;
+    let footer_size = file_size.saturating_sub(span.end);
+    if footer_size > 0 {
+        hash_exact_span(reader, &mut header_hasher, span.end, file_size)?;
     }
 
     let mut audio_hasher = blake3::Hasher::new();
@@ -46,8 +50,23 @@ pub fn compute_audio_frame_fingerprint<R: Read + Seek>(
         audio_frame_blake3_hex: audio_hasher.finalize().to_hex().to_string(),
         header_blake3_hex: header_hasher.finalize().to_hex().to_string(),
         header_size: span.start,
+        footer_size,
         file_size,
     })
+}
+
+fn hash_exact_span<R: Read + Seek>(
+    reader: &mut R,
+    hasher: &mut blake3::Hasher,
+    start: u64,
+    end: u64,
+) -> io::Result<()> {
+    let span_len = end.saturating_sub(start);
+    if span_len == 0 {
+        return Ok(());
+    }
+    reader.seek(SeekFrom::Start(start))?;
+    hash_exact_len(reader, hasher, span_len)
 }
 
 fn hash_span_bounded<R: Read + Seek>(
@@ -774,5 +793,52 @@ mod tests {
         let afp2 = compute_audio_frame_fingerprint(&mut Cursor::new(&aiff2)).unwrap();
         assert_eq!(afp1.audio_frame_blake3_hex, afp2.audio_frame_blake3_hex);
         assert_ne!(afp1.header_blake3_hex, afp2.header_blake3_hex);
+    }
+
+    #[test]
+    fn large_cover_header_does_not_mask_tag_edits_and_reports_footer_size() {
+        // Place a >300 KB metadata block BEFORE the Vorbis comment inside the >256 KB header interval
+        // so the comment falls strictly outside the old head/mid/tail 64 KB windows if edited.
+        let make_large_flac = |title_byte: u8| {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"fLaC");
+            out.push(0x00);
+            out.extend_from_slice(&(34u32.to_be_bytes())[1..4]);
+            out.extend_from_slice(&[0u8; 34]);
+
+            // PICTURE-like padding block A (140 KB)
+            let blk_a = 140 * 1024usize;
+            out.push(0x06);
+            out.extend_from_slice(&((blk_a as u32).to_be_bytes())[1..4]);
+            out.extend_from_slice(&vec![0xAAu8; blk_a]);
+
+            // VORBIS_COMMENT situated outside head 64KB, mid 64KB, tail 64KB windows when followed by blk_b
+            let comment = vec![b'T', b'=', title_byte];
+            out.push(0x04);
+            out.extend_from_slice(&((comment.len() as u32).to_be_bytes())[1..4]);
+            out.extend_from_slice(&comment);
+
+            // Second block B (260 KB) pushing comment out of mid/tail windows
+            let blk_b = 260 * 1024usize;
+            out.push(0x81);
+            out.extend_from_slice(&((blk_b as u32).to_be_bytes())[1..4]);
+            out.extend_from_slice(&vec![0u8; blk_b]);
+
+            out.extend_from_slice(b"FLAC_AUDIO_STREAM_DATA");
+            out
+        };
+
+        let fp_a = compute_audio_frame_fingerprint(&mut Cursor::new(make_large_flac(b'A'))).unwrap();
+        let fp_b = compute_audio_frame_fingerprint(&mut Cursor::new(make_large_flac(b'B'))).unwrap();
+        assert_eq!(fp_a.audio_frame_blake3_hex, fp_b.audio_frame_blake3_hex);
+        assert_ne!(fp_a.header_blake3_hex, fp_b.header_blake3_hex);
+        assert_eq!(fp_a.footer_size, 0);
+
+        let mut mp3_tail = b"RAW_MP3_AUDIO".to_vec();
+        let mut id3v1 = [0u8; 128];
+        id3v1[0..3].copy_from_slice(b"TAG");
+        mp3_tail.extend_from_slice(&id3v1);
+        let fp_mp3 = compute_audio_frame_fingerprint(&mut Cursor::new(&mp3_tail)).unwrap();
+        assert_eq!(fp_mp3.footer_size, 128);
     }
 }

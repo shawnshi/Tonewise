@@ -685,7 +685,10 @@ public static partial class LibraryFolderOrganizerService
         int? MovementNumber = null,
         string? Genre = null,
         double? ReplayGainTrackDb = null,
-        double? ReplayGainAlbumDb = null
+        double? ReplayGainAlbumDb = null,
+        int? SampleRateHz = null,
+        int? BitDepth = null,
+        long? DurationMs = null
     );
 
     public static EmbeddedHeaderTags ReadEmbeddedHeaderTags(string filePath)
@@ -696,11 +699,67 @@ public static partial class LibraryFolderOrganizerService
             using var fs = new FileStream(LongPathHelper.ToExtendedPath(filePath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             if (ext == ".flac") return ReadFlacComments(fs);
             if (ext == ".mp3") return ReadId3v2Comments(fs);
+            if (ext == ".wav") return ReadWavHeaderInfo(fs);
         }
         catch
         {
         }
         return default;
+    }
+
+    private static EmbeddedHeaderTags ReadWavHeaderInfo(Stream fs)
+    {
+        Span<byte> riff = stackalloc byte[12];
+        if (fs.Read(riff) != 12 || riff[0] != 'R' || riff[1] != 'I' || riff[2] != 'F' || riff[3] != 'F'
+            || riff[8] != 'W' || riff[9] != 'A' || riff[10] != 'V' || riff[11] != 'E')
+            return default;
+
+        int? sr = null, bd = null;
+        int byteRate = 0;
+        long dataSize = 0;
+        Span<byte> hdr = stackalloc byte[8];
+        while (fs.Read(hdr) == 8)
+        {
+            uint chunkLen = BinaryPrimitives.ReadUInt32LittleEndian(hdr.Slice(4, 4));
+            if (hdr[0] == 'f' && hdr[1] == 'm' && hdr[2] == 't' && hdr[3] == ' ' && chunkLen >= 16)
+            {
+                byte[] fmt = new byte[Math.Min(chunkLen, 64)];
+                if (fs.Read(fmt, 0, fmt.Length) == fmt.Length)
+                {
+                    int parsedSr = BinaryPrimitives.ReadInt32LittleEndian(fmt.AsSpan(4, 4));
+                    byteRate = BinaryPrimitives.ReadInt32LittleEndian(fmt.AsSpan(8, 4));
+                    int parsedBd = BinaryPrimitives.ReadUInt16LittleEndian(fmt.AsSpan(14, 2));
+                    if (parsedSr > 0) sr = parsedSr;
+                    if (parsedBd > 0) bd = parsedBd;
+                    if (chunkLen > fmt.Length) fs.Seek(chunkLen - fmt.Length, SeekOrigin.Current);
+                }
+                else
+                {
+                    break;
+                }
+            }
+            else if (hdr[0] == 'd' && hdr[1] == 'a' && hdr[2] == 't' && hdr[3] == 'a')
+            {
+                dataSize = chunkLen;
+                fs.Seek(chunkLen, SeekOrigin.Current);
+            }
+            else
+            {
+                fs.Seek(chunkLen, SeekOrigin.Current);
+            }
+
+            if ((chunkLen & 1) != 0 && fs.Position < fs.Length)
+            {
+                fs.Seek(1, SeekOrigin.Current);
+            }
+        }
+
+        long? durMs = byteRate > 0 && dataSize > 0 ? (long)(dataSize * 1000.0 / byteRate) : null;
+        return new EmbeddedHeaderTags(
+            null, null, null, null, null, null,
+            SampleRateHz: sr,
+            BitDepth: bd,
+            DurationMs: durMs);
     }
 
     private static EmbeddedHeaderTags ReadFlacComments(Stream fs)
@@ -709,7 +768,10 @@ public static partial class LibraryFolderOrganizerService
         if (fs.Read(sig) != 4 || sig[0] != 'f' || sig[1] != 'L' || sig[2] != 'a' || sig[3] != 'C')
             return default;
 
+        int? flacSampleRate = null, flacBitDepth = null;
+        long? flacDurationMs = null;
         Span<byte> hdr = stackalloc byte[4];
+        Span<byte> si = stackalloc byte[34];
         while (fs.Read(hdr) == 4)
         {
             bool isLast = (hdr[0] & 0x80) != 0;
@@ -717,14 +779,49 @@ public static partial class LibraryFolderOrganizerService
             int len = (hdr[1] << 16) | (hdr[2] << 8) | hdr[3];
             if (len < 0 || len > 4 * 1024 * 1024) break;
 
+            if (blockType == 0 && len >= 34)
+            {
+                if (fs.Read(si) != 34) break;
+                ulong packed = BinaryPrimitives.ReadUInt64BigEndian(si.Slice(10, 8));
+                int sr = (int)((packed >> 44) & 0xFFFFFUL);
+                int bd = (int)(((packed >> 36) & 0x1FUL) + 1);
+                long totalSamples = (long)(packed & 0xF_FFFF_FFFFUL);
+                if (sr > 0)
+                {
+                    flacSampleRate = sr;
+                    flacBitDepth = bd;
+                    if (totalSamples > 0)
+                    {
+                        flacDurationMs = totalSamples * 1000L / sr;
+                    }
+                }
+                if (len > 34) fs.Seek(len - 34, SeekOrigin.Current);
+                if (isLast) break;
+                continue;
+            }
+
             if (blockType == 4)
             {
                 byte[] buf = new byte[len];
-                if (fs.Read(buf, 0, len) != len || len < 8) return default;
+                if (fs.Read(buf, 0, len) != len || len < 8)
+                {
+                    return new EmbeddedHeaderTags(
+                        null, null, null, null, null, null,
+                        SampleRateHz: flacSampleRate,
+                        BitDepth: flacBitDepth,
+                        DurationMs: flacDurationMs);
+                }
                 int pos = 0;
                 uint vendorLen = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos, 4));
                 pos += 4 + (int)Math.Min(vendorLen, (uint)(len - 4));
-                if (pos + 4 > len) return default;
+                if (pos + 4 > len)
+                {
+                    return new EmbeddedHeaderTags(
+                        null, null, null, null, null, null,
+                        SampleRateHz: flacSampleRate,
+                        BitDepth: flacBitDepth,
+                        DurationMs: flacDurationMs);
+                }
                 uint count = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos, 4));
                 pos += 4;
 
@@ -778,13 +875,20 @@ public static partial class LibraryFolderOrganizerService
                     MovementNumber: movNo,
                     Genre: genre,
                     ReplayGainTrackDb: rgTrack,
-                    ReplayGainAlbumDb: rgAlbum);
+                    ReplayGainAlbumDb: rgAlbum,
+                    SampleRateHz: flacSampleRate,
+                    BitDepth: flacBitDepth,
+                    DurationMs: flacDurationMs);
             }
 
             fs.Seek(len, SeekOrigin.Current);
             if (isLast) break;
         }
-        return default;
+        return new EmbeddedHeaderTags(
+            null, null, null, null, null, null,
+            SampleRateHz: flacSampleRate,
+            BitDepth: flacBitDepth,
+            DurationMs: flacDurationMs);
     }
 
     private static EmbeddedHeaderTags ReadId3v2Comments(Stream fs)

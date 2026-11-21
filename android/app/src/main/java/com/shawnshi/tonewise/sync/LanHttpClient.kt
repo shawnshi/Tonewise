@@ -18,11 +18,13 @@
 
 package com.shawnshi.tonewise.sync
 
+import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.Proxy
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URL
@@ -157,6 +159,52 @@ object LanHttpClient {
         }
     }
 
+    internal fun isPrivateLanHttpUrl(urlString: String): Boolean {
+        val raw = urlString.trim()
+        if (raw.isEmpty()) return false
+        val uri =
+            try {
+                URI(raw)
+            } catch (_: Exception) {
+                return false
+            }
+        return uri.scheme?.equals("http", ignoreCase = true) == true && isSafeLanOrHttpsUrl(raw)
+    }
+
+    @Volatile
+    internal var lanConnectionOpener: ((URL) -> HttpURLConnection?)? = null
+
+    private fun isRetryableStreamEof(error: Throwable): Boolean =
+        generateSequence(error) { it.cause }.any { cause ->
+            cause is EOFException ||
+                cause.message?.contains("unexpected end of stream", ignoreCase = true) == true
+        }
+
+    internal fun openConnectionForUrl(
+        url: String,
+        allowLanNetworkBypass: Boolean = true,
+    ): HttpURLConnection {
+        val parsed = URL(url)
+        val isLan = isPrivateLanHttpUrl(url)
+        val conn =
+            if (isLan) {
+                val bypassed =
+                    if (allowLanNetworkBypass) {
+                        runCatching { lanConnectionOpener?.invoke(parsed) }.getOrNull()
+                    } else {
+                        null
+                    }
+                bypassed ?: parsed.openConnection(Proxy.NO_PROXY)
+            } else {
+                parsed.openConnection()
+            }
+        val httpConn = conn as HttpURLConnection
+        if (isLan) {
+            httpConn.setRequestProperty("Connection", "close")
+        }
+        return httpConn
+    }
+
     private fun parseIpv4Bytes(host: String): ByteArray? {
         val parts = host.split('.')
         if (parts.size != 4) return null
@@ -215,7 +263,8 @@ object LanHttpClient {
             val isStaleCandidate =
                 name.endsWith(".part", ignoreCase = true) ||
                     name.endsWith(".tmp", ignoreCase = true) ||
-                    name.startsWith(".twtmp", ignoreCase = true)
+                    name.contains(".twtmp", ignoreCase = true) ||
+                    name.contains(".twbak", ignoreCase = true)
             if (isStaleCandidate && (nowMs - entry.lastModified()) >= maxAgeMs) {
                 if (runCatching { entry.delete() }.getOrDefault(false)) {
                     removed++
@@ -234,33 +283,50 @@ object LanHttpClient {
         userAgent: String? = null,
     ): ByteArray {
         enforceSafeBearerTransport(url, bearerToken)
-        val conn =
-            (URL(url).openConnection() as HttpURLConnection).apply {
-                instanceFollowRedirects = false
-                connectTimeout = connectTimeoutMs
-                readTimeout = readTimeoutMs
-                requestMethod = "GET"
-                if (!bearerToken.isNullOrBlank()) {
-                    setRequestProperty("Authorization", "Bearer $bearerToken")
+        var lastError: IOException? = null
+        for (attempt in 0 until 2) {
+            cancelToken?.throwIfCancelled()
+            val conn =
+                openConnectionForUrl(url).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = connectTimeoutMs
+                    readTimeout = readTimeoutMs
+                    requestMethod = "GET"
+                    if (!bearerToken.isNullOrBlank()) {
+                        setRequestProperty("Authorization", "Bearer $bearerToken")
+                    }
+                    if (!userAgent.isNullOrBlank()) {
+                        setRequestProperty("User-Agent", userAgent)
+                    }
                 }
-                if (!userAgent.isNullOrBlank()) {
-                    setRequestProperty("User-Agent", userAgent)
-                }
+            val execute: (HttpURLConnection) -> ByteArray = { c ->
+                val code = c.responseCode
+                throwIfHttpStatusError(c, url, code, "未授权或配对已过期，请重新配对")
+                c.inputStream.use { it.readBytes() }
             }
-        val execute: (HttpURLConnection) -> ByteArray = { c ->
-            val code = c.responseCode
-            throwIfHttpStatusError(c, url, code, "未授权或配对已过期，请重新配对")
-            c.inputStream.use { it.readBytes() }
-        }
-        return if (cancelToken != null) {
-            cancelToken.track(conn, execute)
-        } else {
             try {
-                execute(conn)
-            } finally {
-                runCatching { conn.disconnect() }
+                return if (cancelToken != null) {
+                    cancelToken.track(conn, execute)
+                } else {
+                    try {
+                        execute(conn)
+                    } finally {
+                        runCatching { conn.disconnect() }
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (io: IOException) {
+                lastError = io
+                if (attempt == 0 && isRetryableStreamEof(io)) {
+                    cancelToken?.throwIfCancelled()
+                    Thread.sleep(150L)
+                    continue
+                }
+                throw io
             }
         }
+        throw (lastError ?: IOException("HTTP GET failed for $url"))
     }
 
     fun getString(
@@ -282,7 +348,7 @@ object LanHttpClient {
     ): String {
         enforceSafeBearerTransport(url, bearerToken)
         val conn =
-            (URL(url).openConnection() as HttpURLConnection).apply {
+            openConnectionForUrl(url).apply {
                 instanceFollowRedirects = false
                 connectTimeout = connectTimeoutMs
                 readTimeout = readTimeoutMs
@@ -317,11 +383,13 @@ object LanHttpClient {
         expectedSize: Long,
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
         cancelToken: CancelToken? = null,
+        expectedEtag: String? = null,
     ): Long {
         enforceSafeBearerTransport(url, bearerToken)
         val maxConsecutiveStalls = 36 // ~28.8s consecutive no-progress read timeout if not cancelled
         var remainingConsecutiveStalls = maxConsecutiveStalls
         var lastObservedSize = if (partFile.exists()) partFile.length() else 0L
+        var activeEtag = expectedEtag?.trim()?.takeIf { it.isNotEmpty() }
         while (true) {
             val sizeBeforeAttempt = if (partFile.exists()) partFile.length() else 0L
             lastObservedSize = maxOf(lastObservedSize, sizeBeforeAttempt)
@@ -340,6 +408,12 @@ object LanHttpClient {
                     },
                     cancelToken = cancelToken,
                     allowRetry416 = true,
+                    expectedEtag = activeEtag,
+                    onEtagObserved = { observed ->
+                        if (observed.isNotBlank()) {
+                            activeEtag = observed
+                        }
+                    },
                 )
             } catch (timeout: SocketTimeoutException) {
                 cancelToken?.throwIfCancelled()
@@ -363,6 +437,8 @@ object LanHttpClient {
         onProgress: (Long, Long) -> Unit,
         cancelToken: CancelToken?,
         allowRetry416: Boolean,
+        expectedEtag: String? = null,
+        onEtagObserved: (String) -> Unit = {},
     ): Long {
         cancelToken?.throwIfCancelled()
         partFile.parentFile?.mkdirs()
@@ -377,7 +453,7 @@ object LanHttpClient {
         }
 
         val conn =
-            (URL(url).openConnection() as HttpURLConnection).apply {
+            openConnectionForUrl(url).apply {
                 instanceFollowRedirects = false
                 connectTimeout = 8_000
                 readTimeout = if (cancelToken != null) 800 else 30_000
@@ -386,6 +462,9 @@ object LanHttpClient {
                 setRequestProperty("Connection", "close")
                 if (existingBytes > 0L) {
                     setRequestProperty("Range", "bytes=$existingBytes-")
+                    if (!expectedEtag.isNullOrBlank()) {
+                        setRequestProperty("If-Range", expectedEtag)
+                    }
                 }
             }
 
@@ -406,6 +485,7 @@ object LanHttpClient {
                         }
                     } else {
                         throwIfHttpStatusError(c, url, code, "未授权或配对已过期，请重新配对")
+                        c.getHeaderField("ETag")?.trim()?.takeIf { it.isNotEmpty() }?.let(onEtagObserved)
 
                         val append = (code == HttpURLConnection.HTTP_PARTIAL && existingBytes > 0L)
                         if (!append && existingBytes > 0L) {
@@ -421,11 +501,22 @@ object LanHttpClient {
                             }
 
                         val buffer = ByteArray(32 * 1024)
+                        var consecutiveTimeouts = 0
                         c.inputStream.use { input ->
                             FileOutputStream(partFile, append).use { output ->
                                 while (true) {
                                     cancelToken?.throwIfCancelled()
-                                    val n = input.read(buffer)
+                                    val n =
+                                        try {
+                                            input.read(buffer).also { consecutiveTimeouts = 0 }
+                                        } catch (ste: SocketTimeoutException) {
+                                            cancelToken?.throwIfCancelled()
+                                            if (cancelToken != null && consecutiveTimeouts < 38) {
+                                                consecutiveTimeouts++
+                                                continue
+                                            }
+                                            throw ste
+                                        }
                                     if (n <= 0) break
                                     cancelToken?.throwIfCancelled()
                                     output.write(buffer, 0, n)
@@ -478,7 +569,7 @@ object LanHttpClient {
             for (attempt in 0 until 2) {
                 cancelToken.throwIfCancelled()
                 val conn =
-                    (URL(url).openConnection() as HttpURLConnection).apply {
+                    openConnectionForUrl(url, allowLanNetworkBypass = false).apply {
                         instanceFollowRedirects = false
                         connectTimeout = 8_000
                         readTimeout = 15_000
@@ -525,7 +616,7 @@ object LanHttpClient {
             for (attempt in 0 until 2) {
                 cancelToken.throwIfCancelled()
                 val conn =
-                    (URL(url).openConnection() as HttpURLConnection).apply {
+                    openConnectionForUrl(url, allowLanNetworkBypass = false).apply {
                         instanceFollowRedirects = false
                         connectTimeout = 8_000
                         readTimeout = 15_000
@@ -573,7 +664,7 @@ object LanHttpClient {
         val tmpFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
         if (tmpFile.exists()) tmpFile.delete()
         val conn =
-            (URL(url).openConnection() as HttpURLConnection).apply {
+            openConnectionForUrl(url).apply {
                 instanceFollowRedirects = false
                 connectTimeout = connectTimeoutMs
                 readTimeout = readTimeoutMs

@@ -61,6 +61,7 @@ internal class LwwMutationStore(
     @Volatile private var cachedSceneOrderIds: List<String>? = null
     @Volatile private var cachedPairedHost: PairedHostInfo? = null
     @Volatile private var pairedHostLoaded = false
+    @Volatile private var cachedStableDeviceId: String? = null
 
     @Volatile
     var lwwVersion: Long = 0L
@@ -98,6 +99,9 @@ internal class LwwMutationStore(
             var loadedPairedHost: PairedHostInfo? = null
             if (!pairedHostLoaded) {
                 loadedPairedHost = loadPairedHostFromDb()
+            }
+            if (cachedStableDeviceId == null) {
+                cachedStableDeviceId = runCatching { getOrCreateStableDeviceId() }.getOrNull()
             }
 
             synchronized(lock) {
@@ -292,7 +296,9 @@ internal class LwwMutationStore(
         val token = SecretBox.decrypt(storedToken)
         if (token.isBlank()) return null
         if (!SecretBox.isEncrypted(storedToken)) {
-            kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, SecretBox.encrypt(token)))
+            runCatching {
+                kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, SecretBox.encrypt(token)))
+            }
         }
         val hostName = kv.getValue(KEY_PAIRED_HOST_NAME) ?: url
         val deviceId = kv.getValue(KEY_PAIRED_DEVICE_ID) ?: getOrCreateStableDeviceId()
@@ -319,13 +325,26 @@ internal class LwwMutationStore(
         }
     }
 
+    fun getCachedStableDeviceId(): String {
+        cachedStableDeviceId?.let { return it }
+        if (!isMainThread()) {
+            return getOrCreateStableDeviceId()
+        }
+        return (Build.MODEL ?: "android").replace(Regex("[^A-Za-z0-9._-]+"), "-").take(20)
+    }
+
     fun getOrCreateStableDeviceId(): String {
+        cachedStableDeviceId?.let { return it }
         val kv = syncDb.syncKvDao()
-        kv.getValue(KEY_STABLE_DEVICE_ID)?.takeIf { it.isNotBlank() }?.let { return it }
+        kv.getValue(KEY_STABLE_DEVICE_ID)?.takeIf { it.isNotBlank() }?.let {
+            cachedStableDeviceId = it
+            return it
+        }
         val modelPrefix =
             (Build.MODEL ?: "android").replace(Regex("[^A-Za-z0-9._-]+"), "-").take(20)
         val generated = "${modelPrefix}_${UUID.randomUUID().toString().replace("-", "").take(10)}"
         kv.putValue(SyncKvEntity(KEY_STABLE_DEVICE_ID, generated))
+        cachedStableDeviceId = generated
         return generated
     }
 

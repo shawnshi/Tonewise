@@ -20,6 +20,7 @@
 #define AUXIO_UTIL_H
 
 #include <jni.h>
+#include <stdexcept>
 #include <android/log.h>
 
 #define LOG_TAG "taglib_jni"
@@ -27,5 +28,21 @@
   ((void)__android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__))
 #define LOGD(...) \
   ((void)__android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__))
+
+inline bool checkAndClearJniException(JNIEnv *env, const char *context) {
+    if (env != nullptr && env->ExceptionCheck()) {
+        LOGE("JNI exception in %s", context);
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return true;
+    }
+    return false;
+}
+
+inline void throwOnJniException(JNIEnv *env, const char *context) {
+    if (checkAndClearJniException(env, context)) {
+        throw std::runtime_error(context);
+    }
+}
 
 #endif //AUXIO_UTIL_H

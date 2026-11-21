@@ -64,7 +64,8 @@ class StartActionRunner : TaskerPluginRunnerActionNoOutputOrInput() {
                 .setAction(AuxioService.ACTION_START)
                 .putExtra(AuxioService.INTENT_KEY_START_ID, IntegerTable.START_ID_TASKER),
         )
-        while (!AuxioService.isForeground) {
+        val waitDeadlineMs = android.os.SystemClock.elapsedRealtime() + 5_000L
+        while (!AuxioService.isForeground && android.os.SystemClock.elapsedRealtime() < waitDeadlineMs) {
             Thread.sleep(100)
         }
         // Actually need to sleep even longer since for some reason the notification still

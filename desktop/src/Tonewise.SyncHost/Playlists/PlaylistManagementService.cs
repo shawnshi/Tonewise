@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -949,6 +950,10 @@ public static partial class PlaylistTrackMatcher
         internal Dictionary<string, List<(IndexedTrack Track, int TitleTier)>> ByCompactTitle { get; }
         internal Dictionary<string, List<IndexedTrack>> ByArtistToken { get; }
         internal Dictionary<string, List<IndexedTrack>> ByArtistWord { get; }
+        internal IReadOnlyList<FuzzyArtistKeyEntry> LongLatinArtistTokenEntries { get; }
+        internal IReadOnlyList<FuzzyArtistKeyEntry> LongLatinArtistWordEntries { get; }
+        internal ConcurrentDictionary<string, IReadOnlyList<IndexedTrack>> FuzzyTokenQueryCache { get; } = new(StringComparer.Ordinal);
+        internal ConcurrentDictionary<string, IReadOnlyList<IndexedTrack>> FuzzyWordQueryCache { get; } = new(StringComparer.Ordinal);
 
         internal LibraryIndex(
             IReadOnlyList<IndexedTrack> tracks,
@@ -958,7 +963,9 @@ public static partial class PlaylistTrackMatcher
             Dictionary<string, List<(IndexedTrack Track, int TitleTier)>> byTitle,
             Dictionary<string, List<(IndexedTrack Track, int TitleTier)>> byCompactTitle,
             Dictionary<string, List<IndexedTrack>> byArtistToken,
-            Dictionary<string, List<IndexedTrack>> byArtistWord)
+            Dictionary<string, List<IndexedTrack>> byArtistWord,
+            IReadOnlyList<FuzzyArtistKeyEntry> longLatinArtistTokenEntries,
+            IReadOnlyList<FuzzyArtistKeyEntry> longLatinArtistWordEntries)
         {
             Tracks = tracks;
             ByRelPath = byRelPath;
@@ -968,6 +975,8 @@ public static partial class PlaylistTrackMatcher
             ByCompactTitle = byCompactTitle;
             ByArtistToken = byArtistToken;
             ByArtistWord = byArtistWord;
+            LongLatinArtistTokenEntries = longLatinArtistTokenEntries;
+            LongLatinArtistWordEntries = longLatinArtistWordEntries;
         }
     }
 
@@ -1026,6 +1035,19 @@ public static partial class PlaylistTrackMatcher
             }
         }
 
+        var indexedArray = new IndexedTrack[library.Count];
+        if (library.Count >= 512)
+        {
+            Parallel.For(0, library.Count, i => indexedArray[i] = new IndexedTrack(library[i], i));
+        }
+        else
+        {
+            for (int i = 0; i < library.Count; i++)
+            {
+                indexedArray[i] = new IndexedTrack(library[i], i);
+            }
+        }
+
         for (int idx = 0; idx < library.Count; idx++)
         {
             var item = library[idx];
@@ -1047,7 +1069,7 @@ public static partial class PlaylistTrackMatcher
                 }
             }
 
-            var indexed = new IndexedTrack(item, idx);
+            var indexed = indexedArray[idx];
             indexedTracks.Add(indexed);
 
             foreach (var v in indexed.TitleVariantInfos)
@@ -1068,6 +1090,19 @@ public static partial class PlaylistTrackMatcher
             }
         }
 
+        static List<FuzzyArtistKeyEntry> BuildLongLatinEntries(Dictionary<string, List<IndexedTrack>> map)
+        {
+            var entries = new List<FuzzyArtistKeyEntry>();
+            foreach (var kv in map)
+            {
+                if (kv.Key.Length >= 5 && !ContainsEastAsianScript(kv.Key))
+                {
+                    entries.Add(BuildFuzzyArtistKeyEntry(kv.Key, kv.Value));
+                }
+            }
+            return entries;
+        }
+
         return new LibraryIndex(
             indexedTracks,
             byRelPath,
@@ -1076,7 +1111,9 @@ public static partial class PlaylistTrackMatcher
             byTitle,
             byCompactTitle,
             byArtistToken,
-            byArtistWord);
+            byArtistWord,
+            BuildLongLatinEntries(byArtistToken),
+            BuildLongLatinEntries(byArtistWord));
     }
 
     public static IReadOnlyList<string> NormalizeClassicalTitleVariants(string? raw)
@@ -1539,34 +1576,92 @@ public static partial class PlaylistTrackMatcher
         int remainingBudget = Math.Max(0, maxFuzzyPool - exactPool.Count);
         if (remainingBudget == 0) return null;
 
-        void CollectFuzzyKeys(Dictionary<string, List<IndexedTrack>> keyMap, IReadOnlyList<string> queries)
+        static IReadOnlyList<IndexedTrack> QueryFuzzyEntriesCached(
+            IReadOnlyList<FuzzyArtistKeyEntry> entries,
+            ConcurrentDictionary<string, IReadOnlyList<IndexedTrack>> cache,
+            string query)
         {
-            if (fuzzyArtistPool.Count >= remainingBudget || queries.Count == 0) return;
-            foreach (var kv in keyMap)
+            return cache.GetOrAdd(query, static (q, stateEntries) =>
             {
-                if (fuzzyArtistPool.Count >= remainingBudget) break;
-                string key = kv.Key;
-                if (key.Length < 5 || ContainsEastAsianScript(key)) continue;
+                bool qHasSpace = q.Contains(' ', StringComparison.Ordinal);
+                uint qMask = ComputeAsciiLetterMask(q);
+                string[] qLongWords = [];
+                uint[] qLongWordMasks = [];
+                string qSurname = "";
+                uint qSurnameMask = 0;
 
-                bool keyMatches = false;
-                foreach (string q in queries)
+                if (qHasSpace)
                 {
-                    if (IsFuzzyArtistTokenMatch(q, key))
+                    string[] rawWords = q.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    var longWordList = new List<string>(rawWords.Length);
+                    for (int i = 0; i < rawWords.Length; i++)
                     {
-                        keyMatches = true;
-                        break;
+                        if (rawWords[i].Length >= 5) longWordList.Add(rawWords[i]);
+                    }
+                    qLongWords = longWordList.Count > 0 ? [.. longWordList] : [];
+                    qLongWordMasks = qLongWords.Length > 0
+                        ? Array.ConvertAll(qLongWords, static w => ComputeAsciiLetterMask(w))
+                        : [];
+
+                    int idx = q.LastIndexOf(' ');
+                    string sur = q[(idx + 1)..];
+                    if (sur.Length >= 7)
+                    {
+                        qSurname = sur;
+                        qSurnameMask = ComputeAsciiLetterMask(sur);
                     }
                 }
 
-                if (keyMatches)
+                List<IndexedTrack>? matched = null;
+                HashSet<string>? perQuerySeen = null;
+                for (int i = 0; i < stateEntries.Count; i++)
                 {
-                    AddListToPool(fuzzyArtistPool, kv.Value);
+                    FuzzyArtistKeyEntry entry = stateEntries[i];
+                    if (!IsFuzzyArtistQueryMatchEntry(
+                        q, qHasSpace, qMask, qLongWords, qLongWordMasks, qSurname, qSurnameMask, in entry))
+                    {
+                        continue;
+                    }
+
+                    matched ??= [];
+                    perQuerySeen ??= new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var cand in entry.Tracks)
+                    {
+                        if (perQuerySeen.Add(cand.Track.TrackUid))
+                        {
+                            matched.Add(cand);
+                        }
+                    }
+                }
+
+                return matched is null ? Array.Empty<IndexedTrack>() : matched;
+            }, entries);
+        }
+
+        void CollectFuzzyKeysCached(
+            IReadOnlyList<FuzzyArtistKeyEntry> entries,
+            ConcurrentDictionary<string, IReadOnlyList<IndexedTrack>> cache,
+            IReadOnlyList<string> queries)
+        {
+            if (fuzzyArtistPool.Count >= remainingBudget || queries.Count == 0) return;
+            foreach (string q in queries)
+            {
+                if (fuzzyArtistPool.Count >= remainingBudget) break;
+                var hits = QueryFuzzyEntriesCached(entries, cache, q);
+                for (int i = 0; i < hits.Count; i++)
+                {
+                    if (fuzzyArtistPool.Count >= remainingBudget) break;
+                    var cand = hits[i];
+                    if (seenUids.Add(cand.Track.TrackUid))
+                    {
+                        fuzzyArtistPool.Add(cand);
+                    }
                 }
             }
         }
 
-        CollectFuzzyKeys(index.ByArtistToken, longLatinTokens);
-        CollectFuzzyKeys(index.ByArtistWord, longLatinWords);
+        CollectFuzzyKeysCached(index.LongLatinArtistTokenEntries, index.FuzzyTokenQueryCache, longLatinTokens);
+        CollectFuzzyKeysCached(index.LongLatinArtistWordEntries, index.FuzzyWordQueryCache, longLatinWords);
 
         return fuzzyArtistPool.Count > 0 ? EvaluatePool(fuzzyArtistPool)?.Track : null;
     }

@@ -79,6 +79,10 @@ public sealed partial class MainViewModel
         {
             _ = RestartOrDisposeSyncHostAsync(oldHost, musicRoot, _syncStore, restart: wasHostRunning);
         }
+        else if (_uiContext is not null && !_lanSyncManuallyStopped)
+        {
+            _ = EnsureLanSyncHostRunningAsync(silent: true);
+        }
         RefreshLanSyncUiState();
         StatusMessage = $"已加载 {_allTracks.Count:N0} 首曲目（{musicRoot}）";
         RestartLibraryFileWatcher(musicRoot);
@@ -322,6 +326,10 @@ public sealed partial class MainViewModel
         SecondarySubTab = targetSubTab;
         UpdateNavigationState();
         ApplyActiveNavigationData();
+        if (normalized == "sync" && _uiContext is not null && !_lanSyncManuallyStopped && _syncHost is not { IsRunning: true } && !string.IsNullOrWhiteSpace(_store.MusicRoot))
+        {
+            _ = EnsureLanSyncHostRunningAsync(silent: true);
+        }
     }
 
     public void SelectSubTab(string subTabId)

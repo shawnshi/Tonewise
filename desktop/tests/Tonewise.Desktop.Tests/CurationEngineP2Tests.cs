@@ -376,6 +376,137 @@ public sealed class CurationEngineP2Tests
         }
     }
 
+    [Fact]
+    public void StagingDiffStore_PhysicalWriteFailure_DoesNotMarkCommitted_AndWritesWorkMovementTags()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "tw_p2_physfail_" + Guid.NewGuid().ToString("N"));
+        string dotDir = Path.Combine(tempDir, ".tonewise");
+        Directory.CreateDirectory(dotDir);
+        string dbPath = Path.Combine(dotDir, "manifest.db");
+        string wavPath = Path.Combine(tempDir, "01 - Sonata.wav");
+
+        try
+        {
+            string schemaSql = File.ReadAllText(Path.Combine(FindRepoRoot(), "protocol", "schemas", "manifest.sql"));
+            using (var setupConn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                setupConn.Open();
+                using var setupCmd = setupConn.CreateCommand();
+                setupCmd.CommandText = schemaSql;
+                setupCmd.ExecuteNonQuery();
+            }
+
+            const int sampleBytes = 8192;
+            byte[] wav = new byte[44 + sampleBytes];
+            Encoding.ASCII.GetBytes("RIFF").CopyTo(wav, 0);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wav.AsSpan(4, 4), (uint)(36 + sampleBytes));
+            Encoding.ASCII.GetBytes("WAVE").CopyTo(wav, 8);
+            Encoding.ASCII.GetBytes("fmt ").CopyTo(wav, 12);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wav.AsSpan(16, 4), 16u);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(wav.AsSpan(20, 2), 1);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(wav.AsSpan(22, 2), 2);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wav.AsSpan(24, 4), 44100u);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wav.AsSpan(28, 4), 176400u);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(wav.AsSpan(32, 2), 4);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(wav.AsSpan(34, 2), 16);
+            Encoding.ASCII.GetBytes("data").CopyTo(wav, 36);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wav.AsSpan(40, 4), (uint)sampleBytes);
+            for (int i = 0; i < sampleBytes; i++)
+            {
+                wav[44 + i] = (byte)((i * 31 + 7) & 0xFF);
+            }
+            File.WriteAllBytes(wavPath, wav);
+
+            var fp0 = Tonewise.Interop.TonewiseCoreClient.ComputeFingerprint(wavPath);
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                conn.Open();
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                        title, artists_json
+                    ) VALUES (
+                        'uid_sonata', $ah, $hsize, $hh, 0,
+                        '01 - Sonata.wav', $fsize, 1000, 'wav', 44100, 50,
+                        'Sonata No. 1', '["Test Pianist"]'
+                    );
+                    """;
+                ins.Parameters.AddWithValue("$ah", Convert.FromHexString(fp0.AudioFrameBlake3Hex));
+                ins.Parameters.AddWithValue("$hsize", (long)fp0.HeaderSize);
+                ins.Parameters.AddWithValue("$hh", Convert.FromHexString(fp0.HeaderBlake3Hex));
+                ins.Parameters.AddWithValue("$fsize", (long)fp0.FileSize);
+                ins.ExecuteNonQuery();
+            }
+
+            var store = new StagingDiffStore(dbPath, tempDir);
+            var proposals = new[]
+            {
+                StagingDiffStore.TryCreateProposal("uid_sonata", "work_name", null, "Piano Concerto No. 1", 0.95, "Test")!,
+                StagingDiffStore.TryCreateProposal("uid_sonata", "movement_name", null, "I. Allegro", 0.95, "Test")!,
+            };
+            Assert.Equal(2, store.EnqueueProposals(proposals));
+            Assert.Equal(2, store.ApproveAllHighConfidence(0.90));
+
+            using (var lockStream = new FileStream(wavPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                var failedCommit = store.CommitApprovedBatch("batch-locked-1", autoApproveThreshold: 0.80);
+                Assert.Equal(0, failedCommit.CommittedCount);
+                Assert.Equal(0, failedCommit.PhysicalFilesUpdated);
+                Assert.NotNull(failedCommit.PhysicalWriteFailures);
+                Assert.Contains("01 - Sonata.wav", Assert.Single(failedCommit.PhysicalWriteFailures!));
+
+                var (approvedCount, pendingCount) = store.GetPendingProposalCounts();
+                Assert.Equal(2, approvedCount);
+                Assert.Equal(0, pendingCount);
+
+                using var checkConn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+                checkConn.Open();
+                using var q = checkConn.CreateCommand();
+                q.CommandText = "SELECT work_name, movement_name FROM tracks WHERE track_uid = 'uid_sonata';";
+                using var r = q.ExecuteReader();
+                Assert.True(r.Read());
+                Assert.True(r.IsDBNull(0));
+                Assert.True(r.IsDBNull(1));
+            }
+
+            var okCommit = store.CommitApprovedBatch("batch-unlocked-2", autoApproveThreshold: 0.80);
+            Assert.Equal(2, okCommit.CommittedCount);
+            Assert.Equal(1, okCommit.PhysicalFilesUpdated);
+            Assert.True(okCommit.PhysicalWriteFailures is null || okCommit.PhysicalWriteFailures.Count == 0);
+
+            using (var checkConn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+            {
+                checkConn.Open();
+                using var q = checkConn.CreateCommand();
+                q.CommandText = "SELECT work_name, movement_name FROM tracks WHERE track_uid = 'uid_sonata';";
+                using var r = q.ExecuteReader();
+                Assert.True(r.Read());
+                Assert.Equal("Piano Concerto No. 1", r.GetString(0));
+                Assert.Equal("I. Allegro", r.GetString(1));
+            }
+
+            var fp1 = Tonewise.Interop.TonewiseCoreClient.ComputeFingerprint(wavPath);
+            Assert.Equal(fp0.AudioFrameBlake3Hex, fp1.AudioFrameBlake3Hex);
+
+            byte[] writtenBytes = File.ReadAllBytes(wavPath);
+            Assert.True(
+                writtenBytes.AsSpan().IndexOf(Encoding.UTF8.GetBytes("Piano Concerto No. 1")) >= 0
+                || writtenBytes.AsSpan().IndexOf(Encoding.Unicode.GetBytes("Piano Concerto No. 1")) >= 0,
+                "Expected work_name tag written to physical WAV");
+            Assert.True(
+                writtenBytes.AsSpan().IndexOf(Encoding.UTF8.GetBytes("I. Allegro")) >= 0
+                || writtenBytes.AsSpan().IndexOf(Encoding.Unicode.GetBytes("I. Allegro")) >= 0,
+                "Expected movement_name tag written to physical WAV");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
     private sealed class StubDoubanHttpHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

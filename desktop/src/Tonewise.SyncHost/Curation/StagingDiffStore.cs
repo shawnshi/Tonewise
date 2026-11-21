@@ -30,7 +30,8 @@ public sealed record CurationCommitResult(
     string BatchId,
     int CommittedCount,
     int PhysicalFilesUpdated = 0,
-    IReadOnlyList<string>? CommittedTrackUids = null);
+    IReadOnlyList<string>? CommittedTrackUids = null,
+    IReadOnlyList<string>? PhysicalWriteFailures = null);
 
 /// <summary>
 /// Enforces the two anti-corruption curation laws against `manifest.db`:
@@ -75,6 +76,7 @@ public sealed class StagingDiffStore
     {
         "title" or "artists_json" or "composers_json" or "conductors_json"
             or "album" or "genre" or "year" or "publisher"
+            or "work_name" or "movement_name"
             or "tempo_bpm" or "mood_json" or "dj_scene_json"
             or "dj_vocals" or "dj_energy" => true,
         _ => false,
@@ -415,15 +417,23 @@ public sealed class StagingDiffStore
             }
         }
 
-        var physicalResults = WriteBackPhysicalFilesOutsideTx(conn, updatesByTrack, maxPhysicalFiles);
+        var (physicalResults, physicalFailures) = WriteBackPhysicalFilesOutsideTx(conn, updatesByTrack, maxPhysicalFiles);
 
         int committed = 0;
+        var committedItems = new List<TagDiffProposal>(targets.Count);
+        var failedPhysicalItems = new List<TagDiffProposal>();
         using (var tx = TonewiseSqlite.BeginImmediateTransaction(conn))
         {
             foreach (var item in targets)
             {
                 string column = ResolveColumnName(item.FieldName);
+                if (IsPhysicalTagColumn(column) && physicalFailures.ContainsKey(item.TrackUid))
+                {
+                    failedPhysicalItems.Add(item);
+                    continue;
+                }
                 ApplyTrackColumnValue(conn, tx, item.TrackUid, column, item.SuggestedValue, nowMs);
+                committedItems.Add(item);
                 committed++;
             }
 
@@ -433,7 +443,7 @@ public sealed class StagingDiffStore
 
         using (var stateTx = TonewiseSqlite.BeginImmediateTransaction(stateConn))
         {
-            foreach (var item in targets)
+            foreach (var item in committedItems)
             {
                 using var markCmd = stateConn.CreateCommand();
                 markCmd.Transaction = stateTx;
@@ -444,21 +454,42 @@ public sealed class StagingDiffStore
                 markCmd.ExecuteNonQuery();
             }
 
-            using var batchCmd = stateConn.CreateCommand();
-            batchCmd.Transaction = stateTx;
-            batchCmd.CommandText = """
-                INSERT INTO curation_batches (batch_id, committed_at_ms, item_count, rolled_back)
-                VALUES ($bid, $ts, $cnt, 0);
-                """;
-            batchCmd.Parameters.AddWithValue("$bid", batchId);
-            batchCmd.Parameters.AddWithValue("$ts", nowMs);
-            batchCmd.Parameters.AddWithValue("$cnt", committed);
-            batchCmd.ExecuteNonQuery();
+            foreach (var failedItem in failedPhysicalItems)
+            {
+                if (failedItem.Status != ProposalStatus.Approved)
+                {
+                    using var keepApprovedCmd = stateConn.CreateCommand();
+                    keepApprovedCmd.Transaction = stateTx;
+                    keepApprovedCmd.CommandText = "UPDATE staging_diff_queue SET status = $st, batch_id = NULL WHERE proposal_id = $id;";
+                    keepApprovedCmd.Parameters.AddWithValue("$st", ProposalStatus.Approved);
+                    keepApprovedCmd.Parameters.AddWithValue("$id", failedItem.ProposalId);
+                    keepApprovedCmd.ExecuteNonQuery();
+                }
+            }
+
+            if (committed > 0)
+            {
+                using var batchCmd = stateConn.CreateCommand();
+                batchCmd.Transaction = stateTx;
+                batchCmd.CommandText = """
+                    INSERT INTO curation_batches (batch_id, committed_at_ms, item_count, rolled_back)
+                    VALUES ($bid, $ts, $cnt, 0);
+                    """;
+                batchCmd.Parameters.AddWithValue("$bid", batchId);
+                batchCmd.Parameters.AddWithValue("$ts", nowMs);
+                batchCmd.Parameters.AddWithValue("$cnt", committed);
+                batchCmd.ExecuteNonQuery();
+            }
             stateTx.Commit();
         }
 
-        var committedUids = targets.Select(t => t.TrackUid).Distinct(StringComparer.Ordinal).ToList();
-        return new CurationCommitResult(batchId, committed, physicalResults.Count, committedUids);
+        var committedUids = committedItems.Select(t => t.TrackUid).Distinct(StringComparer.Ordinal).ToList();
+        return new CurationCommitResult(
+            batchId,
+            committed,
+            physicalResults.Count,
+            committedUids,
+            physicalFailures.Count > 0 ? physicalFailures.Values.ToList() : null);
     }
 
     public CurationCommitResult ApplyDirectCuratedEdits(
@@ -504,7 +535,7 @@ public sealed class StagingDiffStore
             }
         }
 
-        var physicalResults = WriteBackPhysicalFilesOutsideTx(conn, fileUpdatesByTrack);
+        var (physicalResults, physicalFailures) = WriteBackPhysicalFilesOutsideTx(conn, fileUpdatesByTrack);
 
         int committed = 0;
         var appliedAudit = new List<(string TrackUid, string Column, string? OrigVal, string NewVal)>();
@@ -514,6 +545,11 @@ public sealed class StagingDiffStore
             {
                 foreach (var (col, val) in normalizedUpdates)
                 {
+                    if (IsPhysicalTagColumn(col) && physicalFailures.ContainsKey(uid))
+                    {
+                        continue;
+                    }
+
                     string? origVal = null;
                     using (var origCmd = conn.CreateCommand())
                     {
@@ -537,9 +573,10 @@ public sealed class StagingDiffStore
             tx.Commit();
         }
 
-        using var stateConn = OpenStateConnection();
-        using (var stateTx = TonewiseSqlite.BeginImmediateTransaction(stateConn))
+        if (committed > 0)
         {
+            using var stateConn = OpenStateConnection();
+            using var stateTx = TonewiseSqlite.BeginImmediateTransaction(stateConn);
             foreach (var (uid, col, origVal, newVal) in appliedAudit)
             {
                 using var qCmd = stateConn.CreateCommand();
@@ -579,7 +616,13 @@ public sealed class StagingDiffStore
             stateTx.Commit();
         }
 
-        return new CurationCommitResult(batchId, committed, physicalResults.Count);
+        var committedUids = appliedAudit.Select(a => a.TrackUid).Distinct(StringComparer.Ordinal).ToList();
+        return new CurationCommitResult(
+            batchId,
+            committed,
+            physicalResults.Count,
+            committedUids,
+            physicalFailures.Count > 0 ? physicalFailures.Values.ToList() : null);
     }
 
     public int RollbackBatch(string batchId)
@@ -637,14 +680,22 @@ public sealed class StagingDiffStore
             }
         }
 
-        var physicalResults = WriteBackPhysicalFilesOutsideTx(conn, rollbackUpdatesByTrack);
+        var (physicalResults, physicalFailures) = WriteBackPhysicalFilesOutsideTx(conn, rollbackUpdatesByTrack);
 
+        var rolledBackItems = new List<(string ProposalId, string TrackUid, string FieldName, string? OriginalValue)>();
+        int skippedCount = 0;
         using (var tx = TonewiseSqlite.BeginImmediateTransaction(conn))
         {
             foreach (var item in items)
             {
                 string column = ResolveColumnName(item.FieldName);
+                if (IsPhysicalTagColumn(column) && physicalFailures.ContainsKey(item.TrackUid))
+                {
+                    skippedCount++;
+                    continue;
+                }
                 ApplyTrackColumnValue(conn, tx, item.TrackUid, column, item.OriginalValue, nowMs);
+                rolledBackItems.Add(item);
             }
 
             ApplyPhysicalFingerprintsInTx(conn, tx, physicalResults);
@@ -653,7 +704,7 @@ public sealed class StagingDiffStore
 
         using (var stateTx = TonewiseSqlite.BeginImmediateTransaction(stateConn))
         {
-            foreach (var item in items)
+            foreach (var item in rolledBackItems)
             {
                 using var updCmd = stateConn.CreateCommand();
                 updCmd.Transaction = stateTx;
@@ -663,25 +714,29 @@ public sealed class StagingDiffStore
                 updCmd.ExecuteNonQuery();
             }
 
-            using var markBatchCmd = stateConn.CreateCommand();
-            markBatchCmd.Transaction = stateTx;
-            markBatchCmd.CommandText = "UPDATE curation_batches SET rolled_back = 1 WHERE batch_id = $bid;";
-            markBatchCmd.Parameters.AddWithValue("$bid", batchId);
-            markBatchCmd.ExecuteNonQuery();
+            if (skippedCount == 0)
+            {
+                using var markBatchCmd = stateConn.CreateCommand();
+                markBatchCmd.Transaction = stateTx;
+                markBatchCmd.CommandText = "UPDATE curation_batches SET rolled_back = 1 WHERE batch_id = $bid;";
+                markBatchCmd.Parameters.AddWithValue("$bid", batchId);
+                markBatchCmd.ExecuteNonQuery();
+            }
             stateTx.Commit();
         }
 
-        return items.Count;
+        return rolledBackItems.Count;
     }
 
-    private List<(string TrackUid, AudioFrameFingerprint Fingerprint)> WriteBackPhysicalFilesOutsideTx(
+    private (List<(string TrackUid, AudioFrameFingerprint Fingerprint)> Succeeded, Dictionary<string, string> FailedByTrack) WriteBackPhysicalFilesOutsideTx(
         SqliteConnection conn,
         Dictionary<string, Dictionary<string, string?>> updatesByTrack,
         int maxPhysicalFiles = int.MaxValue)
     {
         var results = new List<(string TrackUid, AudioFrameFingerprint Fingerprint)>();
+        var failedByTrack = new Dictionary<string, string>(StringComparer.Ordinal);
         if (string.IsNullOrWhiteSpace(MusicRoot) || updatesByTrack.Count == 0 || maxPhysicalFiles <= 0)
-            return results;
+            return (results, failedByTrack);
 
         string rootFull = Path.GetFullPath(MusicRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
@@ -709,10 +764,11 @@ public sealed class StagingDiffStore
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Physical tag writeback skipped for {relPath}: {ex.Message}");
+                failedByTrack[uid] = $"{relPath}: {ex.Message}";
+                System.Diagnostics.Debug.WriteLine($"Physical tag writeback failed for {relPath}: {ex.Message}");
             }
         }
-        return results;
+        return (results, failedByTrack);
     }
 
     private static void ApplyPhysicalFingerprintsInTx(

@@ -43,7 +43,7 @@ public sealed class PartitionedFirConvolver
 
     public void Clear()
     {
-        _channelConvolvers = null;
+        Volatile.Write(ref _channelConvolvers, null);
         LoadedTapCount = 0;
         LoadedImpulsePath = null;
         _isEnabled = false;
@@ -78,7 +78,7 @@ public sealed class PartitionedFirConvolver
             convolvers[ch] = new ChannelConvolver(ir);
         }
 
-        _channelConvolvers = convolvers;
+        Volatile.Write(ref _channelConvolvers, convolvers);
         LoadedTapCount = Math.Max(lTrimmed.Length, rTrimmed.Length);
         LoadedImpulsePath = sourceLabel;
         _isEnabled = true;
@@ -215,20 +215,22 @@ public sealed class PartitionedFirConvolver
 
     public double ProcessSample(double drySample, int channel)
     {
-        if (!_isEnabled || _channelConvolvers is null || channel < 0 || channel >= _channelConvolvers.Length)
+        var convs = Volatile.Read(ref _channelConvolvers);
+        if (!_isEnabled || convs is null || channel < 0 || channel >= convs.Length)
         {
             return drySample;
         }
 
-        double wet = _channelConvolvers[channel].ProcessSample(drySample);
+        double wet = convs[channel].ProcessSample(drySample);
         double mix = DryWetMix;
         return drySample * (1.0 - mix) + wet * mix;
     }
 
     public void Reset()
     {
-        if (_channelConvolvers is null) return;
-        foreach (var conv in _channelConvolvers)
+        var convs = Volatile.Read(ref _channelConvolvers);
+        if (convs is null) return;
+        foreach (var conv in convs)
         {
             conv.Reset();
         }

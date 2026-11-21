@@ -19,10 +19,12 @@
 #include "JInputStream.h"
 
 #include <cmath>
+#include <stdexcept>
 
 #include "JClassRef.h"
 #include "JByteArrayRef.h"
 #include "JStringRef.h"
+#include "util.h"
 
 JInputStream::JInputStream(JNIEnv *env, jobject jInputStream) : env(env), jInputStream(
         jInputStream) {
@@ -44,9 +46,13 @@ JInputStream::JInputStream(JNIEnv *env, jobject jInputStream) : env(env), jInput
             "(J)Z");
     jInputStreamTellMethod = jInputStreamClass.method("tell", "()J");
     jInputStreamLengthMethod = jInputStreamClass.method("length", "()J");
-    JStringRef jName = { env, reinterpret_cast<jstring>(env->CallObjectMethod(
-            jInputStream, jInputStreamNameMethod)) };
-    _name = TagLib::String(env->GetStringUTFChars(*jName, nullptr));
+    jstring rawName = reinterpret_cast<jstring>(env->CallObjectMethod(
+            jInputStream, jInputStreamNameMethod));
+    throwOnJniException(env, "JInputStream::name");
+    if (rawName != nullptr) {
+        JStringRef jName = { env, rawName };
+        _name = jName.copy();
+    }
 }
 
 JInputStream::~JInputStream() {
@@ -61,12 +67,14 @@ TagLib::FileName /* const char * */JInputStream::name() const {
 jint JInputStream::readBlockImpl(TagLib::ByteVector &buf) {
     jobject wrappedByteBuffer = env->NewDirectByteBuffer(buf.data(),
             buf.size());
+    throwOnJniException(env, "JInputStream::NewDirectByteBuffer");
     if (wrappedByteBuffer == nullptr) {
         throw std::runtime_error("Failed to wrap ByteBuffer");
     }
     JObjectRef byteBuffer { env, wrappedByteBuffer };
     jint read = env->CallIntMethod(jInputStream, jInputStreamReadBlockMethod,
             *byteBuffer);
+    throwOnJniException(env, "JInputStream::readBlock");
     return read;
 }
 
@@ -103,7 +111,11 @@ bool JInputStream::readOnly() const {
 }
 
 bool JInputStream::isOpen() const {
-    return env->CallBooleanMethod(jInputStream, jInputStreamIsOpenMethod);
+    jboolean open = env->CallBooleanMethod(jInputStream, jInputStreamIsOpenMethod);
+    if (checkAndClearJniException(env, "JInputStream::isOpen")) {
+        return false;
+    }
+    return open;
 }
 
 void JInputStream::seek(TagLib::offset_t offset, Position p) {
@@ -113,14 +125,17 @@ void JInputStream::seek(TagLib::offset_t offset, Position p) {
     case Beginning:
         result = env->CallBooleanMethod(jInputStream,
                 jInputStreamSeekFromBeginningMethod, joffset);
+        throwOnJniException(env, "JInputStream::seekFromBeginning");
         break;
     case Current:
         result = env->CallBooleanMethod(jInputStream,
                 jInputStreamSeekFromCurrentMethod, joffset);
+        throwOnJniException(env, "JInputStream::seekFromCurrent");
         break;
     case End:
         result = env->CallBooleanMethod(jInputStream,
                 jInputStreamSeekFromEndMethod, joffset);
+        throwOnJniException(env, "JInputStream::seekFromEnd");
         break;
     }
     if (!result) {
@@ -134,6 +149,7 @@ void JInputStream::clear() {
 
 TagLib::offset_t JInputStream::tell() const {
     jlong jposition = env->CallLongMethod(jInputStream, jInputStreamTellMethod);
+    throwOnJniException(env, "JInputStream::tell");
     if (jposition == INT64_MIN) {
         throw std::runtime_error("Failed to get position, see logs");
     }
@@ -142,6 +158,7 @@ TagLib::offset_t JInputStream::tell() const {
 
 TagLib::offset_t JInputStream::length() {
     jlong jlength = env->CallLongMethod(jInputStream, jInputStreamLengthMethod);
+    throwOnJniException(env, "JInputStream::length");
     if (jlength == INT64_MIN) {
         throw std::runtime_error("Failed to get length, see logs");
     }

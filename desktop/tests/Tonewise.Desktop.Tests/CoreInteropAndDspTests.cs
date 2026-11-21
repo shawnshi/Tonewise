@@ -178,6 +178,69 @@ public sealed class CoreInteropAndDspTests
         }
     }
 
+    [Fact]
+    public async Task SandboxedVst3HostBridge_And_PartitionedFirConvolver_ConcurrentSafetyAndWatchdog()
+    {
+        using var bridge = new Tonewise.Audio.SandboxedVst3HostBridge();
+        bridge.ConfigureSlots(
+            [new Tonewise.Audio.Vst3SlotConfig("slow.vst3", DryWetMix: 1.0, IsBypassed: false)],
+            externalWorkerCallback: (s, _, _) =>
+            {
+                Thread.Sleep(25);
+                return s * 0.5;
+            });
+
+        double dryFallback = bridge.ProcessSample(0.4, 0);
+        Assert.Equal(0.4, dryFallback, 6);
+        Assert.True(bridge.IsFaultedBypass);
+
+        bridge.ConfigureSlots(
+            [new Tonewise.Audio.Vst3SlotConfig("fast.vst3", DryWetMix: 0.5, IsBypassed: false)],
+            externalWorkerCallback: (s, _, _) => s * 0.25);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+        Task readerTask = Task.Run(() =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                _ = bridge.ProcessSample(0.5, 0);
+                _ = bridge.ProcessSample(-0.5, 1);
+            }
+        });
+        Task mutatorTask = Task.Run(() =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                bridge.Clear();
+                bridge.ConfigureSlots(
+                    [new Tonewise.Audio.Vst3SlotConfig("fast.vst3", DryWetMix: 0.5, IsBypassed: false)],
+                    externalWorkerCallback: (s, _, _) => s * 0.25);
+            }
+        });
+        await Task.WhenAll(readerTask, mutatorTask);
+
+        var convolver = new Tonewise.Audio.PartitionedFirConvolver(2);
+        convolver.LoadImpulse([1.0, 0.2, 0.1], [1.0, 0.2, 0.1], normalizeEnergy: false);
+        using var convCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+        Task convProc = Task.Run(() =>
+        {
+            while (!convCts.IsCancellationRequested)
+            {
+                _ = convolver.ProcessSample(0.25, 0);
+                _ = convolver.ProcessSample(-0.25, 1);
+            }
+        });
+        Task convCtrl = Task.Run(() =>
+        {
+            while (!convCts.IsCancellationRequested)
+            {
+                convolver.Reset();
+                convolver.Clear();
+                convolver.LoadImpulse([1.0, 0.1], [1.0, 0.1], normalizeEnergy: false);
+            }
+        });
+        await Task.WhenAll(convProc, convCtrl);
+    }
+
     private sealed class StubWaveProvider(float[] samples) : NAudio.Wave.ISampleProvider
     {
         private int _pos;
