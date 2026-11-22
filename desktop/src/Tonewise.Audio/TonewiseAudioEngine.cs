@@ -1,8 +1,17 @@
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
 namespace Tonewise.Audio;
+
+public sealed record AudioPlaybackInterruption(
+    string FilePath,
+    TimeSpan Position,
+    TimeSpan Duration,
+    bool WasExclusive,
+    int HResult,
+    string Reason);
 
 public sealed record DesktopSignalPathState(
     string OutputDeviceName,
@@ -27,6 +36,8 @@ public sealed record DesktopSignalPathState(
 public sealed class TonewiseAudioEngine : IDisposable
 {
     private readonly Lock _engineLock = new();
+    private readonly IPlaybackPowerGuard _powerGuard;
+    private readonly bool _ownsPowerGuard;
     private IWavePlayer? _output;
     private WaveStream? _sourceWaveStream;
     private ISampleProvider? _sourceSamples;
@@ -58,10 +69,21 @@ public sealed class TonewiseAudioEngine : IDisposable
     private volatile bool _isDsdSource;
     private bool _isAsioActive;
     private volatile bool _pausePending;
+    private volatile bool _pauseRequested;
     private long _transportOpGen;
     private int _outputLatencyMs = 100;
     private Task? _pendingErrorTeardown;
     private volatile BypassSnapshot _bypassSnapshot = new(false, 0.0, false, false, false, false);
+
+    public TonewiseAudioEngine() : this(null)
+    {
+    }
+
+    internal TonewiseAudioEngine(IPlaybackPowerGuard? powerGuard)
+    {
+        _ownsPowerGuard = powerGuard is null;
+        _powerGuard = powerGuard ?? new WindowsPlaybackPowerGuard("Tonewise Audio Playback");
+    }
 
     private sealed record BypassSnapshot(
         bool HasEq,
@@ -75,6 +97,9 @@ public sealed class TonewiseAudioEngine : IDisposable
     public event Action? PlaybackEnded;
     public event Action<string>? GaplessTrackAdvanced;
     public event Action<string>? PlaybackError;
+    public event Action<AudioPlaybackInterruption>? PlaybackInterrupted;
+
+    public void ReleasePowerKeepAlive() => _powerGuard.ReleaseImmediate();
 
     public string? CurrentFilePath { get; private set; }
     public bool IsPlaying
@@ -340,7 +365,7 @@ public sealed class TonewiseAudioEngine : IDisposable
         return null;
     }
 
-    public void PlayFile(string filePath, double initialSeekFraction = 0.0, bool startPaused = false, TimeSpan? initialPosition = null)
+    public void PlayFile(string filePath, double initialSeekFraction = 0.0, bool startPaused = false, TimeSpan? initialPosition = null, bool allowExclusive = true)
     {
         DetachedPlaybackHandles oldHandles;
         Task? pendingTeardown;
@@ -359,6 +384,8 @@ public sealed class TonewiseAudioEngine : IDisposable
         DesktopSignalPathState? signalSnapshotToNotify = null;
         DetachedPlaybackHandles failedHandles = default;
         ExceptionDispatchInfo? capturedException = null;
+        bool shouldAcquirePower = false;
+        bool shouldReleasePower = false;
 
         lock (_engineLock)
         {
@@ -369,6 +396,8 @@ public sealed class TonewiseAudioEngine : IDisposable
                 _ = ThreadPool.QueueUserWorkItem(_ => DisposeDetachedHandles(stale));
             }
             Interlocked.Exchange(ref _playbackEndedSignaled, 0);
+            _pausePending = false;
+            _pauseRequested = startPaused;
 
             string ext = Path.GetExtension(filePath).ToLowerInvariant();
             _isDsdSource = ext is ".dsf" or ".dff";
@@ -449,7 +478,8 @@ public sealed class TonewiseAudioEngine : IDisposable
 
                 _asioDriverName = null;
 
-                if (!string.IsNullOrWhiteSpace(_selectedDeviceId)
+                if (allowExclusive
+                    && !string.IsNullOrWhiteSpace(_selectedDeviceId)
                     && _selectedDeviceId.StartsWith(AudioDeviceRouter.AsioIdPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     string driver = _selectedDeviceId[AudioDeviceRouter.AsioIdPrefix.Length..];
@@ -480,12 +510,13 @@ public sealed class TonewiseAudioEngine : IDisposable
                         try { resolvedDeviceName = device.FriendlyName; } catch { }
                         try { resolvedDeviceId = device.ID; } catch { }
                     }
-                    if (device is not null && _preferExclusive)
+                    if (allowExclusive && device is not null && _preferExclusive)
                     {
                         WasapiOut? wasapi = null;
                         try
                         {
                             wasapi = new WasapiOut(device, AudioClientShareMode.Exclusive, true, 120);
+                            _ = WasapiMediaCategoryHelper.TryConfigureMediaCategory(wasapi);
                             wasapi.Init(dsp);
                             player = wasapi;
                             wasapi = null;
@@ -504,6 +535,7 @@ public sealed class TonewiseAudioEngine : IDisposable
                             try
                             {
                                 exclusiveFallback = new WasapiOut(device, AudioClientShareMode.Exclusive, false, 150);
+                                _ = WasapiMediaCategoryHelper.TryConfigureMediaCategory(exclusiveFallback);
                                 exclusiveFallback.Init(dsp);
                                 player = exclusiveFallback;
                                 exclusiveFallback = null;
@@ -526,6 +558,7 @@ public sealed class TonewiseAudioEngine : IDisposable
                             shared = device is not null
                                 ? new WasapiOut(device, AudioClientShareMode.Shared, false, 150)
                                 : new WasapiOut(AudioClientShareMode.Shared, 150);
+                            _ = WasapiMediaCategoryHelper.TryConfigureMediaCategory(shared);
                             shared.Init(dsp);
                             player = shared;
                             shared = null;
@@ -561,6 +594,7 @@ public sealed class TonewiseAudioEngine : IDisposable
                         bool finished = false;
                         bool raiseError = false;
                         string? errorMsg = null;
+                        AudioPlaybackInterruption? interruption = null;
                         DetachedPlaybackHandles errorDetach = default;
                         DesktopSignalPathState? standbySnap = null;
                         lock (_engineLock)
@@ -568,14 +602,7 @@ public sealed class TonewiseAudioEngine : IDisposable
                             isActiveOutput = ReferenceEquals(_output, capturedPlayer);
                             if (isActiveOutput)
                             {
-                                if (args.Exception is not null)
-                                {
-                                    errorDetach = DetachPlaybackHandlesLocked();
-                                    standbySnap = ResetSignalPathToStandbyLocked();
-                                    raiseError = true;
-                                    errorMsg = args.Exception.Message;
-                                }
-                                else
+                                if (args.Exception is null)
                                 {
                                     try
                                     {
@@ -595,6 +622,29 @@ public sealed class TonewiseAudioEngine : IDisposable
                                     {
                                         finished = capturedDsp.ReachedEndOfStream;
                                     }
+                                }
+
+                                bool unexpectedStop = args.Exception is not null
+                                    || (!finished && !_pausePending && !_pauseRequested && capturedPlayer.PlaybackState == PlaybackState.Stopped);
+
+                                if (unexpectedStop)
+                                {
+                                    string interruptedPath = CurrentFilePath ?? "";
+                                    TimeSpan interruptedPos = CapturePositionSafely(capturedGapless, capturedWaveStream, capturedSource);
+                                    TimeSpan interruptedDur = CaptureDurationSafely(capturedGapless, capturedWaveStream, capturedSource);
+                                    bool wasExclusive = CurrentSignalPath.IsExclusive;
+                                    int hresult = (args.Exception as COMException)?.HResult ?? args.Exception?.HResult ?? 0;
+                                    errorMsg = args.Exception?.Message ?? "音频输出流意外中断";
+                                    interruption = new AudioPlaybackInterruption(
+                                        interruptedPath,
+                                        interruptedPos,
+                                        interruptedDur,
+                                        wasExclusive,
+                                        hresult,
+                                        errorMsg);
+                                    errorDetach = DetachPlaybackHandlesLocked();
+                                    standbySnap = ResetSignalPathToStandbyLocked();
+                                    raiseError = true;
                                 }
                             }
                         }
@@ -616,11 +666,24 @@ public sealed class TonewiseAudioEngine : IDisposable
                         }
                         if (raiseError)
                         {
+                            if (!string.IsNullOrWhiteSpace(interruption?.FilePath))
+                            {
+                                _powerGuard.ScheduleDeferredRelease(TimeSpan.FromSeconds(8));
+                            }
+                            else
+                            {
+                                _powerGuard.ReleaseImmediate();
+                            }
+                            if (interruption is not null)
+                            {
+                                PlaybackInterrupted?.Invoke(interruption);
+                            }
                             PlaybackError?.Invoke(errorMsg ?? "Audio output device error");
                             return;
                         }
                         if (isActiveOutput && args.Exception is null && finished && Interlocked.CompareExchange(ref _playbackEndedSignaled, 1, 0) == 0)
                         {
+                            _powerGuard.ScheduleDeferredRelease(TimeSpan.FromSeconds(5));
                             PlaybackEnded?.Invoke();
                         }
                     }
@@ -657,10 +720,12 @@ public sealed class TonewiseAudioEngine : IDisposable
                 {
                     dsp.BeginTransportFadeIn(durationMs: 10.0, startFromZero: true);
                     player.Play();
+                    shouldAcquirePower = true;
                 }
                 else
                 {
                     dsp.BeginTransportFadeIn(durationMs: 15.0, startFromZero: true);
+                    shouldReleasePower = true;
                 }
             }
             catch (Exception ex)
@@ -678,6 +743,10 @@ public sealed class TonewiseAudioEngine : IDisposable
                 _cachedApoStatus = new(false, null);
                 _output = null;
                 _isAsioActive = false;
+                _pausePending = false;
+                _pauseRequested = false;
+                shouldAcquirePower = false;
+                shouldReleasePower = true;
                 signalSnapshotToNotify = ResetSignalPathToStandbyLocked();
                 capturedException = ExceptionDispatchInfo.Capture(ex);
             }
@@ -686,6 +755,14 @@ public sealed class TonewiseAudioEngine : IDisposable
         if (failedHandles.HasAny)
         {
             DisposeDetachedHandles(failedHandles);
+        }
+        if (shouldAcquirePower)
+        {
+            _powerGuard.Acquire();
+        }
+        else if (shouldReleasePower)
+        {
+            _powerGuard.ReleaseImmediate();
         }
         if (signalSnapshotToNotify is not null)
         {
@@ -929,26 +1006,38 @@ public sealed class TonewiseAudioEngine : IDisposable
 
     public void TogglePlayPause()
     {
+        bool acquirePower = false;
+        bool releasePower = false;
         lock (_engineLock)
         {
             if (_output is null) return;
             if (!_pausePending && _output.PlaybackState == PlaybackState.Playing)
             {
                 BeginSmoothPauseLocked();
+                releasePower = true;
             }
             else
             {
                 ResumeFromPauseLocked();
+                acquirePower = true;
             }
         }
+        if (releasePower) _powerGuard.ReleaseImmediate();
+        else if (acquirePower) _powerGuard.Acquire();
     }
 
     public void Pause()
     {
+        bool releasePower = false;
         lock (_engineLock)
         {
-            BeginSmoothPauseLocked();
+            if (_output is not null && !_pausePending && _output.PlaybackState == PlaybackState.Playing)
+            {
+                BeginSmoothPauseLocked();
+                releasePower = true;
+            }
         }
+        if (releasePower) _powerGuard.ReleaseImmediate();
     }
 
     private void BeginSmoothPauseLocked()
@@ -958,6 +1047,7 @@ public sealed class TonewiseAudioEngine : IDisposable
             return;
         }
 
+        _pauseRequested = true;
         _pausePending = true;
         long gen = Interlocked.Increment(ref _transportOpGen);
         IWavePlayer capturedOutput = _output;
@@ -1010,6 +1100,7 @@ public sealed class TonewiseAudioEngine : IDisposable
     {
         if (_output is null) return;
         Interlocked.Increment(ref _transportOpGen);
+        _pauseRequested = false;
 
         if (_pausePending)
         {
@@ -1091,6 +1182,7 @@ public sealed class TonewiseAudioEngine : IDisposable
         {
             try { pendingTeardown.Wait(500); } catch { }
         }
+        _powerGuard.ReleaseImmediate();
         SignalPathChanged?.Invoke(standby);
     }
 
@@ -1213,6 +1305,7 @@ public sealed class TonewiseAudioEngine : IDisposable
     {
         Interlocked.Increment(ref _transportOpGen);
         _pausePending = false;
+        _pauseRequested = false;
         CurrentFilePath = null;
         var detached = new DetachedPlaybackHandles(_output, _sourceDisposable, _device, _dsp);
         _output = null;
@@ -1236,6 +1329,44 @@ public sealed class TonewiseAudioEngine : IDisposable
         try { detached.Dsp?.Dispose(); } catch { }
         try { detached.SourceDisposable?.Dispose(); } catch { }
         try { detached.Device?.Dispose(); } catch { }
+    }
+
+    private static TimeSpan CapturePositionSafely(GaplessSampleProvider? gapless, WaveStream? waveStream, ISampleProvider? sourceSamples)
+    {
+        try
+        {
+            if (gapless is not null) return gapless.Position;
+            if (waveStream is not null) return waveStream.CurrentTime;
+            return sourceSamples switch
+            {
+                AudioFileReader afr => afr.CurrentTime,
+                DsdStreamReader dsd => dsd.CurrentTime,
+                _ => TimeSpan.Zero,
+            };
+        }
+        catch
+        {
+            return TimeSpan.Zero;
+        }
+    }
+
+    private static TimeSpan CaptureDurationSafely(GaplessSampleProvider? gapless, WaveStream? waveStream, ISampleProvider? sourceSamples)
+    {
+        try
+        {
+            if (gapless is not null) return gapless.Duration;
+            if (waveStream is not null) return waveStream.TotalTime;
+            return sourceSamples switch
+            {
+                AudioFileReader afr => afr.TotalTime,
+                DsdStreamReader dsd => dsd.TotalTime,
+                _ => TimeSpan.Zero,
+            };
+        }
+        catch
+        {
+            return TimeSpan.Zero;
+        }
     }
 
     private static string ToExtendedPathIfLong(string path)
@@ -1295,5 +1426,9 @@ public sealed class TonewiseAudioEngine : IDisposable
     public void Dispose()
     {
         Stop();
+        if (_ownsPowerGuard)
+        {
+            _powerGuard.Dispose();
+        }
     }
 }

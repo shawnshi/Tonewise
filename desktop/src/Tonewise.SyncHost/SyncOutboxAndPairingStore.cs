@@ -51,6 +51,27 @@ public sealed record ResolvedSyncPlaylist(
     [property: JsonPropertyName("track_uids")] IReadOnlyList<string> TrackUids
 );
 
+public sealed record SyncPolicyConfig(
+    [property: JsonPropertyName("mirror_prune_enabled")] bool MirrorPruneEnabled = false,
+    [property: JsonPropertyName("prune_scope")] string PruneScope = "music_folder_all",
+    [property: JsonPropertyName("target_root")] string TargetRoot = "Music",
+    [property: JsonPropertyName("allow_adb_foreign_delete_fallback")] bool AllowAdbForeignDeleteFallback = true,
+    [property: JsonPropertyName("large_prune_confirm_threshold_count")] int LargePruneConfirmThresholdCount = 20,
+    [property: JsonPropertyName("large_prune_confirm_threshold_ratio")] double LargePruneConfirmThresholdRatio = 0.30
+);
+
+public sealed record ResolvedSyncPolicy(
+    [property: JsonPropertyName("mirror_prune_enabled")] bool MirrorPruneEnabled,
+    [property: JsonPropertyName("prune_scope")] string PruneScope,
+    [property: JsonPropertyName("target_root")] string TargetRoot,
+    [property: JsonPropertyName("outbox_authoritative")] bool OutboxAuthoritative,
+    [property: JsonPropertyName("missing_source_count")] int MissingSourceCount,
+    [property: JsonPropertyName("expected_playlist_names")] IReadOnlyList<string> ExpectedPlaylistNames,
+    [property: JsonPropertyName("large_prune_confirm_threshold_count")] int LargePruneConfirmThresholdCount = 20,
+    [property: JsonPropertyName("large_prune_confirm_threshold_ratio")] double LargePruneConfirmThresholdRatio = 0.30,
+    [property: JsonPropertyName("prune_confirmed_for_session")] bool PruneConfirmedForSession = false
+);
+
 public sealed record ResolvedOutboxPayload(
     [property: JsonPropertyName("host_name")] string HostName,
     [property: JsonPropertyName("generated_at_ms")] long GeneratedAtMs,
@@ -58,7 +79,8 @@ public sealed record ResolvedOutboxPayload(
     [property: JsonPropertyName("tracks")] IReadOnlyList<ResolvedSyncTrack> Tracks,
     [property: JsonPropertyName("playlists")] IReadOnlyList<ResolvedSyncPlaylist> Playlists,
     [property: JsonPropertyName("total_bytes")] long TotalBytes,
-    [property: JsonPropertyName("duplicate_track_count")] int DuplicateTrackCount = 0
+    [property: JsonPropertyName("duplicate_track_count")] int DuplicateTrackCount = 0,
+    [property: JsonPropertyName("sync_policy")] ResolvedSyncPolicy? SyncPolicy = null
 );
 
 public sealed record CatalogEntry(
@@ -96,6 +118,8 @@ public sealed partial class SyncOutboxAndPairingStore
     private readonly string _tonewiseDir;
     private readonly string _devicesPath;
     private readonly string _outboxPath;
+    private readonly string _identityPath;
+    private readonly string _syncPolicyPath;
     private readonly Lock _gate = new();
     private readonly Lock _resolveCacheLock = new();
     private readonly record struct ManifestFileStamp(bool Exists, long DbTicks, long DbLength, long WalTicks, long WalLength);
@@ -106,12 +130,16 @@ public sealed partial class SyncOutboxAndPairingStore
     private readonly Dictionary<string, (PlaylistFileStamp Stamp, PlaylistDocument Doc)> _cachedPlaylists =
         new(StringComparer.OrdinalIgnoreCase);
     private long _outboxMutationVersion;
+    private long _syncPolicyVersion;
+    private string? _cachedHostId;
+    private SyncPolicyConfig? _cachedSyncPolicy;
     private Dictionary<string, ManifestTrackRow>? _cachedRowsByUid;
     private sealed record CachedResolvedOutbox(
         ManifestFileStamp ManifestStamp,
         long OutboxFileTicks,
         long OutboxFileLength,
         long OutboxMutationVersion,
+        long SyncPolicyVersion,
         string PlaylistStampsFingerprint,
         DateTime ComputedAtUtc,
         ResolvedOutboxPayload Payload);
@@ -130,8 +158,111 @@ public sealed partial class SyncOutboxAndPairingStore
         _tonewiseDir = Path.Combine(musicRoot, ".tonewise");
         _devicesPath = Path.Combine(_tonewiseDir, "paired_devices.json");
         _outboxPath = Path.Combine(_tonewiseDir, "sync_outbox.json");
+        _identityPath = Path.Combine(_tonewiseDir, "host_identity.json");
+        _syncPolicyPath = Path.Combine(_tonewiseDir, "sync_policy.json");
         _pairingCode = GenerateSixDigitCode();
         _pairingCodeIssuedAtUtc = DateTimeOffset.UtcNow;
+    }
+
+    public string HostId
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (!string.IsNullOrWhiteSpace(_cachedHostId))
+                    return _cachedHostId;
+
+                if (File.Exists(_identityPath))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(File.ReadAllText(_identityPath, Encoding.UTF8));
+                        if (doc.RootElement.TryGetProperty("host_id", out var idEl))
+                        {
+                            string? existing = idEl.GetString()?.Trim();
+                            if (!string.IsNullOrWhiteSpace(existing))
+                            {
+                                _cachedHostId = existing;
+                                return existing;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Regenerate corrupt host identity file
+                    }
+                }
+
+                string generated = Guid.NewGuid().ToString("D");
+                Directory.CreateDirectory(_tonewiseDir);
+                string payload = JsonSerializer.Serialize(new { host_id = generated }, JsonWriteOptions);
+                WriteTextAtomic(_identityPath, payload + "\n");
+                _cachedHostId = generated;
+                return generated;
+            }
+        }
+    }
+
+    public SyncPolicyConfig GetSyncPolicy()
+    {
+        lock (_gate)
+        {
+            if (_cachedSyncPolicy is not null)
+                return _cachedSyncPolicy;
+
+            if (File.Exists(_syncPolicyPath))
+            {
+                try
+                {
+                    var loaded = JsonSerializer.Deserialize<SyncPolicyConfig>(File.ReadAllText(_syncPolicyPath, Encoding.UTF8));
+                    if (loaded is not null)
+                    {
+                        _cachedSyncPolicy = NormalizeSyncPolicy(loaded);
+                        return _cachedSyncPolicy;
+                    }
+                }
+                catch
+                {
+                    // Fall back to default policy if corrupt
+                }
+            }
+
+            _cachedSyncPolicy = new SyncPolicyConfig();
+            return _cachedSyncPolicy;
+        }
+    }
+
+    public SyncPolicyConfig SetSyncPolicy(SyncPolicyConfig policy)
+    {
+        var normalized = NormalizeSyncPolicy(policy ?? new SyncPolicyConfig());
+        lock (_gate)
+        {
+            Directory.CreateDirectory(_tonewiseDir);
+            string json = JsonSerializer.Serialize(normalized, JsonWriteOptions);
+            WriteTextAtomic(_syncPolicyPath, json + "\n");
+            _cachedSyncPolicy = normalized;
+            Interlocked.Increment(ref _syncPolicyVersion);
+            return normalized;
+        }
+    }
+
+    private static SyncPolicyConfig NormalizeSyncPolicy(SyncPolicyConfig raw)
+    {
+        string scope = string.Equals(raw.PruneScope?.Trim(), "managed_only", StringComparison.OrdinalIgnoreCase)
+            ? "managed_only"
+            : "music_folder_all";
+        int thresholdCount = Math.Max(1, raw.LargePruneConfirmThresholdCount);
+        double thresholdRatio = double.IsFinite(raw.LargePruneConfirmThresholdRatio)
+            ? Math.Clamp(raw.LargePruneConfirmThresholdRatio, 0.05, 1.0)
+            : 0.30;
+        return raw with
+        {
+            PruneScope = scope,
+            TargetRoot = "Music",
+            LargePruneConfirmThresholdCount = thresholdCount,
+            LargePruneConfirmThresholdRatio = thresholdRatio,
+        };
     }
 
     public string CurrentPairingCode
@@ -266,6 +397,35 @@ public sealed partial class SyncOutboxAndPairingStore
             issuedToken = token;
             device = record;
             return PairAttemptStatus.Success;
+        }
+    }
+
+    public PairedDeviceRecord PairDeviceDirect(
+        string deviceId,
+        string? deviceName,
+        out string issuedToken)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+            throw new ArgumentException("Device ID is required.", nameof(deviceId));
+        string cleanDeviceId = SanitizeDeviceId(deviceId);
+        if (string.IsNullOrEmpty(cleanDeviceId))
+            throw new ArgumentException("Device ID is invalid.", nameof(deviceId));
+        string cleanName = string.IsNullOrWhiteSpace(deviceName) ? cleanDeviceId : deviceName.Trim();
+
+        lock (_gate)
+        {
+            string token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+            string tokenHash = ComputeTokenHashHex(token);
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            var devices = LoadDevicesUnlocked();
+            devices.RemoveAll(d => string.Equals(d.DeviceId, cleanDeviceId, StringComparison.OrdinalIgnoreCase));
+            var record = new PairedDeviceRecord(cleanDeviceId, cleanName, tokenHash, now, 0);
+            devices.Add(record);
+            SaveDevicesUnlocked(devices);
+
+            issuedToken = token;
+            return record;
         }
     }
 
@@ -457,6 +617,28 @@ public sealed partial class SyncOutboxAndPairingStore
         lock (_gate)
         {
             SaveOutboxUnlocked([]);
+        }
+    }
+
+    public int PromoteCopyItemsToSubscribe()
+    {
+        lock (_gate)
+        {
+            var items = LoadOutboxUnlocked();
+            int converted = 0;
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (string.Equals(items[i].Mode, "copy", StringComparison.OrdinalIgnoreCase))
+                {
+                    items[i] = items[i] with { Mode = "subscribe" };
+                    converted++;
+                }
+            }
+            if (converted > 0)
+            {
+                SaveOutboxUnlocked(items);
+            }
+            return converted;
         }
     }
 

@@ -12,6 +12,7 @@ using Tonewise.SyncHost.Curation;
 using Tonewise.SyncHost.Export;
 using Tonewise.SyncHost.Ledger;
 using Tonewise.SyncHost.Playlists;
+using Tonewise.SyncHost.Usb;
 using Tonewise.SyncHost.Workbench;
 
 namespace Tonewise.Desktop.ViewModels;
@@ -311,10 +312,12 @@ public sealed partial class MainViewModel
         try
         {
             var store = EnsureSyncStore()!;
+            ApplySyncPolicyToStore();
             var host = new SyncHostServer(_store.MusicRoot, store: store);
             host.SyncStateChanged += OnSyncHostStateChanged;
             int port = await host.StartAsync(45820, enableMdns: true);
             _syncHost = host;
+            _usbCoordinator?.AttachHostEvents(host);
             var urls = SyncOutboxAndPairingStore.GetLocalLanUrls(port);
             LanHostUrlsText = urls.Count > 0 ? string.Join("   |   ", urls) : $"http://127.0.0.1:{port}";
             LanPairingCode = store.CurrentPairingCode;
@@ -397,6 +400,7 @@ public sealed partial class MainViewModel
                 return;
             }
             _syncHost = host;
+            _usbCoordinator?.AttachHostEvents(host);
             var urls = SyncOutboxAndPairingStore.GetLocalLanUrls(port);
             PostUi(() =>
             {
@@ -606,11 +610,13 @@ public sealed partial class MainViewModel
             return;
         }
         string label = tracks.Count == 1 ? $"{tracks[0].ArtistsDisplay} - {tracks[0].Title}".Trim(' ', '-') : $"自选 {uids.Count} 首曲目";
-        store.EnqueueTracks(uids, label, mode: "copy");
+        string mode = IsMirrorPruneEnabled ? "subscribe" : "copy";
+        string modeBadge = IsMirrorPruneEnabled ? "持久同步" : "单次";
+        store.EnqueueTracks(uids, label, mode: mode);
         await EnsureLanSyncHostRunningAsync();
         var summary = await Task.Run(() => store.GetOutboxSummary());
         RefreshLanSyncUiState();
-        Notify($"已将「{label}」加入手机同步队列（单次 · 共 {summary.TrackCount} 首 · {summary.TotalBytes / (1024.0 * 1024.0):F1} MB）", "success");
+        Notify($"已将「{label}」加入手机同步队列（{modeBadge} · 共 {summary.TrackCount} 首 · {summary.TotalBytes / (1024.0 * 1024.0):F1} MB）", "success");
     }
 
     public Task SendPlaylistToPhoneAsync(PlaylistSummary? playlist) =>
@@ -681,14 +687,209 @@ public sealed partial class MainViewModel
         else
         {
             var uids = group.Tracks.Select(t => t.TrackUid).Where(u => !string.IsNullOrWhiteSpace(u)).Distinct().ToList();
-            store.EnqueueTracks(uids, $"{group.Subtitle}：{group.Title}", mode: "copy");
-            modeBadge = "单次专辑/分组";
+            string mode = IsMirrorPruneEnabled ? "subscribe" : "copy";
+            store.EnqueueTracks(uids, $"{group.Subtitle}：{group.Title}", mode: mode);
+            modeBadge = IsMirrorPruneEnabled ? "持久订阅专辑/分组" : "单次专辑/分组";
         }
 
         await EnsureLanSyncHostRunningAsync();
         var summary = await Task.Run(() => store.GetOutboxSummary());
         RefreshLanSyncUiState();
         Notify($"已将「{group.Title}」加入手机同步队列（{modeBadge} · 队列共 {summary.TrackCount} 首 · {summary.TotalBytes / (1024.0 * 1024.0):F1} MB）", "success");
+    }
+
+    private SyncPolicyConfig BuildCurrentSyncPolicyConfig() =>
+        new(
+            MirrorPruneEnabled: IsMirrorPruneEnabled,
+            PruneScope: string.Equals(MirrorPruneScope, "managed_only", StringComparison.OrdinalIgnoreCase)
+                ? "managed_only"
+                : "music_folder_all",
+            TargetRoot: "Music",
+            AllowAdbForeignDeleteFallback: AllowAdbForeignDeleteFallback);
+
+    private void ApplySyncPolicyToStore()
+    {
+        var store = _syncStore ?? EnsureSyncStore();
+        if (store is null) return;
+        store.SetSyncPolicy(BuildCurrentSyncPolicyConfig());
+        if (IsMirrorPruneEnabled)
+        {
+            store.PromoteCopyItemsToSubscribe();
+        }
+    }
+
+    private void EnsureUsbCoordinatorStarted()
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+
+        if (_usbCoordinator is null)
+        {
+            var bridge = new UsbAdbBridge { CustomAdbPath = _customAdbPath };
+            var coordinator = new UsbAutoSyncCoordinator(
+                bridge,
+                EnsureSyncHostForUsbAsync,
+                () => _syncHost);
+            coordinator.StateChanged += OnUsbCoordinatorStateChanged;
+            if (Interlocked.CompareExchange(ref _usbCoordinator, coordinator, null) is not null)
+            {
+                coordinator.StateChanged -= OnUsbCoordinatorStateChanged;
+                _ = coordinator.DisposeAsync();
+            }
+        }
+
+        var active = _usbCoordinator;
+        if (active is not null)
+        {
+            active.AutoSyncEnabled = IsUsbAutoSyncEnabled;
+            active.MirrorPruneEnabled = IsMirrorPruneEnabled;
+            active.PruneScope = MirrorPruneScope;
+            active.AllowAdbForeignDeleteFallback = AllowAdbForeignDeleteFallback;
+            active.AttachHostEvents(_syncHost);
+            active.StartMonitoring();
+            OnUsbCoordinatorStateChanged(active.CurrentState);
+        }
+    }
+
+    private async Task<SyncHostServer?> EnsureSyncHostForUsbAsync(CancellationToken ct)
+    {
+        if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
+        {
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _uiContext.Post(async _ =>
+            {
+                try
+                {
+                    bool ok = await EnsureLanSyncHostRunningAsync(silent: true);
+                    tcs.TrySetResult(ok);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            }, null);
+            await tcs.Task.WaitAsync(ct).ConfigureAwait(false);
+            return _syncHost;
+        }
+
+        await EnsureLanSyncHostRunningAsync(silent: true).ConfigureAwait(false);
+        return _syncHost;
+    }
+
+    private void OnUsbCoordinatorStateChanged(UsbCoordinatorState state)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+
+        void Apply()
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            UsbAdbStatusText = state.AdbStatusText;
+            var readyPhone = state.ConnectedDevices.FirstOrDefault(d =>
+                string.Equals(d.State, "device", StringComparison.OrdinalIgnoreCase));
+            HasConnectedUsbDevice = readyPhone is not null;
+            UsbConnectionSummaryText = readyPhone is not null
+                ? $"{readyPhone.Model} ({readyPhone.Serial})"
+                : state.AdbStatusText;
+            IsUsbSyncRunning = state.IsSyncing;
+            UsbSyncProgressPercent = state.ProgressPercent;
+            UsbSyncProgressText = state.ProgressDetail;
+            HasPendingLargePruneConfirmation = state.PendingLargePruneCount > 0;
+            PendingLargePruneMessage = state.PendingLargePruneCount > 0
+                ? $"安全保护：手机 Music 目录拟清理 {state.PendingLargePruneCount} / {state.LocalAudioCount} 首（占比 {state.PendingLargePruneRatio:P0}），是否确认执行删除？"
+                : "";
+        }
+
+        if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
+            _uiContext.Post(_ => Apply(), null);
+        else
+            Apply();
+    }
+
+    partial void OnIsUsbAutoSyncEnabledChanged(bool value)
+    {
+        if (_usbCoordinator is not null)
+        {
+            _usbCoordinator.AutoSyncEnabled = value;
+        }
+        if (!_suppressSettingsSave) SaveUserSettings();
+    }
+
+    partial void OnIsMirrorPruneEnabledChanged(bool value)
+    {
+        if (_usbCoordinator is not null)
+        {
+            _usbCoordinator.MirrorPruneEnabled = value;
+        }
+        ApplySyncPolicyToStore();
+        RefreshLanSyncUiState();
+        if (!_suppressSettingsSave) SaveUserSettings();
+    }
+
+    partial void OnMirrorPruneScopeChanged(string value)
+    {
+        if (_usbCoordinator is not null)
+        {
+            _usbCoordinator.PruneScope = value;
+        }
+        ApplySyncPolicyToStore();
+        if (!_suppressSettingsSave) SaveUserSettings();
+    }
+
+    partial void OnAllowAdbForeignDeleteFallbackChanged(bool value)
+    {
+        if (_usbCoordinator is not null)
+        {
+            _usbCoordinator.AllowAdbForeignDeleteFallback = value;
+        }
+        ApplySyncPolicyToStore();
+        if (!_suppressSettingsSave) SaveUserSettings();
+    }
+
+    [RelayCommand]
+    private async Task TriggerUsbSyncNowAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot))
+        {
+            Notify("请先打开曲库，再执行 USB 同步。", "warning");
+            return;
+        }
+        EnsureUsbCoordinatorStarted();
+        if (_usbCoordinator is null) return;
+        bool ok = await _usbCoordinator.TriggerSyncAsync(serial: null, isAuto: false, pruneConfirmed: false);
+        if (!ok)
+        {
+            string msg = string.IsNullOrWhiteSpace(UsbSyncProgressText) ? UsbAdbStatusText : UsbSyncProgressText;
+            Notify(msg, "warning");
+        }
+    }
+
+    [RelayCommand]
+    private void CancelUsbSync()
+    {
+        _usbCoordinator?.RequestCancelActiveSync();
+    }
+
+    [RelayCommand]
+    private async Task ConfirmLargeUsbPruneAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot))
+        {
+            Notify("请先打开曲库。", "warning");
+            return;
+        }
+        EnsureUsbCoordinatorStarted();
+        if (_usbCoordinator is null) return;
+        bool ok = await _usbCoordinator.TriggerSyncAsync(serial: null, isAuto: false, pruneConfirmed: true);
+        if (!ok)
+        {
+            string msg = string.IsNullOrWhiteSpace(UsbSyncProgressText) ? UsbAdbStatusText : UsbSyncProgressText;
+            Notify(msg, "warning");
+        }
+    }
+
+    [RelayCommand]
+    private void DismissLargeUsbPrune()
+    {
+        _usbCoordinator?.DismissLargePruneConfirmation();
     }
 
 }

@@ -75,6 +75,7 @@ public sealed partial class MainViewModel
         bool wasHostRunning = oldHost is { IsRunning: true };
         StopPairingCodeRefreshTimer();
         _syncStore = new SyncOutboxAndPairingStore(musicRoot);
+        ApplySyncPolicyToStore();
         if (oldHost is not null)
         {
             _ = RestartOrDisposeSyncHostAsync(oldHost, musicRoot, _syncStore, restart: wasHostRunning);
@@ -82,6 +83,10 @@ public sealed partial class MainViewModel
         else if (_uiContext is not null && !_lanSyncManuallyStopped)
         {
             _ = EnsureLanSyncHostRunningAsync(silent: true);
+        }
+        if (_uiContext is not null)
+        {
+            EnsureUsbCoordinatorStarted();
         }
         RefreshLanSyncUiState();
         StatusMessage = $"已加载 {_allTracks.Count:N0} 首曲目（{musicRoot}）";

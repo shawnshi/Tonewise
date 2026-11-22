@@ -12,6 +12,7 @@ using Tonewise.SyncHost.Curation;
 using Tonewise.SyncHost.Export;
 using Tonewise.SyncHost.Ledger;
 using Tonewise.SyncHost.Playlists;
+using Tonewise.SyncHost.Usb;
 using Tonewise.SyncHost.Workbench;
 
 namespace Tonewise.Desktop.ViewModels;
@@ -25,6 +26,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly SynchronizationContext? _uiContext;
     private SyncHostServer? _syncHost;
     private SyncOutboxAndPairingStore? _syncStore;
+    private UsbAutoSyncCoordinator? _usbCoordinator;
+    private string? _customAdbPath;
     private System.Threading.Timer? _pairingCodeRefreshTimer;
     private System.Threading.Timer? _endpointDebounceTimer;
     private int _disposed;
@@ -329,6 +332,42 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _hasPairedDevices;
+
+    [ObservableProperty]
+    private bool _isUsbAutoSyncEnabled = true;
+
+    [ObservableProperty]
+    private bool _isMirrorPruneEnabled = true;
+
+    [ObservableProperty]
+    private string _mirrorPruneScope = "music_folder_all";
+
+    [ObservableProperty]
+    private bool _allowAdbForeignDeleteFallback = true;
+
+    [ObservableProperty]
+    private string _usbAdbStatusText = "正在检测 ADB 环境...";
+
+    [ObservableProperty]
+    private string _usbConnectionSummaryText = "未检测到 USB 连接手机";
+
+    [ObservableProperty]
+    private string _usbSyncProgressText = "";
+
+    [ObservableProperty]
+    private double _usbSyncProgressPercent;
+
+    [ObservableProperty]
+    private bool _isUsbSyncRunning;
+
+    [ObservableProperty]
+    private bool _hasConnectedUsbDevice;
+
+    [ObservableProperty]
+    private bool _hasPendingLargePruneConfirmation;
+
+    [ObservableProperty]
+    private string _pendingLargePruneMessage = "";
 
     [ObservableProperty]
     private bool _hasSelectedEntityGroup;
@@ -695,6 +734,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private double _pendingRestorePositionSec;
     private DateTime _lastSessionSavedUtc = DateTime.MinValue;
     private DateTime? _pausedSinceUtc;
+    private CancellationTokenSource? _playbackRecoveryCts;
+    private AudioPlaybackInterruption? _pendingEndpointReturnInterruption;
+    private DateTime _pendingEndpointReturnDeadlineUtc = DateTime.MinValue;
+    private bool _isAutoRecoveringPlayback;
+    private string? _appliedEngineEndpointId;
+    private readonly Queue<DateTime> _recentRecoveryTimestampsUtc = new();
 
     public event Action? WaveformUpdated;
     public event Action<TrackItem?>? TrackChanged;
@@ -758,19 +803,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             else
                 HandleGaplessTrackAdvanced(nextPath);
         };
-        _engine.PlaybackError += msg =>
+        _engine.PlaybackInterrupted += interruption =>
         {
-            void HandleErr()
-            {
-                IsPlaying = false;
-                _pausedSinceUtc = DateTime.UtcNow;
-                RefreshEndpoints(handleLostSelection: true);
-                StatusMessage = $"音频输出中断：{msg}";
-            }
             if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
-                _uiContext.Post(_ => HandleErr(), null);
+                _uiContext.Post(_ => HandlePlaybackInterrupted(interruption), null);
             else
-                HandleErr();
+                HandlePlaybackInterrupted(interruption);
         };
         _deviceChangeWatcher.EndpointsChanged += ScheduleEndpointRefresh;
         PlaybackQueue.CollectionChanged += (_, _) => UpdatePlaybackQueueSummary();
@@ -821,6 +859,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _deskClockWidth = saved.DeskClockWidth;
             _deskClockHeight = saved.DeskClockHeight;
             _deskClockAlwaysOnTop = saved.DeskClockAlwaysOnTop;
+            IsUsbAutoSyncEnabled = saved.EnableUsbAutoSync;
+            IsMirrorPruneEnabled = saved.EnableMirrorPrune;
+            MirrorPruneScope = string.Equals(saved.MirrorPruneScope, "managed_only", StringComparison.OrdinalIgnoreCase)
+                ? "managed_only"
+                : "music_folder_all";
+            AllowAdbForeignDeleteFallback = saved.AllowAdbForeignDeleteFallback;
+            _customAdbPath = saved.CustomAdbPath;
 
             if (!string.IsNullOrWhiteSpace(saved.SelectedEndpointId))
             {
@@ -936,7 +981,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             DeskClockY: _deskClockY,
             DeskClockWidth: _deskClockWidth,
             DeskClockHeight: _deskClockHeight,
-            DeskClockAlwaysOnTop: _deskClockAlwaysOnTop);
+            DeskClockAlwaysOnTop: _deskClockAlwaysOnTop,
+            EnableUsbAutoSync: IsUsbAutoSyncEnabled,
+            EnableMirrorPrune: IsMirrorPruneEnabled,
+            MirrorPruneScope: MirrorPruneScope,
+            AllowAdbForeignDeleteFallback: AllowAdbForeignDeleteFallback,
+            CustomAdbPath: _customAdbPath);
 
         try
         {
@@ -1028,11 +1078,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
     partial void OnSelectedEndpointChanged(AudioOutputEndpoint? value)
     {
+        if (value is null && OutputEndpoints.Count > 0)
+        {
+            return;
+        }
         if (!_suppressDspSync)
         {
+            bool endpointChanged = !string.Equals(_appliedEngineEndpointId, value?.Id, StringComparison.Ordinal);
             LoadDspConfigForCurrentEndpoint(_store.MusicRoot);
             PushEnginePreferences();
-            ReopenCurrentOutputAtCurrentPosition();
+            if (endpointChanged)
+            {
+                ReopenCurrentOutputAtCurrentPosition();
+            }
         }
         SaveUserSettings();
     }
@@ -1299,6 +1357,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        CancelPendingPlaybackRecovery();
         Interlocked.Exchange(ref _endpointDebounceTimer, null)?.Dispose();
         _deviceChangeWatcher.EndpointsChanged -= ScheduleEndpointRefresh;
         _deviceChangeWatcher.Dispose();
@@ -1307,6 +1366,22 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         PersistPlaybackSessionSnapshot(force: true, synchronous: true);
         Interlocked.Exchange(ref _libraryWatcher, null)?.Dispose();
         StopPairingCodeRefreshTimer();
+        var usb = Interlocked.Exchange(ref _usbCoordinator, null);
+        if (usb is not null)
+        {
+            usb.StateChanged -= OnUsbCoordinatorStateChanged;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await usb.DisposeAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort non-blocking USB monitor shutdown on window close
+                }
+            });
+        }
         var host = Interlocked.Exchange(ref _syncHost, null);
         if (host is not null)
         {

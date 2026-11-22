@@ -559,7 +559,12 @@ public sealed record DesktopUserSettings(
     int? DeskClockY = null,
     int? DeskClockWidth = null,
     int? DeskClockHeight = null,
-    bool DeskClockAlwaysOnTop = true
+    bool DeskClockAlwaysOnTop = true,
+    bool EnableUsbAutoSync = true,
+    bool EnableMirrorPrune = true,
+    string MirrorPruneScope = "music_folder_all",
+    bool AllowAdbForeignDeleteFallback = true,
+    string? CustomAdbPath = null
 );
 
 public static class DesktopSettingsStore

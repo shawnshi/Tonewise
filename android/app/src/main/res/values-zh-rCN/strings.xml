@@ -376,7 +376,8 @@
     <string name="lbl_scenes_5d_feed">五维场景横幅流</string>
     <string name="lbl_handoff_slots">5 槽位持久队列（Handoff 接力）</string>
     <string name="lbl_save_slot_1">保存当前队列至槽位 1</string>
-    <string name="lbl_lan_sync">局域网同步（电脑与手机）</string>
+    <string name="lbl_lan_sync">电脑同步（局域网 / USB 直连）</string>
+    <string name="lbl_usb_saf_grant_hint">提示：建议在「设置 → 音乐目录」使用 SAF 授权 Music 文件夹，以便自动镜像清理旧歌曲时免弹窗静默删除。</string>
     <string name="lbl_sync_host_url">电脑同步地址</string>
     <string name="lbl_sync_now">立即同步</string>
     <string name="lbl_lan_sync_pairing_code">6 位配对码</string>

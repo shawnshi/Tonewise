@@ -159,6 +159,21 @@ object LanHttpClient {
         }
     }
 
+    internal fun isLoopbackUrl(urlString: String): Boolean {
+        val raw = urlString.trim()
+        if (raw.isEmpty()) return false
+        val uri =
+            try {
+                URI(raw)
+            } catch (_: Exception) {
+                return false
+            }
+        val host = uri.host?.trim('[', ']')?.lowercase()?.takeIf { it.isNotEmpty() } ?: return false
+        if (host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1") return true
+        val ipv4 = parseIpv4Bytes(host) ?: return false
+        return (ipv4[0].toInt() and 0xFF) == 127
+    }
+
     internal fun isPrivateLanHttpUrl(urlString: String): Boolean {
         val raw = urlString.trim()
         if (raw.isEmpty()) return false
@@ -185,9 +200,12 @@ object LanHttpClient {
         allowLanNetworkBypass: Boolean = true,
     ): HttpURLConnection {
         val parsed = URL(url)
+        val isLoopback = isLoopbackUrl(url)
         val isLan = isPrivateLanHttpUrl(url)
         val conn =
-            if (isLan) {
+            if (isLoopback) {
+                parsed.openConnection(Proxy.NO_PROXY)
+            } else if (isLan) {
                 val bypassed =
                     if (allowLanNetworkBypass) {
                         runCatching { lanConnectionOpener?.invoke(parsed) }.getOrNull()
@@ -199,7 +217,7 @@ object LanHttpClient {
                 parsed.openConnection()
             }
         val httpConn = conn as HttpURLConnection
-        if (isLan) {
+        if (isLan && !isLoopback) {
             httpConn.setRequestProperty("Connection", "close")
         }
         return httpConn
@@ -452,6 +470,7 @@ object LanHttpClient {
             existingBytes = 0L
         }
 
+        val isLoopback = isLoopbackUrl(url)
         val conn =
             openConnectionForUrl(url).apply {
                 instanceFollowRedirects = false
@@ -459,7 +478,9 @@ object LanHttpClient {
                 readTimeout = if (cancelToken != null) 800 else 30_000
                 requestMethod = "GET"
                 setRequestProperty("Authorization", "Bearer $bearerToken")
-                setRequestProperty("Connection", "close")
+                if (!isLoopback) {
+                    setRequestProperty("Connection", "close")
+                }
                 if (existingBytes > 0L) {
                     setRequestProperty("Range", "bytes=$existingBytes-")
                     if (!expectedEtag.isNullOrBlank()) {
@@ -500,7 +521,7 @@ object LanHttpClient {
                                 else -> -1L
                             }
 
-                        val buffer = ByteArray(32 * 1024)
+                        val buffer = ByteArray(if (isLoopback) 256 * 1024 else 32 * 1024)
                         var consecutiveTimeouts = 0
                         c.inputStream.use { input ->
                             FileOutputStream(partFile, append).use { output ->

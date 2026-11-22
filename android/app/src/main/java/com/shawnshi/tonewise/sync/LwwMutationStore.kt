@@ -302,7 +302,8 @@ internal class LwwMutationStore(
         }
         val hostName = kv.getValue(KEY_PAIRED_HOST_NAME) ?: url
         val deviceId = kv.getValue(KEY_PAIRED_DEVICE_ID) ?: getOrCreateStableDeviceId()
-        return PairedHostInfo(url, hostName, deviceId, token)
+        val hostId = kv.getValue(KEY_PAIRED_HOST_ID).orEmpty()
+        return PairedHostInfo(url, hostName, deviceId, token, hostId)
     }
 
     fun savePairedHost(info: PairedHostInfo) {
@@ -314,6 +315,7 @@ internal class LwwMutationStore(
             kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_NAME, info.hostName))
             kv.putValue(SyncKvEntity(KEY_PAIRED_DEVICE_ID, info.deviceId))
             kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, SecretBox.encrypt(info.token)))
+            kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_ID, info.hostId))
         }
     }
 
@@ -321,7 +323,9 @@ internal class LwwMutationStore(
         cachedPairedHost = null
         pairedHostLoaded = true
         ioScope.launch {
-            syncDb.syncKvDao().putValue(SyncKvEntity(KEY_PAIRED_TOKEN, ""))
+            val kv = syncDb.syncKvDao()
+            kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, ""))
+            kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_ID, ""))
         }
     }
 
@@ -365,6 +369,21 @@ internal class LwwMutationStore(
 
     fun clearPlaylistMergeBase(name: String) {
         syncDb.syncKvDao().deleteKey("m3u8_base_$name")
+    }
+
+    fun loadManagedPlaylistNames(): Set<String> {
+        val raw = syncDb.syncKvDao().getValue(KEY_MANAGED_PLAYLISTS) ?: return emptySet()
+        return runCatching {
+                @Suppress("UNCHECKED_CAST")
+                val arr = TonewiseCore.parseJson(raw) as? List<Any?> ?: return emptySet()
+                arr.mapNotNull { it?.toString()?.trim()?.takeIf { s -> s.isNotEmpty() } }.toSet()
+            }
+            .getOrDefault(emptySet())
+    }
+
+    fun saveManagedPlaylistNames(names: Set<String>) {
+        val sorted = names.map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
+        syncDb.syncKvDao().putValue(SyncKvEntity(KEY_MANAGED_PLAYLISTS, TonewiseCore.stringifyJson(sorted)))
     }
 
     fun saveSceneOrderIds(ids: List<String>) {
@@ -462,6 +481,8 @@ internal class LwwMutationStore(
         const val KEY_PAIRED_HOST_NAME = "lan_v2_host_name"
         const val KEY_PAIRED_DEVICE_ID = "lan_v2_device_id"
         const val KEY_PAIRED_TOKEN = "lan_v2_token"
+        const val KEY_PAIRED_HOST_ID = "lan_v2_host_id"
         const val KEY_STABLE_DEVICE_ID = "lan_v2_stable_device_id"
+        const val KEY_MANAGED_PLAYLISTS = "managed_outbox_playlists"
     }
 }

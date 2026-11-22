@@ -52,6 +52,19 @@ data class ExistingManagedFile(
     val mtimeMs: Long,
 )
 
+data class LocalMusicAudioFile(
+    val relativePath: String,
+    val documentUri: String,
+    val fileSize: Long,
+)
+
+data class PruneExecutionResult(
+    val deletedFiles: List<LocalMusicAudioFile>,
+    val blockedForeignRelPaths: List<String>,
+    val skippedPlayingRelPaths: List<String>,
+    val removedEmptyDirs: Int,
+)
+
 @Singleton
 class ManagedSyncStorage
 @Inject
@@ -68,6 +81,323 @@ constructor(
         safCache.clear()
         uriInspectCache.clear()
         legacyMediaStoreTonewiseAbsent = null
+    }
+
+    fun hasWritableMusicSafGrant(): Boolean = pickWritableSafLocation() != null
+
+    fun listAudioFilesInMusicRoot(): List<LocalMusicAudioFile> {
+        val safLocation = pickWritableSafLocation()
+        if (safLocation != null) {
+            return listAudioFilesViaSaf(safLocation)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return listAudioFilesViaMediaStore()
+        }
+        return listAudioFilesLegacy()
+    }
+
+    fun deleteAudioFilesAndPruneEmptyDirs(
+        filesToDelete: List<LocalMusicAudioFile>,
+        currentlyPlayingUris: Set<String> = emptySet(),
+        currentlyPlayingNormRelPaths: Set<String> = emptySet(),
+    ): PruneExecutionResult {
+        if (filesToDelete.isEmpty()) {
+            return PruneExecutionResult(emptyList(), emptyList(), emptyList(), 0)
+        }
+
+        val deletedFiles = ArrayList<LocalMusicAudioFile>()
+        val blockedForeignRelPaths = ArrayList<String>()
+        val skippedPlayingRelPaths = ArrayList<String>()
+        val touchedParentDirs = HashSet<String>()
+        val legacyDeletedPaths = ArrayList<String>()
+
+        for (file in filesToDelete) {
+            val normRel = SyncMirrorPrunePlanner.normalizeRelPath(file.relativePath)
+            if (file.documentUri in currentlyPlayingUris ||
+                (normRel.isNotEmpty() && normRel in currentlyPlayingNormRelPaths)
+            ) {
+                skippedPlayingRelPaths.add(file.relativePath)
+                continue
+            }
+
+            var deleted = false
+            var blocked = false
+            if (file.documentUri.startsWith("content://")) {
+                val uri = Uri.parse(file.documentUri)
+                if (uri.authority != MediaStore.AUTHORITY && file.documentUri.contains("/tree/")) {
+                    deleted = runCatching { DocumentsContract.deleteDocument(resolver, uri) }.getOrDefault(false)
+                } else {
+                    try {
+                        val rows = resolver.delete(uri, null, null)
+                        if (rows > 0) deleted = true else blocked = true
+                    } catch (_: SecurityException) {
+                        blocked = true
+                    } catch (e: Exception) {
+                        L.w(e, "MediaStore delete failed for ${file.relativePath}")
+                        blocked = true
+                    }
+                }
+            } else {
+                val f = File(file.documentUri)
+                if (!f.exists() || f.delete()) {
+                    deleted = true
+                    legacyDeletedPaths.add(f.absolutePath)
+                } else {
+                    blocked = true
+                }
+            }
+
+            if (deleted) {
+                deletedFiles.add(file)
+                uriInspectCache.remove(file.documentUri)
+                val parentRel = file.relativePath.replace('\\', '/').substringBeforeLast('/', "")
+                if (parentRel.isNotBlank()) {
+                    collectAncestorSubDirs(parentRel, touchedParentDirs)
+                }
+            } else if (blocked) {
+                blockedForeignRelPaths.add(file.relativePath)
+            }
+        }
+
+        if (legacyDeletedPaths.isNotEmpty()) {
+            runCatching {
+                MediaScannerConnection.scanFile(context, legacyDeletedPaths.toTypedArray(), null, null)
+            }
+        }
+
+        var removedEmptyDirs = 0
+        if (deletedFiles.isNotEmpty() && touchedParentDirs.isNotEmpty()) {
+            safCache.clear()
+            val safLocation = pickWritableSafLocation()
+            val sortedDirs =
+                touchedParentDirs
+                    .filter { dir ->
+                        dir.isNotBlank() &&
+                            !dir.startsWith(".tonewise", ignoreCase = true) &&
+                            !dir.equals("Tonewise", ignoreCase = true) &&
+                            !dir.startsWith("Tonewise/Playlists", ignoreCase = true)
+                    }
+                    .sortedWith(
+                        compareByDescending<String> { it.count { ch -> ch == '/' } }
+                            .thenByDescending { it.length }
+                    )
+
+            if (safLocation != null) {
+                for (dirRel in sortedDirs) {
+                    if (tryPruneEmptySafSubDir(safLocation, dirRel)) {
+                        removedEmptyDirs++
+                    }
+                }
+            } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                @Suppress("DEPRECATION")
+                val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+                val rootCanon = runCatching { musicDir.canonicalPath }.getOrNull()
+                for (dirRel in sortedDirs) {
+                    val dir = File(musicDir, dirRel)
+                    val dirCanon = runCatching { dir.canonicalPath }.getOrNull()
+                    if (dirCanon != null && dirCanon != rootCanon && dir.isDirectory) {
+                        val children = dir.listFiles() ?: continue
+                        val onlyCovers =
+                            children.all { child -> !child.isDirectory && isManagedCoverFilename(child.name) }
+                        if (onlyCovers) {
+                            for (cover in children) {
+                                cover.delete()
+                            }
+                            if (dir.delete()) {
+                                removedEmptyDirs++
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return PruneExecutionResult(
+            deletedFiles = deletedFiles,
+            blockedForeignRelPaths = blockedForeignRelPaths,
+            skippedPlayingRelPaths = skippedPlayingRelPaths,
+            removedEmptyDirs = removedEmptyDirs,
+        )
+    }
+
+    private fun listAudioFilesViaSaf(location: Location.Opened): List<LocalMusicAudioFile> {
+        val rootUri = location.uri
+        val rootDocId = DocumentsContract.getTreeDocumentId(rootUri)
+        val result = ArrayList<LocalMusicAudioFile>()
+        val stack = ArrayDeque<Pair<String, String>>()
+        stack.addLast(rootDocId to "")
+
+        val projection =
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE,
+            )
+
+        while (stack.isNotEmpty()) {
+            val (parentDocId, prefix) = stack.removeLast()
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, parentDocId)
+            runCatching {
+                resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                    val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    val sizeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+                    while (cursor.moveToNext()) {
+                        val name = cursor.getString(nameIdx) ?: continue
+                        if (name.startsWith(".")) continue
+                        val docId = cursor.getString(idIdx) ?: continue
+                        val mime = cursor.getString(mimeIdx)
+                        val isDir = mime == DocumentsContract.Document.MIME_TYPE_DIR
+                        val rel = if (prefix.isEmpty()) name else "$prefix/$name"
+                        if (isDir) {
+                            if (rel.equals("Tonewise/Playlists", ignoreCase = true)) continue
+                            stack.addLast(docId to rel)
+                        } else if (isAudioFilename(name)) {
+                            val size = if (cursor.isNull(sizeIdx)) 0L else cursor.getLong(sizeIdx)
+                            val docUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, docId)
+                            result.add(LocalMusicAudioFile(rel, docUri.toString(), size))
+                        }
+                    }
+                }
+            }.onFailure { L.w(it, "SAF scan failed under $prefix") }
+        }
+        return result
+    }
+
+    private fun listAudioFilesViaMediaStore(): List<LocalMusicAudioFile> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptyList()
+        val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val musicRootName = (Environment.DIRECTORY_MUSIC ?: "Music").trim('/').ifBlank { "Music" }
+        val musicPrefix = "$musicRootName/"
+        val projection =
+            arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.RELATIVE_PATH,
+                MediaStore.Audio.Media.SIZE,
+            )
+        val selection =
+            "${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ? AND ${MediaStore.Audio.Media.IS_PENDING} = 0"
+        val args = arrayOf("$musicPrefix%")
+        val result = ArrayList<LocalMusicAudioFile>()
+
+        runCatching {
+            resolver.query(collection, projection, selection, args, null)?.use { cursor ->
+                val idIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                val nameIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                val relDirIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH)
+                val sizeIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(nameIdx) ?: continue
+                    if (name.startsWith(".") || !isAudioFilename(name)) continue
+                    val rawRelDir = (cursor.getString(relDirIdx) ?: "").replace('\\', '/')
+                    if (!rawRelDir.startsWith(musicPrefix, ignoreCase = true)) continue
+                    val subDir = rawRelDir.substring(musicPrefix.length).trim('/')
+                    if (subDir.split('/').any { it.startsWith(".") }) continue
+                    if (subDir.equals("Tonewise/Playlists", ignoreCase = true)) continue
+                    val rel = if (subDir.isEmpty()) name else "$subDir/$name"
+                    val id = cursor.getLong(idIdx)
+                    val size = if (cursor.isNull(sizeIdx)) 0L else cursor.getLong(sizeIdx)
+                    val uri = ContentUris.withAppendedId(collection, id)
+                    result.add(LocalMusicAudioFile(rel, uri.toString(), size))
+                }
+            }
+        }.onFailure { L.w(it, "MediaStore audio scan failed under $musicPrefix") }
+        return result
+    }
+
+    private fun listAudioFilesLegacy(): List<LocalMusicAudioFile> {
+        @Suppress("DEPRECATION")
+        val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+        if (!musicDir.exists() || !musicDir.isDirectory) return emptyList()
+        val result = ArrayList<LocalMusicAudioFile>()
+        val stack = ArrayDeque<Pair<File, String>>()
+        stack.addLast(musicDir to "")
+        while (stack.isNotEmpty()) {
+            val (dir, prefix) = stack.removeLast()
+            val children = dir.listFiles() ?: continue
+            for (child in children) {
+                val name = child.name
+                if (name.startsWith(".")) continue
+                val rel = if (prefix.isEmpty()) name else "$prefix/$name"
+                if (child.isDirectory) {
+                    if (rel.equals("Tonewise/Playlists", ignoreCase = true)) continue
+                    stack.addLast(child to rel)
+                } else if (child.isFile && isAudioFilename(name)) {
+                    result.add(LocalMusicAudioFile(rel, child.absolutePath, child.length()))
+                }
+            }
+        }
+        return result
+    }
+
+    private fun tryPruneEmptySafSubDir(location: Location.Opened, dirRel: String): Boolean {
+        val rootUri = location.uri
+        val rootDocId = DocumentsContract.getTreeDocumentId(rootUri)
+        val segments = dirRel.split('/').filter { it.isNotBlank() }
+        if (segments.isEmpty()) return false
+
+        var currentDocId = rootDocId
+        for (seg in segments) {
+            val child = findSafChild(rootUri, currentDocId, seg, forceRefresh = true) ?: return false
+            if (!child.isDirectory) return false
+            currentDocId = child.docId
+        }
+        if (currentDocId == rootDocId) return false
+
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, currentDocId)
+        val projection =
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            )
+        val orphanCoverDocIds = ArrayList<String>()
+        val canRemoveDir =
+            runCatching {
+                resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                    val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    while (cursor.moveToNext()) {
+                        val name = cursor.getString(nameIdx) ?: return@use false
+                        val mime = cursor.getString(mimeIdx)
+                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) return@use false
+                        if (!isManagedCoverFilename(name)) return@use false
+                        cursor.getString(idIdx)?.let(orphanCoverDocIds::add)
+                    }
+                    true
+                } ?: false
+            }.getOrDefault(false)
+
+        if (!canRemoveDir) return false
+
+        for (coverDocId in orphanCoverDocIds) {
+            runCatching {
+                DocumentsContract.deleteDocument(
+                    resolver,
+                    DocumentsContract.buildDocumentUriUsingTree(rootUri, coverDocId),
+                )
+            }
+        }
+        return runCatching {
+            DocumentsContract.deleteDocument(
+                resolver,
+                DocumentsContract.buildDocumentUriUsingTree(rootUri, currentDocId),
+            )
+        }.getOrDefault(false)
+    }
+
+    private fun collectAncestorSubDirs(relDir: String, out: MutableSet<String>) {
+        val parts = relDir.split('/').filter { it.isNotBlank() }
+        val sb = StringBuilder()
+        for (i in parts.indices) {
+            if (i > 0) sb.append('/')
+            sb.append(parts[i])
+            out.add(sb.toString())
+        }
     }
 
     fun commitAudioFile(
@@ -1137,6 +1467,46 @@ constructor(
     }
 
     companion object {
+        private val AUDIO_EXTENSIONS =
+            setOf(
+                "flac",
+                "mp3",
+                "m4a",
+                "alac",
+                "aac",
+                "wav",
+                "ogg",
+                "opus",
+                "aiff",
+                "aif",
+                "dsf",
+                "dff",
+                "ape",
+                "wv",
+                "wma",
+            )
+
+        private val COVER_FILENAMES =
+            setOf(
+                "cover.jpg",
+                "cover.jpeg",
+                "cover.png",
+                "folder.jpg",
+                "folder.png",
+                "front.jpg",
+                "front.png",
+            )
+
+        fun isAudioFilename(fileName: String): Boolean {
+            val dot = fileName.lastIndexOf('.')
+            if (dot < 0 || dot == fileName.length - 1) return false
+            val ext = fileName.substring(dot + 1).trim().lowercase()
+            return ext in AUDIO_EXTENSIONS
+        }
+
+        internal fun isManagedCoverFilename(fileName: String): Boolean =
+            fileName.trim().lowercase() in COVER_FILENAMES
+
         internal fun buildMediaStoreMusicRelativeDir(
             parentDirs: List<String>,
             musicRootName: String = Environment.DIRECTORY_MUSIC ?: "Music",

@@ -530,7 +530,8 @@
     <string name="lbl_scenes_5d_feed">5D Scene Banners</string>
     <string name="lbl_handoff_slots">Persistent Queue Slots (Handoff)</string>
     <string name="lbl_save_slot_1">Save queue to Slot 1</string>
-    <string name="lbl_lan_sync">PC LAN Sync</string>
+    <string name="lbl_lan_sync">PC Sync (LAN / USB)</string>
+    <string name="lbl_usb_saf_grant_hint">Tip: Authorize the Music folder via SAF in Settings → Music locations so USB/LAN mirror pruning can delete old audio files silently without system prompts.</string>
     <string name="lbl_sync_host_url">Host URL</string>
     <string name="lbl_sync_now">Sync now</string>
     <string name="lbl_lan_sync_pairing_code">6-digit pairing code</string>

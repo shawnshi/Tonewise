@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -49,6 +50,34 @@ public sealed record ReportApiRequest(
     [property: JsonPropertyName("handoff_slots")] List<SessionSlotDto>? HandoffSlots
 );
 
+public sealed record UsbPairApiRequest(
+    [property: JsonPropertyName("nonce")] string Nonce,
+    [property: JsonPropertyName("device_id")] string DeviceId,
+    [property: JsonPropertyName("device_name")] string? DeviceName
+);
+
+public sealed record SyncSessionProgressReport(
+    [property: JsonPropertyName("device_id")] string? DeviceId = null,
+    [property: JsonPropertyName("transport")] string? Transport = null,
+    [property: JsonPropertyName("phase")] string? Phase = null,
+    [property: JsonPropertyName("is_running")] bool IsRunning = false,
+    [property: JsonPropertyName("completed_tracks")] int CompletedTracks = 0,
+    [property: JsonPropertyName("total_tracks")] int TotalTracks = 0,
+    [property: JsonPropertyName("downloaded_bytes")] long DownloadedBytes = 0,
+    [property: JsonPropertyName("total_bytes")] long TotalBytes = 0,
+    [property: JsonPropertyName("current_track_title")] string? CurrentTrackTitle = null,
+    [property: JsonPropertyName("added_count")] int AddedCount = 0,
+    [property: JsonPropertyName("updated_count")] int UpdatedCount = 0,
+    [property: JsonPropertyName("skipped_count")] int SkippedCount = 0,
+    [property: JsonPropertyName("deleted_count")] int DeletedCount = 0,
+    [property: JsonPropertyName("blocked_foreign_paths")] IReadOnlyList<string>? BlockedForeignPaths = null,
+    [property: JsonPropertyName("pending_large_prune_count")] int PendingLargePruneCount = 0,
+    [property: JsonPropertyName("local_audio_count")] int LocalAudioCount = 0,
+    [property: JsonPropertyName("pending_large_prune_ratio")] double PendingLargePruneRatio = 0.0,
+    [property: JsonPropertyName("error_message")] string? ErrorMessage = null,
+    [property: JsonPropertyName("completed")] bool Completed = false
+);
+
 public sealed class SyncHostServer : IAsyncDisposable
 {
     private sealed record ManifestSnapshotCache(
@@ -58,12 +87,25 @@ public sealed class SyncHostServer : IAsyncDisposable
         string SourceStamp
     );
 
+    private sealed record UsbNonceEntry(
+        string Nonce,
+        string Serial,
+        bool AllowAutoPair,
+        bool PruneConfirmed,
+        DateTimeOffset IssuedAtUtc,
+        DateTimeOffset ExpiresAtUtc
+    );
+
     private readonly string _musicRoot;
     private readonly string _tonewiseDir;
     private readonly string _deviceId;
     private readonly bool _allowPhonePlaylistUpload;
     private readonly Lock _fileLock = new();
     private readonly Lock _manifestSnapshotLock = new();
+    private readonly Lock _usbSessionLock = new();
+    private readonly List<UsbNonceEntry> _usbNonces = [];
+    private readonly HashSet<string> _largePruneConfirmedDevices = new(StringComparer.OrdinalIgnoreCase);
+    private bool _cancelActiveSync;
     private WebApplication? _app;
     private MdnsAdvertiser? _mdns;
     private ManifestSnapshotCache? _manifestSnapshot;
@@ -75,7 +117,9 @@ public sealed class SyncHostServer : IAsyncDisposable
 
     public SyncOutboxAndPairingStore Store { get; }
     public event Action? SyncStateChanged;
+    public event Action<SyncSessionProgressReport>? SyncSessionProgressChanged;
 
+    public SyncSessionProgressReport? LatestSyncProgress { get; private set; }
     public int ListeningPort { get; private set; }
     public bool IsRunning => _app is not null;
 
@@ -552,12 +596,14 @@ public sealed class SyncHostServer : IAsyncDisposable
 
         // === v2 LAN Sync Content & Auth Endpoints ===
 
-        app.MapGet("/api/v2/ping", () => Results.Json(new
+        app.MapGet("/api/v2/ping", (HttpRequest request) => Results.Json(new
         {
             schema_version = 2,
             host_name = _deviceId,
+            host_id = Store.HostId,
             port = ListeningPort,
             requires_pairing = true,
+            transport_hint = IsLoopbackRequest(request) ? "usb_loopback" : "lan",
         }));
 
         app.MapPost("/api/v2/pair", async (HttpRequest request) =>
@@ -604,6 +650,61 @@ public sealed class SyncHostServer : IAsyncDisposable
             {
                 token = issuedToken,
                 host_name = _deviceId,
+                host_id = Store.HostId,
+                device_id = device.DeviceId,
+                device_name = device.DeviceName,
+                paired_at_ms = device.PairedAtMs,
+            });
+        });
+
+        app.MapPost("/api/v2/usb/pair", async (HttpRequest request) =>
+        {
+            if (!IsLoopbackRequest(request))
+            {
+                return Results.Json(
+                    new { error = "usb_pair_requires_loopback" },
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
+            UsbPairApiRequest? body;
+            try
+            {
+                body = await JsonSerializer.DeserializeAsync<UsbPairApiRequest>(request.Body);
+            }
+            catch
+            {
+                return Results.BadRequest(new { error = "invalid usb pairing payload" });
+            }
+
+            if (body is null || string.IsNullOrWhiteSpace(body.Nonce) || string.IsNullOrWhiteSpace(body.DeviceId))
+                return Results.BadRequest(new { error = "nonce and device_id are required" });
+
+            if (!TryConsumeUsbSyncNonce(body.Nonce, requireAllowAutoPair: true))
+            {
+                return Results.Json(
+                    new { error = "invalid_or_expired_usb_nonce" },
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            PairedDeviceRecord device;
+            string issuedToken;
+            try
+            {
+                device = Store.PairDeviceDirect(body.DeviceId, body.DeviceName, out issuedToken);
+            }
+            catch (ArgumentException)
+            {
+                return Results.BadRequest(new { error = "invalid device_id" });
+            }
+
+            SyncStateChanged?.Invoke();
+            return Results.Json(new
+            {
+                token = issuedToken,
+                host_name = _deviceId,
+                host_id = Store.HostId,
                 device_id = device.DeviceId,
                 device_name = device.DeviceName,
                 paired_at_ms = device.PairedAtMs,
@@ -625,8 +726,52 @@ public sealed class SyncHostServer : IAsyncDisposable
             if (!TryAuthenticateV2(request, out var device, out var errorResult))
                 return errorResult!;
 
-            var payload = Store.ResolveOutbox(device!.DeviceId, _deviceId);
+            bool pruneConfirmed = IsLargePruneConfirmed(device!.DeviceId);
+            var payload = Store.ResolveOutbox(device.DeviceId, _deviceId, pruneConfirmedForSession: pruneConfirmed);
             return Results.Json(payload);
+        });
+
+        app.MapPost("/api/v2/sync-session/progress", async (HttpRequest request) =>
+        {
+            if (!TryAuthenticateV2(request, out var device, out var errorResult))
+                return errorResult!;
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
+            SyncSessionProgressReport? body;
+            try
+            {
+                body = await JsonSerializer.DeserializeAsync<SyncSessionProgressReport>(request.Body);
+            }
+            catch
+            {
+                return Results.BadRequest(new { error = "invalid sync progress payload" });
+            }
+            if (body is null)
+                return Results.BadRequest(new { error = "empty sync progress payload" });
+
+            var normalized = body with { DeviceId = device!.DeviceId };
+            bool cancelRequested;
+            bool pruneConfirmed;
+            lock (_usbSessionLock)
+            {
+                LatestSyncProgress = normalized;
+                cancelRequested = _cancelActiveSync;
+                pruneConfirmed = _largePruneConfirmedDevices.Contains(device.DeviceId);
+                if (normalized.Completed || !normalized.IsRunning)
+                {
+                    _cancelActiveSync = false;
+                    _largePruneConfirmedDevices.Remove(device.DeviceId);
+                }
+            }
+
+            SyncSessionProgressChanged?.Invoke(normalized);
+            return Results.Json(new
+            {
+                ok = true,
+                cancel_requested = cancelRequested,
+                prune_confirmed = pruneConfirmed,
+            });
         });
 
         app.MapGet("/api/v2/catalog", (HttpRequest request, string? kind) =>
@@ -785,6 +930,107 @@ public sealed class SyncHostServer : IAsyncDisposable
                 handoff_slots = mergedSlots,
             });
         });
+    }
+
+    public string IssueUsbSyncNonce(string serial, bool allowAutoPair = true, bool pruneConfirmed = false)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        string nonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
+        lock (_usbSessionLock)
+        {
+            _usbNonces.RemoveAll(n => n.ExpiresAtUtc <= nowUtc);
+            while (_usbNonces.Count >= 16)
+            {
+                _usbNonces.RemoveAt(0);
+            }
+            _usbNonces.Add(new UsbNonceEntry(
+                Nonce: nonce,
+                Serial: serial ?? "",
+                AllowAutoPair: allowAutoPair,
+                PruneConfirmed: pruneConfirmed,
+                IssuedAtUtc: nowUtc,
+                ExpiresAtUtc: nowUtc + TimeSpan.FromSeconds(60)));
+        }
+        return nonce;
+    }
+
+    public void RequestCancelActiveSync()
+    {
+        lock (_usbSessionLock)
+        {
+            _cancelActiveSync = true;
+        }
+    }
+
+    public void ClearCancelActiveSync()
+    {
+        lock (_usbSessionLock)
+        {
+            _cancelActiveSync = false;
+        }
+    }
+
+    public void ConfirmLargePruneForDevice(string deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId)) return;
+        lock (_usbSessionLock)
+        {
+            _largePruneConfirmedDevices.Add(deviceId.Trim());
+        }
+    }
+
+    public void ClearLargePruneConfirmation(string? deviceId = null)
+    {
+        lock (_usbSessionLock)
+        {
+            if (string.IsNullOrWhiteSpace(deviceId))
+                _largePruneConfirmedDevices.Clear();
+            else
+                _largePruneConfirmedDevices.Remove(deviceId.Trim());
+        }
+    }
+
+    private bool IsLargePruneConfirmed(string deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId)) return false;
+        lock (_usbSessionLock)
+        {
+            return _largePruneConfirmedDevices.Contains(deviceId.Trim());
+        }
+    }
+
+    private bool TryConsumeUsbSyncNonce(string submittedNonce, bool requireAllowAutoPair)
+    {
+        byte[] submittedBytes = Encoding.UTF8.GetBytes(submittedNonce.Trim());
+        var nowUtc = DateTimeOffset.UtcNow;
+        lock (_usbSessionLock)
+        {
+            _usbNonces.RemoveAll(n => n.ExpiresAtUtc <= nowUtc);
+            for (int i = 0; i < _usbNonces.Count; i++)
+            {
+                var entry = _usbNonces[i];
+                byte[] candidateBytes = Encoding.UTF8.GetBytes(entry.Nonce);
+                if (candidateBytes.Length == submittedBytes.Length
+                    && CryptographicOperations.FixedTimeEquals(candidateBytes, submittedBytes))
+                {
+                    if (requireAllowAutoPair && !entry.AllowAutoPair)
+                    {
+                        return false;
+                    }
+                    _usbNonces.RemoveAt(i);
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static bool IsLoopbackRequest(HttpRequest request)
+    {
+        var ip = request.HttpContext.Connection.RemoteIpAddress;
+        if (ip is null) return false;
+        if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+        return IPAddress.IsLoopback(ip);
     }
 
     private bool TryAuthenticateV2(HttpRequest request, out PairedDeviceRecord? device, out IResult? errorResult)

@@ -276,27 +276,44 @@ public sealed partial class SyncOutboxAndPairingStore
         return new OutboxSummary(resolved.Items.Count, resolved.Tracks.Count, resolved.TotalBytes, resolved.DuplicateTrackCount);
     }
 
-    public ResolvedOutboxPayload ResolveOutbox(string? deviceId = null, string? hostName = null)
+    public ResolvedOutboxPayload ResolveOutbox(
+        string? deviceId = null,
+        string? hostName = null,
+        bool pruneConfirmedForSession = false)
     {
         List<SyncOutboxItem> relevantItems;
         long outboxVer;
+        long policyVer;
         long outboxFileTicks;
         long outboxFileLength;
+        SyncPolicyConfig policyConfig;
         lock (_gate)
         {
             outboxVer = Interlocked.Read(ref _outboxMutationVersion);
+            policyVer = Interlocked.Read(ref _syncPolicyVersion);
             var obFi = new FileInfo(_outboxPath);
             outboxFileTicks = obFi.Exists ? obFi.LastWriteTimeUtc.Ticks : 0L;
             outboxFileLength = obFi.Exists ? obFi.Length : -1L;
             relevantItems = FilterOutboxForDevice(LoadOutboxUnlocked(), deviceId);
         }
+        policyConfig = GetSyncPolicy();
 
         string effectiveHost = string.IsNullOrWhiteSpace(hostName) ? Environment.MachineName : hostName;
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         if (relevantItems.Count == 0)
         {
-            return new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, [], [], 0, 0);
+            var emptyPolicy = new ResolvedSyncPolicy(
+                MirrorPruneEnabled: policyConfig.MirrorPruneEnabled,
+                PruneScope: policyConfig.PruneScope,
+                TargetRoot: policyConfig.TargetRoot,
+                OutboxAuthoritative: false,
+                MissingSourceCount: 0,
+                ExpectedPlaylistNames: [],
+                LargePruneConfirmThresholdCount: policyConfig.LargePruneConfirmThresholdCount,
+                LargePruneConfirmThresholdRatio: policyConfig.LargePruneConfirmThresholdRatio,
+                PruneConfirmedForSession: pruneConfirmedForSession);
+            return new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, [], [], 0, 0, emptyPolicy);
         }
 
         bool hasPlaylistItems = relevantItems.Any(i => string.Equals(i.Kind, "playlist", StringComparison.OrdinalIgnoreCase));
@@ -327,7 +344,7 @@ public sealed partial class SyncOutboxAndPairingStore
             playlistStampsFingerprint = sbFp.ToString();
         }
 
-        string cacheKey = $"{deviceId ?? ""}\u001f{effectiveHost}";
+        string cacheKey = $"{deviceId ?? ""}\u001f{effectiveHost}\u001f{(pruneConfirmedForSession ? '1' : '0')}";
         lock (_resolveCacheLock)
         {
             if (_cachedResolvedOutboxes.TryGetValue(cacheKey, out var cachedOutbox)
@@ -335,6 +352,7 @@ public sealed partial class SyncOutboxAndPairingStore
                 && cachedOutbox.OutboxFileTicks == outboxFileTicks
                 && cachedOutbox.OutboxFileLength == outboxFileLength
                 && cachedOutbox.OutboxMutationVersion == outboxVer
+                && cachedOutbox.SyncPolicyVersion == policyVer
                 && string.Equals(cachedOutbox.PlaylistStampsFingerprint, playlistStampsFingerprint, StringComparison.Ordinal)
                 && (DateTime.UtcNow - cachedOutbox.ComputedAtUtc) < ResolvedOutboxCacheTtl)
             {
@@ -370,6 +388,7 @@ public sealed partial class SyncOutboxAndPairingStore
         var resolvedPlaylists = new List<ResolvedSyncPlaylist>();
         var coverCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         int duplicateTrackCount = 0;
+        int missingSourceCount = 0;
 
         bool AttachTrack(ManifestTrackRow row, string outboxId)
         {
@@ -421,7 +440,11 @@ public sealed partial class SyncOutboxAndPairingStore
             {
                 case "playlist":
                 {
-                    if (!resolvedItemPlaylists.TryGetValue(item.Id, out var plMeta)) break;
+                    if (!resolvedItemPlaylists.TryGetValue(item.Id, out var plMeta))
+                    {
+                        missingSourceCount++;
+                        break;
+                    }
 
                     var doc = LoadPlaylistCached(plMeta.FilePath, libIndex!);
                     var plTrackUids = new List<string>();
@@ -431,9 +454,15 @@ public sealed partial class SyncOutboxAndPairingStore
                         if (!entry.IsLocalMatched || string.IsNullOrWhiteSpace(entry.MatchedTrackUid))
                             continue;
                         if (!rowsByUid.TryGetValue(entry.MatchedTrackUid, out var row))
+                        {
+                            missingSourceCount++;
                             continue;
+                        }
                         if (!AttachTrack(row, item.Id))
+                        {
+                            missingSourceCount++;
                             continue;
+                        }
 
                         plTrackUids.Add(row.TrackUid);
                         plRelPaths.Add(BuildTargetRelPath(row));
@@ -449,7 +478,10 @@ public sealed partial class SyncOutboxAndPairingStore
                         bool match = matchUnlabeled
                             ? string.IsNullOrWhiteSpace(row.Genre)
                             : string.Equals(row.Genre.Trim(), item.TargetKey.Trim(), StringComparison.OrdinalIgnoreCase);
-                        if (match) AttachTrack(row, item.Id);
+                        if (match && !AttachTrack(row, item.Id))
+                        {
+                            missingSourceCount++;
+                        }
                     }
                     break;
                 }
@@ -458,9 +490,9 @@ public sealed partial class SyncOutboxAndPairingStore
                     string targetArtist = item.TargetKey.Trim();
                     foreach (var row in rows)
                     {
-                        if (row.MatchesArtist(targetArtist))
+                        if (row.MatchesArtist(targetArtist) && !AttachTrack(row, item.Id))
                         {
-                            AttachTrack(row, item.Id);
+                            missingSourceCount++;
                         }
                     }
                     break;
@@ -471,7 +503,14 @@ public sealed partial class SyncOutboxAndPairingStore
                     {
                         if (rowsByUid.TryGetValue(uid, out var row))
                         {
-                            AttachTrack(row, item.Id);
+                            if (!AttachTrack(row, item.Id))
+                            {
+                                missingSourceCount++;
+                            }
+                        }
+                        else
+                        {
+                            missingSourceCount++;
                         }
                     }
                     break;
@@ -516,8 +555,28 @@ public sealed partial class SyncOutboxAndPairingStore
             ));
         }
 
-        var payload = new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, resolvedTracks, resolvedPlaylists, totalBytes, duplicateTrackCount);
-        if (Interlocked.Read(ref _outboxMutationVersion) == outboxVer && ReadManifestFileStamp().Equals(manifestStamp))
+        bool manifestExists = File.Exists(Path.Combine(_tonewiseDir, "manifest.db"));
+        bool outboxAuthoritative = manifestExists && relevantItems.Count > 0 && resolvedTracks.Count > 0 && missingSourceCount == 0;
+        var expectedPlaylistNames = resolvedPlaylists
+            .Select(p => p.Name)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var resolvedPolicy = new ResolvedSyncPolicy(
+            MirrorPruneEnabled: policyConfig.MirrorPruneEnabled,
+            PruneScope: policyConfig.PruneScope,
+            TargetRoot: policyConfig.TargetRoot,
+            OutboxAuthoritative: outboxAuthoritative,
+            MissingSourceCount: missingSourceCount,
+            ExpectedPlaylistNames: expectedPlaylistNames,
+            LargePruneConfirmThresholdCount: policyConfig.LargePruneConfirmThresholdCount,
+            LargePruneConfirmThresholdRatio: policyConfig.LargePruneConfirmThresholdRatio,
+            PruneConfirmedForSession: pruneConfirmedForSession);
+
+        var payload = new ResolvedOutboxPayload(effectiveHost, nowMs, relevantItems, resolvedTracks, resolvedPlaylists, totalBytes, duplicateTrackCount, resolvedPolicy);
+        if (Interlocked.Read(ref _outboxMutationVersion) == outboxVer
+            && Interlocked.Read(ref _syncPolicyVersion) == policyVer
+            && ReadManifestFileStamp().Equals(manifestStamp))
         {
             lock (_resolveCacheLock)
             {
@@ -526,6 +585,7 @@ public sealed partial class SyncOutboxAndPairingStore
                     outboxFileTicks,
                     outboxFileLength,
                     outboxVer,
+                    policyVer,
                     playlistStampsFingerprint,
                     DateTime.UtcNow,
                     payload);

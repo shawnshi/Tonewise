@@ -1093,15 +1093,51 @@
                     <ScrollViewer Visibility="{x:Bind ViewModel.IsSyncScrobbleViewVisible, Mode=OneWay}">
                         <StackPanel Spacing="12" Padding="0,8,0,16">
 
-                            <!-- Sub-Tab: LAN Devices & Persistent Session Slots -->
+                            <!-- Sub-Tab: LAN & USB Devices & Persistent Session Slots -->
                             <Border Style="{StaticResource StudioCardStyle}" Visibility="{x:Bind ViewModel.IsSyncLanSubTab, Mode=OneWay}">
                                 <StackPanel Spacing="12">
-                                    <TextBlock Text="局域网同步与手机分发" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource TwFgD9B372Brush}" />
+                                    <TextBlock Text="局域网与 USB 手机双向同步" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource TwFgD9B372Brush}" />
                                     <StackPanel Orientation="Horizontal" Spacing="10">
                                         <Button Style="{StaticResource GoldActionButtonStyle}" Content="开启 / 关闭局域网同步服务" Command="{x:Bind ViewModel.ToggleLanSyncHostCommand}" />
                                         <Button Style="{StaticResource StudioChipButtonStyle}" Content="刷新配对码" Command="{x:Bind ViewModel.RegenerateLanPairingCodeCommand}" />
                                         <TextBlock Text="{x:Bind ViewModel.LanSyncStatus, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFgCBD5E1Brush}" VerticalAlignment="Center" />
                                     </StackPanel>
+
+                                    <Border Background="{ThemeResource TwBg192130Brush}" BorderBrush="{ThemeResource TwLine263147Brush}" BorderThickness="1" CornerRadius="6" Padding="12,10">
+                                        <StackPanel Spacing="8">
+                                            <Grid ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                                    <TextBlock Text="USB 自动双向同步（目标目录：手机 Music/）" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TwFgD9B372Brush}" />
+                                                    <TextBlock Text="{x:Bind ViewModel.UsbAdbStatusText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TwFg94A3B8Brush}" TextWrapping="Wrap" />
+                                                </StackPanel>
+                                                <Button Grid.Column="1" Style="{StaticResource GoldActionButtonStyle}" Content="立即 USB 同步" Command="{x:Bind ViewModel.TriggerUsbSyncNowCommand}" IsEnabled="{x:Bind ViewModel.HasConnectedUsbDevice, Mode=OneWay}" VerticalAlignment="Center" />
+                                                <Button Grid.Column="2" Style="{StaticResource StudioChipButtonStyle}" Content="取消" Command="{x:Bind ViewModel.CancelUsbSyncCommand}" Visibility="{x:Bind ViewModel.IsUsbSyncRunning, Mode=OneWay}" VerticalAlignment="Center" />
+                                            </Grid>
+                                            <StackPanel Orientation="Horizontal" Spacing="24">
+                                                <ToggleSwitch Header="连接手机自动 USB 同步" IsOn="{x:Bind ViewModel.IsUsbAutoSyncEnabled, Mode=TwoWay}" />
+                                                <ToggleSwitch Header="自动删除手机 Music 中不在列表的歌曲" IsOn="{x:Bind ViewModel.IsMirrorPruneEnabled, Mode=TwoWay}" />
+                                            </StackPanel>
+                                            <ProgressBar IsIndeterminate="False" Value="{x:Bind ViewModel.UsbSyncProgressPercent, Mode=OneWay}" Maximum="100" Visibility="{x:Bind ViewModel.IsUsbSyncRunning, Mode=OneWay}" AutomationProperties.Name="USB 同步进度" />
+                                            <TextBlock Text="{x:Bind ViewModel.UsbSyncProgressText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TwFgCBD5E1Brush}" TextWrapping="Wrap" />
+                                            <Border Background="{ThemeResource TwBg141A26Brush}" BorderBrush="{ThemeResource TwFgD9B372Brush}" BorderThickness="1" CornerRadius="6" Padding="10,8" Visibility="{x:Bind ViewModel.HasPendingLargePruneConfirmation, Mode=OneWay}">
+                                                <Grid ColumnSpacing="8">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.PendingLargePruneMessage, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TwFgE2E8F0Brush}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                                                    <Button Grid.Column="1" Style="{StaticResource GoldActionButtonStyle}" Content="确认执行删除" Command="{x:Bind ViewModel.ConfirmLargeUsbPruneCommand}" VerticalAlignment="Center" />
+                                                    <Button Grid.Column="2" Style="{StaticResource StudioChipButtonStyle}" Content="本次跳过" Command="{x:Bind ViewModel.DismissLargeUsbPruneCommand}" VerticalAlignment="Center" />
+                                                </Grid>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
 
                                     <Border Background="{ThemeResource TwBg192130Brush}" BorderBrush="{ThemeResource TwLine263147Brush}" BorderThickness="1" CornerRadius="6" Padding="12,10">
                                         <Grid ColumnSpacing="16">

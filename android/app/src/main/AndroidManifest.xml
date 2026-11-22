@@ -111,6 +111,12 @@
             android:foregroundServiceType="dataSync" />
 
         <service
+            android:name=".sync.UsbSyncTriggerService"
+            android:exported="true"
+            android:foregroundServiceType="dataSync"
+            tools:ignore="ExportedService" />
+
+        <service
             android:name=".playback.ui.clock.TonewiseDreamService"
             android:exported="true"
             android:label="@string/lbl_desk_clock"

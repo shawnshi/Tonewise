@@ -22,34 +22,17 @@ public sealed partial class MainViewModel
     {
         string? previousId = SelectedEndpoint?.Id;
         var endpoints = AudioDeviceRouter.EnumerateRenderEndpoints();
-        bool lostPrevious = previousId is not null;
+        EndpointReconcileResult reconciled;
         bool prevSup = _suppressDspSync;
         bool prevSaveSup = _suppressSettingsSave;
         _suppressDspSync = true;
         _suppressSettingsSave = true;
         try
         {
-            OutputEndpoints.Clear();
-            AudioOutputEndpoint? matched = null;
-            AudioOutputEndpoint? fallbackDefault = null;
-            foreach (var ep in endpoints)
+            reconciled = AudioEndpointReconciler.ReconcileInPlace(OutputEndpoints, endpoints, previousId);
+            if (!string.Equals(SelectedEndpoint?.Id, reconciled.TargetSelection?.Id, StringComparison.Ordinal))
             {
-                OutputEndpoints.Add(ep);
-                if (previousId is not null && string.Equals(ep.Id, previousId, StringComparison.Ordinal))
-                {
-                    matched = ep;
-                    lostPrevious = false;
-                }
-                if (ep.IsDefault && fallbackDefault is null)
-                {
-                    fallbackDefault = ep;
-                }
-            }
-
-            var target = matched ?? fallbackDefault ?? OutputEndpoints.FirstOrDefault();
-            if (!string.Equals(SelectedEndpoint?.Id, target?.Id, StringComparison.Ordinal))
-            {
-                SelectedEndpoint = target;
+                SelectedEndpoint = reconciled.TargetSelection;
             }
         }
         finally
@@ -58,11 +41,28 @@ public sealed partial class MainViewModel
             _suppressSettingsSave = prevSaveSup;
         }
 
-        if (handleLostSelection && lostPrevious && SelectedEndpoint is not null)
+        if (handleLostSelection && reconciled.LostPreviousSelection && SelectedEndpoint is not null)
         {
             LoadDspConfigForCurrentEndpoint(_store.MusicRoot);
             PushEnginePreferences();
-            ReopenCurrentOutputAtCurrentPosition();
+            if (_engine.CurrentFilePath is not null)
+            {
+                ReopenCurrentOutputAtCurrentPosition();
+            }
+            else if (_pendingEndpointReturnInterruption is not null
+                && DateTime.UtcNow <= _pendingEndpointReturnDeadlineUtc
+                && !_isAutoRecoveringPlayback)
+            {
+                TryResumeAfterEndpointReturn();
+            }
+        }
+        else if (handleLostSelection
+            && _pendingEndpointReturnInterruption is not null
+            && DateTime.UtcNow <= _pendingEndpointReturnDeadlineUtc
+            && OutputEndpoints.Count > 0
+            && !_isAutoRecoveringPlayback)
+        {
+            TryResumeAfterEndpointReturn();
         }
     }
 
@@ -379,6 +379,7 @@ public sealed partial class MainViewModel
         var activeProfile = _usingExternalEqFile
             ? _eqProfile
             : (extDsp.Enabled ? extDsp.ToEqualizerApoProfile() : null);
+        _appliedEngineEndpointId = SelectedEndpoint?.Id;
         _engine.SetPreferences(
             PreferWasapiExclusive,
             SelectedEndpoint?.Id,

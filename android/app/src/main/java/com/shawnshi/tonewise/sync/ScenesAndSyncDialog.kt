@@ -116,6 +116,7 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                         pairedHost = pairedHost,
                         syncStatus = syncStatus,
                         syncProgress = syncProgress,
+                        hasWritableMusicSafGrant = lanSyncRepository.hasWritableMusicSafGrant,
                         sessionSlots = slots,
                         lastFmState = lastFmState,
                         onPairHost = { url, code -> lanSyncRepository.pairWithHost(url, code) },
@@ -213,6 +214,7 @@ private fun SyncHubSheet(
     pairedHost: PairedHostInfo?,
     syncStatus: String,
     syncProgress: SyncProgressState,
+    hasWritableMusicSafGrant: Boolean,
     sessionSlots: List<SessionSlotItem>,
     lastFmState: LastFmState,
     onPairHost: suspend (String, String) -> Boolean,
@@ -665,6 +667,14 @@ private fun SyncHubSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            if (!hasWritableMusicSafGrant) {
+                Text(
+                    text = stringResource(R.string.lbl_usb_saf_grant_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
         }
     }
 }

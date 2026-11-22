@@ -32,12 +32,20 @@ class LanSyncRateLimitException(
     message: String,
 ) : IllegalStateException(message)
 
+data class PingInfo(
+    val ok: Boolean,
+    val hostName: String = "",
+    val hostId: String = "",
+    val transportHint: String = "",
+)
+
 data class PairResponse(
     val token: String,
     val hostName: String,
     val deviceId: String,
     val deviceName: String,
     val pairedAtMs: Long,
+    val hostId: String = "",
 )
 
 data class OutboxItemDto(
@@ -82,6 +90,18 @@ data class OutboxPlaylistDto(
     val trackUids: List<String>,
 )
 
+data class SyncPolicyDto(
+    val mirrorPruneEnabled: Boolean = false,
+    val pruneScope: String = "music_folder_all",
+    val targetRoot: String = "Music",
+    val outboxAuthoritative: Boolean = false,
+    val missingSourceCount: Int = 0,
+    val expectedPlaylistNames: List<String> = emptyList(),
+    val largePruneConfirmThresholdCount: Int = 20,
+    val largePruneConfirmThresholdRatio: Double = 0.30,
+    val pruneConfirmedForSession: Boolean = false,
+)
+
 data class OutboxResponse(
     val hostName: String,
     val generatedAtMs: Long,
@@ -90,6 +110,35 @@ data class OutboxResponse(
     val playlists: List<OutboxPlaylistDto>,
     val totalBytes: Long,
     val duplicateTrackCount: Int = 0,
+    val syncPolicy: SyncPolicyDto? = null,
+)
+
+data class SyncSessionProgressPayload(
+    val deviceId: String,
+    val transport: String,
+    val phase: String,
+    val isRunning: Boolean,
+    val completedTracks: Int = 0,
+    val totalTracks: Int = 0,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+    val currentTrackTitle: String = "",
+    val addedCount: Int = 0,
+    val updatedCount: Int = 0,
+    val skippedCount: Int = 0,
+    val deletedCount: Int = 0,
+    val blockedForeignPaths: List<String> = emptyList(),
+    val pendingLargePruneCount: Int = 0,
+    val localAudioCount: Int = 0,
+    val pendingLargePruneRatio: Double = 0.0,
+    val errorMessage: String? = null,
+    val completed: Boolean = false,
+)
+
+data class SyncSessionControlResponse(
+    val ok: Boolean,
+    val cancelRequested: Boolean = false,
+    val pruneConfirmed: Boolean = false,
 )
 
 data class PlayDeltaPayload(
@@ -130,25 +179,36 @@ data class ReportResponse(
 )
 
 object LanSyncV2Client {
-    fun ping(baseUrl: String): Boolean {
+    fun ping(baseUrl: String): Boolean = pingInfo(baseUrl).ok
+
+    fun pingInfo(
+        baseUrl: String,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): PingInfo {
         val clean = baseUrl.trim().trimEnd('/')
         val pingUrl = "$clean/api/v2/ping"
-        if (!LanHttpClient.isSafeLanOrHttpsUrl(pingUrl)) return false
+        if (!LanHttpClient.isSafeLanOrHttpsUrl(pingUrl)) return PingInfo(ok = false)
         return try {
-            val conn =
-                LanHttpClient.openConnectionForUrl(pingUrl).apply {
-                    instanceFollowRedirects = false
-                    connectTimeout = 4_000
-                    readTimeout = 4_000
-                    requestMethod = "GET"
-                }
-            try {
-                conn.responseCode in 200..299
-            } finally {
-                conn.disconnect()
-            }
+            val respText =
+                LanHttpClient.getString(
+                    url = pingUrl,
+                    bearerToken = null,
+                    cancelToken = cancelToken,
+                    connectTimeoutMs = 4_000,
+                    readTimeoutMs = 4_000,
+                )
+            @Suppress("UNCHECKED_CAST")
+            val root = TonewiseCore.parseJson(respText) as? Map<String, Any?>
+            PingInfo(
+                ok = true,
+                hostName = root?.get("host_name")?.toString().orEmpty(),
+                hostId = root?.get("host_id")?.toString().orEmpty(),
+                transportHint = root?.get("transport_hint")?.toString().orEmpty(),
+            )
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (_: Exception) {
-            false
+            PingInfo(ok = false)
         }
     }
 
@@ -213,6 +273,49 @@ object LanSyncV2Client {
             deviceId = root["device_id"]?.toString() ?: deviceId,
             deviceName = root["device_name"]?.toString() ?: deviceName,
             pairedAtMs = asLong(root["paired_at_ms"]),
+            hostId = root["host_id"]?.toString().orEmpty(),
+        )
+    }
+
+    fun pairViaUsb(
+        baseUrl: String,
+        nonce: String,
+        deviceId: String,
+        deviceName: String,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): PairResponse {
+        val clean = baseUrl.trim().trimEnd('/')
+        if (!LanHttpClient.isLoopbackUrl(clean)) {
+            throw IOException("USB 自动配对仅允许本机环回地址: $clean")
+        }
+        val body =
+            TonewiseCore.stringifyJson(
+                linkedMapOf(
+                    "nonce" to nonce.trim(),
+                    "device_id" to deviceId.trim(),
+                    "device_name" to deviceName.trim(),
+                )
+            )
+        val respText =
+            LanHttpClient.postJson(
+                url = "$clean/api/v2/usb/pair",
+                body = body,
+                bearerToken = null,
+                cancelToken = cancelToken,
+            )
+        @Suppress("UNCHECKED_CAST")
+        val root =
+            TonewiseCore.parseJson(respText) as? Map<String, Any?>
+                ?: throw IOException("USB 配对响应格式无效")
+        val token = root["token"]?.toString()?.takeIf { it.isNotBlank() }
+            ?: throw IOException("服务端未返回有效令牌")
+        return PairResponse(
+            token = token,
+            hostName = root["host_name"]?.toString() ?: clean,
+            deviceId = root["device_id"]?.toString() ?: deviceId,
+            deviceName = root["device_name"]?.toString() ?: deviceName,
+            pairedAtMs = asLong(root["paired_at_ms"]),
+            hostId = root["host_id"]?.toString().orEmpty(),
         )
     }
 
@@ -298,6 +401,23 @@ object LanSyncV2Client {
                 )
             }
 
+        @Suppress("UNCHECKED_CAST")
+        val rawPolicy = root["sync_policy"] as? Map<String, Any?>
+        val syncPolicy =
+            rawPolicy?.let { p ->
+                SyncPolicyDto(
+                    mirrorPruneEnabled = p["mirror_prune_enabled"] == true,
+                    pruneScope = p["prune_scope"]?.toString()?.takeIf { it.isNotBlank() } ?: "music_folder_all",
+                    targetRoot = p["target_root"]?.toString()?.takeIf { it.isNotBlank() } ?: "Music",
+                    outboxAuthoritative = p["outbox_authoritative"] == true,
+                    missingSourceCount = asInt(p["missing_source_count"]),
+                    expectedPlaylistNames = asStringList(p["expected_playlist_names"]),
+                    largePruneConfirmThresholdCount = asInt(p["large_prune_confirm_threshold_count"]).let { if (it > 0) it else 20 },
+                    largePruneConfirmThresholdRatio = asDouble(p["large_prune_confirm_threshold_ratio"], 0.30),
+                    pruneConfirmedForSession = p["prune_confirmed_for_session"] == true,
+                )
+            }
+
         return OutboxResponse(
             hostName = root["host_name"]?.toString() ?: "PC",
             generatedAtMs = asLong(root["generated_at_ms"]),
@@ -306,6 +426,7 @@ object LanSyncV2Client {
             playlists = playlists,
             totalBytes = asLong(root["total_bytes"]),
             duplicateTrackCount = asInt(root["duplicate_track_count"]),
+            syncPolicy = syncPolicy,
         )
     }
 
@@ -561,9 +682,59 @@ object LanSyncV2Client {
         }
     }
 
+    fun postSyncProgress(
+        baseUrl: String,
+        token: String,
+        payload: SyncSessionProgressPayload,
+        cancelToken: LanHttpClient.CancelToken? = null,
+    ): SyncSessionControlResponse {
+        val clean = baseUrl.trim().trimEnd('/')
+        val bodyMap =
+            linkedMapOf<String, Any?>(
+                "device_id" to payload.deviceId,
+                "transport" to payload.transport,
+                "phase" to payload.phase,
+                "is_running" to payload.isRunning,
+                "completed_tracks" to payload.completedTracks,
+                "total_tracks" to payload.totalTracks,
+                "downloaded_bytes" to payload.downloadedBytes,
+                "total_bytes" to payload.totalBytes,
+                "current_track_title" to payload.currentTrackTitle,
+                "added_count" to payload.addedCount,
+                "updated_count" to payload.updatedCount,
+                "skipped_count" to payload.skippedCount,
+                "deleted_count" to payload.deletedCount,
+                "blocked_foreign_paths" to payload.blockedForeignPaths,
+                "pending_large_prune_count" to payload.pendingLargePruneCount,
+                "local_audio_count" to payload.localAudioCount,
+                "pending_large_prune_ratio" to payload.pendingLargePruneRatio,
+                "error_message" to payload.errorMessage,
+                "completed" to payload.completed,
+            )
+        val respText =
+            LanHttpClient.postJson(
+                url = "$clean/api/v2/sync-session/progress",
+                body = TonewiseCore.stringifyJson(bodyMap),
+                bearerToken = token,
+                cancelToken = cancelToken,
+                connectTimeoutMs = 3_000,
+                readTimeoutMs = 5_000,
+            )
+        @Suppress("UNCHECKED_CAST")
+        val root = TonewiseCore.parseJson(respText) as? Map<String, Any?>
+        return SyncSessionControlResponse(
+            ok = root?.get("ok") == true,
+            cancelRequested = root?.get("cancel_requested") == true,
+            pruneConfirmed = root?.get("prune_confirmed") == true,
+        )
+    }
+
     private fun asInt(v: Any?): Int = (v as? Number)?.toInt() ?: v?.toString()?.toIntOrNull() ?: 0
 
     private fun asLong(v: Any?): Long = (v as? Number)?.toLong() ?: v?.toString()?.toLongOrNull() ?: 0L
+
+    private fun asDouble(v: Any?, defaultValue: Double): Double =
+        (v as? Number)?.toDouble() ?: v?.toString()?.toDoubleOrNull() ?: defaultValue
 
     private fun asStringList(v: Any?): List<String> =
         (v as? List<*>)?.mapNotNull { it?.toString()?.takeIf { s -> s.isNotEmpty() } } ?: emptyList()

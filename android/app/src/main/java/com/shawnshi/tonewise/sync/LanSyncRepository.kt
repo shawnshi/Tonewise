@@ -57,6 +57,7 @@ import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.detail.MusicBioRepository
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.persist.PlayCountRepository
+import com.shawnshi.tonewise.playback.state.PlaybackStateManager
 import com.shawnshi.tonewise.playback.ui.WaveformRepository
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.core.TonewiseCore
@@ -74,7 +75,13 @@ data class PairedHostInfo(
     val hostName: String,
     val deviceId: String,
     val token: String,
+    val hostId: String = "",
 )
+
+enum class SyncTransportMode {
+    LAN,
+    USB,
+}
 
 data class SyncProgressState(
     val isRunning: Boolean = false,
@@ -146,6 +153,7 @@ constructor(
     private val musicBioRepository: MusicBioRepository,
     private val managedSyncStorage: ManagedSyncStorage,
     private val lastFmRepository: LastFmRepository,
+    private val playbackStateManager: PlaybackStateManager,
 ) {
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val syncDb: TonewiseSyncDatabase by lazy { TonewiseSyncDatabase.getInstance(context) }
@@ -206,8 +214,18 @@ constructor(
     private val pendingEvictTrackMtimes = HashMap<String, Long>()
     private var pendingRemoteReconcileRemaining = 0
 
+    val hasWritableMusicSafGrant: Boolean
+        get() = managedSyncStorage.hasWritableMusicSafGrant()
+
+    fun requestLibraryRescan() {
+        musicRepository.requestIndex(withCache = true)
+    }
+
     init {
         LanHttpClient.lanConnectionOpener = opener@{ targetUrl ->
+            if (LanHttpClient.isLoopbackUrl(targetUrl.toString())) {
+                return@opener null
+            }
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
                 ?: return@opener null
             val wifiNet =
@@ -468,6 +486,7 @@ constructor(
                         hostName = pairResp.hostName,
                         deviceId = pairResp.deviceId,
                         token = pairResp.token,
+                        hostId = pairResp.hostId,
                     )
                 lwwStore.savePairedHost(info)
                 _pairedHost.value = info
@@ -521,6 +540,16 @@ constructor(
     }
 
     suspend fun syncWithHost(baseUrl: String) {
+        syncWithHost(baseUrl = baseUrl, transport = SyncTransportMode.LAN)
+    }
+
+    suspend fun syncWithHost(
+        baseUrl: String,
+        transport: SyncTransportMode,
+        usbNonce: String? = null,
+        expectedHostId: String? = null,
+        allowUsbAutoPair: Boolean = false,
+    ) {
         withContext(Dispatchers.IO) {
             if (!syncInFlight.compareAndSet(false, true)) {
                 return@withContext
@@ -535,25 +564,178 @@ constructor(
 
             syncDb.ensureLegacyMigrated(context)
             lwwStore.ensureLoadedOnBackground(context)
-            val paired =
-                _pairedHost.value ?: lwwStore.loadPairedHost()?.also { _pairedHost.value = it }
-            val token = resolveTokenForHost(paired, cleanBase)
-            if (paired == null || token == null) {
-                _syncStatus.value = "该电脑尚未配对：请先输入电脑端显示的 6 位配对码"
-                syncInFlight.set(false)
-                return@withContext
-            }
 
-            _syncStatus.value = "正在连接 $cleanBase 获取同步清单…"
+            val transportTag = if (transport == SyncTransportMode.USB) "usb" else "lan"
+            val transportLabel = if (transport == SyncTransportMode.USB) "USB 直连" else "局域网"
+            _syncStatus.value = "正在通过$transportLabel 连接 $cleanBase 获取同步清单…"
             _syncProgress.value =
                 SyncProgressState(isRunning = true, phase = "正在连接电脑并检查发送队列…")
+
             LanHttpClient.CancelToken.withCoroutineCancelToken { cancelToken ->
                 activeSyncJob = currentCoroutineContext()[Job]
                 activeCancelToken = cancelToken
+                var activePaired: PairedHostInfo? = null
+                var activeToken: String? = null
+                var lastProgressPushMs = 0L
+
+                fun pushProgress(
+                    phase: String,
+                    isRunning: Boolean,
+                    completedTracks: Int = 0,
+                    totalTracks: Int = 0,
+                    downloadedBytes: Long = 0L,
+                    totalBytes: Long = 0L,
+                    currentTrackTitle: String = "",
+                    addedCount: Int = 0,
+                    updatedCount: Int = 0,
+                    skippedCount: Int = 0,
+                    deletedCount: Int = 0,
+                    blockedForeignPaths: List<String> = emptyList(),
+                    pendingLargePruneCount: Int = 0,
+                    localAudioCount: Int = 0,
+                    pendingLargePruneRatio: Double = 0.0,
+                    errorMessage: String? = null,
+                    completed: Boolean = false,
+                    force: Boolean = false,
+                ) {
+                    val p = activePaired ?: return
+                    val tok = activeToken ?: return
+                    val nowMs = System.currentTimeMillis()
+                    if (!force && isRunning && nowMs - lastProgressPushMs < 500L) {
+                        return
+                    }
+                    lastProgressPushMs = nowMs
+                    val ctrl =
+                        runCatching {
+                            LanSyncV2Client.postSyncProgress(
+                                baseUrl = cleanBase,
+                                token = tok,
+                                payload =
+                                    SyncSessionProgressPayload(
+                                        deviceId = p.deviceId,
+                                        transport = transportTag,
+                                        phase = phase,
+                                        isRunning = isRunning,
+                                        completedTracks = completedTracks,
+                                        totalTracks = totalTracks,
+                                        downloadedBytes = downloadedBytes,
+                                        totalBytes = totalBytes,
+                                        currentTrackTitle = currentTrackTitle,
+                                        addedCount = addedCount,
+                                        updatedCount = updatedCount,
+                                        skippedCount = skippedCount,
+                                        deletedCount = deletedCount,
+                                        blockedForeignPaths = blockedForeignPaths,
+                                        pendingLargePruneCount = pendingLargePruneCount,
+                                        localAudioCount = localAudioCount,
+                                        pendingLargePruneRatio = pendingLargePruneRatio,
+                                        errorMessage = errorMessage,
+                                        completed = completed,
+                                    ),
+                                cancelToken = if (isRunning) cancelToken else null,
+                            )
+                        }.getOrNull()
+                    if (isRunning && ctrl?.cancelRequested == true) {
+                        cancelToken.cancel()
+                        cancelToken.throwIfCancelled()
+                    }
+                }
+
                 try {
                     cancelToken.throwIfCancelled()
+                    val pingInfo = LanSyncV2Client.pingInfo(cleanBase, cancelToken)
+                    if (transport == SyncTransportMode.USB && !pingInfo.ok) {
+                        throw IOException("无法通过 USB 隧道连接电脑端同步服务（$cleanBase 未响应）")
+                    }
+                    if (!expectedHostId.isNullOrBlank() &&
+                        pingInfo.ok &&
+                        pingInfo.hostId.isNotBlank() &&
+                        !pingInfo.hostId.equals(expectedHostId.trim(), ignoreCase = true)
+                    ) {
+                        throw IOException("目标电脑身份不匹配，已中止 USB 同步")
+                    }
+
+                    var paired =
+                        _pairedHost.value ?: lwwStore.loadPairedHost()?.also { _pairedHost.value = it }
+                    val verifiedHostId = pingInfo.hostId.takeIf { pingInfo.ok && it.isNotBlank() }
+                    var token = resolveTokenForHost(paired, cleanBase, verifiedHostId = verifiedHostId)
+
+                    if (paired != null && token != null && paired.hostId.isBlank() && verifiedHostId != null) {
+                        paired = paired.copy(hostId = verifiedHostId)
+                        lwwStore.savePairedHost(paired)
+                        _pairedHost.value = paired
+                    }
+
+                    suspend fun performUsbAutoPair(): Pair<PairedHostInfo, String> {
+                        val nonce = usbNonce?.trim().orEmpty()
+                        if (nonce.isEmpty()) {
+                            throw IOException("缺少 USB 自动配对令牌")
+                        }
+                        val deviceId = lwwStore.getOrCreateStableDeviceId()
+                        val deviceName = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android Phone"
+                        val pairResp =
+                            LanSyncV2Client.pairViaUsb(
+                                baseUrl = cleanBase,
+                                nonce = nonce,
+                                deviceId = deviceId,
+                                deviceName = deviceName,
+                                cancelToken = cancelToken,
+                            )
+                        val preservedUrl =
+                            paired?.baseUrl?.takeIf { it.isNotBlank() && !LanHttpClient.isLoopbackUrl(it) }
+                                ?: cleanBase
+                        val info =
+                            PairedHostInfo(
+                                baseUrl = preservedUrl,
+                                hostName = pairResp.hostName,
+                                deviceId = pairResp.deviceId,
+                                token = pairResp.token,
+                                hostId = pairResp.hostId,
+                            )
+                        lwwStore.savePairedHost(info)
+                        _pairedHost.value = info
+                        return info to pairResp.token
+                    }
+
+                    if (paired == null || token == null) {
+                        if (transport == SyncTransportMode.USB &&
+                            allowUsbAutoPair &&
+                            !usbNonce.isNullOrBlank() &&
+                            LanHttpClient.isLoopbackUrl(cleanBase)
+                        ) {
+                            val (newPaired, newToken) = performUsbAutoPair()
+                            paired = newPaired
+                            token = newToken
+                        } else {
+                            _syncStatus.value = "该电脑尚未配对：请先输入电脑端显示的 6 位配对码"
+                            return@withCoroutineCancelToken
+                        }
+                    }
+
+                    activePaired = paired
+                    activeToken = token
+                    pushProgress(phase = "正在获取电脑端同步列表…", isRunning = true, force = true)
+
                     managedSyncStorage.invalidatePathCache()
-                    val outbox = LanSyncV2Client.fetchOutbox(cleanBase, token, cancelToken)
+                    val outbox =
+                        try {
+                            LanSyncV2Client.fetchOutbox(cleanBase, token, cancelToken)
+                        } catch (authErr: LanSyncAuthException) {
+                            if (transport == SyncTransportMode.USB &&
+                                allowUsbAutoPair &&
+                                !usbNonce.isNullOrBlank() &&
+                                LanHttpClient.isLoopbackUrl(cleanBase)
+                            ) {
+                                val (rePaired, reToken) = performUsbAutoPair()
+                                paired = rePaired
+                                token = reToken
+                                activePaired = rePaired
+                                activeToken = reToken
+                                LanSyncV2Client.fetchOutbox(cleanBase, token, cancelToken)
+                            } else {
+                                throw authErr
+                            }
+                        }
                     val (uniqueOutboxTracks, clientDuplicates) =
                         LanSyncV2Client.deduplicateOutboxTracks(outbox.tracks)
                     val totalDeduplicated = outbox.duplicateTrackCount + clientDuplicates
@@ -729,6 +911,19 @@ constructor(
                                 totalBytes = totalDownloadBytes,
                                 currentTrackTitle = track.title,
                             )
+                        pushProgress(
+                            phase = phaseLabel,
+                            isRunning = true,
+                            completedTracks = index,
+                            totalTracks = pendingDownloads.size,
+                            downloadedBytes = completedBytesBeforeCurrent,
+                            totalBytes = totalDownloadBytes,
+                            currentTrackTitle = track.title,
+                            addedCount = downloadedCount,
+                            updatedCount = updatedExistingCount,
+                            skippedCount = skippedExisting,
+                            force = index == 0,
+                        )
                         val partFile = File(partsDir, "${sanitizeKey(track.trackUid)}.part")
                         if (pending.forceOverwrite && partFile.exists()) {
                             partFile.delete()
@@ -745,16 +940,29 @@ constructor(
                                     partFile = partFile,
                                     expectedSize = track.fileSize,
                                     onProgress = { trackDownloaded, _ ->
+                                        val aggregateBytes = completedBytesBeforeCurrent + trackDownloaded
                                         _syncProgress.value =
                                             SyncProgressState(
                                                 isRunning = true,
                                                 phase = phaseLabel,
                                                 completedTracks = index,
                                                 totalTracks = pendingDownloads.size,
-                                                downloadedBytes = completedBytesBeforeCurrent + trackDownloaded,
+                                                downloadedBytes = aggregateBytes,
                                                 totalBytes = totalDownloadBytes,
                                                 currentTrackTitle = track.title,
                                             )
+                                        pushProgress(
+                                            phase = phaseLabel,
+                                            isRunning = true,
+                                            completedTracks = index,
+                                            totalTracks = pendingDownloads.size,
+                                            downloadedBytes = aggregateBytes,
+                                            totalBytes = totalDownloadBytes,
+                                            currentTrackTitle = track.title,
+                                            addedCount = downloadedCount,
+                                            updatedCount = updatedExistingCount,
+                                            skippedCount = skippedExisting,
+                                        )
                                     },
                                     cancelToken = cancelToken,
                                 )
@@ -835,6 +1043,18 @@ constructor(
 
                     _syncProgress.value =
                         _syncProgress.value.copy(phase = "正在双向同步播放记录、评分与歌单…")
+                    pushProgress(
+                        phase = "正在双向同步播放记录、评分与歌单…",
+                        isRunning = true,
+                        completedTracks = pendingDownloads.size,
+                        totalTracks = pendingDownloads.size,
+                        downloadedBytes = completedBytesBeforeCurrent,
+                        totalBytes = totalDownloadBytes,
+                        addedCount = downloadedCount,
+                        updatedCount = updatedExistingCount,
+                        skippedCount = skippedExisting,
+                        force = true,
+                    )
 
                     // Best-effort v1 metadata assets (scenes / waveforms / encyclopedia)
                     try {
@@ -945,6 +1165,135 @@ constructor(
                                 PendingPlaylistReconcile(pl, remainingAttempts = 3)
                         }
                     }
+
+                    // Clean up previously managed playlists that were removed from the PC sync list
+                    var removedPlaylistsCount = 0
+                    val syncPolicy = outbox.syncPolicy
+                    if (syncPolicy?.outboxAuthoritative == true) {
+                        val expectedNames =
+                            syncPolicy.expectedPlaylistNames
+                                .ifEmpty { outbox.playlists.map { it.name } }
+                                .map { it.trim() }
+                                .filter { it.isNotEmpty() }
+                                .toSet()
+                        val expectedLower = expectedNames.mapTo(HashSet()) { it.lowercase() }
+                        val prevManaged = lwwStore.loadManagedPlaylistNames()
+                        val libSnapshot = musicRepository.library
+                        for (prevName in prevManaged) {
+                            if (prevName.trim().lowercase() !in expectedLower) {
+                                managedSyncStorage.deletePlaylistM3u8(prevName)
+                                val existingPl =
+                                    libSnapshot?.findPlaylistByName(prevName)
+                                        ?: libSnapshot?.playlists?.firstOrNull {
+                                            it.name.raw.equals(prevName, ignoreCase = true)
+                                        }
+                                if (existingPl != null) {
+                                    runCatching { musicRepository.deletePlaylist(existingPl) }
+                                }
+                                removedPlaylistsCount++
+                            }
+                        }
+                        lwwStore.saveManagedPlaylistNames(expectedNames)
+                    }
+
+                    // Mirror prune phase: execute only after downloads and bidirectional report succeed
+                    var deletedCount = 0
+                    var blockedForeignPaths = emptyList<String>()
+                    var skippedPlayingPaths = emptyList<String>()
+                    var pendingLargePruneCount = 0
+                    var localAudioCount = 0
+                    var pendingLargePruneRatio = 0.0
+                    var pruneStatusNote: String? = null
+
+                    if (syncPolicy != null && syncPolicy.mirrorPruneEnabled) {
+                        _syncProgress.value =
+                            _syncProgress.value.copy(phase = "正在扫描 Music 目录并清理不在列表中的歌曲…")
+                        pushProgress(
+                            phase = "正在扫描 Music 目录并清理不在列表中的歌曲…",
+                            isRunning = true,
+                            completedTracks = pendingDownloads.size,
+                            totalTracks = pendingDownloads.size,
+                            downloadedBytes = completedBytesBeforeCurrent,
+                            totalBytes = totalDownloadBytes,
+                            addedCount = downloadedCount,
+                            updatedCount = updatedExistingCount,
+                            skippedCount = skippedExisting,
+                            force = true,
+                        )
+
+                        val localMusicFiles = managedSyncStorage.listAudioFilesInMusicRoot()
+                        val desiredRelPaths = uniqueOutboxTracks.map { it.targetRelPath }
+                        val managedRelPaths = syncDb.syncedTrackDao().getAll().map { it.relativePath }.toSet()
+                        val syncCompletedCleanly = failedTrackUids.isEmpty() && !cancelToken.isCancelled
+                        val prunePlan =
+                            SyncMirrorPrunePlanner.planPrune(
+                                policy = syncPolicy,
+                                desiredTargetRelPaths = desiredRelPaths,
+                                localMusicFiles = localMusicFiles,
+                                managedRelPaths = managedRelPaths,
+                                syncCompletedCleanly = syncCompletedCleanly,
+                            )
+
+                        localAudioCount = prunePlan.localAudioCount
+                        when (prunePlan.decision) {
+                            PruneDecision.PROCEED -> {
+                                val playingUris = HashSet<String>()
+                                val playingNormRels = HashSet<String>()
+                                playbackStateManager.currentSong?.let { cur ->
+                                    playingUris.add(cur.uri.toString())
+                                    val curRel =
+                                        cur.path.components.components
+                                            .joinToString("/")
+                                            .replace('\\', '/')
+                                    val normCurRel = SyncMirrorPrunePlanner.normalizeRelPath(curRel)
+                                    if (normCurRel.isNotEmpty()) {
+                                        playingNormRels.add(normCurRel)
+                                    }
+                                }
+                                val pruneResult =
+                                    managedSyncStorage.deleteAudioFilesAndPruneEmptyDirs(
+                                        filesToDelete = prunePlan.filesToDelete,
+                                        currentlyPlayingUris = playingUris,
+                                        currentlyPlayingNormRelPaths = playingNormRels,
+                                    )
+                                deletedCount = pruneResult.deletedFiles.size
+                                blockedForeignPaths = pruneResult.blockedForeignRelPaths
+                                skippedPlayingPaths = pruneResult.skippedPlayingRelPaths
+
+                                // Only remove deleted entries from synced_tracks; preserve track_play_ledger & lww_overrides!
+                                if (pruneResult.deletedFiles.isNotEmpty()) {
+                                    val deletedNormRels =
+                                        pruneResult.deletedFiles.mapTo(HashSet()) {
+                                            SyncMirrorPrunePlanner.normalizeRelPath(it.relativePath)
+                                        }
+                                    val deletedUris =
+                                        pruneResult.deletedFiles.mapTo(HashSet()) { it.documentUri }
+                                    for (entity in syncDb.syncedTrackDao().getAll()) {
+                                        val entNormRel = SyncMirrorPrunePlanner.normalizeRelPath(entity.relativePath)
+                                        if (entNormRel in deletedNormRels ||
+                                            (entity.documentUri != null && entity.documentUri in deletedUris)
+                                        ) {
+                                            syncDb.syncedTrackDao().deleteByUid(entity.trackUid)
+                                        }
+                                    }
+                                }
+                            }
+                            PruneDecision.REQUIRE_LARGE_PRUNE_CONFIRMATION -> {
+                                pendingLargePruneCount = prunePlan.filesToDelete.size
+                                pendingLargePruneRatio = prunePlan.pruneRatio
+                                pruneStatusNote =
+                                    "拟清理 ${pendingLargePruneCount}/${localAudioCount} 首（超阈值，请在电脑端确认后继续）"
+                            }
+                            PruneDecision.SKIP_EMPTY_OR_UNAUTHORITATIVE -> {
+                                pruneStatusNote = "同步列表为空或源目录异常，已熔断跳过清理"
+                            }
+                            PruneDecision.SKIP_INCOMPLETE_SYNC -> {
+                                pruneStatusNote = "存在未完成下载曲目，已保护本地曲库跳过清理"
+                            }
+                            PruneDecision.SKIP_DISABLED -> Unit
+                        }
+                    }
+
                     val hasPendingRemoteLedger =
                         synchronized(pendingRemoteLedgerLock) {
                             pendingRemoteCounts.isNotEmpty() ||
@@ -952,7 +1301,11 @@ constructor(
                                 pendingRemoteUnloved.isNotEmpty() ||
                                 pendingEvictTrackMtimes.isNotEmpty()
                         }
-                    if (downloadedCount > 0 || updatedExistingCount > 0 || effectiveOutboxPlaylists.isNotEmpty()) {
+                    if (downloadedCount > 0 ||
+                        updatedExistingCount > 0 ||
+                        deletedCount > 0 ||
+                        effectiveOutboxPlaylists.isNotEmpty()
+                    ) {
                         musicRepository.requestIndex(withCache = true)
                         reconcilePendingOutboxPlaylists()
                         reconcilePendingRemoteLedger()
@@ -960,12 +1313,12 @@ constructor(
                         reconcilePendingRemoteLedger()
                     }
 
-                    _syncStatus.value =
+                    val finalStatus =
                         buildString {
                             if (failedTrackUids.isEmpty()) {
-                                append("同步完成（").append(outbox.hostName).append("）：")
+                                append(transportLabel).append("同步完成（").append(outbox.hostName).append("）：")
                             } else {
-                                append("部分完成（").append(failedTrackUids.size).append(" 首待续传）：")
+                                append(transportLabel).append("部分完成（").append(failedTrackUids.size).append(" 首待续传）：")
                             }
                             append("新增 ").append(downloadedCount).append(" 首")
                             if (updatedExistingCount > 0) {
@@ -974,29 +1327,66 @@ constructor(
                             if (skippedExisting > 0) {
                                 append(" · 已最新跳过 ").append(skippedExisting).append(" 首")
                             }
+                            if (deletedCount > 0) {
+                                append(" · 清理 ").append(deletedCount).append(" 首")
+                            }
                             if (totalDeduplicated > 0) {
                                 append(" · 任务去重 ").append(totalDeduplicated).append(" 首")
                             }
-                            if (outbox.playlists.isNotEmpty()) {
+                            if (outbox.playlists.isNotEmpty() || removedPlaylistsCount > 0) {
                                 append(" · 歌单 ").append(outbox.playlists.size).append(" 个")
                             }
                             append(" · 上报播放 ").append(pushedCounts).append(" 首 · 标签 ")
                                 .append(pushedMutations).append(" 条")
+                            if (blockedForeignPaths.isNotEmpty()) {
+                                append(" · 待授权旧曲 ").append(blockedForeignPaths.size).append(" 首")
+                            }
+                            if (skippedPlayingPaths.isNotEmpty()) {
+                                append(" · 跳过正在播放 ").append(skippedPlayingPaths.size).append(" 首")
+                            }
+                            if (pruneStatusNote != null) {
+                                append(" · ").append(pruneStatusNote)
+                            }
                             if (firstDownloadError != null) {
                                 append("（").append(firstDownloadError).append("）")
                             }
                         }
+                    _syncStatus.value = finalStatus
+                    pushProgress(
+                        phase = finalStatus,
+                        isRunning = false,
+                        completedTracks = pendingDownloads.size,
+                        totalTracks = pendingDownloads.size,
+                        downloadedBytes = completedBytesBeforeCurrent,
+                        totalBytes = totalDownloadBytes,
+                        addedCount = downloadedCount,
+                        updatedCount = updatedExistingCount,
+                        skippedCount = skippedExisting,
+                        deletedCount = deletedCount,
+                        blockedForeignPaths = blockedForeignPaths,
+                        pendingLargePruneCount = pendingLargePruneCount,
+                        localAudioCount = localAudioCount,
+                        pendingLargePruneRatio = pendingLargePruneRatio,
+                        completed = true,
+                        force = true,
+                    )
                 } catch (ce: CancellationException) {
-                    L.i("LAN sync cancelled")
-                    _syncStatus.value = "同步已取消（已下载曲目与断点缓存已保留，可随时续传）"
+                    L.i("$transportLabel sync cancelled")
+                    val msg = "同步已取消（已下载曲目与断点缓存已保留，可随时续传）"
+                    _syncStatus.value = msg
+                    pushProgress(phase = msg, isRunning = false, errorMessage = msg, completed = false, force = true)
                     throw ce
                 } catch (authErr: LanSyncAuthException) {
-                    L.w(authErr, "LAN Sync v2 unauthorized")
+                    L.w(authErr, "$transportLabel Sync v2 unauthorized")
                     unpairHost(notifyRemote = false)
-                    _syncStatus.value = "配对已失效，请重新输入电脑端 6 位配对码配对"
+                    val msg = "配对已失效，请重新输入电脑端 6 位配对码配对"
+                    _syncStatus.value = msg
+                    pushProgress(phase = msg, isRunning = false, errorMessage = msg, completed = false, force = true)
                 } catch (e: Exception) {
-                    L.w(e, "LAN sync failed")
-                    _syncStatus.value = formatConnectionError(cleanBase, e, vpnActive = isVpnActive())
+                    L.w(e, "$transportLabel sync failed")
+                    val msg = formatConnectionError(cleanBase, e, vpnActive = isVpnActive())
+                    _syncStatus.value = msg
+                    pushProgress(phase = msg, isRunning = false, errorMessage = msg, completed = false, force = true)
                 } finally {
                     managedSyncStorage.invalidatePathCache()
                     activeCancelToken = null
@@ -1898,14 +2288,29 @@ constructor(
     )
 
     companion object {
-        fun resolveTokenForHost(pairedHost: PairedHostInfo?, targetBaseUrl: String): String? {
+        fun resolveTokenForHost(
+            pairedHost: PairedHostInfo?,
+            targetBaseUrl: String,
+            verifiedHostId: String? = null,
+        ): String? {
             if (pairedHost == null) return null
+            val token = pairedHost.token.takeIf { it.isNotBlank() } ?: return null
             val cleanTarget = normalizeBaseUrlStatic(targetBaseUrl)
+            if (cleanTarget.isEmpty()) return null
             val cleanPaired = normalizeBaseUrlStatic(pairedHost.baseUrl)
-            if (cleanTarget.isEmpty() || !cleanTarget.equals(cleanPaired, ignoreCase = true)) {
-                return null
+            if (cleanTarget.equals(cleanPaired, ignoreCase = true)) {
+                return token
             }
-            return pairedHost.token.takeIf { it.isNotBlank() }
+            val cleanVerifiedId = verifiedHostId?.trim().orEmpty()
+            val pairedId = pairedHost.hostId.trim()
+            if (cleanVerifiedId.isNotEmpty() &&
+                pairedId.isNotEmpty() &&
+                cleanVerifiedId.equals(pairedId, ignoreCase = true) &&
+                LanHttpClient.isSafeLanOrHttpsUrl(cleanTarget)
+            ) {
+                return token
+            }
+            return null
         }
 
         internal fun normalizeBaseUrlStatic(raw: String): String {

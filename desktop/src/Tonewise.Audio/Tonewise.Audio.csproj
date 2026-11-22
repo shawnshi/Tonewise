@@ -7,5 +7,6 @@
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
     <ProjectReference Include="..\Tonewise.Interop\Tonewise.Interop.csproj" />
+    <InternalsVisibleTo Include="Tonewise.Desktop.Tests" />
   </ItemGroup>
 </Project>

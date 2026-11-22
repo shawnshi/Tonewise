@@ -37,5 +37,17 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>tonewise-cli.exe</Link>
     </None>
+    <None Include="tools\adb.exe" Condition="Exists('tools\adb.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>tools\adb.exe</Link>
+    </None>
+    <None Include="tools\AdbWinApi.dll" Condition="Exists('tools\AdbWinApi.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>tools\AdbWinApi.dll</Link>
+    </None>
+    <None Include="tools\AdbWinUsbApi.dll" Condition="Exists('tools\AdbWinUsbApi.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>tools\AdbWinUsbApi.dll</Link>
+    </None>
   </ItemGroup>
 </Project>

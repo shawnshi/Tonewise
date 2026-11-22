@@ -67,6 +67,7 @@ public sealed partial class MainViewModel
     [RelayCommand]
     private void ClearPlaybackQueue()
     {
+        CancelPendingPlaybackRecovery();
         PlaybackQueue.Clear();
         _unshuffledQueueSnapshot.Clear();
         _playbackHistory.Clear();
@@ -253,6 +254,7 @@ public sealed partial class MainViewModel
 
     private bool TryPlayTrackInternal(TrackItem track, double initialSeekFraction = 0.0, bool startPaused = false)
     {
+        CancelPendingPlaybackRecovery();
         EvaluateAndCommitPlayCountIfQualified(completedNaturally: false);
 
         var previousTrack = CurrentTrack;
@@ -361,13 +363,15 @@ public sealed partial class MainViewModel
     {
         if (_engine.CurrentFilePath is null || CurrentTrack is null) return;
         bool wasPlaying = _engine.IsPlaying || IsPlaying;
-        double posSec = Math.Max(0.0, _engine.Position.TotalSeconds);
-        double durSec = _engine.Duration.TotalSeconds;
-        double fraction = durSec > 0 ? Math.Clamp(posSec / durSec, 0.0, 0.995) : 0.0;
+        TimeSpan pos = _engine.Position;
+        if (pos < TimeSpan.Zero) pos = TimeSpan.Zero;
         if (!LongPathHelper.FileExists(CurrentTrack.FullPath)) return;
         try
         {
-            _engine.PlayFile(CurrentTrack.FullPath, initialSeekFraction: fraction, startPaused: !wasPlaying);
+            _engine.PlayFile(
+                CurrentTrack.FullPath,
+                initialPosition: pos > TimeSpan.Zero ? pos : null,
+                startPaused: !wasPlaying);
             IsPlaying = wasPlaying;
             _pausedSinceUtc = wasPlaying ? null : DateTime.UtcNow;
             PreloadNextGaplessTrack();
@@ -485,6 +489,18 @@ public sealed partial class MainViewModel
     [RelayCommand]
     private void TogglePlayPause()
     {
+        bool wasRecovering = _isAutoRecoveringPlayback;
+        CancelPendingPlaybackRecovery(releasePowerKeepAlive: wasRecovering);
+        if (wasRecovering)
+        {
+            IsPlaying = false;
+            _lastProgressSampleUtc = null;
+            _pausedSinceUtc = DateTime.UtcNow;
+            PersistPlaybackSessionSnapshot(force: true);
+            StatusMessage = "已取消自动重连并暂停播放。";
+            return;
+        }
+
         if (_engine.CurrentFilePath is null && CurrentTrack is not null)
         {
             double durSec = CurrentTrack.DurationMs / 1000.0;
@@ -554,6 +570,7 @@ public sealed partial class MainViewModel
         string? nextWorkKey = BuildTrackWorkKey(nextTrack);
         if (_sleepTimer.ShouldStopAtTrackTransition(prevWorkKey, nextWorkKey))
         {
+            CancelPendingPlaybackRecovery();
             _engine.Pause();
             _engine.SetSleepFadeLinear(1.0);
             _pausedSinceUtc = DateTime.UtcNow;
@@ -597,6 +614,10 @@ public sealed partial class MainViewModel
 
     private void NextTrack(bool autoAdvance)
     {
+        if (!autoAdvance)
+        {
+            CancelPendingPlaybackRecovery();
+        }
         IList<TrackItem> source = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
         if (source.Count == 0) return;
 
@@ -611,6 +632,7 @@ public sealed partial class MainViewModel
                 IsPlaying = false;
                 Interlocked.Increment(ref _gaplessPreloadGen);
                 _engine.ClearPreloadedNext();
+                _engine.ReleasePowerKeepAlive();
                 if (autoAdvance && _sleepTimer.Mode != SleepTimerMode.Off)
                 {
                     _sleepTimer.ShouldStopAtTrackTransition(BuildTrackWorkKey(CurrentTrack), null);
@@ -747,6 +769,7 @@ public sealed partial class MainViewModel
     [RelayCommand]
     public void PreviousTrack()
     {
+        CancelPendingPlaybackRecovery();
         double currentPosSec = _engine.CurrentFilePath is not null
             ? _engine.Position.TotalSeconds
             : _pendingRestorePositionSec;
@@ -814,6 +837,7 @@ public sealed partial class MainViewModel
 
     public void SeekFraction(double fraction)
     {
+        CancelPendingPlaybackRecovery();
         if (_engine.CurrentFilePath is null && CurrentTrack is not null)
         {
             double durSec = CurrentTrack.DurationMs / 1000.0;
@@ -829,6 +853,7 @@ public sealed partial class MainViewModel
 
     public void SeekToSeconds(double seconds)
     {
+        CancelPendingPlaybackRecovery();
         if (_engine.CurrentFilePath is null && CurrentTrack is not null)
         {
             double totalSec = CurrentTrack.DurationMs / 1000.0;
@@ -906,6 +931,7 @@ public sealed partial class MainViewModel
 
         if (tick.Expired)
         {
+            CancelPendingPlaybackRecovery(releasePowerKeepAlive: true);
             if (_engine.IsPlaying || IsPlaying)
             {
                 _engine.Pause();
@@ -936,7 +962,10 @@ public sealed partial class MainViewModel
             string rgRest = CurrentTrack.ReplayGainBadge;
             string qRest = PlaybackQueue.Count > 0 ? $" · 队列 {PlaybackQueue.Count} 首" : "";
             CurrentTrackSpecsSubline = $"{TimeDisplay}{(rgRest == "RG2 --" ? "" : $" · {rgRest}")}{qRest}";
-            IsPlaying = false;
+            if (!_isAutoRecoveringPlayback)
+            {
+                IsPlaying = false;
+            }
             return;
         }
 
@@ -959,7 +988,10 @@ public sealed partial class MainViewModel
             CurrentTrackSpecsSubline = $"{TimeDisplay}{(string.IsNullOrEmpty(rg) || rg == "RG2 --" ? "" : $" · {rg}")}{queueInfo}";
         }
 
-        IsPlaying = _engine.IsPlaying;
+        if (!_isAutoRecoveringPlayback)
+        {
+            IsPlaying = _engine.IsPlaying;
+        }
         AccumulateListeningTime();
         if (IsPlaying && _scrobbleTrack is not null && !_scrobbledCurrentTrack)
         {
@@ -1608,6 +1640,215 @@ public sealed partial class MainViewModel
                 ? $"#{idx} {slot!.Name}（{count} 首）— 点击切换（同号点击覆写保存）"
                 : $"空槽位 #{idx} — 点击保存当前队列";
             QueueSlotChips.Add(new QueueSlotChipItem(idx, label, tip, active, populated));
+        }
+    }
+
+    private void CancelPendingPlaybackRecovery(bool releasePowerKeepAlive = false)
+    {
+        _isAutoRecoveringPlayback = false;
+        _pendingEndpointReturnInterruption = null;
+        _pendingEndpointReturnDeadlineUtc = DateTime.MinValue;
+        var cts = Interlocked.Exchange(ref _playbackRecoveryCts, null);
+        if (cts is not null)
+        {
+            try { cts.Cancel(); } catch { }
+        }
+        if (releasePowerKeepAlive)
+        {
+            _engine.ReleasePowerKeepAlive();
+        }
+    }
+
+    private bool PruneAndCheckRecoveryRateLimit()
+    {
+        var cutoff = DateTime.UtcNow - TimeSpan.FromSeconds(30);
+        while (_recentRecoveryTimestampsUtc.Count > 0 && _recentRecoveryTimestampsUtc.Peek() < cutoff)
+        {
+            _recentRecoveryTimestampsUtc.Dequeue();
+        }
+        return _recentRecoveryTimestampsUtc.Count < 4;
+    }
+
+    private static string FormatPlaybackTimestamp(double seconds)
+    {
+        var ts = TimeSpan.FromSeconds(Math.Max(0.0, seconds));
+        return $"{(int)ts.TotalMinutes}:{ts.Seconds:D2}";
+    }
+
+    private void HandlePlaybackInterrupted(AudioPlaybackInterruption interruption)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+
+        double posSec = Math.Max(0.0, interruption.Position.TotalSeconds);
+        _pendingRestorePositionSec = posSec;
+        PersistPlaybackSessionSnapshot(force: false);
+
+        var track = CurrentTrack;
+        bool trackMatches = track is not null
+            && !string.IsNullOrWhiteSpace(interruption.FilePath)
+            && string.Equals(track.FullPath, interruption.FilePath, StringComparison.OrdinalIgnoreCase)
+            && LongPathHelper.FileExists(track.FullPath);
+
+        if (!trackMatches)
+        {
+            CancelPendingPlaybackRecovery(releasePowerKeepAlive: true);
+            IsPlaying = false;
+            _lastProgressSampleUtc = null;
+            _pausedSinceUtc = DateTime.UtcNow;
+            RefreshEndpoints(handleLostSelection: false);
+            StatusMessage = $"音频输出中断：{interruption.Reason}";
+            return;
+        }
+
+        if (!PruneAndCheckRecoveryRateLimit())
+        {
+            CancelPendingPlaybackRecovery(releasePowerKeepAlive: true);
+            IsPlaying = false;
+            _lastProgressSampleUtc = null;
+            _pausedSinceUtc = DateTime.UtcNow;
+            PersistPlaybackSessionSnapshot(force: true);
+            StatusMessage = $"音频输出连续中断，已保留进度 {FormatPlaybackTimestamp(posSec)} 暂停（点击播放续播）：{interruption.Reason}";
+            return;
+        }
+
+        CancelPendingPlaybackRecovery(releasePowerKeepAlive: false);
+        var cts = new CancellationTokenSource();
+        _playbackRecoveryCts = cts;
+        _isAutoRecoveringPlayback = true;
+        _pendingEndpointReturnInterruption = null;
+        _pendingEndpointReturnDeadlineUtc = DateTime.MinValue;
+        StatusMessage = $"检测到系统音频切换或中断，正在重连输出设备（进度 {FormatPlaybackTimestamp(posSec)}）...";
+        _ = RunBoundedPlaybackRecoveryAsync(track!, interruption, cts, cts.Token);
+    }
+
+    private async Task RunBoundedPlaybackRecoveryAsync(
+        TrackItem track,
+        AudioPlaybackInterruption interruption,
+        CancellationTokenSource ownedCts,
+        CancellationToken ct)
+    {
+        int[] backoffMs = [350, 1000, 2200];
+        Exception? lastException = null;
+        try
+        {
+            for (int attempt = 0; attempt < backoffMs.Length; attempt++)
+            {
+                await Task.Delay(backoffMs[attempt], ct).ConfigureAwait(true);
+                if (ct.IsCancellationRequested || Volatile.Read(ref _disposed) != 0) return;
+                if (CurrentTrack is null || !string.Equals(CurrentTrack.TrackUid, track.TrackUid, StringComparison.Ordinal)) return;
+                if (!LongPathHelper.FileExists(track.FullPath)) break;
+
+                RefreshEndpoints(handleLostSelection: false);
+                if (OutputEndpoints.Count == 0)
+                {
+                    continue;
+                }
+
+                PushEnginePreferences();
+                bool allowExclusive = !(attempt == 2 && interruption.WasExclusive && PreferWasapiExclusive);
+                try
+                {
+                    _engine.PlayFile(
+                        track.FullPath,
+                        initialPosition: interruption.Position > TimeSpan.Zero ? interruption.Position : null,
+                        startPaused: false,
+                        allowExclusive: allowExclusive);
+
+                    if (ReferenceEquals(_playbackRecoveryCts, ownedCts))
+                    {
+                        _playbackRecoveryCts = null;
+                    }
+                    _isAutoRecoveringPlayback = false;
+                    _pendingEndpointReturnInterruption = null;
+                    _pendingEndpointReturnDeadlineUtc = DateTime.MinValue;
+                    _recentRecoveryTimestampsUtc.Enqueue(DateTime.UtcNow);
+                    IsPlaying = true;
+                    _lastProgressSampleUtc = DateTime.UtcNow;
+                    _pausedSinceUtc = null;
+                    PreloadNextGaplessTrack();
+                    PersistPlaybackSessionSnapshot(force: false);
+                    StatusMessage = allowExclusive
+                        ? $"已自动重连音频输出并从 {FormatPlaybackTimestamp(interruption.Position.TotalSeconds)} 续播：{track.Title}"
+                        : $"系统锁屏/息屏暂不支持独占输出，已临时以 WASAPI 共享从 {FormatPlaybackTimestamp(interruption.Position.TotalSeconds)} 续播：{track.Title}";
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+                }
+            }
+
+            if (ct.IsCancellationRequested || Volatile.Read(ref _disposed) != 0) return;
+            if (ReferenceEquals(_playbackRecoveryCts, ownedCts))
+            {
+                _playbackRecoveryCts = null;
+            }
+            _isAutoRecoveringPlayback = false;
+            IsPlaying = false;
+            _lastProgressSampleUtc = null;
+            _pausedSinceUtc = DateTime.UtcNow;
+            _pendingRestorePositionSec = Math.Max(0.0, interruption.Position.TotalSeconds);
+            _pendingEndpointReturnInterruption = interruption;
+            _pendingEndpointReturnDeadlineUtc = DateTime.UtcNow.AddSeconds(60);
+            _engine.ReleasePowerKeepAlive();
+            PersistPlaybackSessionSnapshot(force: true);
+            string detail = lastException?.Message ?? interruption.Reason;
+            StatusMessage = $"音频输出中断（已保留进度 {FormatPlaybackTimestamp(_pendingRestorePositionSec)}，设备恢复或点击播放可续播）：{detail}";
+        }
+        catch (OperationCanceledException)
+        {
+            if (ReferenceEquals(_playbackRecoveryCts, ownedCts))
+            {
+                _isAutoRecoveringPlayback = false;
+                _playbackRecoveryCts = null;
+            }
+        }
+        finally
+        {
+            ownedCts.Dispose();
+        }
+    }
+
+    private void TryResumeAfterEndpointReturn()
+    {
+        var pending = _pendingEndpointReturnInterruption;
+        _pendingEndpointReturnInterruption = null;
+        _pendingEndpointReturnDeadlineUtc = DateTime.MinValue;
+        if (pending is null || Volatile.Read(ref _disposed) != 0 || _isAutoRecoveringPlayback) return;
+
+        var track = CurrentTrack;
+        if (track is null
+            || string.IsNullOrWhiteSpace(pending.FilePath)
+            || !string.Equals(track.FullPath, pending.FilePath, StringComparison.OrdinalIgnoreCase)
+            || !LongPathHelper.FileExists(track.FullPath))
+        {
+            return;
+        }
+
+        if (!PruneAndCheckRecoveryRateLimit()) return;
+
+        try
+        {
+            PushEnginePreferences();
+            _engine.PlayFile(
+                track.FullPath,
+                initialPosition: pending.Position > TimeSpan.Zero ? pending.Position : null,
+                startPaused: false,
+                allowExclusive: true);
+            _recentRecoveryTimestampsUtc.Enqueue(DateTime.UtcNow);
+            IsPlaying = true;
+            _lastProgressSampleUtc = DateTime.UtcNow;
+            _pausedSinceUtc = null;
+            PreloadNextGaplessTrack();
+            PersistPlaybackSessionSnapshot(force: false);
+            StatusMessage = $"输出设备已恢复，已从 {FormatPlaybackTimestamp(pending.Position.TotalSeconds)} 自动续播：{track.Title}";
+        }
+        catch
+        {
+            IsPlaying = false;
+            _lastProgressSampleUtc = null;
+            _pausedSinceUtc = DateTime.UtcNow;
+            _engine.ReleasePowerKeepAlive();
         }
     }
 
