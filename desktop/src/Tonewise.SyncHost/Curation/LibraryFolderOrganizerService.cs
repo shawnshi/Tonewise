@@ -1119,6 +1119,7 @@ public sealed class LibraryFileWatcherService : IDisposable
     private readonly FileSystemWatcher _watcher;
     private readonly Lock _gate = new();
     private readonly HashSet<string> _pendingPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _suppressedPathsUntilUtcTicks = new(StringComparer.OrdinalIgnoreCase);
     private readonly Timer _debounceTimer;
 
     private int _suspendCount;
@@ -1215,10 +1216,48 @@ public sealed class LibraryFileWatcherService : IDisposable
         return !isChangeOnly;
     }
 
+    public void SuppressPathsTemporarily(IEnumerable<string> fullPaths, int durationMs = 4500)
+    {
+        long untilTicks = DateTime.UtcNow.AddMilliseconds(Math.Clamp(durationMs, 100, 30_000)).Ticks;
+        foreach (string raw in fullPaths)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            string norm = NormalizeWatchPath(raw);
+            _suppressedPathsUntilUtcTicks[norm] = untilTicks;
+        }
+    }
+
+    public bool IsPathSuppressed(string? path, long? nowUtcTicksOverride = null)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        string norm = NormalizeWatchPath(path);
+        if (_suppressedPathsUntilUtcTicks.TryGetValue(norm, out long untilTicks))
+        {
+            long nowTicks = nowUtcTicksOverride ?? DateTime.UtcNow.Ticks;
+            if (nowTicks < untilTicks) return true;
+            _suppressedPathsUntilUtcTicks.TryRemove(norm, out _);
+        }
+        return false;
+    }
+
+    private static string NormalizeWatchPath(string fullPath)
+    {
+        string stripped = LongPathHelper.StripExtendedPrefix(fullPath);
+        try
+        {
+            return Path.GetFullPath(stripped);
+        }
+        catch
+        {
+            return stripped;
+        }
+    }
+
     private void EnqueuePath(string path)
     {
         if (_disposed || Volatile.Read(ref _suspendCount) > 0) return;
         if (DateTime.UtcNow.Ticks < Interlocked.Read(ref _suppressUntilUtcTicks)) return;
+        if (IsPathSuppressed(path)) return;
 
         lock (_gate)
         {

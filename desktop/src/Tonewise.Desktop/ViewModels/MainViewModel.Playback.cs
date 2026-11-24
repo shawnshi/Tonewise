@@ -1200,22 +1200,23 @@ public sealed partial class MainViewModel
     }
 
     [RelayCommand]
-    public void ToggleCurrentTrackLoved()
+    public async Task ToggleCurrentTrackLovedAsync()
     {
         if (CurrentTrack is null) return;
-        bool nextLoved = !CurrentTrack.IsLoved;
-        ApplyLexiconTagsToTracks([CurrentTrack], new Dictionary<string, string?>
+        var target = CurrentTrack;
+        bool nextLoved = !target.IsLoved;
+        await ApplyLexiconTagsToTracksAsync([target], new Dictionary<string, string?>
         {
             ["rating"] = nextLoved ? "5" : "0",
         });
-        Notify(nextLoved ? $"已喜爱「{CurrentTrack.Title}」（将同步至 Last.fm）" : $"已取消喜爱「{CurrentTrack.Title}」", "success");
+        Notify(nextLoved ? $"已喜爱「{target.Title}」（将同步至 Last.fm）" : $"已取消喜爱「{target.Title}」", "success");
     }
 
-    public void ToggleLovedForTracks(IReadOnlyList<TrackItem> tracks)
+    public async void ToggleLovedForTracks(IReadOnlyList<TrackItem> tracks)
     {
         if (tracks.Count == 0) return;
         bool nextLoved = !tracks[0].IsLoved;
-        ApplyLexiconTagsToTracks(tracks, new Dictionary<string, string?>
+        await ApplyLexiconTagsToTracksAsync(tracks, new Dictionary<string, string?>
         {
             ["rating"] = nextLoved ? "5" : "0",
         });

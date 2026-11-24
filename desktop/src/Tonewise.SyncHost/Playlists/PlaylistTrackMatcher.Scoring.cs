@@ -25,14 +25,16 @@ public static partial class PlaylistTrackMatcher
     }
 
     internal const VersionQualifiers HardBlockQualifierMask =
-        VersionQualifiers.Remix
-        | VersionQualifiers.Instrumental
+        VersionQualifiers.Instrumental
         | VersionQualifiers.Karaoke
-        | VersionQualifiers.Acoustic
         | VersionQualifiers.Acapella
         | VersionQualifiers.Demo
         | VersionQualifiers.Cover
         | VersionQualifiers.SpeedMod;
+
+    internal const VersionQualifiers SoftFallbackQualifierMask =
+        VersionQualifiers.Remix
+        | VersionQualifiers.Acoustic;
 
     internal readonly record struct StructuralMarkers(
         HashSet<string> Numbers,
@@ -53,6 +55,8 @@ public static partial class PlaylistTrackMatcher
         public int OriginalIndex { get; }
         public VersionQualifiers Qualifiers { get; }
         public VersionQualifiers HardQualifiers => Qualifiers & HardBlockQualifierMask;
+        public VersionQualifiers SoftQualifiers => Qualifiers & SoftFallbackQualifierMask;
+        public bool HasAlbumRemix { get; }
         public bool IsLive => (Qualifiers & VersionQualifiers.Live) != 0;
         public HashSet<string> PrimaryArtistTokens { get; }
         public HashSet<string> AllCreditTokens { get; }
@@ -70,6 +74,8 @@ public static partial class PlaylistTrackMatcher
 
             string preNormTitle = PreNormalizeUnicode(track.Title);
             Qualifiers = ExtractVersionQualifiersFromPreNorm(preNormTitle);
+            HasAlbumRemix = !string.IsNullOrWhiteSpace(track.Album)
+                && (ExtractVersionQualifiersFromPreNorm(PreNormalizeUnicode(track.Album)) & VersionQualifiers.Remix) != 0;
 
             PrimaryArtistTokens = ExtractArtistTokens(track.ArtistsDisplay);
             AllCreditTokens = new HashSet<string>(PrimaryArtistTokens, StringComparer.Ordinal);
@@ -108,24 +114,52 @@ public static partial class PlaylistTrackMatcher
                 variants.Add(new TitleVariantInfo(norm, compact, ExtractStructuralMarkers(norm), tier));
             }
 
+            bool hasWorkName = !string.IsNullOrWhiteSpace(track.WorkName);
             var titleVariants = NormalizeClassicalTitleVariants(track.Title);
             if (titleVariants.Count > 0)
             {
                 AddVariant(titleVariants[0], 1000);
                 for (int i = 1; i < titleVariants.Count; i++)
                 {
-                    AddVariant(titleVariants[i], 970);
+                    if (!hasWorkName || !IsGenericClassicalMovementLabel(titleVariants[i]))
+                    {
+                        AddVariant(titleVariants[i], 970);
+                    }
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(track.WorkName) && !string.IsNullOrWhiteSpace(track.MovementName))
+            if (hasWorkName)
             {
-                AddVariant(NormalizeTitle($"{track.WorkName} {track.MovementName}"), 990);
-                AddVariant(NormalizeTitle(track.MovementName), 970);
+                var workVariants = NormalizeClassicalTitleVariants(track.WorkName);
+                if (workVariants.Count > 0)
+                {
+                    AddVariant(workVariants[0], 985);
+                    for (int i = 1; i < workVariants.Count; i++)
+                    {
+                        if (!IsGenericClassicalMovementLabel(workVariants[i]))
+                        {
+                            AddVariant(workVariants[i], 965);
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(track.MovementName))
+                {
+                    AddVariant(NormalizeTitle($"{track.WorkName} {track.MovementName}"), 990);
+                    string movNorm = NormalizeTitle(track.MovementName);
+                    if (!IsGenericClassicalMovementLabel(movNorm))
+                    {
+                        AddVariant(movNorm, 970);
+                    }
+                }
             }
             else if (!string.IsNullOrWhiteSpace(track.MovementName))
             {
-                AddVariant(NormalizeTitle(track.MovementName), 970);
+                string movNorm = NormalizeTitle(track.MovementName);
+                if (!IsGenericClassicalMovementLabel(movNorm))
+                {
+                    AddVariant(movNorm, 970);
+                }
             }
 
             TitleVariantInfos = variants;
@@ -176,6 +210,37 @@ public static partial class PlaylistTrackMatcher
         "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"
     };
 
+    private static readonly HashSet<string> GenericClassicalMovementWords = new(StringComparer.Ordinal)
+    {
+        "allegro", "adagio", "andante", "presto", "largo", "lento", "moderato", "vivace",
+        "allegretto", "prestissimo", "larghetto", "adagietto", "grave", "scherzo", "menuetto",
+        "menuet", "minuet", "minuetto", "finale", "prelude", "praeludium", "overture",
+        "ouverture", "act", "scene", "part", "introduction", "introduzione", "coda", "rondo",
+        "aria", "trio", "variation", "variations", "movement", "satz", "intermezzo",
+        "interlude", "prologue", "epilogue", "no", "nr", "op", "non", "troppo", "molto",
+        "ma", "con", "brio", "moto", "assai", "cantabile", "maestoso", "giocoso",
+        "sostenuto", "grazioso", "espressivo", "lamentoso", "spirito", "fuoco", "piu",
+        "poco", "quasi", "vivacissimo", "tranquillo", "pesante", "appassionato", "animato",
+        "e", "et", "un", "a", "in", "the", "de", "la", "di", "da", "il", "and", "or",
+        "mit", "sehr", "nicht", "zu", "doch"
+    };
+
+    internal static bool IsGenericClassicalMovementLabel(string normalized)
+    {
+        if (string.IsNullOrWhiteSpace(normalized) || ContainsEastAsianScript(normalized)) return false;
+        int tokenCount = 0;
+        foreach (string token in normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            tokenCount++;
+            if (IsAsciiDigits(token) || RomanMovementTokens.Contains(token) || GenericClassicalMovementWords.Contains(token))
+            {
+                continue;
+            }
+            return false;
+        }
+        return tokenCount > 0;
+    }
+
     private static readonly HashSet<string> PlaceholderArtists = new(StringComparer.Ordinal)
     {
         "various artists", "various", "va", "群星", "合辑",
@@ -205,9 +270,217 @@ public static partial class PlaylistTrackMatcher
 
         string s = raw.Replace('\u00A0', ' ').Trim();
         s = ToSimplifiedChinese(s);
+        s = FoldCjkVariants(s);
         s = s.Normalize(NormalizationForm.FormKC);
         s = FoldLatinDiacriticsAndLowercase(s);
         return MultiSpaceRegex().Replace(s, " ").Trim();
+    }
+
+    private static string FoldCjkVariants(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return input;
+        StringBuilder? sb = null;
+        for (int i = 0; i < input.Length; i++)
+        {
+            char mapped = input[i] switch
+            {
+                '妳' => '你',
+                '牠' => '它',
+                '祂' => '他',
+                '裡' or '裏' => '里',
+                '臺' => '台',
+                '峯' => '峰',
+                '煙' => '烟',
+                '豔' => '艳',
+                '啟' => '启',
+                '迴' => '回',
+                '遊' => '游',
+                '麼' or '麽' => '么',
+                '爲' => '为',
+                '衛' => '卫',
+                '歷' or '曆' => '历',
+                '餘' => '余',
+                '後' => '后',
+                '麵' => '面',
+                '髮' or '發' => '发',
+                '隻' => '只',
+                '準' => '准',
+                '雲' => '云',
+                '鐘' or '鍾' => '钟',
+                '衝' => '冲',
+                '劃' => '划',
+                '畫' => '画',
+                '藉' => '借',
+                '乾' => '干',
+                '鬆' => '松',
+                '係' => '系',
+                '範' => '范',
+                '複' or '覆' => '复',
+                '穀' => '谷',
+                '闆' => '板',
+                '夥' => '伙',
+                _ => input[i],
+            };
+            if (mapped != input[i] && sb is null)
+            {
+                sb = new StringBuilder(input.Length);
+                sb.Append(input, 0, i);
+            }
+            sb?.Append(mapped);
+        }
+        return sb is null ? input : sb.ToString();
+    }
+
+    private static readonly Dictionary<string, string[]> CjkArtistAliases = BuildCjkArtistAliases();
+
+    private static Dictionary<string, string[]> BuildCjkArtistAliases()
+    {
+        var groups = new[]
+        {
+            new[] { "周杰伦", "jay chou" },
+            new[] { "陈奕迅", "eason chan" },
+            new[] { "王菲", "faye wong" },
+            new[] { "林俊杰", "jj lin" },
+            new[] { "邓紫棋", "gem", "g e m" },
+            new[] { "张学友", "jacky cheung" },
+            new[] { "张国荣", "leslie cheung" },
+            new[] { "五月天", "mayday" },
+            new[] { "蔡依林", "jolin tsai" },
+            new[] { "孙燕姿", "stefanie sun" },
+            new[] { "陶喆", "david tao" },
+            new[] { "王力宏", "leehom wang" },
+            new[] { "梁静茹", "fish leong" },
+            new[] { "莫文蔚", "karen mok" },
+            new[] { "刘德华", "andy lau" },
+            new[] { "张惠妹", "a mei", "amei" },
+            new[] { "邓丽君", "teresa teng" },
+            new[] { "方大同", "khalil fong" },
+            new[] { "林忆莲", "sandy lam" },
+            new[] { "梅艳芳", "anita mui" },
+            new[] { "谭咏麟", "alan tam" },
+            new[] { "陈百强", "danny chan" },
+            new[] { "李宗盛", "jonathan lee" },
+            new[] { "罗大佑", "lo ta yu" },
+            new[] { "周华健", "wakin chau" },
+            new[] { "张信哲", "jeff chang" },
+            new[] { "刘若英", "rene liu" },
+            new[] { "伍佰", "wu bai" },
+            new[] { "田馥甄", "hebe tien" },
+            new[] { "林宥嘉", "yoga lin" },
+            new[] { "萧敬腾", "jam hsiao" },
+            new[] { "杨千嬅", "miriam yeung" },
+            new[] { "容祖儿", "joey yung" },
+            new[] { "古巨基", "leo ku" },
+            new[] { "李克勤", "hacken lee" },
+            new[] { "谢霆锋", "nicholas tse" },
+            new[] { "张敬轩", "hins cheung" },
+            new[] { "周深", "zhou shen" },
+            new[] { "薛之谦", "joker xue" },
+            new[] { "李荣浩", "ronghao li" },
+            new[] { "毛不易", "mao buyi" },
+            new[] { "苏打绿", "sodagreen", "鱼丁糸", "oaeen" },
+            new[] { "告五人", "accusefive" },
+            new[] { "草东没有派对", "no party for cao dong" },
+            new[] { "万能青年旅店", "omnipotent youth society" },
+            new[] { "落日飞车", "sunset rollercoaster" },
+            new[] { "新裤子", "new pants" },
+            new[] { "逃跑计划", "escape plan" },
+            new[] { "动力火车", "power station" },
+            new[] { "蔡琴", "tsai chin" },
+            new[] { "齐秦", "chyi chin" },
+            new[] { "齐豫", "chyi yu" },
+            new[] { "费玉清", "fei yu ching" },
+            new[] { "任贤齐", "richie jen" },
+            new[] { "光良", "michael wong" },
+            new[] { "戴佩妮", "penny tai" },
+            new[] { "陈绮贞", "cheer chen" },
+            new[] { "徐佳莹", "lala hsu" },
+            new[] { "魏如萱", "waa wei" },
+            new[] { "卢广仲", "crowd lu" },
+            new[] { "韦礼安", "weibird" },
+            new[] { "张杰", "jason zhang" },
+            new[] { "张靓颖", "jane zhang" },
+            new[] { "林子祥", "george lam" },
+            new[] { "叶倩文", "sally yeh" },
+            new[] { "许冠杰", "sam hui" },
+            new[] { "郑秀文", "sammi cheng" },
+            new[] { "陈慧琳", "kelly chen" },
+            new[] { "梁咏琪", "gigi leung" },
+            new[] { "黎明", "leon lai" },
+            new[] { "郭富城", "aaron kwok" },
+            new[] { "安溥", "张悬", "anpu", "deserts chang" },
+            new[] { "黄丽玲", "a lin", "alin" },
+            new[] { "袁娅维", "tia ray" },
+            new[] { "李健", "li jian" },
+            new[] { "那英", "na ying" },
+            new[] { "韩红", "han hong" },
+            new[] { "林志炫", "terry lin" },
+            new[] { "杨宗纬", "aska yang" },
+            new[] { "曹格", "gary chaw" },
+            new[] { "范晓萱", "mavis fan" },
+            new[] { "许茹芸", "valen hsu" },
+            new[] { "华晨宇", "hua chenyu" },
+            new[] { "郁可唯", "yisa yu" },
+            new[] { "凤凰传奇", "phoenix legend" },
+            new[] { "林家谦", "terence lam" },
+            new[] { "卫兰", "janice vidal" },
+            new[] { "谢安琪", "kay tse" },
+            new[] { "陈粒", "chen li" },
+            new[] { "赵雷", "zhao lei" },
+            new[] { "宋冬野", "song dongye" },
+            new[] { "崔健", "cui jian" },
+            new[] { "许巍", "xu wei" },
+            new[] { "朴树", "pu shu" },
+            new[] { "汪峰", "wang feng" },
+            new[] { "窦唯", "dou wei" },
+            new[] { "张楚", "zhang chu" },
+            new[] { "郑钧", "zheng jun" },
+            new[] { "痛仰", "miserable faith" },
+            new[] { "黑豹", "黑豹乐队" },
+            new[] { "飞儿乐团", "f i r", "fir" },
+            new[] { "s h e", "she" },
+            new[] { "петр ильич чайковский", "чайковский", "pyotr ilyich tchaikovsky", "tchaikovsky" },
+            new[] { "сергей васильевич рахманинов", "рахманинов", "sergei rachmaninoff", "rachmaninoff", "rachmaninov" },
+            new[] { "дмитрий дмитриевич шостакович", "шостакович", "dmitri shostakovich", "shostakovich" },
+            new[] { "сергей сергеевич прокофьев", "прокофьев", "sergei prokofiev", "prokofiev" },
+            new[] { "игорь федорович стравинский", "стравинский", "igor stravinsky", "stravinsky" },
+            new[] { "модест петрович мусоргский", "мусоргский", "modest mussorgsky", "mussorgsky" },
+            new[] { "николай андреевич римский корсаков", "римский корсаков", "nikolai rimsky korsakov", "rimsky korsakov" },
+            new[] { "john cougar", "john cougar mellencamp", "john mellencamp" },
+            new[] { "snoop doggy dogg", "snoop dogg" },
+            new[] { "puff daddy", "p diddy", "diddy" },
+        };
+
+        var map = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        foreach (string[] group in groups)
+        {
+            foreach (string alias in group)
+            {
+                map[alias] = group;
+            }
+        }
+        return map;
+    }
+
+    internal static void ExpandCjkArtistAliases(HashSet<string> tokens)
+    {
+        if (tokens.Count == 0) return;
+        List<string>? extra = null;
+        foreach (string t in tokens)
+        {
+            if (CjkArtistAliases.TryGetValue(t, out string[]? aliases))
+            {
+                extra ??= [];
+                extra.AddRange(aliases);
+            }
+        }
+        if (extra is not null)
+        {
+            foreach (string a in extra)
+            {
+                tokens.Add(a);
+            }
+        }
     }
 
     private static string ToSimplifiedChinese(string input)
@@ -275,6 +548,7 @@ public static partial class PlaylistTrackMatcher
                 case 'đ': sb.Append('d'); continue;
                 case 'ð': sb.Append('d'); continue;
                 case 'þ': sb.Append("th"); continue;
+                case 'ё': sb.Append('е'); continue;
             }
 
             if (c >= '\u0300' && c <= '\u036F')
@@ -456,6 +730,32 @@ public static partial class PlaylistTrackMatcher
             if (c < '0' || c > '9') return false;
         }
         return true;
+    }
+
+    internal static bool AreSoftQualifiersCompatible(
+        VersionQualifiers seedSoft,
+        IndexedTrack cand,
+        out bool isSoftFallback)
+    {
+        if (seedSoft == cand.SoftQualifiers)
+        {
+            isSoftFallback = false;
+            return true;
+        }
+        if (seedSoft == VersionQualifiers.Remix
+            && cand.SoftQualifiers == VersionQualifiers.None
+            && cand.HasAlbumRemix)
+        {
+            isSoftFallback = false;
+            return true;
+        }
+        if (seedSoft == VersionQualifiers.None && cand.SoftQualifiers != VersionQualifiers.None)
+        {
+            isSoftFallback = true;
+            return true;
+        }
+        isSoftFallback = false;
+        return false;
     }
 
     internal static bool AreStructurallyCompatible(StructuralMarkers a, StructuralMarkers b)
@@ -881,7 +1181,7 @@ public static partial class PlaylistTrackMatcher
         for (int sIdx = 0; sIdx < seedVariants.Count; sIdx++)
         {
             string seedNorm = seedVariants[sIdx];
-            if (string.IsNullOrEmpty(seedNorm)) continue;
+            if (string.IsNullOrEmpty(seedNorm) || IsGenericClassicalMovementLabel(seedNorm)) continue;
 
             string seedCompact = CompactText(seedNorm);
             bool minOk = ContainsEastAsianScript(seedCompact) ? seedCompact.Length >= 2 : seedCompact.Length >= 4;
@@ -893,6 +1193,7 @@ public static partial class PlaylistTrackMatcher
 
             foreach (var variant in cand.TitleVariantInfos)
             {
+                if (IsGenericClassicalMovementLabel(variant.Normalized)) continue;
                 if (!AreStructurallyCompatible(seedVariantMarkers, variant.Markers)) continue;
 
                 double localSim = 0.0;
@@ -933,7 +1234,21 @@ public static partial class PlaylistTrackMatcher
                             {
                                 localSim = Math.Max(localSim, 0.78 + 0.16 * jaccard);
                             }
-                            else if (shorterStr.Length >= 8
+                        }
+
+                        if (localSim < 0.82)
+                        {
+                            if (ContainsEastAsianScript(shorterStr)
+                                && shorterStr.Length >= 2
+                                && longerStr.StartsWith(shorterStr + " ", StringComparison.Ordinal))
+                            {
+                                localSim = Math.Max(localSim, 0.82);
+                            }
+                            else if (!ContainsEastAsianScript(shorterStr)
+                                     && sIdx == 0
+                                     && variant.Tier >= 985
+                                     && shorterStr.Length >= 6
+                                     && !IsGenericClassicalMovementLabel(shorterStr)
                                      && longerStr.StartsWith(shorterStr + " ", StringComparison.Ordinal))
                             {
                                 localSim = Math.Max(localSim, 0.82);
@@ -943,12 +1258,17 @@ public static partial class PlaylistTrackMatcher
                         string shorterCompact = seedCompact.Length <= variant.Compact.Length ? seedCompact : variant.Compact;
                         string longerCompact = seedCompact.Length <= variant.Compact.Length ? variant.Compact : seedCompact;
                         if (ContainsEastAsianScript(shorterCompact)
-                            && shorterCompact.Length >= 4
+                            && shorterCompact.Length >= 3
                             && longerCompact.Length > shorterCompact.Length
                             && longerCompact.StartsWith(shorterCompact, StringComparison.Ordinal)
                             && (double)shorterCompact.Length / longerCompact.Length >= 0.45)
                         {
                             localSim = Math.Max(localSim, 0.82);
+                        }
+
+                        if (localSim < 0.95)
+                        {
+                            localSim = Math.Max(localSim, ScoreHanziToPinyinMatch(seedNorm, seedCompact, variant.Normalized, variant.Compact));
                         }
                     }
                 }
@@ -963,6 +1283,52 @@ public static partial class PlaylistTrackMatcher
         return bestSim;
     }
 
+    private static double ScoreHanziToPinyinMatch(
+        string seedNorm,
+        string seedCompact,
+        string candNorm,
+        string candCompact)
+    {
+        bool seedHanzi = HanziPinyinConverter.ContainsHanzi(seedNorm) && !ContainsKanaOrHangul(seedNorm);
+        bool candHanzi = HanziPinyinConverter.ContainsHanzi(candNorm) && !ContainsKanaOrHangul(candNorm);
+        if (seedHanzi == candHanzi) return 0.0;
+
+        string hanziNorm = seedHanzi ? seedNorm : candNorm;
+        string hanziCompact = seedHanzi ? seedCompact : candCompact;
+        string latinCompact = seedHanzi ? candCompact : seedCompact;
+
+        if (hanziCompact.Length < 2 || latinCompact.Length < 4 || !HanziPinyinConverter.IsPureAsciiAlphaNum(latinCompact))
+        {
+            return 0.0;
+        }
+
+        var variants = HanziPinyinConverter.ToCompactPinyinVariants(hanziNorm);
+        for (int i = 0; i < variants.Count; i++)
+        {
+            if (string.Equals(variants[i], latinCompact, StringComparison.Ordinal))
+            {
+                return 0.96;
+            }
+        }
+        return 0.0;
+    }
+
+    private static bool ContainsKanaOrHangul(string s)
+    {
+        foreach (char c in s)
+        {
+            if ((c >= '\u3040' && c <= '\u30FF')
+                || (c >= '\u31F0' && c <= '\u31FF')
+                || (c >= '\uAC00' && c <= '\uD7AF')
+                || (c >= '\u1100' && c <= '\u11FF')
+                || (c >= '\u3130' && c <= '\u318F'))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static double ScoreLevenshteinTitlePair(string a, string b)
     {
         int maxLen = Math.Max(a.Length, b.Length);
@@ -971,7 +1337,8 @@ public static partial class PlaylistTrackMatcher
         bool isEastAsian = ContainsEastAsianScript(a) || ContainsEastAsianScript(b);
         if (isEastAsian)
         {
-            if (maxLen < 8) return 0.0;
+            int minLen = (ContainsKanaOrHangul(a) || ContainsKanaOrHangul(b)) ? 8 : 4;
+            if (maxLen < minLen) return 0.0;
             int dist = BoundedLevenshtein(a, b, 1);
             if (dist != 1 || HasConflictingCjkNumeralDiff(a, b)) return 0.0;
             return 1.0 - (double)dist / maxLen;

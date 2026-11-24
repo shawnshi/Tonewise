@@ -25,6 +25,13 @@ public interface IUsbAdbRunner
         CancellationToken ct);
     Task<bool> TriggerPhoneLibraryRescanAsync(string serial, string packageName, string nonce, CancellationToken ct);
     Task<int> DeleteForeignMusicFilesAsync(string serial, IReadOnlyList<string> validatedRelPaths, CancellationToken ct);
+    Task<UsbDirectPushSummary> PushFilesDirectAsync(
+        string serial,
+        IReadOnlyList<UsbDirectPushTrackSpec> tracks,
+        IReadOnlyList<UsbDirectPushCoverSpec> covers,
+        string? remoteMusicRoot,
+        Func<UsbDirectPushProgress, Task>? onProgress,
+        CancellationToken ct);
 }
 
 public sealed class UsbAdbBridge : IUsbAdbRunner
@@ -180,6 +187,23 @@ public sealed class UsbAdbBridge : IUsbAdbRunner
             var devices = ParseTrackDevicesPayload(payload);
             onDevicesChanged(devices);
         }
+    }
+
+    internal async Task EnsureAdbServerRunningAsync(CancellationToken ct)
+    {
+        using var client = await ConnectToAdbServerWithAutoStartAsync(null, ct).ConfigureAwait(false);
+    }
+
+    public Task<UsbDirectPushSummary> PushFilesDirectAsync(
+        string serial,
+        IReadOnlyList<UsbDirectPushTrackSpec> tracks,
+        IReadOnlyList<UsbDirectPushCoverSpec> covers,
+        string? remoteMusicRoot,
+        Func<UsbDirectPushProgress, Task>? onProgress,
+        CancellationToken ct)
+    {
+        var syncClient = new UsbAdbSyncClient(AdbServerPort, EnsureAdbServerRunningAsync);
+        return syncClient.PushAsync(serial, tracks, covers, remoteMusicRoot, onProgress, ct);
     }
 
     private async Task<TcpClient> ConnectToAdbServerWithAutoStartAsync(Action<string>? onStatusLog, CancellationToken ct)
@@ -433,7 +457,7 @@ public sealed class UsbAdbBridge : IUsbAdbRunner
         return result;
     }
 
-    private static bool TryNormalizeSafeAudioRelPath(string? raw, out string normalized)
+    internal static bool TryNormalizeSafeAudioRelPath(string? raw, out string normalized)
     {
         normalized = "";
         if (string.IsNullOrWhiteSpace(raw)) return false;
@@ -471,6 +495,27 @@ public sealed class UsbAdbBridge : IUsbAdbRunner
         return true;
     }
 
+    internal static bool TryNormalizeSafeSubDirRelPath(string? raw, out string normalized)
+    {
+        normalized = string.Empty;
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        string trimmed = raw.Trim().Replace('\\', '/').Trim('/');
+        if (string.IsNullOrEmpty(trimmed))
+            return false;
+
+        const string dummyLeaf = "/__tw_probe.mp3";
+        if (!TryNormalizeSafeAudioRelPath($"{trimmed}{dummyLeaf}", out string probed))
+            return false;
+
+        if (!probed.EndsWith(dummyLeaf, StringComparison.Ordinal))
+            return false;
+
+        normalized = probed[..^dummyLeaf.Length];
+        return !string.IsNullOrEmpty(normalized);
+    }
+
     private static void CollectParentSubDirs(string relPath, HashSet<string> subDirs)
     {
         string[] parts = relPath.Split('/');
@@ -484,10 +529,10 @@ public sealed class UsbAdbBridge : IUsbAdbRunner
         }
     }
 
-    private static string PosixSingleQuote(string value) =>
+    internal static string PosixSingleQuote(string value) =>
         "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
 
-    private static async Task<string> ReadLengthPrefixedUtf8Async(NetworkStream stream, CancellationToken ct)
+    internal static async Task<string> ReadLengthPrefixedUtf8Async(NetworkStream stream, CancellationToken ct)
     {
         byte[] lenBuf = new byte[4];
         await ReadExactlyAsync(stream, lenBuf, ct).ConfigureAwait(false);

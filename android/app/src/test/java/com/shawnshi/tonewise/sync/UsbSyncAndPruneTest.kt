@@ -19,8 +19,11 @@
 package com.shawnshi.tonewise.sync
 
 import com.sun.net.httpserver.HttpServer
+import java.io.File
 import java.io.IOException
 import java.net.InetSocketAddress
+import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -366,5 +369,144 @@ class UsbSyncAndPruneTest {
         assertFalse(ManagedSyncStorage.isAudioFilename("booklet.pdf"))
         assertFalse(ManagedSyncStorage.isAudioFilename("Favorites.m3u8"))
         assertFalse(ManagedSyncStorage.isAudioFilename("README"))
+    }
+
+    @Test
+    fun isPrimaryMusicTreeDocumentId_acceptsPrimaryMusicOnly() {
+        assertTrue(ManagedSyncStorage.isPrimaryMusicTreeDocumentId("primary:Music"))
+        assertTrue(ManagedSyncStorage.isPrimaryMusicTreeDocumentId("primary:music/"))
+        assertTrue(ManagedSyncStorage.isPrimaryMusicTreeDocumentId("PRIMARY:Music\\"))
+
+        assertFalse(ManagedSyncStorage.isPrimaryMusicTreeDocumentId("primary:Music/Tonewise"))
+        assertFalse(ManagedSyncStorage.isPrimaryMusicTreeDocumentId("1A2B-3C4D:Music"))
+        assertFalse(ManagedSyncStorage.isPrimaryMusicTreeDocumentId("primary:Documents"))
+        assertFalse(ManagedSyncStorage.isPrimaryMusicTreeDocumentId(""))
+        assertFalse(ManagedSyncStorage.isPrimaryMusicTreeDocumentId(null))
+    }
+
+    @Test
+    fun requestUsbFastPush_streamsNdjsonProgressAndComplete_andFallsBackOn501AndHandles409Cancel() {
+        val mode = AtomicInteger(0)
+        withServer(
+            configure = { server ->
+                server.createContext("/api/v2/usb/push-tracks") { ex ->
+                    ex.requestBody.readBytes()
+                    when (mode.get()) {
+                        0 -> {
+                            val ndjson =
+                                """
+                                {"event":"progress","stage":"pushing","completed_tracks":1,"total_tracks":2,"bytes_transferred":1024,"total_bytes":2048,"speed_mbps":38.5,"current_rel_path":"Artist/01.flac"}
+                                {"event":"complete","used_direct_push":true,"pushed_tracks":[{"track_uid":"uid_ok","rel_path":"Artist/01.flac","file_size":1024}],"failed_track_uids":["uid_fail"],"covers_pushed":1,"covers_skipped":0,"total_bytes_transferred":1024,"elapsed_seconds":0.25,"average_mbps":39.1,"error":null}
+                                """.trimIndent() + "\n"
+                            val bytes = ndjson.toByteArray(Charsets.UTF_8)
+                            ex.responseHeaders.add("Content-Type", "application/x-ndjson; charset=utf-8")
+                            ex.sendResponseHeaders(200, bytes.size.toLong())
+                            ex.responseBody.use { it.write(bytes) }
+                        }
+                        1 -> {
+                            val bytes = """{"error":"usb_direct_push_unavailable"}""".toByteArray()
+                            ex.sendResponseHeaders(501, bytes.size.toLong())
+                            ex.responseBody.use { it.write(bytes) }
+                        }
+                        2 -> {
+                            val bytes = """{"error":"sync_cancelled"}""".toByteArray()
+                            ex.sendResponseHeaders(409, bytes.size.toLong())
+                            ex.responseBody.use { it.write(bytes) }
+                        }
+                        else -> {
+                            val ndjson =
+                                """{"event":"complete","used_direct_push":false,"pushed_tracks":[],"failed_track_uids":["uid_ok"],"covers_pushed":0,"covers_skipped":0,"total_bytes_transferred":0,"elapsed_seconds":0.0,"average_mbps":0.0,"error":"sync_cancelled"}""" +
+                                    "\n"
+                            val bytes = ndjson.toByteArray(Charsets.UTF_8)
+                            ex.sendResponseHeaders(200, bytes.size.toLong())
+                            ex.responseBody.use { it.write(bytes) }
+                        }
+                    }
+                }
+            },
+        ) { baseUrl ->
+            val tracks = listOf(UsbFastPushTrackItem("uid_ok", "Artist/01.flac", 1024L, 100L))
+            val covers = listOf(UsbFastPushCoverItem("Artist", "uid_ok"))
+            val events = ArrayList<UsbFastPushProgressEvent>()
+
+            mode.set(0)
+            val ok =
+                LanSyncV2Client.requestUsbFastPush(
+                    baseUrl = baseUrl,
+                    token = "tok_test",
+                    tracks = tracks,
+                    covers = covers,
+                    onProgress = { events.add(it) },
+                )
+            assertTrue(ok.usedDirectPush)
+            assertFalse(ok.cancelledByHost)
+            assertEquals(1, events.size)
+            assertEquals(38.5, events[0].speedMbps, 0.01)
+            assertEquals(1, ok.pushedTracks.size)
+            assertEquals("uid_ok", ok.pushedTracks[0].trackUid)
+            assertEquals(listOf("uid_fail"), ok.failedTrackUids)
+            assertEquals(1, ok.coversPushed)
+
+            mode.set(1)
+            val fallback = LanSyncV2Client.requestUsbFastPush(baseUrl, "tok_test", tracks, covers)
+            assertFalse(fallback.usedDirectPush)
+            assertFalse(fallback.cancelledByHost)
+
+            mode.set(2)
+            val cancelled409 = LanSyncV2Client.requestUsbFastPush(baseUrl, "tok_test", tracks, covers)
+            assertFalse(cancelled409.usedDirectPush)
+            assertTrue(cancelled409.cancelledByHost)
+
+            mode.set(3)
+            val cancelledNdjson = LanSyncV2Client.requestUsbFastPush(baseUrl, "tok_test", tracks, covers)
+            assertFalse(cancelledNdjson.usedDirectPush)
+            assertTrue(cancelledNdjson.cancelledByHost)
+        }
+    }
+
+    @Test
+    fun lanHttpClient_reusesKeepAliveConnectionAndDownloadsBufferedFile() {
+        val payload = ByteArray(1_200_000) { i -> ((i * 73) and 0xFF).toByte() }
+        val connectionHeaders = ArrayList<String?>()
+        withServer(
+            configure = { server ->
+                server.createContext("/api/v2/tracks/t1/file") { ex ->
+                    connectionHeaders.add(ex.requestHeaders.getFirst("Connection"))
+                    ex.sendResponseHeaders(200, payload.size.toLong())
+                    ex.responseBody.use { it.write(payload) }
+                }
+            },
+        ) { baseUrl ->
+            val tmpDir = Files.createTempDirectory("tonewise_http_dl_test").toFile()
+            try {
+                val part1 = File(tmpDir, "t1_a.part")
+                val part2 = File(tmpDir, "t1_b.part")
+                val token = LanHttpClient.CancelToken()
+                val size1 =
+                    LanHttpClient.downloadFileResumable(
+                        url = "$baseUrl/api/v2/tracks/t1/file",
+                        bearerToken = "tok",
+                        partFile = part1,
+                        expectedSize = payload.size.toLong(),
+                        cancelToken = token,
+                    )
+                val size2 =
+                    LanHttpClient.downloadFileResumable(
+                        url = "$baseUrl/api/v2/tracks/t1/file",
+                        bearerToken = "tok",
+                        partFile = part2,
+                        expectedSize = payload.size.toLong(),
+                        cancelToken = token,
+                    )
+                assertEquals(payload.size.toLong(), size1)
+                assertEquals(payload.size.toLong(), size2)
+                assertEquals(2, connectionHeaders.size)
+                assertFalse(connectionHeaders.any { "close".equals(it, ignoreCase = true) })
+                assertTrue(part1.readBytes().contentEquals(payload))
+                assertTrue(part2.readBytes().contentEquals(payload))
+            } finally {
+                tmpDir.deleteRecursively()
+            }
+        }
     }
 }

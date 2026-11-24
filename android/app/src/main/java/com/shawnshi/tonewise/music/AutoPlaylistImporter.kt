@@ -22,6 +22,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.core.content.edit
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.text.Normalizer
 import javax.inject.Inject
 import org.oxycblt.musikr.DiscoveredPlaylist
 import org.oxycblt.musikr.Library
@@ -29,6 +30,7 @@ import org.oxycblt.musikr.MutableLibrary
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.fs.Path
 import org.oxycblt.musikr.playlist.ExternalPlaylistManager
+import org.oxycblt.musikr.playlist.ImportedPlaylistEntry
 import org.oxycblt.musikr.playlist.PossiblePaths
 import timber.log.Timber as L
 
@@ -59,7 +61,12 @@ constructor(@ApplicationContext private val context: Context) {
         for (discovered in sorted) {
             val uriKey = discovered.uri.toString()
             val tracked = prefs.getString(uriKey, null)
-            val trackedModifiedMs = tracked?.substringBefore('|')?.toLongOrNull()
+            val trackedModifiedMs =
+                if (tracked != null && tracked.startsWith("$TRACK_VERSION|")) {
+                    tracked.removePrefix("$TRACK_VERSION|").substringBefore('|').toLongOrNull()
+                } else {
+                    null
+                }
             if (trackedModifiedMs != null && trackedModifiedMs == discovered.modifiedMs) {
                 continue
             }
@@ -81,7 +88,7 @@ constructor(@ApplicationContext private val context: Context) {
                 continue
             }
 
-            val songs = matcher.match(imported.paths)
+            val songs = matcher.matchEntries(imported.entries)
             if (songs.isEmpty()) {
                 L.d("Skipping discovered playlist '$playlistName': no matching songs in library")
                 continue
@@ -92,7 +99,7 @@ constructor(@ApplicationContext private val context: Context) {
                 L.d("Auto-importing playlist '$playlistName' (${songs.size} songs)")
                 currentLibrary = currentLibrary.createPlaylist(playlistName, songs)
                 saveTracked(uriKey, discovered.modifiedMs, playlistName)
-            } else if (trackedModifiedMs != null) {
+            } else if (trackedModifiedMs != null || tracked != null) {
                 if (existing.songs.map { it.uid } != songs.map { it.uid }) {
                     L.d("Updating auto-imported playlist '$playlistName' (${songs.size} songs)")
                     currentLibrary = currentLibrary.rewritePlaylist(existing, songs)
@@ -114,61 +121,127 @@ constructor(@ApplicationContext private val context: Context) {
     }
 
     private fun saveTracked(uriKey: String, modifiedMs: Long, name: String) {
-        prefs.edit { putString(uriKey, "$modifiedMs|$name") }
+        prefs.edit { putString(uriKey, "$TRACK_VERSION|$modifiedMs|$name") }
     }
 
     private companion object {
         const val PREFS_NAME = "tonewise_auto_m3u_imports"
+        const val TRACK_VERSION = "v3"
     }
 }
 
 internal class PlaylistSongMatcher(private val library: Library) {
-    private val byNormalizedRelPath: Map<String, Song?> by lazy {
+    private val metadataMatcher: AndroidPlaylistTrackMatcher<Song> by lazy {
+        AndroidPlaylistTrackMatcher.fromSongs(library.songs)
+    }
+
+    private val byNormalizedRelPath: Map<String, List<Song>> by lazy {
         val grouped = HashMap<String, MutableList<Song>>()
         for (song in library.songs) {
             for (key in normalizedRelKeys(song.path)) {
                 grouped.getOrPut(key) { mutableListOf() }.add(song)
             }
         }
-        grouped.mapValues { (_, matches) -> matches.singleOrNull() }
+        grouped
     }
 
-    private val byParentAndFile: Map<String, Song?> by lazy {
+    private val byParentAndFile: Map<String, List<Song>> by lazy {
         val grouped = HashMap<String, MutableList<Song>>()
         for (song in library.songs) {
             val key = parentAndFileKey(song.path) ?: continue
             grouped.getOrPut(key) { mutableListOf() }.add(song)
         }
-        grouped.mapValues { (_, matches) -> matches.singleOrNull() }
+        grouped
     }
 
-    private val byFileName: Map<String, Song?> by lazy {
+    private val byFileName: Map<String, List<Song>> by lazy {
         val grouped = HashMap<String, MutableList<Song>>()
         for (song in library.songs) {
-            val file = song.path.name?.lowercase() ?: continue
+            val file = normalizeSegment(song.path.name) ?: continue
             grouped.getOrPut(file) { mutableListOf() }.add(song)
         }
-        grouped.mapValues { (_, matches) -> matches.singleOrNull() }
+        grouped
     }
 
     fun match(paths: List<PossiblePaths>): List<Song> =
-        paths.mapNotNull { candidates ->
-            candidates.firstNotNullOfOrNull(library::findSongByPath)
-                ?: candidates.firstNotNullOfOrNull { candidate ->
-                    normalizedRelKeys(candidate).firstNotNullOfOrNull { byNormalizedRelPath[it] }
+        matchEntries(paths.map { ImportedPlaylistEntry(it) })
+
+    fun matchEntries(entries: List<ImportedPlaylistEntry>): List<Song> =
+        entries.mapNotNull { entry -> matchSingleEntry(entry) }
+
+    private fun matchSingleEntry(entry: ImportedPlaylistEntry): Song? {
+        val candidates = entry.paths
+        if (candidates.isNotEmpty()) {
+            candidates.firstNotNullOfOrNull(library::findSongByPath)?.let { return it }
+
+            candidates
+                .firstNotNullOfOrNull { candidate ->
+                    normalizedRelKeys(candidate).firstNotNullOfOrNull { key ->
+                        disambiguate(byNormalizedRelPath[key], entry)
+                    }
                 }
-                ?: candidates.firstNotNullOfOrNull { candidate ->
-                    parentAndFileKey(candidate)?.let { byParentAndFile[it] }
+                ?.let { return it }
+
+            candidates
+                .firstNotNullOfOrNull { candidate ->
+                    parentAndFileKey(candidate)?.let { key -> disambiguate(byParentAndFile[key], entry) }
                 }
-                ?: candidates.firstNotNullOfOrNull { candidate ->
-                    candidate.name?.lowercase()?.let { byFileName[it] }
+                ?.let { return it }
+
+            candidates
+                .firstNotNullOfOrNull { candidate ->
+                    normalizeSegment(candidate.name)?.let { key -> disambiguate(byFileName[key], entry) }
                 }
+                ?.let { return it }
         }
+
+        if (!entry.title.isNullOrBlank()) {
+            metadataMatcher
+                .match(
+                    title = entry.title,
+                    artist = entry.artist,
+                    album = entry.album,
+                    durationMs = entry.durationSec * 1000L,
+                )
+                ?.let { return it }
+        }
+
+        for (candidate in candidates) {
+            val name = candidate.name ?: continue
+            metadataMatcher.matchByFilenameHint(name)?.let { return it }
+        }
+        return null
+    }
+
+    private fun disambiguate(pool: List<Song>?, entry: ImportedPlaylistEntry): Song? {
+        if (pool.isNullOrEmpty()) return null
+        if (pool.size == 1) return pool[0]
+        if (!entry.title.isNullOrBlank() || !entry.artist.isNullOrBlank()) {
+            val scoped = AndroidPlaylistTrackMatcher.fromSongs(pool)
+            val titleHint = entry.title ?: entry.artist
+            if (!titleHint.isNullOrBlank()) {
+                scoped
+                    .match(
+                        title = titleHint,
+                        artist = if (entry.title != null) entry.artist else null,
+                        album = entry.album,
+                        durationMs = entry.durationSec * 1000L,
+                    )
+                    ?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun normalizeSegment(raw: String?): String? =
+        raw?.let { Normalizer.normalize(it, Normalizer.Form.NFC).lowercase() }
 
     private fun normalizedRelKeys(path: Path): Set<String> {
         val full =
-            path.components.components
-                .joinToString("/")
+            Normalizer.normalize(
+                    path.components.components.joinToString("/"),
+                    Normalizer.Form.NFC,
+                )
                 .replace('\\', '/')
                 .trim('/')
                 .lowercase()
@@ -203,6 +276,8 @@ internal class PlaylistSongMatcher(private val library: Library) {
     private fun parentAndFileKey(path: Path): String? {
         val parts = path.components.components
         if (parts.size < 2) return null
-        return "${parts[parts.size - 2].lowercase()}/${parts[parts.size - 1].lowercase()}"
+        val parent = normalizeSegment(parts[parts.size - 2]) ?: return null
+        val file = normalizeSegment(parts[parts.size - 1]) ?: return null
+        return "$parent/$file"
     }
 }

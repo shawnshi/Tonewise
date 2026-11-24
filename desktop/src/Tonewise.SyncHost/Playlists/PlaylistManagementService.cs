@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -817,7 +818,8 @@ public static partial class PlaylistImporter
 
     private static string StripChartNumberPrefix(string line)
     {
-        string stripped = ChartNumberPrefixRegex().Replace(line, "");
+        string stripped = DiscTrackImportPrefixRegex().Replace(line, "");
+        stripped = ChartNumberPrefixRegex().Replace(stripped, "");
         var m = LeadingDashRankRegex().Match(stripped);
         if (m.Success)
         {
@@ -828,7 +830,7 @@ public static partial class PlaylistImporter
 
     private static (string Artist, string Title) SplitArtistTitle(string raw)
     {
-        foreach (string sep in new[] { " - ", " – ", " — " })
+        foreach (string sep in new[] { " - ", " – ", " — ", " —— ", " － ", " / ", "：" })
         {
             int idx = raw.IndexOf(sep, StringComparison.Ordinal);
             if (idx > 0 && idx + sep.Length < raw.Length)
@@ -839,6 +841,18 @@ public static partial class PlaylistImporter
                 {
                     return (left, right);
                 }
+            }
+        }
+        // Fallback for unspaced dash/en-dash/fullwidth-dash when CJK or multi-char tokens sit on both sides
+        int compactIdx = raw.IndexOfAny(['－', '—', '–', '-']);
+        if (compactIdx > 0 && compactIdx + 1 < raw.Length)
+        {
+            string left = raw[..compactIdx].Trim();
+            string right = raw[(compactIdx + 1)..].Trim();
+            if (!string.IsNullOrEmpty(left) && !string.IsNullOrEmpty(right)
+                && (PlaylistTrackMatcher.ContainsEastAsianScript(left) || PlaylistTrackMatcher.ContainsEastAsianScript(right)))
+            {
+                return (left, right);
             }
         }
         return ("", raw.Trim());
@@ -931,7 +945,10 @@ public static partial class PlaylistImporter
     [GeneratedRegex("""\s+""")]
     private static partial Regex MultiWhitespaceRegex();
 
-    [GeneratedRegex("""^\s*\d+\s*[\.\)]\s+""")]
+    [GeneratedRegex("""^\s*\d{1,2}\s*-\s*\d{2,3}\s+(?=\S)""")]
+    private static partial Regex DiscTrackImportPrefixRegex();
+
+    [GeneratedRegex("""^\s*\d+\s*(?:[\.\)）、]\s*|\s+(?=[^\d\s]))""")]
     private static partial Regex ChartNumberPrefixRegex();
 
     [GeneratedRegex("""^\s*\d{1,4}\s+[-–]\s+(?=.*?\s+[-–]\s+)""")]
@@ -1122,32 +1139,148 @@ public static partial class PlaylistTrackMatcher
         string preNorm = PreNormalizeUnicode(raw);
         if (string.IsNullOrEmpty(preNorm)) return [];
 
+        string discStripped = DiscTrackPrefixRegex().Replace(preNorm, "");
+        if (!string.IsNullOrWhiteSpace(discStripped))
+        {
+            preNorm = discStripped.Trim();
+        }
+
         string cleaned = StripEditionDecorations(preNorm);
         if (string.IsNullOrEmpty(NormalizePreNormalizedTokenText(cleaned)))
         {
             cleaned = preNorm;
         }
 
-        var variants = new List<string>(3);
+        var variants = new List<string>(6);
+        static void AddUnique(List<string> list, string value)
+        {
+            if (!string.IsNullOrEmpty(value) && !list.Contains(value, StringComparer.Ordinal))
+            {
+                list.Add(value);
+            }
+        }
+
         string full = NormalizePreNormalizedTokenText(cleaned);
-        if (!string.IsNullOrEmpty(full)) variants.Add(full);
+        AddUnique(variants, full);
+
+        // When parens/brackets contain NO hard-block qualifiers (e.g. "晴天 (Sunny Day)" or "Sunny Day (晴天)"),
+        // add the outer base title and any >=2-char CJK inner translation as secondary variants.
+        var matches = TrailingOrInlineBracketRegex().Matches(cleaned);
+        if (matches.Count > 0)
+        {
+            string withoutSafeParens = TrailingOrInlineBracketRegex().Replace(cleaned, m =>
+            {
+                string inner = m.Groups["inner"].Value;
+                return (ExtractVersionQualifiersFromPreNorm(inner) & HardBlockQualifierMask) != 0 ? m.Value : " ";
+            });
+            AddUnique(variants, NormalizePreNormalizedTokenText(withoutSafeParens));
+
+            foreach (Match m in matches)
+            {
+                string inner = m.Groups["inner"].Value;
+                if ((ExtractVersionQualifiersFromPreNorm(inner) & HardBlockQualifierMask) == 0)
+                {
+                    string innerNorm = NormalizePreNormalizedTokenText(inner);
+                    if (ContainsEastAsianScript(innerNorm) && CompactText(innerNorm).Length >= 2)
+                    {
+                        AddUnique(variants, innerNorm);
+                    }
+                }
+            }
+        }
+
+        // Split bilingual slash titles (e.g. "晴天 / Sunny Day") and CJK/CJK medley slash titles (e.g. "償還 / 紅豆")
+        if (cleaned.IndexOfAny(['/', '／']) >= 0)
+        {
+            string[] slashSegs = SlashTitleSplitRegex().Split(cleaned);
+            if (slashSegs.Length is >= 2 and <= 4)
+            {
+                var segNorms = new List<string>(slashSegs.Length);
+                bool anyPureDigits = false;
+                bool anyEastAsian = false;
+                bool allEastAsian = true;
+
+                foreach (string seg in slashSegs)
+                {
+                    string segNorm = NormalizePreNormalizedTokenText(seg);
+                    if (string.IsNullOrEmpty(segNorm))
+                    {
+                        anyPureDigits = true;
+                        break;
+                    }
+                    bool allDigits = true;
+                    foreach (char c in segNorm)
+                    {
+                        if (c < '0' || c > '9') { allDigits = false; break; }
+                    }
+                    if (allDigits)
+                    {
+                        anyPureDigits = true;
+                        break;
+                    }
+                    bool isEa = ContainsEastAsianScript(segNorm);
+                    anyEastAsian |= isEa;
+                    allEastAsian &= isEa;
+                    segNorms.Add(segNorm);
+                }
+
+                if (!anyPureDigits && segNorms.Count >= 2)
+                {
+                    if (anyEastAsian && !allEastAsian)
+                    {
+                        foreach (string sn in segNorms) AddUnique(variants, sn);
+                    }
+                    else if (allEastAsian)
+                    {
+                        foreach (string sn in segNorms)
+                        {
+                            if (CompactText(sn).Length >= 2) AddUnique(variants, sn);
+                        }
+                    }
+                }
+            }
+        }
+
+        int dashIdx = cleaned.IndexOf(" - ", StringComparison.Ordinal);
+        if (dashIdx > 0 && dashIdx + 3 < cleaned.Length)
+        {
+            string leftRaw = cleaned[..dashIdx];
+            string rightRaw = cleaned[(dashIdx + 3)..];
+            string left = NormalizePreNormalizedTokenText(leftRaw);
+            string right = NormalizePreNormalizedTokenText(rightRaw);
+            if (!string.IsNullOrEmpty(left)
+                && !string.IsNullOrEmpty(right)
+                && ContainsEastAsianScript(left) != ContainsEastAsianScript(right)
+                && (ExtractVersionQualifiersFromPreNorm(leftRaw) & HardBlockQualifierMask) == 0
+                && (ExtractVersionQualifiersFromPreNorm(rightRaw) & HardBlockQualifierMask) == 0)
+            {
+                AddUnique(variants, left);
+                AddUnique(variants, right);
+            }
+        }
+
+        string dashRemixStripped = DashRemixSuffixRegex().Replace(cleaned, "").Trim();
+        if (!string.IsNullOrEmpty(dashRemixStripped) && !string.Equals(dashRemixStripped, cleaned, StringComparison.Ordinal))
+        {
+            AddUnique(variants, NormalizePreNormalizedTokenText(dashRemixStripped));
+        }
 
         int firstColon = cleaned.IndexOfAny([':', '：']);
         if (firstColon > 0 && firstColon + 1 < cleaned.Length)
         {
-            string afterFirst = NormalizePreNormalizedTokenText(cleaned[(firstColon + 1)..]);
-            if (!string.IsNullOrEmpty(afterFirst) && !variants.Contains(afterFirst, StringComparer.Ordinal))
+            string firstColonNorm = NormalizePreNormalizedTokenText(cleaned[(firstColon + 1)..]);
+            if (!IsGenericClassicalMovementLabel(firstColonNorm))
             {
-                variants.Add(afterFirst);
+                AddUnique(variants, firstColonNorm);
             }
 
             int lastColon = cleaned.LastIndexOfAny([':', '：']);
             if (lastColon > firstColon && lastColon + 1 < cleaned.Length)
             {
-                string afterLast = NormalizePreNormalizedTokenText(cleaned[(lastColon + 1)..]);
-                if (!string.IsNullOrEmpty(afterLast) && !variants.Contains(afterLast, StringComparer.Ordinal))
+                string lastColonNorm = NormalizePreNormalizedTokenText(cleaned[(lastColon + 1)..]);
+                if (!IsGenericClassicalMovementLabel(lastColonNorm))
                 {
-                    variants.Add(afterLast);
+                    AddUnique(variants, lastColonNorm);
                 }
             }
         }
@@ -1253,6 +1386,24 @@ public static partial class PlaylistTrackMatcher
         ImportedTrackSeed seed,
         LibraryIndex index)
     {
+        var primary = ResolveSingleSeedByMetadataCore(seed, index, exactOnly: false);
+        if (primary is not null) return primary;
+
+        // Swapped "Title - Artist" fallback common in Chinese text playlists
+        if (!string.IsNullOrWhiteSpace(seed.Title) && !string.IsNullOrWhiteSpace(seed.Artist))
+        {
+            var swapped = seed with { Title = seed.Artist, Artist = seed.Title };
+            return ResolveSingleSeedByMetadataCore(swapped, index, exactOnly: true);
+        }
+
+        return null;
+    }
+
+    private static LocalLibraryTrackRef? ResolveSingleSeedByMetadataCore(
+        ImportedTrackSeed seed,
+        LibraryIndex index,
+        bool exactOnly)
+    {
         var seedVariants = NormalizeClassicalTitleVariants(seed.Title);
         string seedTitleFull = seedVariants.Count > 0 ? seedVariants[0] : NormalizeTitle(seed.Title);
         if (seedVariants.Count == 0 && string.IsNullOrEmpty(seedTitleFull)) return null;
@@ -1260,6 +1411,7 @@ public static partial class PlaylistTrackMatcher
         string seedPreNorm = PreNormalizeUnicode(seed.Title);
         VersionQualifiers seedQualifiers = ExtractVersionQualifiersFromPreNorm(seedPreNorm);
         VersionQualifiers seedHardQualifiers = seedQualifiers & HardBlockQualifierMask;
+        VersionQualifiers seedSoftQualifiers = seedQualifiers & SoftFallbackQualifierMask;
         bool seedIsLive = (seedQualifiers & VersionQualifiers.Live) != 0;
         StructuralMarkers seedMarkers = ExtractStructuralMarkers(seedTitleFull);
 
@@ -1273,28 +1425,36 @@ public static partial class PlaylistTrackMatcher
         var stage2ACandidates = CollectStage2ACandidates(
             seedVariants,
             seedHardQualifiers,
+            seedSoftQualifiers,
             seedMarkers,
             index);
 
         if (stage2ACandidates.Count > 0)
         {
-            if (artistMissingOrPlaceholder)
+            if (artistMissingOrPlaceholder && !exactOnly)
             {
-                return SelectUncreditedStage2ACandidate(
-                    stage2ACandidates,
-                    seedIsLive,
-                    seedAlbumNorm,
-                    seedDurationMs);
+                var strictUncredited = stage2ACandidates
+                    .Where(c => !c.IsSoftFallback)
+                    .Select(c => (c.Track, c.TitleScore))
+                    .ToList();
+                return strictUncredited.Count > 0
+                    ? SelectUncreditedStage2ACandidate(
+                        strictUncredited,
+                        seedIsLive,
+                        seedAlbumNorm,
+                        seedDurationMs)
+                    : null;
             }
 
             IndexedTrack? bestTrack = null;
             CandidateRank bestRank = default;
             bool hasBest = false;
 
-            foreach (var (cand, titleScore) in stage2ACandidates)
+            foreach (var (cand, titleScore, isSoftFallback) in stage2ACandidates)
             {
+                if (exactOnly && isSoftFallback) continue;
                 int artistScore = ScoreArtistMatch(seedArtistTokens, seedArtistFlat, cand);
-                if (artistScore <= 0) continue;
+                if (exactOnly ? artistScore < 3 : artistScore <= 0) continue;
 
                 var rank = ComputeCandidateRank(
                     titleScore,
@@ -1317,7 +1477,7 @@ public static partial class PlaylistTrackMatcher
                 return bestTrack.Track;
             }
 
-            if (stage2ACandidates.Count == 1)
+            if (!exactOnly && stage2ACandidates.Count == 1 && !stage2ACandidates[0].IsSoftFallback)
             {
                 var solo = stage2ACandidates[0].Track.Track;
                 if (string.IsNullOrWhiteSpace(solo.ArtistsDisplay)
@@ -1330,7 +1490,7 @@ public static partial class PlaylistTrackMatcher
         }
 
         // Stage 2B: Artist-anchored controlled fuzzy title recall
-        if (artistMissingOrPlaceholder || string.IsNullOrEmpty(seedTitleFull))
+        if (exactOnly || artistMissingOrPlaceholder || string.IsNullOrEmpty(seedTitleFull))
         {
             return null;
         }
@@ -1340,6 +1500,7 @@ public static partial class PlaylistTrackMatcher
             effectiveVariants,
             seedMarkers,
             seedHardQualifiers,
+            seedSoftQualifiers,
             seedIsLive,
             seedArtistTokens,
             seedArtistFlat,
@@ -1348,36 +1509,39 @@ public static partial class PlaylistTrackMatcher
             index);
     }
 
-    private static List<(IndexedTrack Track, int TitleScore)> CollectStage2ACandidates(
+    private static List<(IndexedTrack Track, int TitleScore, bool IsSoftFallback)> CollectStage2ACandidates(
         IReadOnlyList<string> seedVariants,
         VersionQualifiers seedHardQualifiers,
+        VersionQualifiers seedSoftQualifiers,
         StructuralMarkers seedMarkers,
         LibraryIndex index)
     {
-        var candidates = new List<(IndexedTrack Track, int TitleScore)>();
+        var candidates = new List<(IndexedTrack Track, int TitleScore, bool IsSoftFallback)>();
         var uidToIndex = new Dictionary<string, int>(StringComparer.Ordinal);
 
-        void UpsertCandidate(IndexedTrack cand, int titleScore)
+        void UpsertCandidate(IndexedTrack cand, int titleScore, bool isSoftFallback)
         {
             if (uidToIndex.TryGetValue(cand.Track.TrackUid, out int existingIdx))
             {
                 if (titleScore > candidates[existingIdx].TitleScore)
                 {
-                    candidates[existingIdx] = (cand, titleScore);
+                    candidates[existingIdx] = (cand, titleScore, isSoftFallback);
                 }
                 return;
             }
             uidToIndex[cand.Track.TrackUid] = candidates.Count;
-            candidates.Add((cand, titleScore));
+            candidates.Add((cand, titleScore, isSoftFallback));
         }
 
         for (int vi = 0; vi < seedVariants.Count; vi++)
         {
+            if (vi > 0 && IsGenericClassicalMovementLabel(seedVariants[vi])) continue;
             if (index.ByTitle.TryGetValue(seedVariants[vi], out var found))
             {
                 foreach (var (cand, candTier) in found)
                 {
                     if (cand.HardQualifiers != seedHardQualifiers) continue;
+                    if (!AreSoftQualifiersCompatible(seedSoftQualifiers, cand, out bool isSoftFallback)) continue;
                     if ((vi > 0 || candTier < 990) && !AreStructurallyCompatible(seedMarkers, cand.WorkAndTitleMarkers))
                     {
                         continue;
@@ -1390,7 +1554,8 @@ public static partial class PlaylistTrackMatcher
                         (<= 1, >= 990) => 990,
                         _ => 960,
                     };
-                    UpsertCandidate(cand, effectiveScore);
+                    if (isSoftFallback) effectiveScore -= 200;
+                    UpsertCandidate(cand, effectiveScore, isSoftFallback);
                 }
             }
 
@@ -1401,13 +1566,15 @@ public static partial class PlaylistTrackMatcher
                 foreach (var (cand, candTier) in compactHits)
                 {
                     if (cand.HardQualifiers != seedHardQualifiers) continue;
+                    if (!AreSoftQualifiersCompatible(seedSoftQualifiers, cand, out bool isSoftFallback)) continue;
                     if ((vi > 0 || candTier < 990) && !AreStructurallyCompatible(seedMarkers, cand.WorkAndTitleMarkers))
                     {
                         continue;
                     }
 
                     int effectiveScore = vi == 0 && candTier >= 990 ? 980 : 955;
-                    UpsertCandidate(cand, effectiveScore);
+                    if (isSoftFallback) effectiveScore -= 200;
+                    UpsertCandidate(cand, effectiveScore, isSoftFallback);
                 }
             }
         }
@@ -1478,6 +1645,7 @@ public static partial class PlaylistTrackMatcher
         IReadOnlyList<string> seedVariants,
         StructuralMarkers seedMarkers,
         VersionQualifiers seedHardQualifiers,
+        VersionQualifiers seedSoftQualifiers,
         bool seedIsLive,
         HashSet<string> seedArtistTokens,
         string seedArtistFlat,
@@ -1527,6 +1695,7 @@ public static partial class PlaylistTrackMatcher
             foreach (var cand in pool)
             {
                 if (cand.HardQualifiers != seedHardQualifiers) continue;
+                if (!AreSoftQualifiersCompatible(seedSoftQualifiers, cand, out bool isSoftFallback)) continue;
 
                 int artistScore = ScoreArtistMatch(seedArtistTokens, seedArtistFlat, cand);
                 if (artistScore <= 0) continue;
@@ -1535,6 +1704,7 @@ public static partial class PlaylistTrackMatcher
                 if (fuzzySim <= 0.0) continue;
 
                 int fuzzyTitleScore = (int)Math.Round(fuzzySim * 900.0);
+                if (isSoftFallback) fuzzyTitleScore = Math.Max(1, fuzzyTitleScore - 200);
                 var rank = ComputeCandidateRank(
                     fuzzyTitleScore,
                     artistScore,
@@ -1735,31 +1905,136 @@ public static partial class PlaylistTrackMatcher
             if (!string.IsNullOrEmpty(clean))
             {
                 tokens.Add(clean);
+                AddChineseArtistDerivations(clean, tokens);
+            }
+
+            // Split parenthetical bilingual artist forms (e.g. "周杰伦 (Jay Chou)")
+            var parenMatches = TrailingOrInlineBracketRegex().Matches(restored);
+            if (parenMatches.Count > 0)
+            {
+                string outer = NormalizePreNormalizedTokenText(TrailingOrInlineBracketRegex().Replace(restored, " "));
+                if (!string.IsNullOrEmpty(outer))
+                {
+                    tokens.Add(outer);
+                    AddChineseArtistDerivations(outer, tokens);
+                }
+                foreach (Match pm in parenMatches)
+                {
+                    string inner = NormalizePreNormalizedTokenText(pm.Groups["inner"].Value);
+                    if (!string.IsNullOrEmpty(inner))
+                    {
+                        tokens.Add(inner);
+                        AddChineseArtistDerivations(inner, tokens);
+                    }
+                }
+            }
+
+            // Split mixed CJK + Latin script segments (e.g. "陈奕迅 Eason Chan")
+            if (ContainsEastAsianScript(clean))
+            {
+                var scriptMatches = ScriptRunSplitRegex().Matches(clean);
+                if (scriptMatches.Count > 1)
+                {
+                    var cjkRuns = new List<string>();
+                    var latinRuns = new List<string>();
+                    foreach (Match sm in scriptMatches)
+                    {
+                        string run = sm.Value.Trim();
+                        if (string.IsNullOrEmpty(run)) continue;
+                        if (ContainsEastAsianScript(run)) cjkRuns.Add(run);
+                        else latinRuns.Add(run);
+                    }
+                    if (cjkRuns.Count > 0 && latinRuns.Count > 0)
+                    {
+                        string cjkPart = string.Join(" ", cjkRuns).Trim();
+                        string latinPart = string.Join(" ", latinRuns).Trim();
+                        if (cjkPart.Length >= 2)
+                        {
+                            tokens.Add(cjkPart);
+                            AddChineseArtistDerivations(cjkPart, tokens);
+                        }
+                        if (latinPart.Length >= 2) tokens.Add(latinPart);
+                    }
+                }
             }
         }
 
+        ExpandCjkArtistAliases(tokens);
         return tokens;
     }
+
+    private static void AddChineseArtistDerivations(string token, HashSet<string> tokens)
+    {
+        if (string.IsNullOrEmpty(token) || !HanziPinyinConverter.ContainsHanzi(token)) return;
+
+        // Strip common Chinese band/group suffixes when base name >= 2 chars (protects "信乐团")
+        foreach (string suffix in BandSuffixes)
+        {
+            if (token.EndsWith(suffix, StringComparison.Ordinal) && token.Length - suffix.Length >= 2)
+            {
+                string stripped = token[..^suffix.Length].Trim();
+                if (stripped.Length >= 2)
+                {
+                    tokens.Add(stripped);
+                }
+            }
+        }
+
+        // Split pure-Hanzi multi-artist conjunction (e.g. "李宗盛与卢冠廷") when both sides >= 2 chars
+        if (!token.Contains(' ', StringComparison.Ordinal))
+        {
+            int idx = token.IndexOf('与');
+            if (idx >= 2 && idx + 3 <= token.Length)
+            {
+                string left = token[..idx];
+                string right = token[(idx + 1)..];
+                if (left.Length >= 2 && right.Length >= 2 && !right.Contains('与'))
+                {
+                    tokens.Add(left);
+                    tokens.Add(right);
+                }
+            }
+        }
+    }
+
+    private static readonly string[] BandSuffixes = ["乐队", "乐团", "组合"];
 
     private static string NormalizeTokenText(string raw) =>
         string.IsNullOrWhiteSpace(raw) ? "" : NormalizePreNormalizedTokenText(PreNormalizeUnicode(raw));
 
     private static string NormalizePathKey(string? path) =>
-        string.IsNullOrWhiteSpace(path) ? "" : path.Replace('\\', '/').TrimStart('/');
+        string.IsNullOrWhiteSpace(path)
+            ? ""
+            : path.Normalize(NormalizationForm.FormC).Replace('\\', '/').TrimStart('/');
+
+    [GeneratedRegex("""^\s*\d{1,2}-\d{2,3}\s+(?=\S)""")]
+    private static partial Regex DiscTrackPrefixRegex();
+
+    [GeneratedRegex("""\s*[/／]\s*""")]
+    private static partial Regex SlashTitleSplitRegex();
+
+    [GeneratedRegex("""[\(\[【]\s*(?<inner>[^\)\]】]+?)\s*[\)\]】]""")]
+    private static partial Regex TrailingOrInlineBracketRegex();
+
+    [GeneratedRegex("""[\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF]+|[a-z0-9]+(?:\s+[a-z0-9]+)*""")]
+    private static partial Regex ScriptRunSplitRegex();
 
     [GeneratedRegex("""[\(\[【]\s*(?:feat\.?|ft\.?|featuring|with|from\s+[^\)\]】]+)(?:\s+[^\)\]】]*)?[\)\]】]""", RegexOptions.IgnoreCase)]
     private static partial Regex FeaturingParenRegex();
 
-    [GeneratedRegex("""[\(\[【]\s*(?!.*?\b(?:remix(?:es|ed)?|rework|bootleg|instrumental|off\s+vocal|minus\s+one|karaoke|ktv|acoustic|unplugged|a\s*capp?ell?a|demo|cover|mashup|medley|sped\s+up|speed\s+up|slowed|nightcore)\b)(?!.*?(?:伴奏|纯音乐|消音|无人声|乐器版|卡拉ok|翻唱|不插电|木吉他版|清唱|阿卡贝拉|小样|混音|变速|加速版|降调))[^\)\]】]*(?:remaster(?:ed)?|version|radio\s+edit|album\s+version|live|deluxe|mono|stereo|重制|重置|完整版|正式版|专辑版|单曲版|原版|现场|演唱会|音乐会|母带|纯净版|无损|主题曲|插曲|片尾曲|片头曲|推广曲|影视原声)\s*[^\)\]】]*[\)\]】]""", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("""[\(\[【]\s*(?!.*?\b(?:remix(?:es|ed)?|rework|bootleg|instrumental|off\s+vocal|minus\s+one|karaoke|ktv|acoustic|unplugged|a\s*capp?ell?a|demo|cover|mashup|medley|sped\s+up|speed\s+up|slowed|nightcore)\b)(?!.*?(?:伴奏|纯音乐|消音|无人声|乐器版|卡拉ok|翻唱|不插电|木吉他版|清唱|阿卡贝拉|小样|混音|变速|加速版|降调))[^\)\]】]*(?:remaster(?:ed)?|version|radio\s+edit|album\s+edit|single\s+edit|radio\s+version|album\s+version|spanish\s+version|english\s+version|french\s+version|japanese\s+version|korean\s+version|clean(?:\s+ver(?:sion)?\.?)?|explicit(?:\s+ver(?:sion)?\.?)?|official\s+(?:music\s+|4k\s+|lyric\s+|audio\s+)?video|live|deluxe|mono|stereo|ost|重制|重置|完整版|正式版|专辑版|单曲版|原版|现场|演唱会|音乐会|母带|纯净版|无损|主题曲|插曲|片尾曲|片头曲|推广曲|影视原声|国语版?|粤语版?|普通话版?|中文版|英文版|tv版|独唱版|合唱版|经典版|珍藏版)\s*[^\)\]】]*[\)\]】]|[\(\[【]\s*(?:19|20)\d{2}\s*(?:版|年)?\s*[\)\]】]""", RegexOptions.IgnoreCase)]
     private static partial Regex RemasterSuffixRegex();
 
-    [GeneratedRegex("""(?:\s+[-–—]\s+(?!.*?\b(?:remix(?:es|ed)?|rework|bootleg|instrumental|off\s+vocal|minus\s+one|karaoke|ktv|acoustic|unplugged|a\s*capp?ell?a|demo|cover|mashup|medley|sped\s+up|speed\s+up|slowed|nightcore)\b)(?!.*?(?:伴奏|纯音乐|消音|无人声|乐器版|卡拉ok|翻唱|不插电|木吉他版|清唱|阿卡贝拉|小样|混音|变速|加速版|降调))(?:(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+(?:version|edition))?|radio\s+edit|album\s+version|single\s+version|single|original\s+mix|live(?:\s+[^\n]*)?|mono|stereo|from\s+[^\n]*|[^\n]*\bsoundtrack\b[^\n]*|(?:\d{4}\s*)?(?:重制版?|重置版?)(?:\s*\d{4})?|完整版|正式版|专辑版|单曲版|原版|(?:\d{4}\s*)?(?:现场版?|live版)|[^\n]*(?:演唱会|音乐会)[^\n]*现场[^\n]*|母带版|纯净版|无损版?|电影[^\n]*(?:主题曲|插曲|片尾曲|片头曲|推广曲)|电视剧[^\n]*(?:主题曲|插曲|片尾曲|片头曲)|影视原声))+$""", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("""(?:\s+[-–—]\s+(?!.*?\b(?:remix(?:es|ed)?|rework|bootleg|instrumental|off\s+vocal|minus\s+one|karaoke|ktv|acoustic|unplugged|a\s*capp?ell?a|demo|cover|mashup|medley|sped\s+up|speed\s+up|slowed|nightcore)\b)(?!.*?(?:伴奏|纯音乐|消音|无人声|乐器版|卡拉ok|翻唱|不插电|木吉他版|清唱|阿卡贝拉|小样|混音|变速|加速版|降调))(?:(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+(?:version|edition))?|radio\s+edit|album\s+edit|single\s+edit|radio\s+version|album\s+version|single\s+version|spanish\s+version|english\s+version|french\s+version|japanese\s+version|korean\s+version|clean(?:\s+ver(?:sion)?\.?)?|explicit(?:\s+ver(?:sion)?\.?)?|official\s+(?:music\s+|4k\s+|lyric\s+|audio\s+)?video|single|original\s+mix|live(?:\s+[^\n]*)?|mono|stereo|from\s+[^\n]*|[^\n]*\bsoundtrack\b[^\n]*|(?:\d{4}\s*)?(?:重制版?|重置版?)(?:\s*\d{4})?|完整版|正式版|专辑版|单曲版|原版|(?:\d{4}\s*)?(?:现场版?|live版)|[^\n]*(?:演唱会|音乐会)[^\n]*现场[^\n]*|母带版|纯净版|无损版?|国语版?|粤语版?|普通话版?|中文版|英文版|tv版|独唱版|合唱版|(?:电影|电视剧|网剧|动画|游戏)[^\n]*(?:主题曲|插曲|片尾曲|片头曲|推广曲)|影视原声))+$""", RegexOptions.IgnoreCase)]
     private static partial Regex DashEditionSuffixRegex();
+
+    [GeneratedRegex("""(?:\s+[-–—]\s+[^\n]*\b(?:remix(?:es|ed)?|rework|club\s+mix|dub\s+mix|extended\s+mix|vip\s+mix)\b[^\n]*)+$""", RegexOptions.IgnoreCase)]
+    private static partial Regex DashRemixSuffixRegex();
 
     [GeneratedRegex("""\s+-\s+single\s*$""", RegexOptions.IgnoreCase)]
     private static partial Regex SingleSuffixRegex();
 
-    [GeneratedRegex("""(?:\s*[,&/;+、，；／＋]\s*|\s+(?:feat\.?|ft\.?|featuring|with|x|and|vs\.?)\s+)""", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("""(?:\s*[,&/;+×、，；／＋]\s*|\s+(?:feat\.?|ft\.?|featuring|with|x|and|vs\.?)\s+)""", RegexOptions.IgnoreCase)]
     private static partial Regex ArtistSplitRegex();
 }
 
@@ -1816,7 +2091,7 @@ public static class PlaylistStore
         PlaylistTrackMatcher.LibraryIndex index,
         string? musicRoot = null)
     {
-        string text = File.ReadAllText(filePath, Encoding.UTF8);
+        string text = ReadPlaylistFileText(filePath);
         string fallbackName = Path.GetFileNameWithoutExtension(filePath);
         var parsed = PlaylistImporter.ParseTextPlaylist(text, fallbackName, maxTracks: 50_000);
         var resolved = PlaylistTrackMatcher.ResolveSeeds(parsed.Tracks, index, musicRoot);
@@ -1864,7 +2139,7 @@ public static class PlaylistStore
         string? musicRoot = null,
         bool persistIfChanged = true)
     {
-        string text = File.ReadAllText(filePath, Encoding.UTF8);
+        string text = ReadPlaylistFileText(filePath);
         string fallbackName = Path.GetFileNameWithoutExtension(filePath);
         var parsed = PlaylistImporter.ParseTextPlaylist(text, fallbackName, maxTracks: 50_000);
         var resolved = PlaylistTrackMatcher.ResolveSeeds(parsed.Tracks, index, musicRoot);
@@ -2086,4 +2361,71 @@ public static class PlaylistStore
 
     private static string SanitizeInline(string raw) =>
         raw.Replace('\r', ' ').Replace('\n', ' ').Trim();
+
+    private static string ReadPlaylistFileText(string filePath)
+    {
+        byte[] bytes = File.ReadAllBytes(filePath);
+        if (bytes.Length == 0) return "";
+
+        int offset = (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) ? 3 : 0;
+        var strictUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+        try
+        {
+            return strictUtf8.GetString(bytes, offset, bytes.Length - offset);
+        }
+        catch (DecoderFallbackException)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                if (TryDecodeWindowsCodePage(bytes, 54936, out string? gb18030))
+                {
+                    return gb18030!;
+                }
+                if (TryDecodeWindowsCodePage(bytes, 936, out string? gbk))
+                {
+                    return gbk!;
+                }
+            }
+
+            return Encoding.UTF8.GetString(bytes, offset, bytes.Length - offset);
+        }
+    }
+
+    private const uint MbErrInvalidChars = 0x00000008;
+
+    private static bool TryDecodeWindowsCodePage(byte[] bytes, uint codePage, out string? decoded)
+    {
+        decoded = null;
+        if (bytes.Length == 0)
+        {
+            decoded = "";
+            return true;
+        }
+
+        try
+        {
+            int charCount = MultiByteToWideChar(codePage, MbErrInvalidChars, bytes, bytes.Length, null, 0);
+            if (charCount <= 0) return false;
+
+            char[] buffer = new char[charCount];
+            int written = MultiByteToWideChar(codePage, MbErrInvalidChars, bytes, bytes.Length, buffer, buffer.Length);
+            if (written <= 0) return false;
+
+            decoded = new string(buffer, 0, written);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int MultiByteToWideChar(
+        uint codePage,
+        uint dwFlags,
+        byte[] lpMultiByteStr,
+        int cbMultiByte,
+        [Out] char[]? lpWideCharStr,
+        int cchWideChar);
 }

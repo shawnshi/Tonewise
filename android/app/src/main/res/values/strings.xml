@@ -651,4 +651,8 @@
     <string name="lbl_save_current_slot">Save</string>
     <string name="fmt_queue_slot">Slot %d</string>
     <string name="lbl_quick_tag_saved">Queued 5D edit for PC LWW sync</string>
+    <string name="lbl_autodj_title">Auto DJ</string>
+    <string name="lbl_autodj_action">Play 50 Tracks</string>
+    <string name="lbl_autodj_badge">Time-Aware · 50 Tracks</string>
+    <string name="lbl_scene_autodj_badge">Auto DJ 50</string>
 </resources>

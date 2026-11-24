@@ -718,6 +718,12 @@ constructor(
             waveformEnvelope.value = null
             return
         }
+        val cached = waveformRepository.getCachedEnvelope(currentSong.uid)
+        if (cached != null) {
+            waveformEnvelope.value = cached
+            return
+        }
+        waveformEnvelope.value = null
         waveformJob =
             viewModelScope.launch {
                 waveformEnvelope.value = waveformRepository.getEnvelope(currentSong)

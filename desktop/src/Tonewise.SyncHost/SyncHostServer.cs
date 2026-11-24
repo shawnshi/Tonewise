@@ -16,6 +16,7 @@ using Microsoft.Net.Http.Headers;
 using Tonewise.Interop;
 using Tonewise.SyncHost.Curation;
 using Tonewise.SyncHost.Ledger;
+using Tonewise.SyncHost.Usb;
 
 namespace Tonewise.SyncHost;
 
@@ -54,6 +55,24 @@ public sealed record UsbPairApiRequest(
     [property: JsonPropertyName("nonce")] string Nonce,
     [property: JsonPropertyName("device_id")] string DeviceId,
     [property: JsonPropertyName("device_name")] string? DeviceName
+);
+
+public sealed record UsbPushTrackRequestItem(
+    [property: JsonPropertyName("track_uid")] string TrackUid,
+    [property: JsonPropertyName("rel_path")] string RelPath,
+    [property: JsonPropertyName("file_size")] long FileSize,
+    [property: JsonPropertyName("mtime_ms")] long MtimeMs
+);
+
+public sealed record UsbPushCoverRequestItem(
+    [property: JsonPropertyName("album_dir")] string AlbumDir,
+    [property: JsonPropertyName("sample_track_uid")] string SampleTrackUid
+);
+
+public sealed record UsbPushTracksApiRequest(
+    [property: JsonPropertyName("remote_music_root")] string? RemoteMusicRoot,
+    [property: JsonPropertyName("tracks")] IReadOnlyList<UsbPushTrackRequestItem> Tracks,
+    [property: JsonPropertyName("covers")] IReadOnlyList<UsbPushCoverRequestItem>? Covers
 );
 
 public sealed record SyncSessionProgressReport(
@@ -106,6 +125,7 @@ public sealed class SyncHostServer : IAsyncDisposable
     private readonly List<UsbNonceEntry> _usbNonces = [];
     private readonly HashSet<string> _largePruneConfirmedDevices = new(StringComparer.OrdinalIgnoreCase);
     private bool _cancelActiveSync;
+    private CancellationTokenSource? _activeUsbDirectPushCts;
     private WebApplication? _app;
     private MdnsAdvertiser? _mdns;
     private ManifestSnapshotCache? _manifestSnapshot;
@@ -116,6 +136,7 @@ public sealed class SyncHostServer : IAsyncDisposable
     private string? _waveformsHashHex;
 
     public SyncOutboxAndPairingStore Store { get; }
+    public Func<UsbPushTracksApiRequest, Func<UsbDirectPushProgress, Task>, CancellationToken, Task<UsbDirectPushSummary>>? UsbDirectPushHandler { get; set; }
     public event Action? SyncStateChanged;
     public event Action<SyncSessionProgressReport>? SyncSessionProgressChanged;
 
@@ -784,6 +805,170 @@ public sealed class SyncHostServer : IAsyncDisposable
             return Results.Json(new { kind = resolvedKind, items = entries });
         });
 
+        app.MapPost("/api/v2/usb/push-tracks", async (HttpContext httpContext) =>
+        {
+            HttpRequest request = httpContext.Request;
+            if (!IsLoopbackRequest(request))
+            {
+                return Results.Json(
+                    new { error = "usb_push_requires_loopback" },
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
+            UsbPushTracksApiRequest? body;
+            try
+            {
+                body = await JsonSerializer.DeserializeAsync<UsbPushTracksApiRequest>(
+                    request.Body,
+                    cancellationToken: httpContext.RequestAborted);
+            }
+            catch
+            {
+                return Results.Json(new { error = "invalid_json" }, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            if (body is null)
+                return Results.Json(new { error = "invalid_request" }, statusCode: StatusCodes.Status400BadRequest);
+
+            var handler = UsbDirectPushHandler;
+            if (handler is null)
+            {
+                return Results.Json(
+                    new { error = "usb_direct_push_unavailable" },
+                    statusCode: StatusCodes.Status501NotImplemented);
+            }
+
+            CancellationTokenSource linkedCts;
+            lock (_usbSessionLock)
+            {
+                if (_cancelActiveSync)
+                {
+                    return Results.Json(
+                        new { error = "sync_cancelled" },
+                        statusCode: StatusCodes.Status409Conflict);
+                }
+
+                linkedCts = CancellationTokenSource.CreateLinkedTokenSource(httpContext.RequestAborted);
+                _activeUsbDirectPushCts = linkedCts;
+            }
+
+            httpContext.Response.StatusCode = StatusCodes.Status200OK;
+            httpContext.Response.ContentType = "application/x-ndjson; charset=utf-8";
+            httpContext.Response.Headers.CacheControl = "no-cache";
+            await using var writer = new StreamWriter(
+                httpContext.Response.Body,
+                new UTF8Encoding(false),
+                bufferSize: 16 * 1024,
+                leaveOpen: true);
+            using var writeGate = new SemaphoreSlim(1, 1);
+
+            async Task WriteNdjsonLineAsync(string jsonLine, CancellationToken writeCt)
+            {
+                await writeGate.WaitAsync(writeCt).ConfigureAwait(false);
+                try
+                {
+                    await writer.WriteLineAsync(jsonLine.AsMemory(), writeCt).ConfigureAwait(false);
+                    await writer.FlushAsync(writeCt).ConfigureAwait(false);
+                }
+                finally
+                {
+                    writeGate.Release();
+                }
+            }
+
+            UsbDirectPushSummary summary;
+            try
+            {
+                summary = await handler(
+                    body,
+                    progress => WriteNdjsonLineAsync(
+                        JsonSerializer.Serialize(new
+                        {
+                            @event = "progress",
+                            stage = progress.Stage,
+                            completed_tracks = progress.CompletedTracks,
+                            total_tracks = progress.TotalTracks,
+                            bytes_transferred = progress.BytesTransferred,
+                            total_bytes = progress.TotalBytes,
+                            speed_mbps = Math.Round(progress.SpeedMbps, 2),
+                            current_rel_path = progress.CurrentRelPath
+                        }),
+                        httpContext.RequestAborted),
+                    linkedCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                bool cancelledByUi;
+                lock (_usbSessionLock)
+                {
+                    cancelledByUi = _cancelActiveSync;
+                }
+                summary = new UsbDirectPushSummary(
+                    UsedDirectPush: false,
+                    PushedTracks: [],
+                    FailedTrackUids: body.Tracks.Select(t => t.TrackUid).ToArray(),
+                    CoversPushed: 0,
+                    CoversSkipped: 0,
+                    TotalBytesTransferred: 0,
+                    ElapsedSeconds: 0,
+                    AverageMbps: 0,
+                    Error: cancelledByUi ? "sync_cancelled" : "request_cancelled");
+            }
+            catch (Exception ex)
+            {
+                summary = new UsbDirectPushSummary(
+                    UsedDirectPush: false,
+                    PushedTracks: [],
+                    FailedTrackUids: body.Tracks.Select(t => t.TrackUid).ToArray(),
+                    CoversPushed: 0,
+                    CoversSkipped: 0,
+                    TotalBytesTransferred: 0,
+                    ElapsedSeconds: 0,
+                    AverageMbps: 0,
+                    Error: ex.Message);
+            }
+            finally
+            {
+                lock (_usbSessionLock)
+                {
+                    if (ReferenceEquals(_activeUsbDirectPushCts, linkedCts))
+                    {
+                        _activeUsbDirectPushCts = null;
+                    }
+                }
+                linkedCts.Dispose();
+            }
+
+            if (!httpContext.RequestAborted.IsCancellationRequested)
+            {
+                string completeLine = JsonSerializer.Serialize(new
+                {
+                    @event = "complete",
+                    used_direct_push = summary.UsedDirectPush,
+                    pushed_tracks = summary.PushedTracks.Select(t => new
+                    {
+                        track_uid = t.TrackUid,
+                        rel_path = t.RelPath,
+                        file_size = t.FileSize
+                    }),
+                    failed_track_uids = summary.FailedTrackUids,
+                    covers_pushed = summary.CoversPushed,
+                    covers_skipped = summary.CoversSkipped,
+                    total_bytes_transferred = summary.TotalBytesTransferred,
+                    elapsed_seconds = Math.Round(summary.ElapsedSeconds, 3),
+                    average_mbps = Math.Round(summary.AverageMbps, 2),
+                    error = summary.Error
+                });
+                await WriteNdjsonLineAsync(completeLine, httpContext.RequestAborted).ConfigureAwait(false);
+            }
+
+            return Results.Empty;
+        });
+
         app.MapGet("/api/v2/tracks/{trackUid}/file", (HttpRequest request, string trackUid) =>
         {
             if (!TryAuthenticateV2(request, out _, out var errorResult))
@@ -798,7 +983,7 @@ public sealed class SyncHostServer : IAsyncDisposable
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
-                bufferSize: 64 * 1024,
+                bufferSize: 256 * 1024,
                 options: FileOptions.Asynchronous | FileOptions.SequentialScan);
             return Results.File(
                 stream,
@@ -956,9 +1141,20 @@ public sealed class SyncHostServer : IAsyncDisposable
 
     public void RequestCancelActiveSync()
     {
+        CancellationTokenSource? activePushCts;
         lock (_usbSessionLock)
         {
             _cancelActiveSync = true;
+            activePushCts = _activeUsbDirectPushCts;
+        }
+
+        try
+        {
+            activePushCts?.Cancel();
+        }
+        catch
+        {
+            // Best-effort cancellation of active direct push
         }
     }
 

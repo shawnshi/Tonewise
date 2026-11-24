@@ -497,4 +497,8 @@
     <string name="lbl_save_current_slot">保存</string>
     <string name="fmt_queue_slot">槽位 %d</string>
     <string name="lbl_quick_tag_saved">已写入五维 LWW 微补丁队列</string>
+    <string name="lbl_autodj_title">Auto DJ 智能电台</string>
+    <string name="lbl_autodj_action">生成 50 首</string>
+    <string name="lbl_autodj_badge">按当前时间编排 · 50 首</string>
+    <string name="lbl_scene_autodj_badge">Auto DJ 50首</string>
 </resources>

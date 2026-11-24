@@ -76,15 +76,28 @@ interface ExternalPlaylistManager {
  */
 data class ExportConfig(val absolute: Boolean, val windowsPaths: Boolean)
 
+data class ImportedPlaylistEntry(
+    val paths: PossiblePaths,
+    val title: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val durationSec: Int = 0,
+)
+
 /**
  * A playlist that has been imported.
  *
  * @property name The name of the playlist. May be null if not provided.
  * @property paths The paths of the files in the playlist.
+ * @property entries Structured entries including optional `#EXTINF` and `#EXTTW-UNMATCHED` metadata.
  * @see ExternalPlaylistManager
  * @see M3U
  */
-data class ImportedPlaylist(val name: String?, val paths: List<PossiblePaths>)
+data class ImportedPlaylist(
+    val name: String?,
+    val paths: List<PossiblePaths>,
+    val entries: List<ImportedPlaylistEntry> = paths.map { ImportedPlaylistEntry(it) },
+)
 
 typealias PossiblePaths = List<Path>
 
@@ -112,7 +125,7 @@ private class ExternalPlaylistManagerImpl(
                 newName = newName.replace(Regex("[_-]"), " ")
                 // Replace long stretches of whitespace with one space
                 newName = newName.replace(Regex("\\s+"), " ")
-                return ImportedPlaylist(newName, imported.paths)
+                return ImportedPlaylist(newName, imported.paths, imported.entries)
             }
         } catch (e: Exception) {
             null

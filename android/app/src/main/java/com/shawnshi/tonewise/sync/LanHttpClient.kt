@@ -18,10 +18,13 @@
 
 package com.shawnshi.tonewise.sync
 
+import java.io.BufferedOutputStream
+import java.io.BufferedReader
 import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.Proxy
@@ -41,6 +44,8 @@ import org.oxycblt.musikr.core.TonewiseCore
 /**
  * Shared HTTP client & cooperative cancellation registry used across LAN Sync and Last.fm sync.
  */
+class LanSyncHttpException(val statusCode: Int, message: String) : IOException(message)
+
 object LanHttpClient {
     class CancelToken {
         private val cancelled = AtomicBoolean(false)
@@ -79,13 +84,16 @@ object LanHttpClient {
                 throwIfCancelled()
                 block(conn)
             } catch (t: Throwable) {
+                runCatching { conn.disconnect() }
                 if (cancelled.get() && t !is CancellationException) {
                     throw CancellationException("Sync cancelled").apply { initCause(t) }
                 }
                 throw t
             } finally {
                 activeConnections.remove(conn)
-                runCatching { conn.disconnect() }
+                if (cancelled.get()) {
+                    runCatching { conn.disconnect() }
+                }
             }
         }
 
@@ -216,11 +224,24 @@ object LanHttpClient {
             } else {
                 parsed.openConnection()
             }
-        val httpConn = conn as HttpURLConnection
-        if (isLan && !isLoopback) {
-            httpConn.setRequestProperty("Connection", "close")
+        return conn as HttpURLConnection
+    }
+
+    private inline fun <T> executePooled(
+        conn: HttpURLConnection,
+        cancelToken: CancelToken?,
+        crossinline block: (HttpURLConnection) -> T,
+    ): T {
+        return if (cancelToken != null) {
+            cancelToken.track(conn) { block(it) }
+        } else {
+            try {
+                block(conn)
+            } catch (t: Throwable) {
+                runCatching { conn.disconnect() }
+                throw t
+            }
         }
-        return httpConn
     }
 
     private fun parseIpv4Bytes(host: String): ByteArray? {
@@ -248,7 +269,7 @@ object LanHttpClient {
             throw IOException("Blocked HTTP redirect ($code) for $url")
         }
         if (code !in 200..299) {
-            throw IOException("HTTP $code for $url")
+            throw LanSyncHttpException(code, "HTTP $code for $url")
         }
     }
 
@@ -323,15 +344,7 @@ object LanHttpClient {
                 c.inputStream.use { it.readBytes() }
             }
             try {
-                return if (cancelToken != null) {
-                    cancelToken.track(conn, execute)
-                } else {
-                    try {
-                        execute(conn)
-                    } finally {
-                        runCatching { conn.disconnect() }
-                    }
-                }
+                return executePooled(conn, cancelToken, execute)
             } catch (ce: CancellationException) {
                 throw ce
             } catch (io: IOException) {
@@ -365,33 +378,104 @@ object LanHttpClient {
         readTimeoutMs: Int = 20_000,
     ): String {
         enforceSafeBearerTransport(url, bearerToken)
-        val conn =
-            openConnectionForUrl(url).apply {
-                instanceFollowRedirects = false
-                connectTimeout = connectTimeoutMs
-                readTimeout = readTimeoutMs
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                if (!bearerToken.isNullOrBlank()) {
-                    setRequestProperty("Authorization", "Bearer $bearerToken")
+        var lastError: IOException? = null
+        val payload = body.toByteArray(Charsets.UTF_8)
+        for (attempt in 0 until 2) {
+            cancelToken?.throwIfCancelled()
+            val conn =
+                openConnectionForUrl(url).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = connectTimeoutMs
+                    readTimeout = readTimeoutMs
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    if (!bearerToken.isNullOrBlank()) {
+                        setRequestProperty("Authorization", "Bearer $bearerToken")
+                    }
+                }
+            val execute: (HttpURLConnection) -> String = { c ->
+                c.outputStream.use { it.write(payload) }
+                val code = c.responseCode
+                throwIfHttpStatusError(c, url, code, "配对码错误或未授权")
+                c.inputStream.use { String(it.readBytes(), Charsets.UTF_8) }
+            }
+            try {
+                return executePooled(conn, cancelToken, execute)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (io: IOException) {
+                lastError = io
+                if (attempt == 0 && isRetryableStreamEof(io)) {
+                    cancelToken?.throwIfCancelled()
+                    Thread.sleep(150L)
+                    continue
+                }
+                throw io
+            }
+        }
+        throw (lastError ?: IOException("HTTP POST failed for $url"))
+    }
+
+    fun postJsonNdjsonStream(
+        url: String,
+        body: String,
+        bearerToken: String? = null,
+        cancelToken: CancelToken? = null,
+        connectTimeoutMs: Int = 5_000,
+        readTimeoutMs: Int = 120_000,
+        onLine: (String) -> Unit,
+    ) {
+        enforceSafeBearerTransport(url, bearerToken)
+        var lastError: IOException? = null
+        val payload = body.toByteArray(Charsets.UTF_8)
+        for (attempt in 0 until 2) {
+            cancelToken?.throwIfCancelled()
+            var receivedAnyLine = false
+            val conn =
+                openConnectionForUrl(url).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = connectTimeoutMs
+                    readTimeout = readTimeoutMs
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    if (!bearerToken.isNullOrBlank()) {
+                        setRequestProperty("Authorization", "Bearer $bearerToken")
+                    }
+                }
+            val execute: (HttpURLConnection) -> Unit = { c ->
+                c.outputStream.use { it.write(payload) }
+                val code = c.responseCode
+                throwIfHttpStatusError(c, url, code, "未授权或配对已过期，请重新配对")
+                BufferedReader(InputStreamReader(c.inputStream, Charsets.UTF_8), 16 * 1024).use { reader ->
+                    while (true) {
+                        cancelToken?.throwIfCancelled()
+                        val line = reader.readLine() ?: break
+                        val trimmed = line.trim()
+                        if (trimmed.isNotEmpty()) {
+                            receivedAnyLine = true
+                            onLine(trimmed)
+                        }
+                    }
                 }
             }
-        val execute: (HttpURLConnection) -> String = { c ->
-            c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            val code = c.responseCode
-            throwIfHttpStatusError(c, url, code, "配对码错误或未授权")
-            c.inputStream.use { String(it.readBytes(), Charsets.UTF_8) }
-        }
-        return if (cancelToken != null) {
-            cancelToken.track(conn, execute)
-        } else {
             try {
-                execute(conn)
-            } finally {
-                runCatching { conn.disconnect() }
+                executePooled(conn, cancelToken, execute)
+                return
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (io: IOException) {
+                lastError = io
+                if (!receivedAnyLine && attempt == 0 && isRetryableStreamEof(io)) {
+                    cancelToken?.throwIfCancelled()
+                    Thread.sleep(150L)
+                    continue
+                }
+                throw io
             }
         }
+        throw (lastError ?: IOException("HTTP NDJSON stream failed for $url"))
     }
 
     fun downloadFileResumable(
@@ -478,9 +562,6 @@ object LanHttpClient {
                 readTimeout = if (cancelToken != null) 800 else 30_000
                 requestMethod = "GET"
                 setRequestProperty("Authorization", "Bearer $bearerToken")
-                if (!isLoopback) {
-                    setRequestProperty("Connection", "close")
-                }
                 if (existingBytes > 0L) {
                     setRequestProperty("Range", "bytes=$existingBytes-")
                     if (!expectedEtag.isNullOrBlank()) {
@@ -495,6 +576,7 @@ object LanHttpClient {
                 val execute: (HttpURLConnection) -> Long = { c ->
                     val code = c.responseCode
                     if (code == 416) {
+                        runCatching { c.disconnect() }
                         if (expectedSize > 0L && existingBytes == expectedSize) {
                             onProgress(expectedSize, expectedSize)
                             expectedSize
@@ -521,10 +603,10 @@ object LanHttpClient {
                                 else -> -1L
                             }
 
-                        val buffer = ByteArray(if (isLoopback) 256 * 1024 else 32 * 1024)
+                        val buffer = ByteArray(if (isLoopback) 256 * 1024 else 128 * 1024)
                         var consecutiveTimeouts = 0
                         c.inputStream.use { input ->
-                            FileOutputStream(partFile, append).use { output ->
+                            BufferedOutputStream(FileOutputStream(partFile, append), 256 * 1024).use { output ->
                                 while (true) {
                                     cancelToken?.throwIfCancelled()
                                     val n =
@@ -555,15 +637,7 @@ object LanHttpClient {
                         finalSize
                     }
                 }
-                if (cancelToken != null) {
-                    cancelToken.track(conn, execute)
-                } else {
-                    try {
-                        execute(conn)
-                    } finally {
-                        runCatching { conn.disconnect() }
-                    }
-                }
+                executePooled(conn, cancelToken, execute)
             } catch (ce: CancellationException) {
                 throw ce
             }
@@ -727,15 +801,7 @@ object LanHttpClient {
                 throw t
             }
         }
-        return if (cancelToken != null) {
-            cancelToken.track(conn, execute)
-        } else {
-            try {
-                execute(conn)
-            } finally {
-                runCatching { conn.disconnect() }
-            }
-        }
+        return executePooled(conn, cancelToken, execute)
     }
 
     private class TransientHttpException(val code: Int) : IOException("Transient HTTP $code")

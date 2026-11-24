@@ -282,6 +282,12 @@ fn save_tagged_file_atomically(
     use lofty::file::AudioFile;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    // Fast path: let Lofty update metadata in place (or within container padding) without
+    // unconditionally copying 30-300 MB lossless audio files or issuing a synchronous fsync barrier.
+    if tagged.save_to_path(path, WriteOptions::default()).is_ok() {
+        return Ok(());
+    }
+
     static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
@@ -300,9 +306,6 @@ fn save_tagged_file_atomically(
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("lofty save failed: {e}"));
     }
-    if let Ok(f) = File::open(&tmp_path) {
-        let _ = f.sync_data();
-    }
 
     #[cfg(windows)]
     {
@@ -316,7 +319,6 @@ fn save_tagged_file_atomically(
             ) -> i32;
         }
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
-        const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
 
         let src_w: Vec<u16> = OsStr::new(&tmp_path).encode_wide().chain(std::iter::once(0)).collect();
         let dst_w: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
@@ -324,7 +326,7 @@ fn save_tagged_file_atomically(
             MoveFileExW(
                 src_w.as_ptr(),
                 dst_w.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                MOVEFILE_REPLACE_EXISTING,
             )
         };
         if moved != 0 {
@@ -359,6 +361,7 @@ fn save_tagged_file_atomically(
 
 #[cfg(not(target_os = "android"))]
 fn write_audio_tags_json_impl(request_json: &str) -> String {
+    use lofty::config::ParseOptions;
     use lofty::file::TaggedFileExt;
     use lofty::probe::Probe;
     use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagItem};
@@ -369,7 +372,9 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
     };
 
     let path = std::path::Path::new(&req.path);
-    let mut tagged = match Probe::open(path).and_then(|p| p.read()) {
+    let mut tagged = match Probe::open(path).and_then(|p| {
+        p.options(ParseOptions::new().read_properties(false)).read()
+    }) {
         Ok(t) => t,
         Err(e) => return json_error(&format!("lofty read failed: {e}")),
     };
@@ -1183,6 +1188,61 @@ mod tests {
             Some("Symphony No. 5 in C minor, Op. 67")
         );
         assert_eq!(tag.get_string(&ItemKey::Movement), Some("I. Allegro con brio"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn write_audio_tags_updates_padded_flac_without_corrupting_audio_frames() {
+        use lofty::file::TaggedFileExt;
+        use lofty::probe::Probe;
+        use lofty::tag::Accessor;
+
+        let dir = std::env::temp_dir().join(format!("tw_ffi_flac_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let flac_path = dir.join("padded.flac");
+
+        let mut flac = Vec::new();
+        flac.extend_from_slice(b"fLaC");
+        // STREAMINFO (34 bytes), last=false
+        flac.push(0x00);
+        flac.extend_from_slice(&[0, 0, 34]);
+        let mut streaminfo = [0u8; 34];
+        // Sample rate 44100 Hz (0xAC44), 2 ch, 16 bps
+        streaminfo[10] = 0x0A;
+        streaminfo[11] = 0xC4;
+        streaminfo[12] = 0x42;
+        streaminfo[13] = 0xF0;
+        flac.extend_from_slice(&streaminfo);
+        // PADDING (128 bytes), last=true
+        flac.push(0x81);
+        flac.extend_from_slice(&[0, 0, 128]);
+        flac.extend_from_slice(&[0u8; 128]);
+        let audio_payload = vec![0xAAu8; 4096];
+        flac.extend_from_slice(&audio_payload);
+        std::fs::write(&flac_path, &flac).unwrap();
+
+        let before: serde_json::Value =
+            serde_json::from_str(&fingerprint_path_impl(&flac_path.to_string_lossy())).unwrap();
+
+        let req = serde_json::json!({
+            "path": flac_path.to_string_lossy(),
+            "updates": {
+                "title": "晴天",
+                "artist": "周杰伦"
+            }
+        })
+        .to_string();
+        let after: serde_json::Value = serde_json::from_str(&write_audio_tags_json_impl(&req)).unwrap();
+        assert!(after.get("error").is_none(), "unexpected error: {after}");
+        assert_eq!(after["audio_frame_blake3_hex"], before["audio_frame_blake3_hex"]);
+
+        let reloaded = Probe::open(&flac_path).unwrap().read().unwrap();
+        let tag = reloaded.primary_tag().unwrap();
+        assert_eq!(tag.title().as_deref(), Some("晴天"));
+        assert_eq!(tag.artist().as_deref(), Some("周杰伦"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

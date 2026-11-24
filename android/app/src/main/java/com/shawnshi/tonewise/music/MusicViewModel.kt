@@ -168,10 +168,7 @@ constructor(
                 }
 
                 val library = musicRepository.library ?: return@launch
-                val songs =
-                    importedPlaylist.paths.mapNotNull {
-                        it.firstNotNullOfOrNull(library::findSongByPath)
-                    }
+                val songs = PlaylistSongMatcher(library).matchEntries(importedPlaylist.entries)
 
                 if (songs.isEmpty()) {
                     L.e("No songs found")

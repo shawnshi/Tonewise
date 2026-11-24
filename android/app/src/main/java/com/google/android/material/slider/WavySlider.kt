@@ -84,6 +84,7 @@ constructor(
     private var tmpTrackInactiveTintList: ColorStateList = trackInactiveTintList
     private var linearActiveTrackSuppressed = false
     private var linearInactiveTrackSuppressed = false
+    private var waveformStyleEnabled = true
     private var waveformEnvelope: FloatArray? = null
     private val waveformBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
@@ -163,6 +164,8 @@ constructor(
                     )
             }
         updateActiveTrackSuppression()
+        updateInactiveTrackSuppression()
+        applyWaveformThumbSuppression()
 
         // Easier logic this way (even if a bit non-standard)
         // The funky tangent stuff was just not my thing
@@ -223,13 +226,35 @@ constructor(
     }
 
     /**
+     * Enables or disables PC-style 150-bar waveform rendering (falling back to flat placeholder
+     * bars until an envelope arrives) instead of the animated sinusoidal progress wave.
+     */
+    fun setWaveformStyleEnabled(enabled: Boolean) {
+        if (waveformStyleEnabled == enabled) return
+        waveformStyleEnabled = enabled
+        updateInactiveTrackSuppression()
+        applyWaveformThumbSuppression()
+        invalidate()
+    }
+
+    /**
      * Configures a precomputed 150-point RMS waveform envelope (`0f..1f`), or `null` to use the
-     * default wavy progress track.
+     * placeholder waveform (when waveform style is enabled) or wavy progress track.
      */
     fun setWaveformEnvelope(envelope: FloatArray?) {
         waveformEnvelope = envelope?.takeIf { it.size == 150 }
         updateInactiveTrackSuppression()
+        applyWaveformThumbSuppression()
         invalidate()
+    }
+
+    private fun applyWaveformThumbSuppression() {
+        if (waveformStyleEnabled || waveformEnvelope != null) {
+            thumbTintList = transparentTrackTint
+            haloTintList = transparentTrackTint
+            thumbTrackGapSize = 0
+            trackStopIndicatorSize = 0
+        }
     }
 
     /**
@@ -283,8 +308,13 @@ constructor(
         val progressFraction = ((value - valueFrom) / range).coerceIn(0f, 1f)
 
         val envelope = waveformEnvelope
-        if (envelope != null) {
-            drawStaticWaveformEnvelope(canvas, envelope, trackLength, progressFraction)
+        if (envelope != null || waveformStyleEnabled) {
+            drawStaticWaveformEnvelope(
+                canvas,
+                envelope ?: PLACEHOLDER_WAVEFORM_ENVELOPE,
+                trackLength,
+                progressFraction,
+            )
             return
         }
 
@@ -674,7 +704,7 @@ constructor(
     private fun shouldDrawWave(): Boolean = waveEnabled || waveTransitionAnimation != null
 
     private fun updateInactiveTrackSuppression() {
-        val suppress = waveformEnvelope != null
+        val suppress = waveformStyleEnabled || waveformEnvelope != null
         if (suppress == linearInactiveTrackSuppressed) {
             return
         }
@@ -692,6 +722,7 @@ constructor(
         trackLength: Float,
         progressFraction: Float,
     ) {
+        val density = resources.displayMetrics.density
         val originX = trackSidePadding.toFloat()
         val centerY = height / 2f
         val isRtl = layoutDirection == LAYOUT_DIRECTION_RTL
@@ -713,18 +744,15 @@ constructor(
 
         val count = envelope.size
         val step = trackLength / count
-        val barWidth = (step * 0.65f).coerceIn(1.5f, 6f)
+        val barWidth = (step * 0.62f).coerceIn(1.2f * density, 4f * density)
         val halfBarW = barWidth / 2f
-        val minHalfH = max(trackHeight / 2f, 2f)
-        val maxHalfH = max(minHalfH + configuredAmplitudePx * 2.2f, trackHeight * 2.2f)
-        val gap = thumbTrackGapSize.toFloat()
+        val minHalfH = max(trackHeight / 2f, 2f * density)
+        val availableHalfH = max(minHalfH + 4f * density, (height - paddingTop - paddingBottom) * 0.44f)
+        val maxHalfH = min(availableHalfH, 16f * density)
 
         for (i in 0 until count) {
             val barIdx = if (isRtl) count - 1 - i else i
             val cx = originX + (i + 0.5f) * step
-            if (gap > 0f && abs(cx - thumbX) < gap) {
-                continue
-            }
             val amp = envelope[barIdx].coerceIn(0f, 1f)
             val halfH = minHalfH + amp * (maxHalfH - minHalfH)
             val isPlayed = if (isRtl) cx >= thumbX else cx <= thumbX
@@ -732,6 +760,18 @@ constructor(
             patchRect.set(cx - halfBarW, centerY - halfH, cx + halfBarW, centerY + halfH)
             canvas.drawRoundRect(patchRect, halfBarW, halfBarW, waveformBarPaint)
         }
+
+        // Crisp vertical playhead cursor matching Desktop's waveform scrubber
+        val playheadHalfW = 1.25f * density
+        val playheadHalfH = min((height - paddingTop - paddingBottom) * 0.48f, maxHalfH + 2f * density)
+        waveformBarPaint.color = activeColor
+        patchRect.set(
+            thumbX - playheadHalfW,
+            centerY - playheadHalfH,
+            thumbX + playheadHalfW,
+            centerY + playheadHalfH,
+        )
+        canvas.drawRoundRect(patchRect, playheadHalfW, playheadHalfW, waveformBarPaint)
     }
 
     private fun updateActiveTrackSuppression() {
@@ -894,5 +934,6 @@ constructor(
         const val MIN_PHASE_FRACTION = 0.0001f
         const val EPSILON = 0.0001f
         const val WAVE_SMOOTHNESS = 0.48f
+        val PLACEHOLDER_WAVEFORM_ENVELOPE = FloatArray(150) { 0.18f }
     }
 }

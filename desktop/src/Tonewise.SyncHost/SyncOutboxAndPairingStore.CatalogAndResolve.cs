@@ -679,58 +679,20 @@ public sealed partial class SyncOutboxAndPairingStore
         relPath = "";
         if (string.IsNullOrWhiteSpace(trackUid)) return false;
 
-        string dbPath = Path.Combine(_tonewiseDir, "manifest.db");
-        if (!File.Exists(dbPath)) return false;
-
         string cleanUid = trackUid.Trim();
-        string? dbRelPath = null;
-        using (var conn = TonewiseSqlite.OpenReadOnly(dbPath))
+        var (_, rowsByUid, _) = GetCachedManifestRowsAndIndex(requirePlaylistIndex: false);
+        if (!rowsByUid.TryGetValue(cleanUid, out ManifestTrackRow? row) ||
+            string.IsNullOrWhiteSpace(row.RelPath))
         {
-            using var cmd = conn.CreateCommand();
-            if (TryHexToBytes32(cleanUid, out byte[]? b3) && b3 is not null)
-            {
-                cmd.CommandText = """
-                    SELECT rel_path
-                    FROM tracks
-                    WHERE track_uid = $uid OR audio_frame_blake3 = $b3
-                    LIMIT 1;
-                    """;
-                cmd.Parameters.AddWithValue("$uid", cleanUid);
-                cmd.Parameters.AddWithValue("$b3", b3);
-            }
-            else
-            {
-                cmd.CommandText = """
-                    SELECT rel_path
-                    FROM tracks
-                    WHERE track_uid = $uid
-                    LIMIT 1;
-                    """;
-                cmd.Parameters.AddWithValue("$uid", cleanUid);
-            }
-            object? res = cmd.ExecuteScalar();
-            dbRelPath = res as string;
+            return false;
         }
 
-        if (string.IsNullOrWhiteSpace(dbRelPath)) return false;
-        if (!TryGetValidPhysicalFileInfo(dbRelPath, out string audioFull, out _, out _))
+        if (!TryGetValidPhysicalFileInfo(row.RelPath, out string audioFull, out _, out _))
             return false;
 
-        relPath = dbRelPath;
+        relPath = row.RelPath;
         fullPath = audioFull;
         return true;
-    }
-
-    private static bool TryHexToBytes32(string hex, out byte[]? bytes)
-    {
-        bytes = null;
-        if (hex.Length != 64) return false;
-        foreach (char c in hex)
-        {
-            if (!Uri.IsHexDigit(c)) return false;
-        }
-        bytes = Convert.FromHexString(hex);
-        return bytes.Length == 32;
     }
 
     public bool TryResolveTrackCoverPath(string trackUid, out string coverPath)

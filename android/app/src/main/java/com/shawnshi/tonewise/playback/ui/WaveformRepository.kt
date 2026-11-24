@@ -58,27 +58,98 @@ constructor(
     @Volatile private var cachedArchiveUri: Uri? = null
     @Volatile private var archiveMissingCheckedAtMs = 0L
 
+    fun getCachedEnvelope(uid: Music.UID): FloatArray? = envelopeCache.get(uid)
+
     suspend fun getEnvelope(song: Song): FloatArray? {
         envelopeCache.get(song.uid)?.let { return it }
 
-        return withContext(Dispatchers.IO) {
-            try {
-                if (!hasAnyWaveformArchive()) return@withContext null
-                val blake3Hex = getOrComputeBlake3(song) ?: return@withContext null
-                val envelope =
-                    lookupFromSyncedCache(blake3Hex)
-                        ?: lookupFromSafArchive(blake3Hex)
-                        ?: lookupFromExternalMusicFile(blake3Hex)
-                if (envelope != null && envelope.size == 150) {
-                    envelopeCache.put(song.uid, envelope)
-                    envelope
-                } else {
+        val archiveOrDisk =
+            withContext(Dispatchers.IO) {
+                try {
+                    if (hasAnyWaveformArchive()) {
+                        val blake3Hex = getOrComputeBlake3(song)
+                        if (blake3Hex != null) {
+                            val fromArchive =
+                                lookupFromSyncedCache(blake3Hex)
+                                    ?: lookupFromSafArchive(blake3Hex)
+                                    ?: lookupFromExternalMusicFile(blake3Hex)
+                            if (fromArchive != null && fromArchive.size == LocalWaveformExtractor.ENVELOPE_POINTS) {
+                                envelopeCache.put(song.uid, fromArchive)
+                                return@withContext fromArchive
+                            }
+                        }
+                    }
+
+                    val fromDisk = readLocalDiskCache(song)
+                    if (fromDisk != null && fromDisk.size == LocalWaveformExtractor.ENVELOPE_POINTS) {
+                        envelopeCache.put(song.uid, fromDisk)
+                        return@withContext fromDisk
+                    }
+                    null
+                } catch (e: Throwable) {
+                    L.d("Waveform archive/disk lookup failed for ${song.path}: ${e.message}")
                     null
                 }
-            } catch (e: Throwable) {
-                L.d("Waveform lookup unavailable for ${song.path}: ${e.message}")
-                null
             }
+        if (archiveOrDisk != null) {
+            return archiveOrDisk
+        }
+
+        val extracted =
+            withContext(Dispatchers.Default) {
+                LocalWaveformExtractor.extract(context, song.uri, song.durationMs)
+            } ?: return null
+
+        if (extracted.size == LocalWaveformExtractor.ENVELOPE_POINTS) {
+            envelopeCache.put(song.uid, extracted)
+            withContext(Dispatchers.IO) {
+                writeLocalDiskCache(song, extracted)
+            }
+            return extracted
+        }
+        return null
+    }
+
+    private fun localCacheFileFor(song: Song): File {
+        val cacheDir = File(context.cacheDir, LOCAL_WAVEFORM_CACHE_DIR)
+        val safeUid = song.uid.toString().replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        return File(cacheDir, "${safeUid}_${song.size}_${song.modifiedMs}.wf150")
+    }
+
+    internal fun readLocalDiskCache(song: Song): FloatArray? {
+        val file = localCacheFileFor(song)
+        if (!file.isFile || file.length() != LocalWaveformExtractor.ENVELOPE_POINTS.toLong()) {
+            return null
+        }
+        return runCatching {
+                LocalWaveformExtractor.dequantizeFromBytes(file.readBytes())
+            }
+            .getOrNull()
+    }
+
+    internal fun writeLocalDiskCache(song: Song, envelope: FloatArray) {
+        if (envelope.size != LocalWaveformExtractor.ENVELOPE_POINTS) return
+        runCatching {
+            val dir = File(context.cacheDir, LOCAL_WAVEFORM_CACHE_DIR)
+            if (!dir.exists()) dir.mkdirs()
+            val target = localCacheFileFor(song)
+            val tmp = File(dir, "${target.name}.tmp")
+            tmp.writeBytes(LocalWaveformExtractor.quantizeToBytes(envelope))
+            if (!tmp.renameTo(target)) {
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+            pruneLocalDiskCacheIfNeeded(dir)
+        }
+    }
+
+    private fun pruneLocalDiskCacheIfNeeded(dir: File) {
+        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".wf150") } ?: return
+        if (files.size <= MAX_LOCAL_CACHE_FILES) return
+        files.sortBy { it.lastModified() }
+        val toRemove = files.size - MAX_LOCAL_CACHE_FILES
+        for (i in 0 until toRemove) {
+            files[i].delete()
         }
     }
 
@@ -228,5 +299,7 @@ constructor(
 
     private companion object {
         const val ARCHIVE_NEGATIVE_CACHE_MS = 60_000L
+        const val LOCAL_WAVEFORM_CACHE_DIR = "waveforms_v1"
+        const val MAX_LOCAL_CACHE_FILES = 2000
     }
 }

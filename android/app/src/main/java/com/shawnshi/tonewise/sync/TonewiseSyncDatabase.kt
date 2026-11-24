@@ -318,6 +318,9 @@ interface SyncedTrackDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun upsert(entity: SyncedTrackEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun upsertAll(entities: List<SyncedTrackEntity>)
+
     @Query("DELETE FROM synced_tracks WHERE trackUid = :uid")
     fun deleteByUid(uid: String)
 }

@@ -178,6 +178,47 @@ data class ReportResponse(
     val unlovedUids: List<String> = emptyList(),
 )
 
+data class UsbFastPushTrackItem(
+    val trackUid: String,
+    val relPath: String,
+    val fileSize: Long,
+    val mtimeMs: Long,
+)
+
+data class UsbFastPushCoverItem(
+    val albumDir: String,
+    val sampleTrackUid: String,
+)
+
+data class UsbFastPushProgressEvent(
+    val stage: String,
+    val completedTracks: Int,
+    val totalTracks: Int,
+    val bytesTransferred: Long,
+    val totalBytes: Long,
+    val speedMbps: Double,
+    val currentRelPath: String?,
+)
+
+data class UsbFastPushedTrack(
+    val trackUid: String,
+    val relPath: String,
+    val fileSize: Long,
+)
+
+data class UsbFastPushResult(
+    val usedDirectPush: Boolean,
+    val cancelledByHost: Boolean = false,
+    val pushedTracks: List<UsbFastPushedTrack> = emptyList(),
+    val failedTrackUids: List<String> = emptyList(),
+    val coversPushed: Int = 0,
+    val coversSkipped: Int = 0,
+    val totalBytesTransferred: Long = 0L,
+    val elapsedSeconds: Double = 0.0,
+    val averageMbps: Double = 0.0,
+    val error: String? = null,
+)
+
 object LanSyncV2Client {
     fun ping(baseUrl: String): Boolean = pingInfo(baseUrl).ok
 
@@ -727,6 +768,112 @@ object LanSyncV2Client {
             cancelRequested = root?.get("cancel_requested") == true,
             pruneConfirmed = root?.get("prune_confirmed") == true,
         )
+    }
+
+    fun requestUsbFastPush(
+        baseUrl: String,
+        token: String,
+        tracks: List<UsbFastPushTrackItem>,
+        covers: List<UsbFastPushCoverItem>,
+        remoteMusicRoot: String = "/storage/emulated/0/Music",
+        cancelToken: LanHttpClient.CancelToken? = null,
+        onProgress: (UsbFastPushProgressEvent) -> Unit = {},
+    ): UsbFastPushResult {
+        val clean = baseUrl.trim().trimEnd('/')
+        val bodyMap =
+            linkedMapOf<String, Any?>(
+                "remote_music_root" to remoteMusicRoot,
+                "tracks" to
+                    tracks.map { t ->
+                        linkedMapOf<String, Any?>(
+                            "track_uid" to t.trackUid,
+                            "rel_path" to t.relPath,
+                            "file_size" to t.fileSize,
+                            "mtime_ms" to t.mtimeMs,
+                        )
+                    },
+                "covers" to
+                    covers.map { c ->
+                        linkedMapOf<String, Any?>(
+                            "album_dir" to c.albumDir,
+                            "sample_track_uid" to c.sampleTrackUid,
+                        )
+                    },
+            )
+
+        var completeResult: UsbFastPushResult? = null
+        return try {
+            LanHttpClient.postJsonNdjsonStream(
+                url = "$clean/api/v2/usb/push-tracks",
+                body = TonewiseCore.stringifyJson(bodyMap),
+                bearerToken = token,
+                cancelToken = cancelToken,
+                connectTimeoutMs = 5_000,
+                readTimeoutMs = 120_000,
+            ) { line ->
+                @Suppress("UNCHECKED_CAST")
+                val obj = TonewiseCore.parseJson(line) as? Map<String, Any?> ?: return@postJsonNdjsonStream
+                when (obj["event"]?.toString()) {
+                    "progress" -> {
+                        onProgress(
+                            UsbFastPushProgressEvent(
+                                stage = obj["stage"]?.toString().orEmpty().ifBlank { "pushing" },
+                                completedTracks = asInt(obj["completed_tracks"]),
+                                totalTracks = asInt(obj["total_tracks"]),
+                                bytesTransferred = asLong(obj["bytes_transferred"]),
+                                totalBytes = asLong(obj["total_bytes"]),
+                                speedMbps = asDouble(obj["speed_mbps"], 0.0),
+                                currentRelPath = obj["current_rel_path"]?.toString()?.takeIf { it.isNotBlank() },
+                            )
+                        )
+                    }
+                    "complete" -> {
+                        val errMsg = obj["error"]?.toString()?.takeIf { it.isNotBlank() }
+                        @Suppress("UNCHECKED_CAST")
+                        val rawPushed = obj["pushed_tracks"] as? List<Map<String, Any?>> ?: emptyList()
+                        val pushedList =
+                            rawPushed.mapNotNull { item ->
+                                val uid = item["track_uid"]?.toString()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                                val rel = item["rel_path"]?.toString()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                                UsbFastPushedTrack(
+                                    trackUid = uid,
+                                    relPath = rel,
+                                    fileSize = asLong(item["file_size"]),
+                                )
+                            }
+                        completeResult =
+                            UsbFastPushResult(
+                                usedDirectPush = obj["used_direct_push"] == true,
+                                cancelledByHost = errMsg.equals("sync_cancelled", ignoreCase = true),
+                                pushedTracks = pushedList,
+                                failedTrackUids = asStringList(obj["failed_track_uids"]),
+                                coversPushed = asInt(obj["covers_pushed"]),
+                                coversSkipped = asInt(obj["covers_skipped"]),
+                                totalBytesTransferred = asLong(obj["total_bytes_transferred"]),
+                                elapsedSeconds = asDouble(obj["elapsed_seconds"], 0.0),
+                                averageMbps = asDouble(obj["average_mbps"], 0.0),
+                                error = errMsg,
+                            )
+                    }
+                }
+            }
+            completeResult ?: UsbFastPushResult(
+                usedDirectPush = false,
+                error = "USB direct push stream ended without complete event",
+            )
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (auth: LanSyncAuthException) {
+            throw auth
+        } catch (http: LanSyncHttpException) {
+            if (http.statusCode == 409) {
+                UsbFastPushResult(usedDirectPush = false, cancelledByHost = true, error = "sync_cancelled")
+            } else {
+                UsbFastPushResult(usedDirectPush = false, error = http.message)
+            }
+        } catch (io: IOException) {
+            UsbFastPushResult(usedDirectPush = false, error = io.message)
+        }
     }
 
     private fun asInt(v: Any?): Int = (v as? Number)?.toInt() ?: v?.toString()?.toIntOrNull() ?: 0

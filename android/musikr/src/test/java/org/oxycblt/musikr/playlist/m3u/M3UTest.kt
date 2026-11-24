@@ -139,4 +139,44 @@ class M3UTest {
             lines.any { it.replace('\\', '/') == "./../Bach/01_Aria.flac" },
         )
     }
+
+    @Test
+    fun read_handlesGb18030PercentEncodedAndExttwUnmatchedEntries() {
+        val volumeManager = mockk<VolumeManager>()
+        every { volumeManager.getVolumes() } returns listOf(fakeVolume)
+        val m3u = M3U.from(volumeManager)
+        val workingDir = Path(fakeVolume, Components.parseUnix("Music/Playlists"))
+
+        val gbContent =
+            "#EXTM3U\n" +
+                "#PLAYLIST:华语经典\n" +
+                "#EXTINF:269,周杰伦 - 晴天\n" +
+                "../Jay/晴天.flac\n"
+        val gbBytes = gbContent.toByteArray(java.nio.charset.Charset.forName("GB18030"))
+        val gbImported = m3u.read(ByteArrayInputStream(gbBytes), workingDir)
+        assertNotNull(gbImported)
+        assertEquals("华语经典", gbImported!!.name)
+        assertEquals(1, gbImported.entries.size)
+        assertEquals("周杰伦", gbImported.entries[0].artist)
+        assertEquals("晴天", gbImported.entries[0].title)
+        assertEquals(269, gbImported.entries[0].durationSec)
+
+        val utfContent =
+            "#EXTM3U\n" +
+                "#EXTINF:269,周杰伦 - 晴天\n" +
+                "file:///storage/emulated/0/Music/Jay/%E6%99%B4%E5%A4%A9.flac\n" +
+                "#EXTINF:0,陈奕迅 - 十年\n" +
+                "#EXTTW-UNMATCHED:陈奕迅\t十年\t黑白灰\n"
+        val utfImported =
+            m3u.read(ByteArrayInputStream(utfContent.toByteArray(Charsets.UTF_8)), workingDir)
+        assertNotNull(utfImported)
+        assertEquals(2, utfImported!!.entries.size)
+        val expectedDecoded =
+            Path(fakeVolume, Components.parseUnix("/storage/emulated/0/Music/Jay/晴天.flac"))
+        assertTrue(utfImported.entries[0].paths.contains(expectedDecoded))
+        assertTrue(utfImported.entries[1].paths.isEmpty())
+        assertEquals("陈奕迅", utfImported.entries[1].artist)
+        assertEquals("十年", utfImported.entries[1].title)
+        assertEquals("黑白灰", utfImported.entries[1].album)
+    }
 }

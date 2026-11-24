@@ -39,6 +39,9 @@ import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
@@ -46,13 +49,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.detail.MusicBioRepository
 import com.shawnshi.tonewise.music.MusicRepository
@@ -761,6 +768,7 @@ constructor(
                     val confirmedTrackUids = HashSet<String>()
                     val overwrittenTrackMtimes = HashMap<String, Long>()
                     var skippedExisting = 0
+                    val upToDateEntities = ArrayList<SyncedTrackEntity>()
 
                     for (track in uniqueOutboxTracks) {
                         cancelToken.throwIfCancelled()
@@ -855,7 +863,7 @@ constructor(
                             )
                         ) {
                             LocalSyncState.UP_TO_DATE -> {
-                                syncDb.syncedTrackDao().upsert(
+                                upToDateEntities.add(
                                     SyncedTrackEntity(
                                         trackUid = track.trackUid,
                                         relativePath = recorded?.relativePath ?: track.targetRelPath,
@@ -883,163 +891,478 @@ constructor(
                         }
                     }
 
+                    if (upToDateEntities.isNotEmpty()) {
+                        syncDb.syncedTrackDao().upsertAll(upToDateEntities)
+                    }
+
                     val partsDir = File(context.cacheDir, "lan_sync_parts")
                     runCatching { LanHttpClient.pruneStalePartFiles(partsDir) }
                     val totalDownloadBytes = pendingDownloads.sumOf { it.track.fileSize.coerceAtLeast(0L) }
                     var completedBytesBeforeCurrent = 0L
                     var downloadedCount = 0
                     var updatedExistingCount = 0
-                    val failedTrackUids = HashSet<String>()
-                    var firstDownloadError: String? = null
+                    val failedTrackUids = ConcurrentHashMap.newKeySet<String>()
+                    val firstErrorRef = AtomicReference<String?>(null)
 
-                    for ((index, pending) in pendingDownloads.withIndex()) {
-                        cancelToken.throwIfCancelled()
-                        val track = pending.track
-                        val phaseLabel =
-                            if (pending.forceOverwrite) {
-                                "正在更新曲目 (${index + 1}/${pendingDownloads.size})"
-                            } else {
-                                "正在下载曲目 (${index + 1}/${pendingDownloads.size})"
-                            }
-                        _syncProgress.value =
-                            SyncProgressState(
-                                isRunning = true,
-                                phase = phaseLabel,
-                                completedTracks = index,
-                                totalTracks = pendingDownloads.size,
-                                downloadedBytes = completedBytesBeforeCurrent,
-                                totalBytes = totalDownloadBytes,
-                                currentTrackTitle = track.title,
+                    if (pendingDownloads.isNotEmpty() || uniqueOutboxTracks.any { it.hasCover }) {
+                        val sharedPhase =
+                            AtomicReference(
+                                if (transport == SyncTransportMode.USB) "准备 USB 同步…" else "正在准备下载…",
                             )
-                        pushProgress(
-                            phase = phaseLabel,
-                            isRunning = true,
-                            completedTracks = index,
-                            totalTracks = pendingDownloads.size,
-                            downloadedBytes = completedBytesBeforeCurrent,
-                            totalBytes = totalDownloadBytes,
-                            currentTrackTitle = track.title,
-                            addedCount = downloadedCount,
-                            updatedCount = updatedExistingCount,
-                            skippedCount = skippedExisting,
-                            force = index == 0,
-                        )
-                        val partFile = File(partsDir, "${sanitizeKey(track.trackUid)}.part")
-                        if (pending.forceOverwrite && partFile.exists()) {
-                            partFile.delete()
+                        val sharedCompletedTracks = AtomicInteger(0)
+                        val sharedCompletedBytes = AtomicLong(0L)
+                        val sharedCurrentTitle = AtomicReference("")
+                        val sharedAddedCount = AtomicInteger(0)
+                        val sharedUpdatedCount = AtomicInteger(0)
+                        val fastPushInFlightBytes = AtomicLong(0L)
+                        val inFlightTrackBytes = ConcurrentHashMap<String, Long>()
+                        val fastPushCoveredDirs = HashSet<String>()
+
+                        fun computeAggregateBytes(): Long =
+                            (sharedCompletedBytes.get() + fastPushInFlightBytes.get() + inFlightTrackBytes.values.sum())
+                                .coerceAtLeast(0L)
+
+                        fun emitLocalTransferProgress() {
+                            _syncProgress.value =
+                                SyncProgressState(
+                                    isRunning = true,
+                                    phase = sharedPhase.get(),
+                                    completedTracks = sharedCompletedTracks.get(),
+                                    totalTracks = pendingDownloads.size,
+                                    downloadedBytes = computeAggregateBytes(),
+                                    totalBytes = totalDownloadBytes,
+                                    currentTrackTitle = sharedCurrentTitle.get(),
+                                )
                         }
-                        try {
-                            val fileUrl = LanSyncV2Client.buildTrackFileUrl(cleanBase, track.trackUid)
-                            var verified = false
-                            var lastVerifyError: String? = null
-                            for (attempt in 0 until 2) {
-                                cancelToken.throwIfCancelled()
-                                LanSyncV2Client.downloadFileResumable(
-                                    url = fileUrl,
-                                    token = token,
-                                    partFile = partFile,
-                                    expectedSize = track.fileSize,
-                                    onProgress = { trackDownloaded, _ ->
-                                        val aggregateBytes = completedBytesBeforeCurrent + trackDownloaded
-                                        _syncProgress.value =
-                                            SyncProgressState(
-                                                isRunning = true,
-                                                phase = phaseLabel,
-                                                completedTracks = index,
-                                                totalTracks = pendingDownloads.size,
-                                                downloadedBytes = aggregateBytes,
-                                                totalBytes = totalDownloadBytes,
-                                                currentTrackTitle = track.title,
-                                            )
+
+                        var remainingDownloads: List<PendingSyncDownload> = pendingDownloads
+
+                        coroutineScope {
+                            val tickerJob =
+                                launch(Dispatchers.IO) {
+                                    while (!cancelToken.isCancelled) {
+                                        delay(600L)
+                                        cancelToken.throwIfCancelled()
                                         pushProgress(
-                                            phase = phaseLabel,
+                                            phase = sharedPhase.get(),
                                             isRunning = true,
-                                            completedTracks = index,
+                                            completedTracks = sharedCompletedTracks.get(),
                                             totalTracks = pendingDownloads.size,
-                                            downloadedBytes = aggregateBytes,
+                                            downloadedBytes = computeAggregateBytes(),
                                             totalBytes = totalDownloadBytes,
-                                            currentTrackTitle = track.title,
-                                            addedCount = downloadedCount,
-                                            updatedCount = updatedExistingCount,
+                                            currentTrackTitle = sharedCurrentTitle.get(),
+                                            addedCount = sharedAddedCount.get(),
+                                            updatedCount = sharedUpdatedCount.get(),
                                             skippedCount = skippedExisting,
+                                            force = true,
                                         )
-                                    },
-                                    cancelToken = cancelToken,
-                                )
-                                if (verifyDownloadedPartIntegrity(partFile, track)) {
-                                    verified = true
-                                    break
+                                    }
                                 }
-                                lastVerifyError = "下载文件校验失败（期望音频/头哈希不匹配）"
-                                partFile.delete()
-                                if (attempt == 1) break
-                            }
-                            if (!verified) {
-                                throw IOException(lastVerifyError ?: "下载文件校验失败")
-                            }
 
-                            val committed =
-                                managedSyncStorage.commitAudioFile(
-                                    track = track,
-                                    partFile = partFile,
-                                    forceOverwrite = pending.forceOverwrite,
-                                )
-                            syncDb.syncedTrackDao().upsert(
-                                SyncedTrackEntity(
-                                    trackUid = track.trackUid,
-                                    relativePath = committed.relativePath,
-                                    documentUri = committed.documentUri,
-                                    fileSize = committed.fileSize,
-                                    mtimeMs = track.mtimeMs,
-                                    sourceOutboxIdsJson = TonewiseCore.stringifyJson(track.sourceOutboxIds),
-                                    syncedAtMs = System.currentTimeMillis(),
-                                    headerBlake3Hex = track.headerBlake3,
-                                    audioFrameBlake3Hex = track.audioFrameBlake3,
-                                )
-                            )
-                            confirmedTrackUids.add(track.trackUid)
-                            if (pending.forceOverwrite) {
-                                updatedExistingCount++
-                                overwrittenTrackMtimes[track.trackUid.lowercase()] =
-                                    track.mtimeMs.takeIf { it > 0L } ?: System.currentTimeMillis()
-                            } else {
-                                downloadedCount++
-                            }
-                            completedBytesBeforeCurrent += track.fileSize.coerceAtLeast(0L)
-                        } catch (ce: CancellationException) {
-                            throw ce
-                        } catch (authErr: LanSyncAuthException) {
-                            throw authErr
-                        } catch (dlErr: Exception) {
-                            L.w(dlErr, "Track download paused/failed for ${track.title} (${track.trackUid})")
-                            failedTrackUids.add(track.trackUid)
-                            if (firstDownloadError == null) {
-                                firstDownloadError = dlErr.message
+                            try {
+                                if (pendingDownloads.isNotEmpty()) {
+                                    emitLocalTransferProgress()
+                                    pushProgress(
+                                        phase = sharedPhase.get(),
+                                        isRunning = true,
+                                        completedTracks = 0,
+                                        totalTracks = pendingDownloads.size,
+                                        downloadedBytes = 0L,
+                                        totalBytes = totalDownloadBytes,
+                                        currentTrackTitle = pendingDownloads.first().track.title,
+                                        addedCount = downloadedCount,
+                                        updatedCount = updatedExistingCount,
+                                        skippedCount = skippedExisting,
+                                        force = true,
+                                    )
+                                }
+
+                                // Pillar 1: USB native ADB sync: fast-push when writing to standard primary Music/
+                                if (transport == SyncTransportMode.USB &&
+                                    pendingDownloads.isNotEmpty() &&
+                                    managedSyncStorage.isStandardPrimaryMusicStorage()
+                                ) {
+                                    cancelToken.throwIfCancelled()
+                                    val fastPushTracks =
+                                        pendingDownloads.map { pending ->
+                                            val rel =
+                                                LanSyncV2Client.sanitizeRelativePathSegments(pending.track.targetRelPath)
+                                                    .joinToString("/")
+                                                    .ifBlank { "Unsorted/${sanitizeKey(pending.track.trackUid)}.flac" }
+                                            UsbFastPushTrackItem(
+                                                trackUid = pending.track.trackUid,
+                                                relPath = rel,
+                                                fileSize = pending.track.fileSize,
+                                                mtimeMs = pending.track.mtimeMs,
+                                            )
+                                        }
+                                    val coverCandidates =
+                                        uniqueOutboxTracks
+                                            .asSequence()
+                                            .filter { it.hasCover }
+                                            .mapNotNull { t ->
+                                                val segments = LanSyncV2Client.sanitizeRelativePathSegments(t.targetRelPath)
+                                                val albumDir = segments.dropLast(1).joinToString("/")
+                                                if (albumDir.isBlank()) null else (albumDir to t.trackUid)
+                                            }
+                                            .distinctBy { it.first.lowercase() }
+                                            .map { (dir, uid) ->
+                                                UsbFastPushCoverItem(albumDir = dir, sampleTrackUid = uid)
+                                            }
+                                            .toList()
+                                    @Suppress("DEPRECATION")
+                                    val remoteMusicRoot =
+                                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+                                            ?.absolutePath
+                                            ?.takeIf { it.startsWith("/storage/") }
+                                            ?: "/storage/emulated/0/Music"
+
+                                    sharedPhase.set("USB 直传准备中…")
+                                    emitLocalTransferProgress()
+
+                                    val pushResult =
+                                        LanSyncV2Client.requestUsbFastPush(
+                                            baseUrl = cleanBase,
+                                            token = token,
+                                            tracks = fastPushTracks,
+                                            covers = coverCandidates,
+                                            remoteMusicRoot = remoteMusicRoot,
+                                            cancelToken = cancelToken,
+                                            onProgress = { ev ->
+                                                val speedSuffix =
+                                                    if (ev.speedMbps > 0.0) {
+                                                        String.format(java.util.Locale.US, " (%.1f MB/s)", ev.speedMbps)
+                                                    } else {
+                                                        ""
+                                                    }
+                                                sharedPhase.set(
+                                                    "USB 直传 (${ev.completedTracks}/${ev.totalTracks})$speedSuffix",
+                                                )
+                                                sharedCompletedTracks.set(ev.completedTracks)
+                                                fastPushInFlightBytes.set(ev.bytesTransferred.coerceAtLeast(0L))
+                                                sharedCurrentTitle.set(
+                                                    ev.currentRelPath?.substringAfterLast('/') ?: "",
+                                                )
+                                                emitLocalTransferProgress()
+                                            },
+                                        )
+
+                                    fastPushInFlightBytes.set(0L)
+                                    if (pushResult.cancelledByHost) {
+                                        cancelToken.cancel()
+                                        throw CancellationException("Sync cancelled by PC")
+                                    }
+
+                                    if (pushResult.usedDirectPush && pushResult.pushedTracks.isNotEmpty()) {
+                                        managedSyncStorage.invalidatePathCache()
+                                        val pushedRelPaths = pushResult.pushedTracks.map { it.relPath }
+                                        managedSyncStorage.triggerMediaScanForRelPaths(pushedRelPaths)
+
+                                        val pendingByUid = pendingDownloads.associateBy { it.track.trackUid.lowercase() }
+                                        val pushedEntities = ArrayList<SyncedTrackEntity>(pushResult.pushedTracks.size)
+                                        val pushedUidsLower = HashSet<String>(pushResult.pushedTracks.size)
+                                        val nowMs = System.currentTimeMillis()
+                                        var pushedBytesTotal = 0L
+
+                                        for (pushed in pushResult.pushedTracks) {
+                                            val uidLower = pushed.trackUid.lowercase()
+                                            val pending = pendingByUid[uidLower] ?: continue
+                                            val track = pending.track
+                                            pushedUidsLower.add(uidLower)
+                                            confirmedTrackUids.add(track.trackUid)
+                                            pushedBytesTotal += track.fileSize.coerceAtLeast(pushed.fileSize).coerceAtLeast(0L)
+                                            if (pending.forceOverwrite) {
+                                                updatedExistingCount++
+                                                overwrittenTrackMtimes[uidLower] =
+                                                    track.mtimeMs.takeIf { it > 0L } ?: nowMs
+                                            } else {
+                                                downloadedCount++
+                                            }
+                                            pushedEntities.add(
+                                                SyncedTrackEntity(
+                                                    trackUid = track.trackUid,
+                                                    relativePath = pushed.relPath,
+                                                    documentUri = null,
+                                                    fileSize = pushed.fileSize.takeIf { it > 0L } ?: track.fileSize,
+                                                    mtimeMs = track.mtimeMs,
+                                                    sourceOutboxIdsJson = TonewiseCore.stringifyJson(track.sourceOutboxIds),
+                                                    syncedAtMs = nowMs,
+                                                    headerBlake3Hex = track.headerBlake3,
+                                                    audioFrameBlake3Hex = track.audioFrameBlake3,
+                                                )
+                                            )
+                                        }
+
+                                        if (pushedEntities.isNotEmpty()) {
+                                            syncDb.syncedTrackDao().upsertAll(pushedEntities)
+                                        }
+
+                                        completedBytesBeforeCurrent += pushedBytesTotal
+                                        sharedCompletedBytes.set(completedBytesBeforeCurrent)
+                                        sharedCompletedTracks.set(pushedUidsLower.size)
+                                        sharedAddedCount.set(downloadedCount)
+                                        sharedUpdatedCount.set(updatedExistingCount)
+                                        emitLocalTransferProgress()
+
+                                        if (pushResult.error == null &&
+                                            coverCandidates.isNotEmpty() &&
+                                            (pushResult.coversPushed + pushResult.coversSkipped) >= coverCandidates.size
+                                        ) {
+                                            for (c in coverCandidates) {
+                                                fastPushCoveredDirs.add(c.albumDir.lowercase())
+                                            }
+                                        }
+
+                                        remainingDownloads =
+                                            pendingDownloads.filter {
+                                                it.track.trackUid.lowercase() !in pushedUidsLower
+                                            }
+                                    } else if (pushResult.usedDirectPush &&
+                                        pushResult.error == null &&
+                                        coverCandidates.isNotEmpty() &&
+                                        (pushResult.coversPushed + pushResult.coversSkipped) >= coverCandidates.size
+                                    ) {
+                                        for (c in coverCandidates) {
+                                            fastPushCoveredDirs.add(c.albumDir.lowercase())
+                                        }
+                                    }
+                                }
+
+                                // Pillar 2: Bounded concurrent HTTP download + verify -> sequential SAF/MediaStore committer
+                                if (remainingDownloads.isNotEmpty()) {
+                                    data class DownloadedPendingItem(
+                                        val pending: PendingSyncDownload,
+                                        val partFile: File,
+                                        val accountBytes: Long,
+                                    )
+
+                                    val httpConcurrency = if (transport == SyncTransportMode.USB) 2 else 3
+                                    val downloadSem = Semaphore(httpConcurrency)
+                                    val commitChannel = Channel<DownloadedPendingItem>(capacity = 2)
+                                    val baseCompletedBeforeHttp = sharedCompletedTracks.get()
+
+                                    val consumerJob =
+                                        launch(Dispatchers.IO) {
+                                            val upsertBatch = ArrayList<SyncedTrackEntity>(16)
+                                            for (item in commitChannel) {
+                                                val pending = item.pending
+                                                val track = pending.track
+                                                val uidLower = track.trackUid.lowercase()
+                                                try {
+                                                    cancelToken.throwIfCancelled()
+                                                    val committed =
+                                                        managedSyncStorage.commitAudioFile(
+                                                            track = track,
+                                                            partFile = item.partFile,
+                                                            forceOverwrite = pending.forceOverwrite,
+                                                        )
+                                                    upsertBatch.add(
+                                                        SyncedTrackEntity(
+                                                            trackUid = track.trackUid,
+                                                            relativePath = committed.relativePath,
+                                                            documentUri = committed.documentUri,
+                                                            fileSize = committed.fileSize,
+                                                            mtimeMs = track.mtimeMs,
+                                                            sourceOutboxIdsJson =
+                                                                TonewiseCore.stringifyJson(track.sourceOutboxIds),
+                                                            syncedAtMs = System.currentTimeMillis(),
+                                                            headerBlake3Hex = track.headerBlake3,
+                                                            audioFrameBlake3Hex = track.audioFrameBlake3,
+                                                        )
+                                                    )
+                                                    if (upsertBatch.size >= 16) {
+                                                        syncDb.syncedTrackDao().upsertAll(upsertBatch)
+                                                        upsertBatch.clear()
+                                                    }
+                                                    confirmedTrackUids.add(track.trackUid)
+                                                    val nowMs = System.currentTimeMillis()
+                                                    if (pending.forceOverwrite) {
+                                                        updatedExistingCount++
+                                                        overwrittenTrackMtimes[uidLower] =
+                                                            track.mtimeMs.takeIf { it > 0L } ?: nowMs
+                                                    } else {
+                                                        downloadedCount++
+                                                    }
+                                                    val nextCompleted = downloadedCount + updatedExistingCount
+                                                    sharedAddedCount.set(downloadedCount)
+                                                    sharedUpdatedCount.set(updatedExistingCount)
+                                                    sharedCompletedTracks.set(nextCompleted.coerceAtMost(pendingDownloads.size))
+                                                    completedBytesBeforeCurrent += item.accountBytes
+                                                    sharedCompletedBytes.set(completedBytesBeforeCurrent)
+                                                    inFlightTrackBytes.remove(uidLower)
+                                                    emitLocalTransferProgress()
+                                                } catch (ce: CancellationException) {
+                                                    inFlightTrackBytes.remove(uidLower)
+                                                    throw ce
+                                                } catch (authErr: LanSyncAuthException) {
+                                                    inFlightTrackBytes.remove(uidLower)
+                                                    throw authErr
+                                                } catch (commitErr: Exception) {
+                                                    inFlightTrackBytes.remove(uidLower)
+                                                    L.w(commitErr, "Track commit failed for ${track.title} (${track.trackUid})")
+                                                    failedTrackUids.add(track.trackUid)
+                                                    firstErrorRef.compareAndSet(null, commitErr.message)
+                                                } finally {
+                                                    item.partFile.delete()
+                                                }
+                                            }
+                                            if (upsertBatch.isNotEmpty()) {
+                                                syncDb.syncedTrackDao().upsertAll(upsertBatch)
+                                                upsertBatch.clear()
+                                            }
+                                        }
+
+                                    try {
+                                        val producerCoordinator =
+                                            launch {
+                                                try {
+                                                    coroutineScope {
+                                                        for ((relIdx, pending) in remainingDownloads.withIndex()) {
+                                                            launch(Dispatchers.IO) {
+                                                                downloadSem.withPermit {
+                                                                    cancelToken.throwIfCancelled()
+                                                                    val track = pending.track
+                                                                    val uidLower = track.trackUid.lowercase()
+                                                                    val displayIdx = (baseCompletedBeforeHttp + relIdx + 1)
+                                                                        .coerceAtMost(pendingDownloads.size)
+                                                                    val phaseLabel =
+                                                                        if (pending.forceOverwrite) {
+                                                                            "正在更新曲目 ($displayIdx/${pendingDownloads.size})"
+                                                                        } else {
+                                                                            "正在下载曲目 ($displayIdx/${pendingDownloads.size})"
+                                                                        }
+                                                                    sharedPhase.set(phaseLabel)
+                                                                    sharedCurrentTitle.set(track.title)
+                                                                    emitLocalTransferProgress()
+
+                                                                    val partFile = File(partsDir, "${sanitizeKey(track.trackUid)}.part")
+                                                                    if (pending.forceOverwrite && partFile.exists()) {
+                                                                        partFile.delete()
+                                                                    }
+
+                                                                    var sentToConsumer = false
+                                                                    try {
+                                                                        val fileUrl = LanSyncV2Client.buildTrackFileUrl(cleanBase, track.trackUid)
+                                                                        var verified = false
+                                                                        var lastVerifyError: String? = null
+                                                                        for (attempt in 0 until 2) {
+                                                                            cancelToken.throwIfCancelled()
+                                                                            LanSyncV2Client.downloadFileResumable(
+                                                                                url = fileUrl,
+                                                                                token = token,
+                                                                                partFile = partFile,
+                                                                                expectedSize = track.fileSize,
+                                                                                onProgress = { trackDownloaded, _ ->
+                                                                                    inFlightTrackBytes[uidLower] =
+                                                                                        trackDownloaded.coerceAtLeast(0L)
+                                                                                    sharedCurrentTitle.set(track.title)
+                                                                                    emitLocalTransferProgress()
+                                                                                },
+                                                                                cancelToken = cancelToken,
+                                                                            )
+                                                                            if (verifyDownloadedPartIntegrity(partFile, track)) {
+                                                                                verified = true
+                                                                                break
+                                                                            }
+                                                                            lastVerifyError = "下载文件校验失败（期望音频/头哈希不匹配）"
+                                                                            partFile.delete()
+                                                                            inFlightTrackBytes.remove(uidLower)
+                                                                            if (attempt == 1) break
+                                                                        }
+                                                                        if (!verified) {
+                                                                            throw IOException(lastVerifyError ?: "下载文件校验失败")
+                                                                        }
+
+                                                                        val accountBytes = track.fileSize.coerceAtLeast(partFile.length()).coerceAtLeast(0L)
+                                                                        inFlightTrackBytes[uidLower] = accountBytes
+                                                                        commitChannel.send(DownloadedPendingItem(pending, partFile, accountBytes))
+                                                                        sentToConsumer = true
+                                                                    } catch (ce: CancellationException) {
+                                                                        inFlightTrackBytes.remove(uidLower)
+                                                                        throw ce
+                                                                    } catch (authErr: LanSyncAuthException) {
+                                                                        inFlightTrackBytes.remove(uidLower)
+                                                                        throw authErr
+                                                                    } catch (dlErr: Exception) {
+                                                                        inFlightTrackBytes.remove(uidLower)
+                                                                        L.w(dlErr, "Track download paused/failed for ${track.title} (${track.trackUid})")
+                                                                        failedTrackUids.add(track.trackUid)
+                                                                        firstErrorRef.compareAndSet(null, dlErr.message)
+                                                                    } finally {
+                                                                        if (!sentToConsumer && pending.forceOverwrite) {
+                                                                            partFile.delete()
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                } finally {
+                                                    commitChannel.close()
+                                                }
+                                            }
+
+                                        producerCoordinator.join()
+                                        consumerJob.join()
+                                    } finally {
+                                        while (true) {
+                                            val leftover = commitChannel.tryReceive().getOrNull() ?: break
+                                            leftover.partFile.delete()
+                                        }
+                                    }
+                                }
+
+                                // Parallel album cover fetches once per album directory (skip already fast-pushed albums)
+                                val coverTasks = ArrayList<Pair<String, OutboxTrackDto>>()
+                                val attemptedCoverDirs = HashSet<String>()
+                                for (track in uniqueOutboxTracks) {
+                                    cancelToken.throwIfCancelled()
+                                    if (!track.hasCover || track.trackUid in failedTrackUids) continue
+                                    val dirKey = track.targetRelPath.substringBeforeLast('/', "")
+                                    if (!attemptedCoverDirs.add(dirKey)) continue
+                                    if (dirKey.lowercase() in fastPushCoveredDirs) continue
+                                    coverTasks.add(dirKey to track)
+                                }
+
+                                if (coverTasks.isNotEmpty()) {
+                                    val coverSem = Semaphore(4)
+                                    val coverCommitMutex = Mutex()
+                                    coroutineScope {
+                                        for ((dirKey, track) in coverTasks) {
+                                            launch(Dispatchers.IO) {
+                                                coverSem.withPermit {
+                                                    cancelToken.throwIfCancelled()
+                                                    try {
+                                                        val coverUrl = LanSyncV2Client.buildTrackCoverUrl(cleanBase, track.trackUid)
+                                                        val bytes = LanSyncV2Client.downloadCoverIfPresent(coverUrl, token, cancelToken)
+                                                        if (bytes != null && bytes.isNotEmpty()) {
+                                                            coverCommitMutex.withLock {
+                                                                managedSyncStorage.commitAlbumCoverIfMissing(
+                                                                    track.targetRelPath,
+                                                                    bytes,
+                                                                )
+                                                            }
+                                                        }
+                                                    } catch (ce: CancellationException) {
+                                                        throw ce
+                                                    } catch (authErr: LanSyncAuthException) {
+                                                        throw authErr
+                                                    } catch (t: Throwable) {
+                                                        L.w(t, "Album cover fetch skipped for $dirKey")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } finally {
+                                tickerJob.cancel()
+                                runCatching { tickerJob.join() }
                             }
                         }
                     }
 
-                    // Download missing album covers once per album directory
-                    val attemptedCoverDirs = HashSet<String>()
-                    for (track in uniqueOutboxTracks) {
-                        cancelToken.throwIfCancelled()
-                        if (!track.hasCover || track.trackUid in failedTrackUids) continue
-                        val dirKey = track.targetRelPath.substringBeforeLast('/', "")
-                        if (!attemptedCoverDirs.add(dirKey)) continue
-                        try {
-                            val coverUrl = LanSyncV2Client.buildTrackCoverUrl(cleanBase, track.trackUid)
-                            val bytes = LanSyncV2Client.downloadCoverIfPresent(coverUrl, token, cancelToken)
-                            if (bytes != null && bytes.isNotEmpty()) {
-                                managedSyncStorage.commitAlbumCoverIfMissing(track.targetRelPath, bytes)
-                            }
-                        } catch (ce: CancellationException) {
-                            throw ce
-                        } catch (authErr: LanSyncAuthException) {
-                            throw authErr
-                        } catch (t: Throwable) {
-                            L.w(t, "Album cover fetch skipped for $dirKey")
-                        }
-                    }
+                    val firstDownloadError = firstErrorRef.get()
 
                     _syncProgress.value =
                         _syncProgress.value.copy(phase = "正在双向同步播放记录、评分与歌单…")
@@ -1645,6 +1968,77 @@ constructor(
         return order.map { songs[it] }
     }
 
+    fun generateAutoDjPlaylist(
+        scene: SceneBanner? = null,
+        targetCount: Int = AutoDjEngine.DEFAULT_TARGET_COUNT,
+        hourOfDay: Int = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY),
+    ): Pair<AutoDjResult, List<Song>> {
+        val songs = musicRepository.library?.songs?.toList().orEmpty()
+        if (songs.isEmpty()) {
+            val emptyRes = AutoDjEngine.generate(emptyList(), hourOfDay = hourOfDay, targetCount = targetCount)
+            return emptyRes to emptyList()
+        }
+        val matchedUids =
+            if (scene != null) {
+                matchSongsForScene(scene).map { it.uid.toString() }.toSet()
+            } else {
+                emptySet()
+            }
+        val sceneCtx =
+            scene?.let {
+                AutoDjSceneContext(
+                    sceneId = it.id,
+                    sceneTitle = it.title,
+                    matchedUids = matchedUids,
+                    sortArc = SceneRuleEvaluator.extractSortArc(it.rawSceneJson),
+                )
+            }
+        val candidates =
+            songs.map { song ->
+                val uid = song.uid.toString()
+                val snap = playCountRepository.getSnapshot(song)
+                val rating =
+                    lwwStore.getLwwOverride(uid, "rating")?.toIntOrNull()
+                        ?: if (snap.loved) 5 else 0
+                val artistStr =
+                    song.artists
+                        .mapNotNull { (it.name as? Name.Known)?.raw }
+                        .filter { it.isNotBlank() }
+                        .joinToString("; ")
+                val workName = song.workName?.trim()?.takeIf { it.isNotEmpty() }
+                val workKey = workName?.let { "${song.album.uid}::${it.lowercase()}" }
+                AutoDjTrackCandidate(
+                    trackUid = uid,
+                    title = song.name.raw,
+                    artist = artistStr,
+                    effectivePlayCount = snap.playCount,
+                    rating = rating,
+                    tempoBpm = song.tempoBpm?.toDouble(),
+                    tempoBucket = getEffectiveDjTempo(song),
+                    djEnergy = getEffectiveDjEnergy(song),
+                    djVocals = getEffectiveDjVocals(song),
+                    djScenes = getEffectiveDjScenes(song),
+                    moods = getEffectiveMoods(song),
+                    lastPlayedTsMs = snap.lastPlayedMs,
+                    workKey = workKey,
+                    movementNumber = song.movementNumber?.takeIf { it > 0 },
+                    discNumber = song.disc?.number ?: 0,
+                    trackNumber = song.track ?: 0,
+                    relPath = song.path.components.components.joinToString("/"),
+                )
+            }
+        val result =
+            AutoDjEngine.generate(
+                candidates = candidates,
+                hourOfDay = hourOfDay,
+                targetCount = targetCount,
+                sceneContext = sceneCtx,
+            )
+        val byUid = songs.associateBy { it.uid.toString() }
+        val ordered = result.orderedTrackUids.mapNotNull { byUid[it] }
+        return result to ordered
+    }
+
     private fun getOrBuildTracksJson(songs: Collection<Song>): String {
         val key =
             TracksCacheKey(
@@ -2122,8 +2516,14 @@ constructor(
                 }
                 return 0 to 0
             }
+            val metadataFallback by lazy {
+                com.shawnshi.tonewise.music.AndroidPlaylistTrackMatcher.fromSongs(lib.songs)
+            }
             val matchedSongs =
-                pl.relPaths.mapNotNull { rel -> PlaylistM3u8Helper.findMatchingSongByRelPath(rel, songsByRel) }
+                pl.relPaths.mapNotNull { rel ->
+                    PlaylistM3u8Helper.findMatchingSongByRelPath(rel, songsByRel)
+                        ?: metadataFallback.matchByFilenameHint(rel.substringAfterLast('/').substringAfterLast('\\'))
+                }
             matchedCount = matchedSongs.size
             if (matchedSongs.isEmpty()) return 0 to totalExpected
             val matchedUids = matchedSongs.map { it.uid }

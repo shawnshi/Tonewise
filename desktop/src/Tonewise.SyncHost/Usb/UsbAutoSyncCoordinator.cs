@@ -106,9 +106,11 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
             if (_subscribedHost is not null)
             {
                 _subscribedHost.SyncSessionProgressChanged -= OnHostSyncSessionProgressChanged;
+                _subscribedHost.UsbDirectPushHandler = null;
             }
             _subscribedHost = host;
             host.SyncSessionProgressChanged += OnHostSyncSessionProgressChanged;
+            host.UsbDirectPushHandler = HandleUsbDirectPushAsync;
         }
     }
 
@@ -549,6 +551,125 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
         }
     }
 
+    private async Task<UsbDirectPushSummary> HandleUsbDirectPushAsync(
+        UsbPushTracksApiRequest request,
+        Func<UsbDirectPushProgress, Task> onProgress,
+        CancellationToken ct)
+    {
+        SyncHostServer? host = _getActiveSyncHost();
+        string? serial;
+        lock (_gate)
+        {
+            var snap = _state;
+            var ready = snap.ConnectedDevices
+                .Where(d => string.Equals(d.State, "device", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var chosen = snap.ActiveSerial is not null
+                ? ready.FirstOrDefault(d => string.Equals(d.Serial, snap.ActiveSerial, StringComparison.Ordinal))
+                : null;
+            chosen ??= ready.FirstOrDefault();
+            serial = chosen?.Serial;
+        }
+
+        if (host is null || string.IsNullOrWhiteSpace(serial))
+        {
+            return new UsbDirectPushSummary(
+                UsedDirectPush: false,
+                PushedTracks: [],
+                FailedTrackUids: request.Tracks.Select(t => t.TrackUid).ToArray(),
+                CoversPushed: 0,
+                CoversSkipped: 0,
+                TotalBytesTransferred: 0,
+                ElapsedSeconds: 0,
+                AverageMbps: 0,
+                Error: host is null ? "sync_host_unavailable" : "no_ready_usb_device");
+        }
+
+        var trackSpecs = new List<UsbDirectPushTrackSpec>(request.Tracks.Count);
+        var unresolvedUids = new List<string>();
+        foreach (UsbPushTrackRequestItem item in request.Tracks)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!host.Store.TryResolveTrackPhysicalPath(item.TrackUid, out string fullPath, out string storeRelPath))
+            {
+                unresolvedUids.Add(item.TrackUid);
+                continue;
+            }
+
+            string? chosenRel = UsbAdbBridge.TryNormalizeSafeAudioRelPath(item.RelPath, out string clientRel)
+                ? clientRel
+                : (UsbAdbBridge.TryNormalizeSafeAudioRelPath(storeRelPath, out string fallbackRel) ? fallbackRel : null);
+            if (chosenRel is null)
+            {
+                unresolvedUids.Add(item.TrackUid);
+                continue;
+            }
+
+            trackSpecs.Add(new UsbDirectPushTrackSpec(
+                item.TrackUid,
+                chosenRel,
+                fullPath,
+                item.FileSize,
+                item.MtimeMs));
+        }
+
+        var coverSpecs = new List<UsbDirectPushCoverSpec>(request.Covers?.Count ?? 0);
+        if (request.Covers is { Count: > 0 })
+        {
+            var seenDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (UsbPushCoverRequestItem coverItem in request.Covers)
+            {
+                ct.ThrowIfCancellationRequested();
+                string albumDir = coverItem.AlbumDir?.Trim().Replace('\\', '/').Trim('/') ?? string.Empty;
+                if (!string.IsNullOrEmpty(albumDir) &&
+                    !UsbAdbBridge.TryNormalizeSafeSubDirRelPath(albumDir, out albumDir))
+                {
+                    continue;
+                }
+                if (!seenDirs.Add(albumDir))
+                    continue;
+
+                if (host.Store.TryResolveTrackCoverPath(coverItem.SampleTrackUid, out string coverPath))
+                {
+                    coverSpecs.Add(new UsbDirectPushCoverSpec(albumDir, coverPath));
+                }
+            }
+        }
+
+        UsbDirectPushSummary summary = await _adb.PushFilesDirectAsync(
+            serial,
+            trackSpecs,
+            coverSpecs,
+            string.IsNullOrWhiteSpace(request.RemoteMusicRoot)
+                ? UsbAdbSyncClient.DefaultRemoteMusicRoot
+                : request.RemoteMusicRoot,
+            async p =>
+            {
+                double pct = p.TotalBytes > 0
+                    ? Math.Clamp(p.BytesTransferred * 100.0 / p.TotalBytes, 0.0, 100.0)
+                    : (p.TotalTracks > 0
+                        ? Math.Clamp(p.CompletedTracks * 100.0 / p.TotalTracks, 0.0, 100.0)
+                        : 0.0);
+                UpdateState(s => s with
+                {
+                    IsSyncing = true,
+                    ProgressPercent = pct,
+                    ProgressDetail = $"USB 直传 · {p.CompletedTracks}/{p.TotalTracks} ({p.SpeedMbps:F1} MB/s)",
+                });
+                await onProgress(p).ConfigureAwait(false);
+            },
+            ct).ConfigureAwait(false);
+
+        if (unresolvedUids.Count == 0)
+            return summary;
+
+        string[] mergedFailed = summary.FailedTrackUids
+            .Concat(unresolvedUids)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return summary with { FailedTrackUids = mergedFailed };
+    }
+
     private async Task RunAdbForeignFallbackAsync(SyncSessionProgressReport report)
     {
         await _fallbackLock.WaitAsync().ConfigureAwait(false);
@@ -666,6 +787,7 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
             if (_subscribedHost is not null)
             {
                 _subscribedHost.SyncSessionProgressChanged -= OnHostSyncSessionProgressChanged;
+                _subscribedHost.UsbDirectPushHandler = null;
                 _subscribedHost = null;
             }
         }

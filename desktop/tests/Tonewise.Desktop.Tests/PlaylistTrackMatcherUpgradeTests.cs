@@ -724,4 +724,270 @@ public sealed class PlaylistTrackMatcherUpgradeTests
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
         }
     }
+
+    [Fact]
+    public void ResolveSeeds_ChinesePlaylists_MatchBilingualTraditionalVariantsAndRejectDerivatives()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            new("u1", "Jay/01.flac", "D:\\Music\\Jay\\01.flac", "晴天", "周杰伦", "叶惠美", 269000, 44100),
+            new("u2", "Eason/02.flac", "D:\\Music\\Eason\\02.flac", "十年", "陈奕迅", "黑白灰", 205000, 44100),
+            new("u3", "Faye/03.flac", "D:\\Music\\Faye\\03.flac", "红豆", "王菲", "唱游", 259000, 44100),
+            new("u4", "PuShu/04.flac", "D:\\Music\\PuShu\\04.flac", "平凡之路", "朴树", "猎户星座", 301000, 44100),
+            new("u5", "Jay/05.flac", "D:\\Music\\Jay\\05.flac", "发如雪", "周杰伦", "十一月的萧邦", 299000, 44100),
+            new("u6", "Jay/06.flac", "D:\\Music\\Jay\\06.flac", "珊瑚海", "周杰伦; 梁心颐", "十一月的萧邦", 256000, 44100),
+        };
+
+        var seeds = new List<ImportedTrackSeed>
+        {
+            new("晴天 (Sunny Day)", "周杰伦 (Jay Chou)"),
+            new("十年 (国语)", "Eason Chan"),
+            new("紅豆", "Faye Wong"),
+            new("平凡之途", "朴树"), // 1-char diff on 4-char CJK title
+            new("髮如雪 (影视主题曲)", "周杰倫"),
+            new("珊瑚海", "周杰伦×梁心颐"),
+            new("晴天 (伴奏)", "周杰伦"), // Hard-block derivative must NOT match studio track
+            new("晴天 (翻唱)", "周杰伦"), // Hard-block cover must NOT match studio track
+        };
+
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(seeds, lib);
+        Assert.Equal(8, resolved.Count);
+        Assert.Equal("u1", resolved[0].MatchedTrackUid);
+        Assert.Equal("u2", resolved[1].MatchedTrackUid);
+        Assert.Equal("u3", resolved[2].MatchedTrackUid);
+        Assert.Equal("u4", resolved[3].MatchedTrackUid);
+        Assert.Equal("u5", resolved[4].MatchedTrackUid);
+        Assert.Equal("u6", resolved[5].MatchedTrackUid);
+        Assert.False(resolved[6].IsLocalMatched);
+        Assert.False(resolved[7].IsLocalMatched);
+    }
+
+    [Fact]
+    public void ParseTextPlaylist_ChineseNumberingUnspacedDashAndSwappedTitleArtist_ResolvesMatched()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            new("u1", "Jay/01.flac", "D:\\Music\\Jay\\01.flac", "晴天", "周杰伦", "叶惠美", 269000, 44100),
+            new("u2", "Eason/02.flac", "D:\\Music\\Eason\\02.flac", "浮夸", "陈奕迅", "U87", 285000, 44100),
+        };
+
+        string rawText = """
+            1、周杰伦-晴天
+            02. 浮誇 - 陈奕迅
+            """;
+        var parsed = PlaylistImporter.ParseTextPlaylist(rawText, "华语精选");
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(parsed.Tracks, lib);
+
+        Assert.Equal(2, resolved.Count);
+        Assert.Equal("u1", resolved[0].MatchedTrackUid);
+        Assert.Equal("u2", resolved[1].MatchedTrackUid);
+    }
+
+    [Fact]
+    public void ResolveSeeds_ChinesePinyin_SlashMedley_DiscPrefix_BandSuffixAndConjunction_MatchesAccurately()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            MakeTrack("p1", "Hua Xin", "周華健"),
+            MakeTrack("p2", "Wéi Yī", "王力宏"),
+            MakeTrack("p3", "Ai Hen Jian Dan", "陶喆"),
+            MakeTrack("p4", "Chi Xin Jue Dui", "李聖傑"),
+            MakeTrack("p5", "唯一", "五月天"),
+            MakeTrack("m1", "償還 / 紅豆", "王菲", album: "菲比尋常Live!"),
+            MakeTrack("m2", "Chang Huan", "那英"),
+            MakeTrack("d1", "我要我們在一起", "范曉萱"),
+            MakeTrack("a1", "如風往事", "李宗盛與盧冠廷"),
+            MakeTrack("a2", "Don't Break My Heart", "黑豹"),
+            MakeTrack("a3", "海阔天空", "信"),
+            MakeTrack("n1", "AI", "王菲"),
+        };
+
+        var seeds = new List<ImportedTrackSeed>
+        {
+            new("花心", "周华健"),
+            new("唯一", "王力宏"),
+            new("爱，很简单", "陶喆"),
+            new("痴心绝对", "李圣杰"),
+            new("Wei Yi", "五月天"), // Reverse Pinyin seed -> Hanzi track
+            new("唯一", "张学友"), // Wrong artist must NOT match
+            new("爱", "王菲"), // 1-char Hanzi must NOT false-match 2-char "AI"
+            new("红豆", "王菲"), // CJK/CJK slash medley
+            new("偿还", "那英"), // Polyphone 还 -> huan hits "Chang Huan"
+            new("1-01 我要我們在一起", ""), // Disc-track prefix on uncredited title
+            new("如风往事", "李宗盛"),
+            new("如风往事", "卢冠廷"),
+            new("Don't Break My Heart", "黑豹乐队"),
+            new("海阔天空", "信乐团"), // 1-char prefix must NOT strip 乐团 -> 信
+        };
+
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(seeds, lib);
+        Assert.Equal("p1", resolved[0].MatchedTrackUid);
+        Assert.Equal("p2", resolved[1].MatchedTrackUid);
+        Assert.Equal("p3", resolved[2].MatchedTrackUid);
+        Assert.Equal("p4", resolved[3].MatchedTrackUid);
+        Assert.Equal("p5", resolved[4].MatchedTrackUid);
+        Assert.False(resolved[5].IsLocalMatched);
+        Assert.False(resolved[6].IsLocalMatched);
+        Assert.Equal("m1", resolved[7].MatchedTrackUid);
+        Assert.Equal("m2", resolved[8].MatchedTrackUid);
+        Assert.Equal("d1", resolved[9].MatchedTrackUid);
+        Assert.Equal("a1", resolved[10].MatchedTrackUid);
+        Assert.Equal("a1", resolved[11].MatchedTrackUid);
+        Assert.Equal("a2", resolved[12].MatchedTrackUid);
+        Assert.False(resolved[13].IsLocalMatched);
+    }
+
+    [Fact]
+    public void PlaylistStore_LoadPlaylist_DecodesLegacyGb18030M3uAndMatchesTrack()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "tw_gbk_pl_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            string m3uPath = Path.Combine(tempDir, "legacy.m3u");
+            // GB18030 bytes for:
+            // "#EXTM3U\n#PLAYLIST:中文GBK歌单\n#EXTINF:0,周杰伦 - 晴天\n#EXTTW-UNMATCHED:周杰伦\t晴天\t\n"
+            byte[] gb18030Bytes =
+            [
+                0x23, 0x45, 0x58, 0x54, 0x4D, 0x33, 0x55, 0x0A, 0x23, 0x50, 0x4C, 0x41, 0x59, 0x4C, 0x49, 0x53,
+                0x54, 0x3A, 0xD6, 0xD0, 0xCE, 0xC4, 0x47, 0x42, 0x4B, 0xB8, 0xE8, 0xB5, 0xA5, 0x0A, 0x23, 0x45,
+                0x58, 0x54, 0x49, 0x4E, 0x46, 0x3A, 0x30, 0x2C, 0xD6, 0xDC, 0xBD, 0xDC, 0xC2, 0xD7, 0x20, 0x2D,
+                0x20, 0xC7, 0xE7, 0xCC, 0xEC, 0x0A, 0x23, 0x45, 0x58, 0x54, 0x54, 0x57, 0x2D, 0x55, 0x4E, 0x4D,
+                0x41, 0x54, 0x43, 0x48, 0x45, 0x44, 0x3A, 0xD6, 0xDC, 0xBD, 0xDC, 0xC2, 0xD7, 0x09, 0xC7, 0xE7,
+                0xCC, 0xEC, 0x09, 0x0A,
+            ];
+            File.WriteAllBytes(m3uPath, gb18030Bytes);
+
+            var lib = new List<LocalLibraryTrackRef>
+            {
+                MakeTrack("u_jay", "晴天", "周杰伦", album: "叶惠美"),
+            };
+
+            var doc = PlaylistStore.LoadPlaylist(m3uPath, lib);
+            Assert.Equal("中文GBK歌单", doc.Name);
+            var entry = Assert.Single(doc.Entries);
+            Assert.True(entry.IsLocalMatched);
+            Assert.Equal("u_jay", entry.MatchedTrackUid);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void NonChineseUpgrades_StandaloneWorkName_SingleWordPrefix_Cyrillic_SoftRemixFallback_AndStrictPerformer()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            // Standalone workName when movementName is empty
+            MakeTrack(
+                "cls_brahms",
+                "Klarinettenquintett in h-Moll, op. 115: I. Allegro",
+                "Johannes Brahms",
+                composers: "Johannes Brahms",
+                work: "Quintet for Clarinet, 2 Violins, Viola, and Cello in B minor, op. 115: I. Allegro"),
+            // Cyrillic composer artist tag
+            MakeTrack(
+                "cls_tchaik",
+                "The Swan Lake (Suite), Op. 20a: I. Scene",
+                "Пётр Ильич Чайковский",
+                composers: ""),
+            // Strategy 1 OFF: Glenn Gould must NOT satisfy Dinu Lipatti
+            MakeTrack(
+                "cls_bach_gould",
+                "Partita No. 1 in B-Flat Major, BWV 825: I. Praeludium",
+                "Glenn Gould",
+                composers: "Johann Sebastian Bach"),
+            // Single-word prefix matches
+            MakeTrack("pop_sunflower", "Sunflower", "Post Malone, Swae Lee"),
+            MakeTrack("pop_bailando", "Bailando", "Enrique Iglesias"),
+            MakeTrack("cls_bolero", "Boléro, M. 81", "Maurice Ravel"),
+            // Bilingual Japanese - English dash split
+            MakeTrack("jp_peace", "ピースサイン", "米津玄師"),
+            // Strategy 2 soft Remix / Acoustic fallback + preference for studio original
+            MakeTrack("pop_despacito_rmx", "Despacito (remix)", "Luis Fonsi, Daddy Yankee, Justin Bieber"),
+            MakeTrack("pop_someday_unp", "Someday (MTV Unplugged)", "Mariah Carey"),
+            MakeTrack("pop_calma_alb", "Calma", "Pedro Capó", album: "Calma (Alan Walker Remix)"),
+            MakeTrack("pop_dual_studio", "Closer", "The Chainsmokers, Halsey"),
+            MakeTrack("pop_dual_rmx", "Closer (R3hab Remix)", "The Chainsmokers, Halsey"),
+            // Hard block guard: Instrumental still blocked for studio seed
+            MakeTrack("pop_coldplay_inst", "Adventure of a Lifetime (instrumental)", "Coldplay"),
+        };
+
+        var seeds = new List<ImportedTrackSeed>
+        {
+            new("Clarinet Quintet in B minor, Op. 115 I. Allegro", "Brahms"),
+            new("Swan Lake (Suite), Op. 20a: I. Scene", "Tchaikovsky"),
+            new("J.S. Bach: Partita No. 1 in B-Flat Major, BWV 825: I. Praeludium", "Dinu Lipatti"), // Strategy 1 OFF
+            new("Sunflower - Spider-Man: Into the Spider-Verse", "Post Malone & Swae Lee"),
+            new("Bailando - Spanish Version", "Enrique Iglesias, Descemer Bueno"),
+            new("Boléro", "Ravel"),
+            new("ピースサイン - Peace Sign", "米津玄師"),
+            new("Despacito", "Luis Fonsi & Daddy Yankee Featuring Justin Bieber"),
+            new("Someday", "Mariah Carey"),
+            new("Calma - Remix", "Pedro Capó, Farruko"),
+            new("Closer", "The Chainsmokers"), // Studio original MUST beat Remix when both exist
+            new("Adventure Of A Lifetime (Official Video)", "Coldplay"), // Instrumental must remain blocked
+        };
+
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(seeds, lib);
+        Assert.Equal("cls_brahms", resolved[0].MatchedTrackUid);
+        Assert.Equal("cls_tchaik", resolved[1].MatchedTrackUid);
+        Assert.False(resolved[2].IsLocalMatched);
+        Assert.Equal("pop_sunflower", resolved[3].MatchedTrackUid);
+        Assert.Equal("pop_bailando", resolved[4].MatchedTrackUid);
+        Assert.Equal("cls_bolero", resolved[5].MatchedTrackUid);
+        Assert.Equal("jp_peace", resolved[6].MatchedTrackUid);
+        Assert.Equal("pop_despacito_rmx", resolved[7].MatchedTrackUid);
+        Assert.Equal("pop_someday_unp", resolved[8].MatchedTrackUid);
+        Assert.Equal("pop_calma_alb", resolved[9].MatchedTrackUid);
+        Assert.Equal("pop_dual_studio", resolved[10].MatchedTrackUid);
+        Assert.False(resolved[11].IsLocalMatched);
+    }
+
+    [Fact]
+    public void ClassicalGuard_RejectsCrossWorkMovementAndTempoCollisions()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            MakeTrack(
+                "haydn_45",
+                "Haydn:Symphony No. 45 in F Sharp Minor \"Farewell\", Hob. 1/45 - II. Adagio",
+                "Leningrad Chamber Orchestra",
+                composers: "Joseph Haydn"),
+            MakeTrack(
+                "lalo_cello",
+                "Cello Concerto in D minor: I. Prélude. Lento - Allegro maestoso (Live)",
+                "Jacqueline Du Pré",
+                composers: "Édouard Lalo",
+                conductors: "Daniel Barenboim",
+                work: "Concerto pour violoncelle et orchestre en ré majeur : I. Allegro"),
+            MakeTrack(
+                "bizet_pearls",
+                "Les Pêcheurs de perles: Prélude",
+                "Georges Bizet, Pierrette Alarie",
+                composers: "Georges Bizet"),
+            MakeTrack(
+                "tchaik_swan",
+                "Swan Lake Act IV No. 26 Scène",
+                "Пётр Ильич Чайковский",
+                composers: "Pyotr Ilyich Tchaikovsky",
+                movement: "Allegro non troppo"),
+        };
+
+        var seeds = new List<ImportedTrackSeed>
+        {
+            new("Haydn: Cello Concerto No. 1 in C Major, Hob. VIIb:1: II. Adagio", "Mstislav Rostropovich, English Chamber Orchestra"),
+            new("Lalo: Symphonie espagnole in D Minor, Op. 21: I. Allegro non troppo", "Itzhak Perlman, Daniel Barenboim, Orchestre de Paris"),
+            new("Carmen: Prelude. Allegro giocoso - Andante moderato", "Georges Bizet, Herbert von Karajan"),
+            new("Allegro non troppo", "Tchaikovsky"),
+        };
+
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(seeds, lib);
+        Assert.False(resolved[0].IsLocalMatched);
+        Assert.False(resolved[1].IsLocalMatched);
+        Assert.False(resolved[2].IsLocalMatched);
+        Assert.False(resolved[3].IsLocalMatched);
+    }
 }

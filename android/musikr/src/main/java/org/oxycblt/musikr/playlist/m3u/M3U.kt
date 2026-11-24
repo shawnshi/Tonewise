@@ -22,8 +22,13 @@ import android.content.Context
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStream
-import java.io.InputStreamReader
 import java.io.OutputStream
+import java.io.StringReader
+import java.net.URLDecoder
+import java.nio.ByteBuffer
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
+import java.text.Normalizer
 import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.fs.Components
 import org.oxycblt.musikr.fs.Path
@@ -31,6 +36,7 @@ import org.oxycblt.musikr.fs.Volume
 import org.oxycblt.musikr.fs.path.VolumeManager
 import org.oxycblt.musikr.playlist.ExportConfig
 import org.oxycblt.musikr.playlist.ImportedPlaylist
+import org.oxycblt.musikr.playlist.ImportedPlaylistEntry
 import org.oxycblt.musikr.playlist.PossiblePaths
 import org.oxycblt.musikr.tag.Name
 import org.oxycblt.musikr.util.correctWhitespace
@@ -111,18 +117,26 @@ abstract class M3U {
 private class M3UImpl(private val volumeManager: VolumeManager) : M3U() {
     override fun read(stream: InputStream, workingDirectory: Path): ImportedPlaylist? {
         val volumes = volumeManager.getVolumes()
-        val reader = BufferedReader(InputStreamReader(stream, Charsets.UTF_8))
-        val paths = mutableListOf<PossiblePaths>()
+        val decodedText = decodePlaylistBytes(stream.readBytes())
+        val reader = BufferedReader(StringReader(decodedText))
+        val entries = mutableListOf<ImportedPlaylistEntry>()
         var name: String? = null
         var isFirstLine = true
+        var pendingExtInfTitle: String? = null
+        var pendingExtInfArtist: String? = null
+        var pendingDurationSec = 0
+        var pendingAlbum: String? = null
+
+        fun resetPendingMeta() {
+            pendingExtInfTitle = null
+            pendingExtInfArtist = null
+            pendingDurationSec = 0
+            pendingAlbum = null
+        }
 
         consumeFile@ while (true) {
-            var path: String?
+            var path: String? = null
             collectMetadata@ while (true) {
-                // The M3U format consists of "entries" that begin with a bunch of metadata
-                // prefixed with "#", and then a relative/absolute path or url to the file.
-                // We don't really care about the metadata except for the playlist name, so
-                // we discard everything but that.
                 var rawLine = reader.readLine() ?: break@consumeFile
                 if (isFirstLine) {
                     isFirstLine = false
@@ -130,46 +144,135 @@ private class M3UImpl(private val volumeManager: VolumeManager) : M3U() {
                 }
                 val currentLine = rawLine.correctWhitespace() ?: continue@collectMetadata
                 if (currentLine.startsWith("#")) {
-                    // Metadata entries are roughly structured
                     val split = currentLine.split(":", limit = 2)
-                    when (split[0]) {
-                        // Playlist name
-                        "#PLAYLIST" -> name = split.getOrNull(1)?.correctWhitespace()
-                        // Add more metadata handling here if needed.
+                    val directive = split[0].uppercase()
+                    val payload = split.getOrNull(1)?.correctWhitespace()
+                    when (directive) {
+                        "#PLAYLIST" -> name = payload
+                        "#EXTALB" -> pendingAlbum = payload
+                        "#EXTINF" -> {
+                            if (payload != null) {
+                                val commaIdx = payload.indexOf(',')
+                                if (commaIdx >= 0) {
+                                    pendingDurationSec =
+                                        payload.substring(0, commaIdx).trim().toIntOrNull()?.coerceAtLeast(0)
+                                            ?: 0
+                                    val label = payload.substring(commaIdx + 1).trim()
+                                    val (artist, title) = splitExtInfLabel(label)
+                                    pendingExtInfArtist = artist
+                                    pendingExtInfTitle = title
+                                } else {
+                                    pendingExtInfTitle = payload
+                                    pendingExtInfArtist = null
+                                }
+                            }
+                        }
+                        "#EXTTW-UNMATCHED" -> {
+                            val rawPayload = rawLine.trim().substringAfter(':', "")
+                            val parts = rawPayload.split('\t')
+                            val artist = parts.getOrNull(0)?.trim()?.takeIf { it.isNotEmpty() } ?: pendingExtInfArtist
+                            val title = parts.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() } ?: pendingExtInfTitle
+                            val album = parts.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() } ?: pendingAlbum
+                            if (!title.isNullOrEmpty() || !artist.isNullOrEmpty()) {
+                                entries.add(
+                                    ImportedPlaylistEntry(
+                                        paths = emptyList(),
+                                        title = title,
+                                        artist = artist,
+                                        album = album,
+                                        durationSec = pendingDurationSec,
+                                    )
+                                )
+                            }
+                            resetPendingMeta()
+                        }
                         else -> {}
                     }
                 } else {
-                    // Something that isn't a metadata entry, assume it's a path. It could be
-                    // a URL, but it'll just get mangled really badly and not match with anything,
-                    // so it's okay.
                     path = currentLine
                     break@collectMetadata
                 }
             }
 
-            // There is basically no formal specification of file paths in M3U, and it differs
-            // based on the programs that generated it. I more or less have to consider any possible
-            // interpretation as valid.
             val interpretations = interpretPath(unlikelyToBeNull(path))
             val possibilities = interpretations.flatMap {
                 expandInterpretation(it, workingDirectory, volumes)
             }
 
-            paths.add(possibilities)
+            entries.add(
+                ImportedPlaylistEntry(
+                    paths = possibilities,
+                    title = pendingExtInfTitle,
+                    artist = pendingExtInfArtist,
+                    album = pendingAlbum,
+                    durationSec = pendingDurationSec,
+                )
+            )
+            resetPendingMeta()
         }
 
-        return if (paths.isNotEmpty()) {
-            ImportedPlaylist(name, paths)
+        return if (entries.isNotEmpty()) {
+            ImportedPlaylist(name, entries.map { it.paths }, entries)
         } else {
-            // Couldn't get anything useful out of this file.
             null
         }
     }
 
+    private fun decodePlaylistBytes(bytes: ByteArray): String {
+        if (bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte()) {
+            return String(bytes, Charsets.UTF_16LE)
+        }
+        if (bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte()) {
+            return String(bytes, Charsets.UTF_16BE)
+        }
+        val utf8Decoder =
+            Charsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+        return try {
+            utf8Decoder.decode(ByteBuffer.wrap(bytes)).toString()
+        } catch (_: Exception) {
+            val gbk = runCatching { Charset.forName("GB18030") }.getOrNull() ?: Charsets.UTF_8
+            String(bytes, gbk)
+        }
+    }
+
+    private fun splitExtInfLabel(label: String): Pair<String?, String?> {
+        for (sep in listOf(" - ", " – ", " — ", " —— ", " － ")) {
+            val idx = label.indexOf(sep)
+            if (idx > 0 && idx + sep.length < label.length) {
+                val left = label.substring(0, idx).trim()
+                val right = label.substring(idx + sep.length).trim()
+                if (left.isNotEmpty() && right.isNotEmpty()) {
+                    return left to right
+                }
+            }
+        }
+        return null to label.trim().takeIf { it.isNotEmpty() }
+    }
+
+    private fun normalizeRawPlaylistPath(raw: String): String {
+        var s = raw.trim()
+        if (s.startsWith("file://", ignoreCase = true)) {
+            s = s.substring("file://".length)
+            if (s.startsWith("/") && s.length >= 3 && s[2] == ':') {
+                s = s.substring(1)
+            }
+        }
+        if (PERCENT_HEX_REGEX.containsMatchIn(s)) {
+            s =
+                runCatching { URLDecoder.decode(s.replace("+", "%2B"), "UTF-8") }
+                    .getOrDefault(s)
+        }
+        return Normalizer.normalize(s, Normalizer.Form.NFC)
+    }
+
     private data class InterpretedPath(val components: Components, val likelyAbsolute: Boolean)
 
-    private fun interpretPath(path: String): List<InterpretedPath> =
-        when {
+    private fun interpretPath(rawPath: String): List<InterpretedPath> {
+        val path = normalizeRawPlaylistPath(rawPath)
+        return when {
             path.startsWith('/') -> listOf(InterpretedPath(Components.parseUnix(path), true))
             path.startsWith("./") -> listOf(InterpretedPath(Components.parseUnix(path), false))
             path.matches(WINDOWS_VOLUME_PREFIX_REGEX) ->
@@ -182,6 +285,7 @@ private class M3UImpl(private val volumeManager: VolumeManager) : M3U() {
                     InterpretedPath(Components.parseWindows(path), true),
                 )
         }
+    }
 
     private fun expandInterpretation(
         path: InterpretedPath,
@@ -337,5 +441,6 @@ private class M3UImpl(private val volumeManager: VolumeManager) : M3U() {
 
     private companion object {
         val WINDOWS_VOLUME_PREFIX_REGEX = Regex("^[A-Za-z]:\\\\.*")
+        val PERCENT_HEX_REGEX = Regex("%[0-9a-fA-F]{2}")
     }
 }

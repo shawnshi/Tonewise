@@ -54,9 +54,14 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         binding.seekBarSlider.setWaveEnabled(enabled)
     }
 
-    /** Configures a 150-point precomputed RMS waveform envelope, or null to restore wavy mode. */
+    /** Configures a 150-point precomputed RMS waveform envelope, or null to restore placeholder/wavy mode. */
     fun setWaveformEnvelope(envelope: FloatArray?) {
         binding.seekBarSlider.setWaveformEnvelope(envelope)
+    }
+
+    /** Enables or disables PC-style 150-bar waveform progress bar rendering. */
+    fun setWaveformStyleEnabled(enabled: Boolean) {
+        binding.seekBarSlider.setWaveformStyleEnabled(enabled)
     }
 
     /** The current [Listener] attached to this instance. */

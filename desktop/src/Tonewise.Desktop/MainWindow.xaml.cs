@@ -17,6 +17,7 @@ using Tonewise.Desktop.ViewModels;
 using Tonewise.SyncHost.Curation;
 using Tonewise.SyncHost.Ledger;
 using Tonewise.SyncHost.Playlists;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Data.Pdf;
 using Windows.Media;
 using Windows.Media.Playback;
@@ -246,6 +247,9 @@ public sealed partial class MainWindow : Window
             _lastWaveformProgress = -1.0;
             WaveformCanvas.Invalidate();
         };
+        ViewModel.TracksUpdatingInPlace += BeginPreserveTrackListViewportAndSelection;
+        ViewModel.TracksUpdatedInPlace += EndPreserveTrackListViewportAndSelection;
+        TrackListView?.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(OnTrackListPointerPressed), handledEventsToo: true);
         ViewModel.TrackChanged += async track =>
         {
             try
@@ -1769,6 +1773,123 @@ public sealed partial class MainWindow : Window
         await ViewModel.SendEntityGroupToPhoneAsync(group);
     }
 
+    private void RootWorkbench_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        bool ctrl = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+        bool shift = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+        bool alt = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+        bool textFocused = IsTextInputFocused();
+
+        if (ctrl && !alt && !shift && e.Key == VirtualKey.S)
+        {
+            if (_inlineDirtyCount > 0 || (InspectorSplitView?.IsPaneOpen == true && _inlineTargets.Count > 0))
+            {
+                _ = SaveInlineInspectorMetadataAsync();
+                e.Handled = true;
+                return;
+            }
+        }
+
+        if (textFocused)
+        {
+            return;
+        }
+
+        if (ctrl && !alt && !shift && e.Key == VirtualKey.A)
+        {
+            if (IsTrackListActiveAndPopulated())
+            {
+                SelectAllTracksPreservingFocus();
+                e.Handled = true;
+            }
+            return;
+        }
+
+        if (ctrl && !alt && !shift && e.Key == VirtualKey.Z)
+        {
+            if (_inlineDirtyCount > 0)
+            {
+                RevertInlineEditor();
+            }
+            else
+            {
+                _ = ViewModel.UndoLastCurationAsync();
+            }
+            e.Handled = true;
+            return;
+        }
+
+        if (ctrl && !alt && ((e.Key == VirtualKey.Y && !shift) || (e.Key == VirtualKey.Z && shift)))
+        {
+            _ = ViewModel.RedoLastCurationAsync();
+            e.Handled = true;
+            return;
+        }
+
+        if (ctrl && !alt && !shift && e.Key == VirtualKey.C)
+        {
+            if (IsTrackListFocused() && TrackListView is not null && TrackListView.SelectedItems.Count > 0)
+            {
+                CopySelectedTracksToClipboard();
+                e.Handled = true;
+            }
+            return;
+        }
+
+        if (!ctrl && !alt && !shift && e.Key == VirtualKey.Escape)
+        {
+            if (_inlineDirtyCount > 0)
+            {
+                RevertInlineEditor();
+                e.Handled = true;
+                return;
+            }
+            if (TrackListView is not null && (TrackListView.SelectedItems.Count > 0 || ViewModel.IsMultiSelectMode))
+            {
+                TrackListView.SelectedItems.Clear();
+                if (ViewModel.IsMultiSelectMode)
+                {
+                    ViewModel.IsMultiSelectMode = false;
+                }
+                e.Handled = true;
+            }
+            return;
+        }
+
+        if (!ctrl && !alt && !shift && e.Key == VirtualKey.Delete)
+        {
+            if (IsTrackListFocused()
+                && ViewModel.IsViewingPlaylist
+                && ViewModel.SelectedPlaylist is not null
+                && TrackListView is not null
+                && TrackListView.SelectedItems.Count > 0)
+            {
+                RemoveSelectedTracksFromCurrentPlaylist();
+                e.Handled = true;
+            }
+            return;
+        }
+
+        if (!ctrl && !alt && !shift && e.Key == VirtualKey.Enter)
+        {
+            if (IsTrackListFocused() && TrackListView?.SelectedItem is TrackItem selectedTrack)
+            {
+                ViewModel.PlayFromBrowseView(selectedTrack);
+                e.Handled = true;
+            }
+            return;
+        }
+
+        if (!ctrl && !alt && !shift && e.Key == VirtualKey.Space)
+        {
+            if (!IsInteractiveNonListControlFocused())
+            {
+                ViewModel.TogglePlayPauseCommand.Execute(null);
+                e.Handled = true;
+            }
+        }
+    }
+
     private void RootWorkbench_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if ((int)e.Key == 188 &&
@@ -1777,6 +1898,93 @@ public sealed partial class MainWindow : Window
             ViewModel.NavigateToPrimary("settings");
             e.Handled = true;
         }
+    }
+
+    private bool IsTextInputFocused()
+    {
+        if (RootWorkbench?.XamlRoot is null) return false;
+        object? focused = FocusManager.GetFocusedElement(RootWorkbench.XamlRoot);
+        if (focused is TextBox or PasswordBox or RichEditBox or AutoSuggestBox or NumberBox)
+            return true;
+        for (var cur = focused as DependencyObject; cur is not null; cur = VisualTreeHelper.GetParent(cur))
+        {
+            if (cur is TextBox or PasswordBox or RichEditBox or AutoSuggestBox or NumberBox)
+                return true;
+        }
+        return false;
+    }
+
+    private bool IsInteractiveNonListControlFocused()
+    {
+        if (RootWorkbench?.XamlRoot is null) return false;
+        object? focused = FocusManager.GetFocusedElement(RootWorkbench.XamlRoot);
+        if (focused is null) return false;
+        for (var cur = focused as DependencyObject; cur is not null; cur = VisualTreeHelper.GetParent(cur))
+        {
+            if (ReferenceEquals(cur, TrackListView)) return false;
+            if (cur is ButtonBase or Slider or ComboBox or ToggleSwitch) return true;
+        }
+        return false;
+    }
+
+    private bool IsTrackListFocused()
+    {
+        if (RootWorkbench?.XamlRoot is null || TrackListView is null) return false;
+        object? focused = FocusManager.GetFocusedElement(RootWorkbench.XamlRoot);
+        if (ReferenceEquals(focused, TrackListView)) return true;
+        for (var cur = focused as DependencyObject; cur is not null; cur = VisualTreeHelper.GetParent(cur))
+        {
+            if (ReferenceEquals(cur, TrackListView)) return true;
+        }
+        return false;
+    }
+
+    private bool IsTrackListActiveAndPopulated() =>
+        TrackListView is not null
+        && TrackListView.Visibility == Visibility.Visible
+        && !ViewModel.IsEntityBrowserVisible
+        && ViewModel.FilteredTracks.Count > 0;
+
+    private void SelectAllTracksPreservingFocus()
+    {
+        if (TrackListView is null || ViewModel.FilteredTracks.Count == 0) return;
+        _suppressInspectorFocusSteal = true;
+        try
+        {
+            SetInspectorOpen(true);
+            TrackListView.SelectAll();
+            TrackListView.Focus(FocusState.Programmatic);
+        }
+        finally
+        {
+            _suppressInspectorFocusSteal = false;
+        }
+    }
+
+    private void CopySelectedTracksToClipboard()
+    {
+        if (TrackListView is null) return;
+        var selected = TrackListView.SelectedItems.OfType<TrackItem>().ToList();
+        if (selected.Count == 0) return;
+        var lines = selected.Select(t =>
+            string.IsNullOrWhiteSpace(t.ArtistsDisplay) ? t.Title : $"{t.ArtistsDisplay} - {t.Title}");
+        var package = new DataPackage();
+        package.SetText(string.Join(Environment.NewLine, lines));
+        Clipboard.SetContent(package);
+        ViewModel.StatusMessage = $"已复制 {selected.Count} 首曲目信息到剪贴板。";
+    }
+
+    private void RemoveSelectedTracksFromCurrentPlaylist()
+    {
+        if (!ViewModel.IsViewingPlaylist || ViewModel.SelectedPlaylist is null || TrackListView is null) return;
+        var removeSet = TrackListView.SelectedItems.OfType<TrackItem>().ToHashSet();
+        if (removeSet.Count == 0) return;
+        var remaining = ViewModel.FilteredTracks
+            .Where(t => !removeSet.Contains(t))
+            .Select(ViewModel.ToPlaylistEntry)
+            .ToList();
+        ViewModel.SaveEditedPlaylist(ViewModel.SelectedPlaylist, ViewModel.SelectedPlaylist.Name, remaining);
+        ViewModel.Notify($"已从歌单「{ViewModel.SelectedPlaylist.Name}」移除 {removeSet.Count} 首曲目。", "info");
     }
 
     private void OnToggleInspectorShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -2119,6 +2327,128 @@ public sealed partial class MainWindow : Window
     }
 
     private bool _restoringSelection;
+    private bool _suppressInspectorFocusSteal;
+    private int _trackSelectionAnchorIndex = -1;
+    private HashSet<string>? _pendingRestoreSelectedUids;
+    private double? _pendingRestoreScrollOffset;
+    private bool _isSavingInlineMetadata;
+
+    private static ScrollViewer? FindDescendantScrollViewer(DependencyObject? parent)
+    {
+        if (parent is null) return null;
+        int count = VisualTreeHelper.GetChildrenCount(parent);
+        for (int i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is ScrollViewer sv) return sv;
+            var nested = FindDescendantScrollViewer(child);
+            if (nested is not null) return nested;
+        }
+        return null;
+    }
+
+    private void BeginPreserveTrackListViewportAndSelection()
+    {
+        if (TrackListView is null) return;
+        _pendingRestoreSelectedUids = TrackListView.SelectedItems
+            .OfType<TrackItem>()
+            .Select(t => t.TrackUid)
+            .ToHashSet(StringComparer.Ordinal);
+        _pendingRestoreScrollOffset = FindDescendantScrollViewer(TrackListView)?.VerticalOffset;
+        _restoringSelection = true;
+    }
+
+    private void EndPreserveTrackListViewportAndSelection(IReadOnlyCollection<string> updatedUids)
+    {
+        if (TrackListView is null)
+        {
+            _restoringSelection = false;
+            return;
+        }
+        try
+        {
+            var restoreUids = _pendingRestoreSelectedUids;
+            if (restoreUids is { Count: > 0 })
+            {
+                var restored = new List<TrackItem>(restoreUids.Count);
+                // Re-add only items that were deselected when their TrackItem record instance was replaced
+                var currentlySelectedUids = TrackListView.SelectedItems
+                    .OfType<TrackItem>()
+                    .Select(t => t.TrackUid)
+                    .ToHashSet(StringComparer.Ordinal);
+                foreach (var item in ViewModel.FilteredTracks)
+                {
+                    if (restoreUids.Contains(item.TrackUid))
+                    {
+                        restored.Add(item);
+                        if (!currentlySelectedUids.Contains(item.TrackUid))
+                        {
+                            TrackListView.SelectedItems.Add(item);
+                        }
+                    }
+                }
+                if (restored.Count > 0)
+                {
+                    SyncInlineInspectorTargets(restored);
+                }
+            }
+
+            if (_pendingRestoreScrollOffset is double targetOffset)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    FindDescendantScrollViewer(TrackListView)?.ChangeView(null, targetOffset, null, disableAnimation: true);
+                });
+            }
+        }
+        finally
+        {
+            _pendingRestoreSelectedUids = null;
+            _pendingRestoreScrollOffset = null;
+            _restoringSelection = false;
+        }
+    }
+
+    private void OnTrackListPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (TrackListView is null) return;
+        var clickedTrack = (e.OriginalSource as FrameworkElement)?.DataContext as TrackItem;
+        if (clickedTrack is null) return;
+        int clickedIdx = ViewModel.FilteredTracks.IndexOf(clickedTrack);
+        if (clickedIdx < 0) return;
+
+        bool shift = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+        if (TrackListView.SelectionMode == ListViewSelectionMode.Multiple && shift && _trackSelectionAnchorIndex >= 0)
+        {
+            int start = Math.Min(_trackSelectionAnchorIndex, clickedIdx);
+            int end = Math.Max(_trackSelectionAnchorIndex, clickedIdx);
+            _restoringSelection = true;
+            try
+            {
+                for (int i = start; i <= end; i++)
+                {
+                    var item = ViewModel.FilteredTracks[i];
+                    if (!TrackListView.SelectedItems.Contains(item))
+                    {
+                        TrackListView.SelectedItems.Add(item);
+                    }
+                }
+            }
+            finally
+            {
+                _restoringSelection = false;
+            }
+            var selected = TrackListView.SelectedItems.OfType<TrackItem>().ToList();
+            SyncInlineInspectorTargets(selected);
+            e.Handled = true;
+            return;
+        }
+
+        if (!shift)
+        {
+            _trackSelectionAnchorIndex = clickedIdx;
+        }
+    }
 
     private void OnTrackColumnHeaderClick(object sender, RoutedEventArgs e)
     {
@@ -2141,19 +2471,21 @@ public sealed partial class MainWindow : Window
             : ListViewSelectionMode.Extended;
     }
 
-    private void OnSelectAllTracksClick(object sender, RoutedEventArgs e)
-    {
-        if (TrackListView is null || ViewModel.FilteredTracks.Count == 0) return;
-        SetInspectorOpen(true);
-        TrackListView.SelectAll();
-    }
+    private void OnSelectAllTracksClick(object sender, RoutedEventArgs e) =>
+        SelectAllTracksPreservingFocus();
 
     private void OnTrackSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_restoringSelection) return;
+        bool wasListFocused = IsTrackListFocused();
         var selected = TrackListView.SelectedItems.OfType<TrackItem>().ToList();
         if (selected.Count == 1)
         {
+            int idx = ViewModel.FilteredTracks.IndexOf(selected[0]);
+            if (idx >= 0 && (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) != CoreVirtualKeyStates.Down)
+            {
+                _trackSelectionAnchorIndex = idx;
+            }
             ViewModel.InspectTrack(selected[0]);
         }
         else if (selected.Count == 0)
@@ -2174,6 +2506,10 @@ public sealed partial class MainWindow : Window
             if (InspectorSplitView is not null && !InspectorSplitView.IsPaneOpen)
             {
                 SetInspectorOpen(true);
+                if (wasListFocused && !_suppressInspectorFocusSteal)
+                {
+                    TrackListView?.Focus(FocusState.Programmatic);
+                }
             }
         }
         SyncInlineInspectorTargets(selected);
@@ -2692,7 +3028,7 @@ public sealed partial class MainWindow : Window
     {
         if (args.ChosenSuggestion is null)
         {
-            SaveInlineInspectorMetadata();
+            _ = SaveInlineInspectorMetadataAsync();
         }
     }
 
@@ -2700,14 +3036,14 @@ public sealed partial class MainWindow : Window
     {
         if (e.Key == VirtualKey.Enter)
         {
-            SaveInlineInspectorMetadata();
+            _ = SaveInlineInspectorMetadataAsync();
             e.Handled = true;
         }
     }
 
     private void OnSaveInlineInspectorMetadataClick(object sender, RoutedEventArgs e)
     {
-        SaveInlineInspectorMetadata();
+        _ = SaveInlineInspectorMetadataAsync();
     }
 
     private static string NormalizeTagList(string text) =>
@@ -2855,8 +3191,9 @@ public sealed partial class MainWindow : Window
         return updates;
     }
 
-    private void SaveInlineInspectorMetadata()
+    private async Task SaveInlineInspectorMetadataAsync()
     {
+        if (_isSavingInlineMetadata) return;
         var targets = _inlineTargets.Count > 0 ? _inlineTargets : ResolveTargetTracksForAction(this);
         if (targets.Count == 0)
         {
@@ -2876,34 +3213,68 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var savedUids = targets.Select(t => t.TrackUid).ToHashSet(StringComparer.Ordinal);
-        _inlineDirtyCount = 0;
-        ViewModel.ApplyLexiconTagsToTracks(targets, updates);
-
-        // Preserve user selection (single or multi-select) after FilteredTracks refreshes
-        if (TrackListView is not null)
+        _isSavingInlineMetadata = true;
+        if (InlineSaveButton is not null)
         {
-            _restoringSelection = true;
-            try
+            InlineSaveButton.IsEnabled = false;
+            InlineSaveButton.Content = "保存中...";
+        }
+
+        var savedUids = targets.Select(t => t.TrackUid).ToHashSet(StringComparer.Ordinal);
+        double? savedScrollOffset = FindDescendantScrollViewer(TrackListView)?.VerticalOffset;
+        _inlineDirtyCount = 0;
+
+        try
+        {
+            await ViewModel.ApplyLexiconTagsToTracksAsync(targets, updates);
+
+            // Ensure selection & scroll position remain intact even if Filter/Sort triggered a view update
+            if (TrackListView is not null)
             {
-                TrackListView.SelectedItems.Clear();
-                var restored = new List<TrackItem>(savedUids.Count);
-                foreach (var item in ViewModel.FilteredTracks)
+                _restoringSelection = true;
+                try
                 {
-                    if (savedUids.Contains(item.TrackUid))
+                    var currentSelectedUids = TrackListView.SelectedItems
+                        .OfType<TrackItem>()
+                        .Select(t => t.TrackUid)
+                        .ToHashSet(StringComparer.Ordinal);
+                    var restored = new List<TrackItem>(savedUids.Count);
+                    foreach (var item in ViewModel.FilteredTracks)
                     {
-                        TrackListView.SelectedItems.Add(item);
-                        restored.Add(item);
+                        if (savedUids.Contains(item.TrackUid))
+                        {
+                            restored.Add(item);
+                            if (!currentSelectedUids.Contains(item.TrackUid))
+                            {
+                                TrackListView.SelectedItems.Add(item);
+                            }
+                        }
+                    }
+                    if (restored.Count > 0)
+                    {
+                        SyncInlineInspectorTargets(restored);
+                    }
+                    if (savedScrollOffset is double offset)
+                    {
+                        DispatcherQueue.TryEnqueue(() =>
+                        {
+                            FindDescendantScrollViewer(TrackListView)?.ChangeView(null, offset, null, disableAnimation: true);
+                        });
                     }
                 }
-                if (restored.Count > 0)
+                finally
                 {
-                    SyncInlineInspectorTargets(restored);
+                    _restoringSelection = false;
                 }
             }
-            finally
+        }
+        finally
+        {
+            _isSavingInlineMetadata = false;
+            if (InlineSaveButton is not null)
             {
-                _restoringSelection = false;
+                InlineSaveButton.Content = "保存";
+                UpdateInlineDirtyState();
             }
         }
     }
@@ -3058,7 +3429,7 @@ public sealed partial class MainWindow : Window
             Style = accentButtonStyle,
             Padding = new Thickness(14, 6, 14, 6),
         };
-        applyBtn.Click += (_, _) =>
+        applyBtn.Click += async (_, _) =>
         {
             var updates = new Dictionary<string, string?>(StringComparer.Ordinal);
             if (touchedScene)
@@ -3078,7 +3449,7 @@ public sealed partial class MainWindow : Window
                 ViewModel.StatusMessage = "未修改任何标签维度，已跳过写入。";
                 return;
             }
-            ViewModel.ApplyLexiconTagsToTracks(targets, updates);
+            await ViewModel.ApplyLexiconTagsToTracksAsync(targets, updates);
         };
 
         var closeBtn = new Button
@@ -3206,10 +3577,6 @@ public sealed partial class MainWindow : Window
             ViewModel.ApproveProposal(pid, approved: true);
         }
     }
-
-    private bool IsTextInputFocused() =>
-        Content?.XamlRoot is { } xamlRoot
-        && FocusManager.GetFocusedElement(xamlRoot) is TextBox or AutoSuggestBox or PasswordBox or RichEditBox or NumberBox;
 
     private void OnTogglePlayShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {

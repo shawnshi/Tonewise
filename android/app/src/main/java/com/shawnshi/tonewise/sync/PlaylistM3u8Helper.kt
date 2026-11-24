@@ -18,6 +18,7 @@
 
 package com.shawnshi.tonewise.sync
 
+import java.text.Normalizer
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.tag.Name
 
@@ -126,29 +127,53 @@ object PlaylistM3u8Helper {
 
     fun buildSongsByRelSuffixMap(songs: Collection<Song>): List<Pair<String, Song>> =
         songs.map { song ->
-            val pathStr =
-                song.path.components.components.joinToString("/").replace('\\', '/').lowercase()
-            pathStr to song
+            val rawRel = song.path.components.components.joinToString("/")
+            val nfcRel = Normalizer.normalize(rawRel, Normalizer.Form.NFC)
+            val cleanRel =
+                LanSyncV2Client.sanitizeRelativePathSegments(nfcRel)
+                    .joinToString("/")
+                    .lowercase()
+            cleanRel to song
         }
 
     fun findMatchingSongByRelPath(
         targetRelPath: String,
         indexedSongs: List<Pair<String, Song>>,
     ): Song? {
+        val nfcTarget = Normalizer.normalize(targetRelPath, Normalizer.Form.NFC)
         val cleanRel =
-            LanSyncV2Client.sanitizeRelativePathSegments(targetRelPath)
+            LanSyncV2Client.sanitizeRelativePathSegments(nfcTarget)
                 .joinToString("/")
                 .lowercase()
         if (cleanRel.isEmpty()) return null
-        return indexedSongs.firstOrNull { (fullRel, _) ->
-            fullRel == cleanRel ||
-                fullRel == "music/$cleanRel" ||
-                fullRel.endsWith("/music/$cleanRel")
-        }?.second
-            ?: indexedSongs.firstOrNull { (fullRel, _) ->
-                fullRel == "tonewise/$cleanRel" ||
-                    fullRel.endsWith("/tonewise/$cleanRel") ||
-                    fullRel.endsWith("/$cleanRel")
+        val exactHit =
+            indexedSongs.firstOrNull { (fullRel, _) ->
+                fullRel == cleanRel ||
+                    fullRel == "music/$cleanRel" ||
+                    fullRel.endsWith("/music/$cleanRel")
             }?.second
+                ?: indexedSongs.firstOrNull { (fullRel, _) ->
+                    fullRel == "tonewise/$cleanRel" ||
+                        fullRel.endsWith("/tonewise/$cleanRel") ||
+                        fullRel.endsWith("/$cleanRel")
+                }?.second
+        if (exactHit != null) return exactHit
+
+        // Unique extension-agnostic stem fallback (e.g. .flac synced/transcoded as .m4a/.mp3)
+        val cleanStem = cleanRel.substringBeforeLast('.')
+        if (cleanStem != cleanRel && cleanStem.isNotEmpty()) {
+            val stemHits =
+                indexedSongs.filter { (fullRel, _) ->
+                    val fullStem = fullRel.substringBeforeLast('.')
+                    fullStem == cleanStem ||
+                        fullStem == "music/$cleanStem" ||
+                        fullStem.endsWith("/music/$cleanStem") ||
+                        fullStem == "tonewise/$cleanStem" ||
+                        fullStem.endsWith("/tonewise/$cleanStem") ||
+                        fullStem.endsWith("/$cleanStem")
+                }
+            if (stemHits.size == 1) return stemHits[0].second
+        }
+        return null
     }
 }

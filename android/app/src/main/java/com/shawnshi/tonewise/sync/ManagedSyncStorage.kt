@@ -32,8 +32,10 @@ import com.shawnshi.tonewise.music.MusicSettings
 import com.shawnshi.tonewise.music.locations.LocationMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -76,14 +78,66 @@ constructor(
     private val safCache = SafPathCache()
     private val uriInspectCache = ConcurrentHashMap<String, ExistingManagedFile>()
     @Volatile private var legacyMediaStoreTonewiseAbsent: Boolean? = null
+    @Volatile private var legacyFileTonewiseAbsent: Boolean? = null
 
     fun invalidatePathCache() {
         safCache.clear()
         uriInspectCache.clear()
         legacyMediaStoreTonewiseAbsent = null
+        legacyFileTonewiseAbsent = null
     }
 
     fun hasWritableMusicSafGrant(): Boolean = pickWritableSafLocation() != null
+
+    fun isStandardPrimaryMusicStorage(): Boolean {
+        val safLocation = pickWritableSafLocation() ?: return true
+        val docId = runCatching { DocumentsContract.getTreeDocumentId(safLocation.uri) }.getOrNull()
+        return isPrimaryMusicTreeDocumentId(docId)
+    }
+
+    fun triggerMediaScanForRelPaths(relPaths: List<String>) {
+        if (relPaths.isEmpty()) return
+        @Suppress("DEPRECATION")
+        val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+        if (!musicDir.exists()) return
+        val absPaths =
+            relPaths.mapNotNull { rel ->
+                val segments = LanSyncV2Client.sanitizeRelativePathSegments(rel)
+                if (segments.isEmpty()) return@mapNotNull null
+                val file = File(musicDir, segments.joinToString("/"))
+                if (file.isFile) file.absolutePath else null
+            }
+        if (absPaths.isEmpty()) return
+        for (chunk in absPaths.chunked(256)) {
+            runCatching {
+                MediaScannerConnection.scanFile(context, chunk.toTypedArray(), null, null)
+            }
+        }
+    }
+
+    private fun legacyFileTonewiseDirIfExists(musicDir: File): File? {
+        if (legacyFileTonewiseAbsent == true) return null
+        val root = File(musicDir, "Tonewise")
+        val exists = root.exists()
+        if (!exists) {
+            legacyFileTonewiseAbsent = true
+            return null
+        }
+        legacyFileTonewiseAbsent = false
+        return root
+    }
+
+    private fun copyFileToOutputStream(src: File, out: OutputStream) {
+        val buf = ByteArray(STREAM_COPY_BUFFER_BYTES)
+        FileInputStream(src).use { input ->
+            while (true) {
+                val read = input.read(buf)
+                if (read < 0) break
+                if (read > 0) out.write(buf, 0, read)
+            }
+        }
+        out.flush()
+    }
 
     fun listAudioFilesInMusicRoot(): List<LocalMusicAudioFile> {
         val safLocation = pickWritableSafLocation()
@@ -785,7 +839,7 @@ constructor(
         runCatching {
             @Suppress("DEPRECATION")
             val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-            var dir = File(musicDir, "Tonewise")
+            var dir = legacyFileTonewiseDirIfExists(musicDir) ?: return@runCatching
             for (seg in parentDirs) {
                 dir = File(dir, seg)
             }
@@ -799,8 +853,12 @@ constructor(
     }
 
     fun inspectExistingManagedFile(entity: SyncedTrackEntity): ExistingManagedFile? {
-        val rawUri = entity.documentUri?.takeIf { it.isNotBlank() } ?: return null
-        return inspectUriOrPath(rawUri)
+        val rawUri = entity.documentUri?.takeIf { it.isNotBlank() }
+        if (rawUri != null) {
+            inspectUriOrPath(rawUri)?.let { return it }
+        }
+        val relPath = entity.relativePath.takeIf { it.isNotBlank() } ?: return null
+        return findExistingManagedFileByRelPath(relPath)
     }
 
     fun findExistingManagedFileByRelPath(targetRelPath: String): ExistingManagedFile? {
@@ -841,7 +899,7 @@ constructor(
         if (file.isFile) {
             return ExistingManagedFile(file.absolutePath, file.length(), file.lastModified())
         }
-        var legacyTargetDir = File(musicDir, "Tonewise")
+        var legacyTargetDir = legacyFileTonewiseDirIfExists(musicDir) ?: return null
         for (seg in parentDirs) {
             legacyTargetDir = File(legacyTargetDir, seg)
         }
@@ -980,7 +1038,7 @@ constructor(
                             ?: throw IOException("无法在 SAF 目录中创建文件: $safeRelPath")
                     try {
                         resolver.openOutputStream(createdUri, "wt")?.use { out ->
-                            partFile.inputStream().use { input -> input.copyTo(out) }
+                            copyFileToOutputStream(partFile, out)
                             out.flush()
                         } ?: throw IOException("无法写入 SAF 目标文件: $safeRelPath")
                     } catch (e: Exception) {
@@ -1051,7 +1109,7 @@ constructor(
         if (tempUri != null) {
             try {
                 resolver.openOutputStream(tempUri, "wt")?.use { out ->
-                    partFile.inputStream().use { input -> input.copyTo(out) }
+                    copyFileToOutputStream(partFile, out)
                     out.flush()
                 } ?: throw IOException("无法写入 SAF 临时文件: $safeRelPath")
 
@@ -1072,7 +1130,7 @@ constructor(
                             ?: throw IOException("无法重建 SAF 目标文件: $safeRelPath")
                     try {
                         resolver.openOutputStream(recreatedUri, "wt")?.use { out ->
-                            partFile.inputStream().use { input -> input.copyTo(out) }
+                            copyFileToOutputStream(partFile, out)
                             out.flush()
                         } ?: throw IOException("无法写入重建后的 SAF 文件: $safeRelPath")
                     } catch (recreateErr: Throwable) {
@@ -1091,7 +1149,7 @@ constructor(
         }
 
         resolver.openOutputStream(existingUri, "wt")?.use { out ->
-            partFile.inputStream().use { input -> input.copyTo(out) }
+            copyFileToOutputStream(partFile, out)
             out.flush()
         } ?: throw IOException("无法覆盖 SAF 目标文件: $safeRelPath")
         return existingUri
@@ -1146,7 +1204,7 @@ constructor(
 
         try {
             resolver.openOutputStream(itemUri, "w")?.use { out ->
-                partFile.inputStream().use { input -> input.copyTo(out) }
+                copyFileToOutputStream(partFile, out)
                 out.flush()
             } ?: throw IOException("无法打开 MediaStore 输出流: $safeRelPath")
 
@@ -1202,9 +1260,7 @@ constructor(
         val expectedSize = partFile.length()
         if (destFile.exists()) destFile.delete()
         if (!partFile.renameTo(destFile)) {
-            partFile.inputStream().use { input ->
-                destFile.outputStream().use { output -> input.copyTo(output) }
-            }
+            destFile.outputStream().use { output -> copyFileToOutputStream(partFile, output) }
             partFile.delete()
         }
         runCatching {
@@ -1467,6 +1523,14 @@ constructor(
     }
 
     companion object {
+        private const val STREAM_COPY_BUFFER_BYTES = 512 * 1024
+
+        internal fun isPrimaryMusicTreeDocumentId(docId: String?): Boolean {
+            if (docId.isNullOrBlank()) return false
+            val normalized = docId.trim().replace('\\', '/').trimEnd('/')
+            return normalized.equals("primary:music", ignoreCase = true)
+        }
+
         private val AUDIO_EXTENSIONS =
             setOf(
                 "flac",

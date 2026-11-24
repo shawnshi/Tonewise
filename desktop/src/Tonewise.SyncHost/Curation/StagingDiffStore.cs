@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
 using Tonewise.Interop;
@@ -32,6 +33,11 @@ public sealed record CurationCommitResult(
     int PhysicalFilesUpdated = 0,
     IReadOnlyList<string>? CommittedTrackUids = null,
     IReadOnlyList<string>? PhysicalWriteFailures = null);
+
+public sealed record RollbackBatchResult(
+    int RolledBackCount,
+    IReadOnlyList<string> AffectedTrackUids,
+    IReadOnlyDictionary<string, Dictionary<string, string?>> ForwardUpdatesByTrack);
 
 /// <summary>
 /// Enforces the two anti-corruption curation laws against `manifest.db`:
@@ -625,7 +631,9 @@ public sealed class StagingDiffStore
             physicalFailures.Count > 0 ? physicalFailures.Values.ToList() : null);
     }
 
-    public int RollbackBatch(string batchId)
+    public int RollbackBatch(string batchId) => RollbackBatchDetailed(batchId).RolledBackCount;
+
+    public RollbackBatchResult RollbackBatchDetailed(string batchId)
     {
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         using var stateConn = OpenStateConnection();
@@ -637,15 +645,15 @@ public sealed class StagingDiffStore
             object? res = checkCmd.ExecuteScalar();
             if (res is null || Convert.ToInt64(res) != 0)
             {
-                return 0;
+                return new RollbackBatchResult(0, [], new Dictionary<string, Dictionary<string, string?>>());
             }
         }
 
-        var items = new List<(string ProposalId, string TrackUid, string FieldName, string? OriginalValue)>();
+        var items = new List<(string ProposalId, string TrackUid, string FieldName, string? OriginalValue, string? SuggestedValue)>();
         using (var listCmd = stateConn.CreateCommand())
         {
             listCmd.CommandText = """
-                SELECT proposal_id, track_uid, field_name, original_value
+                SELECT proposal_id, track_uid, field_name, original_value, suggested_value
                 FROM staging_diff_queue
                 WHERE batch_id = $bid AND status = 'Committed';
                 """;
@@ -657,7 +665,8 @@ public sealed class StagingDiffStore
                     reader.GetString(0),
                     reader.GetString(1),
                     reader.GetString(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3)
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4)
                 ));
             }
         }
@@ -682,7 +691,8 @@ public sealed class StagingDiffStore
 
         var (physicalResults, physicalFailures) = WriteBackPhysicalFilesOutsideTx(conn, rollbackUpdatesByTrack);
 
-        var rolledBackItems = new List<(string ProposalId, string TrackUid, string FieldName, string? OriginalValue)>();
+        var rolledBackItems = new List<(string ProposalId, string TrackUid, string FieldName, string? OriginalValue, string? SuggestedValue)>();
+        var forwardUpdatesByTrack = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
         int skippedCount = 0;
         using (var tx = TonewiseSqlite.BeginImmediateTransaction(conn))
         {
@@ -696,6 +706,12 @@ public sealed class StagingDiffStore
                 }
                 ApplyTrackColumnValue(conn, tx, item.TrackUid, column, item.OriginalValue, nowMs);
                 rolledBackItems.Add(item);
+                if (!forwardUpdatesByTrack.TryGetValue(item.TrackUid, out var fwd))
+                {
+                    fwd = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                    forwardUpdatesByTrack[item.TrackUid] = fwd;
+                }
+                fwd[column] = item.SuggestedValue;
             }
 
             ApplyPhysicalFingerprintsInTx(conn, tx, physicalResults);
@@ -725,15 +741,16 @@ public sealed class StagingDiffStore
             stateTx.Commit();
         }
 
-        return rolledBackItems.Count;
+        var affectedUids = rolledBackItems.Select(x => x.TrackUid).Distinct(StringComparer.Ordinal).ToList();
+        return new RollbackBatchResult(rolledBackItems.Count, affectedUids, forwardUpdatesByTrack);
     }
 
-    private (List<(string TrackUid, AudioFrameFingerprint Fingerprint)> Succeeded, Dictionary<string, string> FailedByTrack) WriteBackPhysicalFilesOutsideTx(
+    private (List<(string TrackUid, AudioFrameFingerprint Fingerprint, long MtimeMs)> Succeeded, Dictionary<string, string> FailedByTrack) WriteBackPhysicalFilesOutsideTx(
         SqliteConnection conn,
         Dictionary<string, Dictionary<string, string?>> updatesByTrack,
         int maxPhysicalFiles = int.MaxValue)
     {
-        var results = new List<(string TrackUid, AudioFrameFingerprint Fingerprint)>();
+        var results = new List<(string TrackUid, AudioFrameFingerprint Fingerprint, long MtimeMs)>();
         var failedByTrack = new Dictionary<string, string>(StringComparer.Ordinal);
         if (string.IsNullOrWhiteSpace(MusicRoot) || updatesByTrack.Count == 0 || maxPhysicalFiles <= 0)
             return (results, failedByTrack);
@@ -741,31 +758,87 @@ public sealed class StagingDiffStore
         string rootFull = Path.GetFullPath(MusicRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
 
+        // Batch-fetch rel_path for target track UIDs up front to avoid per-track SQLite roundtrips.
+        var relPathByUid = new Dictionary<string, string>(updatesByTrack.Count, StringComparer.Ordinal);
+        var uidList = updatesByTrack.Keys.ToList();
+        const int batchSize = 200;
+        for (int offset = 0; offset < uidList.Count; offset += batchSize)
+        {
+            int count = Math.Min(batchSize, uidList.Count - offset);
+            using var pathCmd = conn.CreateCommand();
+            var paramNames = new List<string>(count);
+            for (int i = 0; i < count; i++)
+            {
+                string pName = $"$u{i}";
+                paramNames.Add(pName);
+                pathCmd.Parameters.AddWithValue(pName, uidList[offset + i]);
+            }
+            pathCmd.CommandText = $"SELECT track_uid, rel_path FROM tracks WHERE track_uid IN ({string.Join(",", paramNames)});";
+            using var reader = pathCmd.ExecuteReader();
+            while (reader.Read())
+            {
+                if (!reader.IsDBNull(1))
+                {
+                    string rel = reader.GetString(1);
+                    if (!string.IsNullOrWhiteSpace(rel))
+                    {
+                        relPathByUid[reader.GetString(0)] = rel;
+                    }
+                }
+            }
+        }
+
+        var workItems = new List<(string TrackUid, string RelPath, string FullPath, Dictionary<string, string?> Updates)>(updatesByTrack.Count);
         foreach (var (uid, updates) in updatesByTrack)
         {
-            if (results.Count >= maxPhysicalFiles) break;
-            string? relPath;
-            using (var pathCmd = conn.CreateCommand())
-            {
-                pathCmd.CommandText = "SELECT rel_path FROM tracks WHERE track_uid = $uid;";
-                pathCmd.Parameters.AddWithValue("$uid", uid);
-                relPath = pathCmd.ExecuteScalar() as string;
-            }
-            if (string.IsNullOrWhiteSpace(relPath)) continue;
-
+            if (workItems.Count >= maxPhysicalFiles) break;
+            if (!relPathByUid.TryGetValue(uid, out string? relPath)) continue;
             string fullPath = Path.GetFullPath(Path.Combine(MusicRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
             if (!fullPath.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) || !File.Exists(fullPath))
                 continue;
+            workItems.Add((uid, relPath, fullPath, updates));
+        }
 
+        if (workItems.Count == 1)
+        {
+            var w = workItems[0];
             try
             {
-                var fp = TonewiseCoreClient.WriteAudioTags(fullPath, updates);
-                results.Add((uid, fp));
+                var fp = TonewiseCoreClient.WriteAudioTags(w.FullPath, w.Updates);
+                long mtimeMs = new DateTimeOffset(File.GetLastWriteTimeUtc(w.FullPath)).ToUnixTimeMilliseconds();
+                results.Add((w.TrackUid, fp, mtimeMs));
             }
             catch (Exception ex)
             {
-                failedByTrack[uid] = $"{relPath}: {ex.Message}";
-                System.Diagnostics.Debug.WriteLine($"Physical tag writeback failed for {relPath}: {ex.Message}");
+                failedByTrack[w.TrackUid] = $"{w.RelPath}: {ex.Message}";
+                System.Diagnostics.Debug.WriteLine($"Physical tag writeback failed for {w.RelPath}: {ex.Message}");
+            }
+        }
+        else if (workItems.Count > 1)
+        {
+            var bagOk = new ConcurrentBag<(string TrackUid, AudioFrameFingerprint Fingerprint, long MtimeMs)>();
+            var bagErr = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+            Parallel.ForEach(
+                workItems,
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Min(4, Environment.ProcessorCount) },
+                w =>
+                {
+                    try
+                    {
+                        var fp = TonewiseCoreClient.WriteAudioTags(w.FullPath, w.Updates);
+                        long mtimeMs = new DateTimeOffset(File.GetLastWriteTimeUtc(w.FullPath)).ToUnixTimeMilliseconds();
+                        bagOk.Add((w.TrackUid, fp, mtimeMs));
+                    }
+                    catch (Exception ex)
+                    {
+                        bagErr[w.TrackUid] = $"{w.RelPath}: {ex.Message}";
+                        System.Diagnostics.Debug.WriteLine($"Physical tag writeback failed for {w.RelPath}: {ex.Message}");
+                    }
+                });
+            results.AddRange(bagOk);
+            foreach (var kv in bagErr)
+            {
+                failedByTrack[kv.Key] = kv.Value;
             }
         }
         return (results, failedByTrack);
@@ -774,9 +847,9 @@ public sealed class StagingDiffStore
     private static void ApplyPhysicalFingerprintsInTx(
         SqliteConnection conn,
         SqliteTransaction tx,
-        List<(string TrackUid, AudioFrameFingerprint Fingerprint)> physicalResults)
+        List<(string TrackUid, AudioFrameFingerprint Fingerprint, long MtimeMs)> physicalResults)
     {
-        foreach (var (uid, fp) in physicalResults)
+        foreach (var (uid, fp, mtimeMs) in physicalResults)
         {
             byte[] newHeaderHash = Convert.FromHexString(fp.HeaderBlake3Hex);
             using var syncCmd = conn.CreateCommand();
@@ -785,12 +858,14 @@ public sealed class StagingDiffStore
                 UPDATE tracks
                 SET header_size = $hsize,
                     header_blake3 = $hhash,
-                    file_size = $fsize
+                    file_size = $fsize,
+                    mtime_ms = $mtime
                 WHERE track_uid = $uid;
                 """;
             syncCmd.Parameters.AddWithValue("$hsize", (long)fp.HeaderSize);
             syncCmd.Parameters.AddWithValue("$hhash", newHeaderHash);
             syncCmd.Parameters.AddWithValue("$fsize", (long)fp.FileSize);
+            syncCmd.Parameters.AddWithValue("$mtime", mtimeMs);
             syncCmd.Parameters.AddWithValue("$uid", uid);
             syncCmd.ExecuteNonQuery();
         }

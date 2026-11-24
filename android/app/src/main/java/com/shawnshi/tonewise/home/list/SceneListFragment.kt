@@ -18,11 +18,11 @@
 
 package com.shawnshi.tonewise.home.list
 
-import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -42,6 +42,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -76,21 +77,21 @@ import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.sync.AutoDjEngine
+import com.shawnshi.tonewise.sync.AutoDjTimeProfile
 import com.shawnshi.tonewise.sync.FocusFilterSpec
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SceneBanner
-import com.shawnshi.tonewise.sync.SceneRuleEvaluator
 import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.util.showToast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import org.oxycblt.musikr.Song
 
 /**
- * Library tab displaying reorderable 5D Scene Banners and the interactive 5D DJ Tag Matrix Filter.
+ * Library tab displaying time-aware Auto DJ and 5D Scene Auto DJ mixes (50 tracks each).
  */
 @AndroidEntryPoint
 class SceneListFragment : Fragment() {
@@ -111,11 +112,21 @@ class SceneListFragment : Fragment() {
                 val indexingState by musicModel.indexingState.collectAsStateWithLifecycle()
                 val pendingMutationCount by
                     lanSyncRepository.pendingMutationCount.collectAsStateWithLifecycle()
+                val hasBuiltinRediscovery =
+                    remember(scenes) {
+                        scenes.any { it.id.equals("rediscovery_90d", ignoreCase = true) }
+                    }
                 val rediscoverySpec = remember {
                     FocusFilterSpec(unplayedDaysGte = 90, sortArc = "rediscovery_90d")
                 }
 
                 val scope = rememberCoroutineScope()
+                var lastAutoDjSummary by remember { mutableStateOf<String?>(null) }
+                var isGenerating by remember { mutableStateOf(false) }
+                val timeProfile = remember(indexingState, pendingMutationCount) {
+                    AutoDjEngine.resolveTimeProfile()
+                }
+
                 val sceneCounts by
                     produceState<Map<String, Int>>(
                         initialValue = emptyMap(),
@@ -132,53 +143,77 @@ class SceneListFragment : Fragment() {
                 val rediscoverySongs by
                     produceState<List<Song>>(
                         initialValue = emptyList(),
+                        hasBuiltinRediscovery,
                         indexingState,
                         pendingMutationCount,
                     ) {
                         value =
-                            withContext(Dispatchers.Default) {
-                                lanSyncRepository.matchSongsByFocus(rediscoverySpec)
+                            if (hasBuiltinRediscovery) {
+                                emptyList()
+                            } else {
+                                withContext(Dispatchers.Default) {
+                                    lanSyncRepository.matchSongsByFocus(rediscoverySpec)
+                                }
                             }
                     }
+
+                fun launchAutoDj(scene: SceneBanner?) {
+                    if (isGenerating) return
+                    isGenerating = true
+                    scope.launch {
+                        try {
+                            val (result, ordered) =
+                                withContext(Dispatchers.Default) {
+                                    lanSyncRepository.generateAutoDjPlaylist(
+                                        scene = scene,
+                                        targetCount = AutoDjEngine.DEFAULT_TARGET_COUNT,
+                                    )
+                                }
+                            if (ordered.isNotEmpty()) {
+                                val label = scene?.title ?: "Auto DJ · ${result.profile.periodLabel}"
+                                sessionSlotStore.setActiveScene(label)
+                                lastAutoDjSummary = result.summaryText
+                                playbackModel.play(ordered)
+                                Toast.makeText(
+                                        requireContext().applicationContext,
+                                        result.summaryText,
+                                        Toast.LENGTH_SHORT,
+                                    )
+                                    .show()
+                            } else {
+                                requireContext().showToast(R.string.lbl_scene_no_matches)
+                            }
+                        } finally {
+                            isGenerating = false
+                        }
+                    }
+                }
 
                 TonewiseComposeTheme {
                     SceneTabContent(
                         scenes = scenes,
                         sceneCounts = sceneCounts,
+                        timeProfile = timeProfile,
+                        lastAutoDjSummary = lastAutoDjSummary,
+                        isGenerating = isGenerating,
+                        showStandaloneRediscovery = !hasBuiltinRediscovery,
                         rediscoveryCount = rediscoverySongs.size,
+                        onLaunchAutoDj = { launchAutoDj(null) },
                         onLaunchRediscovery = {
-                            if (rediscoverySongs.isNotEmpty()) {
-                                val title = getString(R.string.lbl_rediscovery_90d_title)
-                                sessionSlotStore.setActiveScene(title)
-                                lanSyncRepository.scheduleM3u8WriteBack(title, rediscoverySongs)
-                                playbackModel.play(rediscoverySongs)
-                            } else {
-                                requireContext().showToast(R.string.lbl_scene_no_matches)
-                            }
+                            launchAutoDj(
+                                SceneBanner(
+                                    id = "rediscovery_90d",
+                                    title = getString(R.string.lbl_rediscovery_90d_title),
+                                    subtitle = getString(R.string.lbl_rediscovery_90d_subtitle),
+                                    accentHex = "#6366F1",
+                                    rawSceneJson =
+                                        """{"id":"rediscovery_90d","sort_arc":"rediscovery_90d","rule":{"all":[{"predicate":{"field":"unplayed_days_gte","op":"gte","value":90}}]}}""",
+                                )
+                            )
                         },
                         onMoveUp = { idx -> lanSyncRepository.moveScene(idx, idx - 1) },
                         onMoveDown = { idx -> lanSyncRepository.moveScene(idx, idx + 1) },
-                        onLaunchScene = { banner ->
-                            scope.launch {
-                                val ordered =
-                                    withContext(Dispatchers.Default) {
-                                        val matched = lanSyncRepository.matchSongsForScene(banner)
-                                        val arc = SceneRuleEvaluator.extractSortArc(banner.rawSceneJson)
-                                        if (arc == "work_shuffle") {
-                                            lanSyncRepository.orderSongsWorkShuffle(matched)
-                                        } else {
-                                            matched
-                                        }
-                                    }
-                                if (ordered.isNotEmpty()) {
-                                    sessionSlotStore.setActiveScene(banner.title)
-                                    lanSyncRepository.scheduleM3u8WriteBack(banner.title, ordered)
-                                    playbackModel.play(ordered)
-                                } else {
-                                    requireContext().showToast(R.string.lbl_scene_no_matches)
-                                }
-                            }
-                        },
+                        onLaunchScene = { banner -> launchAutoDj(banner) },
                     )
                 }
             }
@@ -190,7 +225,12 @@ class SceneListFragment : Fragment() {
 private fun SceneTabContent(
     scenes: List<SceneBanner>,
     sceneCounts: Map<String, Int>,
+    timeProfile: AutoDjTimeProfile,
+    lastAutoDjSummary: String?,
+    isGenerating: Boolean,
+    showStandaloneRediscovery: Boolean,
     rediscoveryCount: Int,
+    onLaunchAutoDj: () -> Unit,
     onLaunchRediscovery: () -> Unit,
     onMoveUp: (Int) -> Unit,
     onMoveDown: (Int) -> Unit,
@@ -206,6 +246,65 @@ private fun SceneTabContent(
                     .verticalScroll(rememberScrollState())
                     .navigationBarsPadding(),
         ) {
+            // Time-aware Auto DJ Hero Card (50 tracks keyed to current local time of day)
+            Surface(
+                modifier =
+                    Modifier.fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(enabled = !isGenerating) { onLaunchAutoDj() },
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+                tonalElevation = 2.dp,
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text =
+                                    "${stringResource(R.string.lbl_autodj_title)} · ${timeProfile.periodLabel}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = stringResource(R.string.lbl_autodj_badge),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        FilledTonalButton(
+                            onClick = onLaunchAutoDj,
+                            enabled = !isGenerating,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_play_24),
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(text = stringResource(R.string.lbl_autodj_action))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = lastAutoDjSummary ?: timeProfile.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.86f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
             Row(
                 modifier =
                     Modifier.fillMaxWidth()
@@ -234,6 +333,7 @@ private fun SceneTabContent(
                 }
             }
 
+            val sceneAutoDjBadge = stringResource(R.string.lbl_scene_autodj_badge)
             scenes.forEachIndexed { index, scene ->
                 val trackCount = sceneCounts[scene.id] ?: 0
                 val countText =
@@ -247,13 +347,17 @@ private fun SceneTabContent(
                         stringResource(R.string.def_song_count)
                     }
                 val detailLine =
-                    if (scene.subtitle.isNotEmpty()) "$countText • ${scene.subtitle}" else countText
+                    if (scene.subtitle.isNotEmpty()) {
+                        "$sceneAutoDjBadge · $countText · ${scene.subtitle}"
+                    } else {
+                        "$sceneAutoDjBadge · $countText"
+                    }
 
                 val accent = parseSceneAccentColor(scene.accentHex, MaterialTheme.colorScheme.primary)
                 Row(
                     modifier =
                         Modifier.fillMaxWidth()
-                            .clickable { onLaunchScene(scene) }
+                            .clickable(enabled = !isGenerating) { onLaunchScene(scene) }
                             .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -322,7 +426,7 @@ private fun SceneTabContent(
                             )
                         }
                     } else {
-                        IconButton(onClick = { onLaunchScene(scene) }) {
+                        IconButton(onClick = { onLaunchScene(scene) }, enabled = !isGenerating) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_play_24),
                                 contentDescription = scene.title,
@@ -333,62 +437,63 @@ private fun SceneTabContent(
                 }
             }
 
-            // Explicit P1-3 anti-filter-bubble entry: Buried Treasures (90d+ unplayed)
-            val rediscoveryCountText =
-                if (rediscoveryCount > 0) {
-                    context.resources.getQuantityString(
-                        R.plurals.fmt_song_count,
-                        rediscoveryCount,
-                        rediscoveryCount,
-                    )
-                } else {
-                    stringResource(R.string.def_song_count)
-                }
-            Row(
-                modifier =
-                    Modifier.fillMaxWidth()
-                        .clickable { onLaunchRediscovery() }
-                        .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
+            if (showStandaloneRediscovery) {
+                val rediscoveryCountText =
+                    if (rediscoveryCount > 0) {
+                        context.resources.getQuantityString(
+                            R.plurals.fmt_song_count,
+                            rediscoveryCount,
+                            rediscoveryCount,
+                        )
+                    } else {
+                        stringResource(R.string.def_song_count)
+                    }
+                Row(
                     modifier =
-                        Modifier.size(56.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.secondaryContainer),
-                    contentAlignment = Alignment.Center,
+                        Modifier.fillMaxWidth()
+                            .clickable(enabled = !isGenerating) { onLaunchRediscovery() }
+                            .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_time_24),
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                        modifier = Modifier.size(28.dp),
-                    )
-                }
-                Spacer(modifier = Modifier.width(16.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.lbl_rediscovery_90d_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text =
-                            "$rediscoveryCountText • ${stringResource(R.string.lbl_rediscovery_90d_subtitle)}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                IconButton(onClick = onLaunchRediscovery) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_play_24),
-                        contentDescription = stringResource(R.string.lbl_rediscovery_90d_title),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Box(
+                        modifier =
+                            Modifier.size(56.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.secondaryContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_time_24),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(28.dp),
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.lbl_rediscovery_90d_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text =
+                                "$sceneAutoDjBadge · $rediscoveryCountText • ${stringResource(R.string.lbl_rediscovery_90d_subtitle)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    IconButton(onClick = onLaunchRediscovery, enabled = !isGenerating) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_play_24),
+                            contentDescription = stringResource(R.string.lbl_rediscovery_90d_title),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
 
