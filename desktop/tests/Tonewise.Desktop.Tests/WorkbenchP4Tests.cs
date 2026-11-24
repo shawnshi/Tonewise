@@ -519,7 +519,7 @@ public sealed class WorkbenchP4Tests
         Assert.Equal(["Above & Beyond", "Justine Suissa"], split1);
 
         var split2 = ArtistEntitySplitter.SplitPerformers("Herbert von Karajan; Berliner Philharmoniker");
-        Assert.Equal(["Herbert von Karajan", "Berliner Philharmoniker"], split2);
+        Assert.Equal(["Herbert von Karajan", "Berlin Philharmonic"], split2);
 
         // Adaptive classical sub-items expand at >=20% when sidebar is expanded, collapse when rail is collapsed
         Assert.False(AdaptiveClassicalHierarchyPolicy.ShouldShowSidebarSubItems(19, 100, alwaysExpandUserSetting: false, isSidebarExpanded: true));
@@ -702,7 +702,7 @@ public sealed class WorkbenchP4Tests
                 using var r = check.ExecuteReader();
                 Assert.True(r.Read());
                 Assert.Equal("Symphony No. 5: I. Allegro con brio", r.GetString(0));
-                Assert.Equal(["Berliner Philharmoniker", "Above & Beyond"], JsonSerializer.Deserialize<string[]>(r.GetString(1))!);
+                Assert.Equal(["Berlin Philharmonic", "Above & Beyond"], JsonSerializer.Deserialize<string[]>(r.GetString(1))!);
                 Assert.Equal(["Ludwig van Beethoven"], JsonSerializer.Deserialize<string[]>(r.GetString(2))!);
                 Assert.Equal(["Carlos Kleiber"], JsonSerializer.Deserialize<string[]>(r.GetString(3))!);
                 Assert.Equal("Symphony No. 5 in C minor, Op. 67", r.GetString(4));

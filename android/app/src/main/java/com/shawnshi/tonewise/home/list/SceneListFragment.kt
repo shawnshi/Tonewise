@@ -23,26 +23,26 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,12 +61,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.platform.rememberNestedScrollInteropConnection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.Fragment
@@ -84,11 +86,15 @@ import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SceneBanner
 import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.oxycblt.musikr.Song
+
+private const val AUTO_DJ_KEY = "__autodj__"
+private const val REDISCOVERY_BUILTIN_ID = "44444444-4444-4444-8444-444444444444"
 
 /**
  * Library tab displaying time-aware Auto DJ and 5D Scene Auto DJ mixes (50 tracks each).
@@ -97,6 +103,7 @@ import org.oxycblt.musikr.Song
 class SceneListFragment : Fragment() {
     @Inject lateinit var lanSyncRepository: LanSyncRepository
     @Inject lateinit var sessionSlotStore: SessionSlotStore
+    @Inject lateinit var uiSettings: UISettings
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val musicModel: MusicViewModel by activityViewModels()
 
@@ -109,23 +116,23 @@ class SceneListFragment : Fragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val scenes by lanSyncRepository.scenes.collectAsStateWithLifecycle()
+                val activeSceneLabel by sessionSlotStore.activeSceneLabel.collectAsStateWithLifecycle()
                 val indexingState by musicModel.indexingState.collectAsStateWithLifecycle()
                 val pendingMutationCount by
                     lanSyncRepository.pendingMutationCount.collectAsStateWithLifecycle()
                 val hasBuiltinRediscovery =
-                    remember(scenes) {
-                        scenes.any { it.id.equals("rediscovery_90d", ignoreCase = true) }
-                    }
+                    remember(scenes) { hasBuiltinRediscoveryScene(scenes) }
                 val rediscoverySpec = remember {
                     FocusFilterSpec(unplayedDaysGte = 90, sortArc = "rediscovery_90d")
                 }
 
                 val scope = rememberCoroutineScope()
                 var lastAutoDjSummary by remember { mutableStateOf<String?>(null) }
-                var isGenerating by remember { mutableStateOf(false) }
+                var generatingKey by remember { mutableStateOf<String?>(null) }
                 val timeProfile = remember(indexingState, pendingMutationCount) {
                     AutoDjEngine.resolveTimeProfile()
                 }
+                val roundMode = remember { uiSettings.roundMode }
 
                 val sceneCounts by
                     produceState<Map<String, Int>>(
@@ -158,8 +165,8 @@ class SceneListFragment : Fragment() {
                     }
 
                 fun launchAutoDj(scene: SceneBanner?) {
-                    if (isGenerating) return
-                    isGenerating = true
+                    if (generatingKey != null) return
+                    generatingKey = scene?.id ?: AUTO_DJ_KEY
                     scope.launch {
                         try {
                             val (result, ordered) =
@@ -184,7 +191,7 @@ class SceneListFragment : Fragment() {
                                 requireContext().showToast(R.string.lbl_scene_no_matches)
                             }
                         } finally {
-                            isGenerating = false
+                            generatingKey = null
                         }
                     }
                 }
@@ -193,9 +200,11 @@ class SceneListFragment : Fragment() {
                     SceneTabContent(
                         scenes = scenes,
                         sceneCounts = sceneCounts,
+                        activeSceneLabel = activeSceneLabel,
                         timeProfile = timeProfile,
                         lastAutoDjSummary = lastAutoDjSummary,
-                        isGenerating = isGenerating,
+                        generatingKey = generatingKey,
+                        roundMode = roundMode,
                         showStandaloneRediscovery = !hasBuiltinRediscovery,
                         rediscoveryCount = rediscoverySongs.size,
                         onLaunchAutoDj = { launchAutoDj(null) },
@@ -225,9 +234,11 @@ class SceneListFragment : Fragment() {
 private fun SceneTabContent(
     scenes: List<SceneBanner>,
     sceneCounts: Map<String, Int>,
+    activeSceneLabel: String,
     timeProfile: AutoDjTimeProfile,
     lastAutoDjSummary: String?,
-    isGenerating: Boolean,
+    generatingKey: String?,
+    roundMode: Boolean,
     showStandaloneRediscovery: Boolean,
     rediscoveryCount: Int,
     onLaunchAutoDj: () -> Unit,
@@ -238,103 +249,88 @@ private fun SceneTabContent(
 ) {
     val context = LocalContext.current
     var isReorderMode by remember { mutableStateOf(false) }
+    val isBusy = generatingKey != null
+    val tileShape = remember(roundMode) {
+        if (roundMode) RoundedCornerShape(12.dp) else RoundedCornerShape(0.dp)
+    }
+    val nestedScrollInterop = rememberNestedScrollInteropConnection()
 
     Surface(modifier = Modifier.fillMaxSize(), color = Color.Transparent) {
-        Column(
+        LazyColumn(
             modifier =
                 Modifier.fillMaxSize()
-                    .verticalScroll(rememberScrollState())
+                    .nestedScroll(nestedScrollInterop)
                     .navigationBarsPadding(),
+            contentPadding = PaddingValues(bottom = 88.dp),
         ) {
-            // Time-aware Auto DJ Hero Card (50 tracks keyed to current local time of day)
-            Surface(
-                modifier =
-                    Modifier.fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable(enabled = !isGenerating) { onLaunchAutoDj() },
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
-                tonalElevation = 2.dp,
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text =
-                                    "${stringResource(R.string.lbl_autodj_title)} · ${timeProfile.periodLabel}",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = stringResource(R.string.lbl_autodj_badge),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        FilledTonalButton(
-                            onClick = onLaunchAutoDj,
-                            enabled = !isGenerating,
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_play_24),
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(text = stringResource(R.string.lbl_autodj_action))
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
+            item(key = "header_autodj") {
+                Box(
+                    modifier =
+                        Modifier.fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
                     Text(
-                        text = lastAutoDjSummary ?: timeProfile.description,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.86f),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                        text = stringResource(R.string.lbl_autodj_title),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.secondary,
                     )
                 }
             }
 
-            Row(
-                modifier =
-                    Modifier.fillMaxWidth()
-                        .defaultMinSize(minHeight = 48.dp)
-                        .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.lbl_scenes),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.secondary,
+            item(key = "row_autodj") {
+                val isAutoDjActive = activeSceneLabel.startsWith("Auto DJ")
+                val autoDjBadge = stringResource(R.string.lbl_autodj_badge)
+                val autoDjSubtitle = lastAutoDjSummary ?: "$autoDjBadge • ${timeProfile.description}"
+                SceneListRow(
+                    title = timeProfile.periodLabel,
+                    subtitle = autoDjSubtitle,
+                    iconRes = R.drawable.ic_auto_24,
+                    tileShape = tileShape,
+                    isActive = isAutoDjActive,
+                    isGenerating = generatingKey == AUTO_DJ_KEY,
+                    enabled = !isBusy,
+                    idleTileColor = MaterialTheme.colorScheme.secondaryContainer,
+                    idleIconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                    actionContentDescription = stringResource(R.string.lbl_autodj_action),
+                    onClick = onLaunchAutoDj,
                 )
-                TextButton(onClick = { isReorderMode = !isReorderMode }) {
+            }
+
+            item(key = "header_scenes") {
+                Row(
+                    modifier =
+                        Modifier.fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .padding(start = 16.dp, end = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
-                        text =
-                            stringResource(
-                                if (isReorderMode) {
-                                    R.string.lbl_scene_done
-                                } else {
-                                    R.string.lbl_scene_reorder
-                                }
-                            )
+                        text = stringResource(R.string.lbl_scenes),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.secondary,
                     )
+                    TextButton(onClick = { isReorderMode = !isReorderMode }) {
+                        Text(
+                            text =
+                                stringResource(
+                                    if (isReorderMode) {
+                                        R.string.lbl_scene_done
+                                    } else {
+                                        R.string.lbl_scene_reorder
+                                    }
+                                )
+                        )
+                    }
                 }
             }
 
-            val sceneAutoDjBadge = stringResource(R.string.lbl_scene_autodj_badge)
-            scenes.forEachIndexed { index, scene ->
+            itemsIndexed(
+                items = scenes,
+                key = { _, scene -> scene.id },
+            ) { index, scene ->
                 val trackCount = sceneCounts[scene.id] ?: 0
                 val countText =
                     if (trackCount > 0) {
@@ -348,160 +344,225 @@ private fun SceneTabContent(
                     }
                 val detailLine =
                     if (scene.subtitle.isNotEmpty()) {
-                        "$sceneAutoDjBadge · $countText · ${scene.subtitle}"
+                        "$countText • ${scene.subtitle}"
                     } else {
-                        "$sceneAutoDjBadge · $countText"
+                        countText
                     }
+                val isActive = activeSceneLabel == scene.title
 
-                val accent = parseSceneAccentColor(scene.accentHex, MaterialTheme.colorScheme.primary)
-                Row(
-                    modifier =
-                        Modifier.fillMaxWidth()
-                            .clickable(enabled = !isGenerating) { onLaunchScene(scene) }
-                            .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        modifier =
-                            Modifier.size(56.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(accent.copy(alpha = 0.14f))
-                                .border(1.dp, accent.copy(alpha = 0.30f), RoundedCornerShape(12.dp)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_playlist_24),
-                            contentDescription = null,
-                            tint = accent,
-                            modifier = Modifier.size(28.dp),
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = scene.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = detailLine,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    if (isReorderMode) {
-                        IconButton(
-                            onClick = { onMoveUp(index) },
-                            enabled = index > 0,
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_down_24),
-                                contentDescription = stringResource(R.string.lbl_scene_move_up),
-                                tint =
-                                    if (index > 0) {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
-                                    },
-                                modifier = Modifier.rotate(180f),
-                            )
-                        }
-                        IconButton(
-                            onClick = { onMoveDown(index) },
-                            enabled = index < scenes.lastIndex,
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_down_24),
-                                contentDescription = stringResource(R.string.lbl_scene_move_down),
-                                tint =
-                                    if (index < scenes.lastIndex) {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
-                                    },
-                            )
-                        }
-                    } else {
-                        IconButton(onClick = { onLaunchScene(scene) }, enabled = !isGenerating) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_play_24),
-                                contentDescription = scene.title,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
+                SceneListRow(
+                    title = scene.title,
+                    subtitle = detailLine,
+                    iconRes = resolveSceneIconRes(scene),
+                    tileShape = tileShape,
+                    isActive = isActive,
+                    isGenerating = generatingKey == scene.id,
+                    enabled = !isBusy,
+                    idleTileColor = MaterialTheme.colorScheme.surfaceContainer,
+                    idleIconTint = MaterialTheme.colorScheme.onSurface,
+                    actionContentDescription = scene.title,
+                    onClick = { onLaunchScene(scene) },
+                    trailingContent =
+                        if (isReorderMode) {
+                            {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = { onMoveUp(index) },
+                                        enabled = index > 0,
+                                    ) {
+                                        Icon(
+                                            painter = painterResource(R.drawable.ic_down_24),
+                                            contentDescription = stringResource(R.string.lbl_scene_move_up),
+                                            tint =
+                                                if (index > 0) {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                                        alpha = 0.38f
+                                                    )
+                                                },
+                                            modifier = Modifier.rotate(180f),
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onMoveDown(index) },
+                                        enabled = index < scenes.lastIndex,
+                                    ) {
+                                        Icon(
+                                            painter = painterResource(R.drawable.ic_down_24),
+                                            contentDescription =
+                                                stringResource(R.string.lbl_scene_move_down),
+                                            tint =
+                                                if (index < scenes.lastIndex) {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                                        alpha = 0.38f
+                                                    )
+                                                },
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            null
+                        },
+                )
             }
 
             if (showStandaloneRediscovery) {
-                val rediscoveryCountText =
-                    if (rediscoveryCount > 0) {
-                        context.resources.getQuantityString(
-                            R.plurals.fmt_song_count,
-                            rediscoveryCount,
-                            rediscoveryCount,
-                        )
-                    } else {
-                        stringResource(R.string.def_song_count)
-                    }
-                Row(
-                    modifier =
-                        Modifier.fillMaxWidth()
-                            .clickable(enabled = !isGenerating) { onLaunchRediscovery() }
-                            .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        modifier =
-                            Modifier.size(56.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.secondaryContainer),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_time_24),
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                            modifier = Modifier.size(28.dp),
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = stringResource(R.string.lbl_rediscovery_90d_title),
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text =
-                                "$sceneAutoDjBadge · $rediscoveryCountText • ${stringResource(R.string.lbl_rediscovery_90d_subtitle)}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    IconButton(onClick = onLaunchRediscovery, enabled = !isGenerating) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_play_24),
-                            contentDescription = stringResource(R.string.lbl_rediscovery_90d_title),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                item(key = "row_rediscovery_90d") {
+                    val rediscoveryTitle = stringResource(R.string.lbl_rediscovery_90d_title)
+                    val rediscoveryCountText =
+                        if (rediscoveryCount > 0) {
+                            context.resources.getQuantityString(
+                                R.plurals.fmt_song_count,
+                                rediscoveryCount,
+                                rediscoveryCount,
+                            )
+                        } else {
+                            stringResource(R.string.def_song_count)
+                        }
+                    val detailLine =
+                        "$rediscoveryCountText • ${stringResource(R.string.lbl_rediscovery_90d_subtitle)}"
+
+                    SceneListRow(
+                        title = rediscoveryTitle,
+                        subtitle = detailLine,
+                        iconRes = R.drawable.ic_time_24,
+                        tileShape = tileShape,
+                        isActive = activeSceneLabel == rediscoveryTitle,
+                        isGenerating = generatingKey == "rediscovery_90d",
+                        enabled = !isBusy,
+                        idleTileColor = MaterialTheme.colorScheme.surfaceContainer,
+                        idleIconTint = MaterialTheme.colorScheme.onSurface,
+                        actionContentDescription = rediscoveryTitle,
+                        onClick = onLaunchRediscovery,
+                    )
                 }
             }
-
-            // Reserve space for the bottom mini playback bar & FAB.
-            Spacer(modifier = Modifier.height(104.dp))
         }
     }
 }
 
-private fun parseSceneAccentColor(hex: String, fallback: Color): Color =
-    runCatching { Color(android.graphics.Color.parseColor(hex)) }.getOrDefault(fallback)
+@Composable
+private fun SceneListRow(
+    title: String,
+    subtitle: String,
+    @DrawableRes iconRes: Int,
+    tileShape: Shape,
+    isActive: Boolean,
+    isGenerating: Boolean,
+    enabled: Boolean,
+    idleTileColor: Color,
+    idleIconTint: Color,
+    actionContentDescription: String,
+    onClick: () -> Unit,
+    trailingContent: (@Composable () -> Unit)? = null,
+) {
+    val tileBg = if (isActive) MaterialTheme.colorScheme.primaryContainer else idleTileColor
+    val tileTint = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else idleIconTint
+    val titleColor = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+    val actionTint =
+        if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+
+    Row(
+        modifier =
+            Modifier.fillMaxWidth()
+                .clickable(enabled = enabled, onClick = onClick)
+                .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier =
+                Modifier.size(56.dp)
+                    .clip(tileShape)
+                    .background(tileBg),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                tint = tileTint,
+                modifier = Modifier.size(28.dp),
+            )
+        }
+        Spacer(modifier = Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = titleColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        if (trailingContent != null) {
+            trailingContent()
+        } else if (isGenerating) {
+            Box(
+                modifier = Modifier.size(48.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        } else {
+            IconButton(onClick = onClick, enabled = enabled) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_play_24),
+                    contentDescription = actionContentDescription,
+                    tint = actionTint,
+                )
+            }
+        }
+    }
+}
+
+internal fun hasBuiltinRediscoveryScene(scenes: List<SceneBanner>): Boolean =
+    scenes.any {
+        it.id.equals("rediscovery_90d", ignoreCase = true) ||
+            it.id.equals(REDISCOVERY_BUILTIN_ID, ignoreCase = true) ||
+            it.rawSceneJson.contains("\"rediscovery_90d\"", ignoreCase = true) ||
+            it.rawSceneJson.contains("\"unplayed_days_gte\"", ignoreCase = true)
+    }
+
+@DrawableRes
+internal fun resolveSceneIconRes(scene: SceneBanner): Int {
+    val raw = scene.rawSceneJson.lowercase()
+    val id = scene.id.lowercase()
+    val title = scene.title.lowercase()
+    return when {
+        id == "rediscovery_90d" ||
+            id == REDISCOVERY_BUILTIN_ID ||
+            raw.contains("\"rediscovery_90d\"") ||
+            raw.contains("\"unplayed_days_gte\"") -> R.drawable.ic_time_24
+        id == "22222222-2222-4222-8222-222222222222" ||
+            raw.contains("\"coding\"") ||
+            title.contains("coding") -> R.drawable.ic_code_24
+        id == "33333333-3333-4333-8333-333333333333" ||
+            raw.contains("\"relax\"") ||
+            title.contains("relax") -> R.drawable.ic_dark_24
+        id == "55555555-5555-4555-8555-555555555555" ||
+            raw.contains("\"energy\"") ||
+            title.contains("energy") -> R.drawable.ic_light_24
+        id == "66666666-6666-4666-8666-666666666666" ||
+            raw.contains("\"pop\"") ||
+            title.contains("pop") -> R.drawable.ic_song_24
+        id == "11111111-1111-4111-8111-111111111111" ||
+            raw.contains("\"focus\"") ||
+            title.contains("focus") -> R.drawable.ic_filter_24
+        else -> R.drawable.ic_playlist_24
+    }
+}

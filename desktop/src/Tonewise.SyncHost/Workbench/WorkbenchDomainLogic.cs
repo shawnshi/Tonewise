@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Tonewise.Interop;
 
 namespace Tonewise.SyncHost.Workbench;
@@ -352,6 +353,15 @@ public static class SessionSlotStore
 
 public static class ArtistEntitySplitter
 {
+    private static readonly Regex JrSrSuffixRegex = new(
+        @",\s*(?:Jr\.?|Sr\.?)(?=\s*(?:$|[,;/&\0]))",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private sealed record AliasTable(
+        Dictionary<string, string> CanonicalAliases,
+        Dictionary<string, IReadOnlyList<string>> MultiValueAliases,
+        Dictionary<string, string> ComposerShortAliases);
+
     private static readonly Lazy<IReadOnlyList<string>> LazyWhitelist = new(() =>
     {
         var asm = typeof(ArtistEntitySplitter).Assembly;
@@ -371,23 +381,197 @@ public static class ArtistEntitySplitter
         return [];
     });
 
-    public static IReadOnlyList<string> Whitelist => LazyWhitelist.Value;
-
-    public static IReadOnlyList<string> SplitPerformers(string? raw)
+    private static readonly Lazy<AliasTable> LazyAliases = new(() =>
     {
-        if (string.IsNullOrWhiteSpace(raw)) return [];
-        string working = raw.Trim();
-        var whitelist = Whitelist;
-        foreach (string w in whitelist)
+        var asm = typeof(ArtistEntitySplitter).Assembly;
+        const string resourceName = "Tonewise.SyncHost.protocol.artist_aliases.json";
+        using Stream? stream = asm.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded alias dictionary resource '{resourceName}' not found.");
+        using var doc = JsonDocument.Parse(stream);
+
+        var canonical = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (doc.RootElement.TryGetProperty("canonical_aliases", out var cObj) && cObj.ValueKind == JsonValueKind.Object)
         {
-            if (string.Equals(working, w, StringComparison.OrdinalIgnoreCase))
+            foreach (var prop in cObj.EnumerateObject())
             {
-                return [working];
+                string key = NormalizePunctuationAndHygiene(prop.Name);
+                string val = NormalizePunctuationAndHygiene(prop.Value.GetString());
+                if (!string.IsNullOrEmpty(key) && !string.IsNullOrEmpty(val))
+                {
+                    canonical[key] = val;
+                }
             }
         }
 
+        var multi = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+        if (doc.RootElement.TryGetProperty("multi_value_aliases", out var mObj) && mObj.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in mObj.EnumerateObject())
+            {
+                string key = NormalizePunctuationAndHygiene(prop.Name);
+                if (string.IsNullOrEmpty(key) || prop.Value.ValueKind != JsonValueKind.Array) continue;
+                var vals = prop.Value.EnumerateArray()
+                    .Where(e => e.ValueKind == JsonValueKind.String)
+                    .Select(e => NormalizePunctuationAndHygiene(e.GetString()))
+                    .Where(s => !string.IsNullOrEmpty(s))
+                    .ToList();
+                if (vals.Count > 0)
+                {
+                    multi[key] = vals;
+                }
+            }
+        }
+
+        var composerShort = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (doc.RootElement.TryGetProperty("composer_short_aliases", out var csObj) && csObj.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in csObj.EnumerateObject())
+            {
+                string key = NormalizePunctuationAndHygiene(prop.Name);
+                string val = NormalizePunctuationAndHygiene(prop.Value.GetString());
+                if (!string.IsNullOrEmpty(key) && !string.IsNullOrEmpty(val))
+                {
+                    composerShort[key] = val;
+                }
+            }
+        }
+
+        return new AliasTable(canonical, multi, composerShort);
+    });
+
+    public static IReadOnlyList<string> Whitelist => LazyWhitelist.Value;
+    private static AliasTable Aliases => LazyAliases.Value;
+
+    public static string NormalizePunctuationAndWhitespace(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return "";
+        var sb = new StringBuilder(raw.Length);
+        bool prevSpace = true;
+        foreach (char ch in raw)
+        {
+            switch (ch)
+            {
+                case '\u200B':
+                case '\uFEFF':
+                    break;
+                case '\u2010':
+                case '\u2011':
+                case '\u2012':
+                case '\u2013':
+                case '\u2212':
+                case '\uFE63':
+                case '\uFF0D':
+                    sb.Append('-');
+                    prevSpace = false;
+                    break;
+                case '\u2018':
+                case '\u2019':
+                case '\u201B':
+                case '\u02BC':
+                case '\uFF07':
+                    sb.Append('\'');
+                    prevSpace = false;
+                    break;
+                default:
+                    if (char.IsWhiteSpace(ch))
+                    {
+                        if (!prevSpace)
+                        {
+                            sb.Append(' ');
+                            prevSpace = true;
+                        }
+                    }
+                    else
+                    {
+                        sb.Append(ch);
+                        prevSpace = false;
+                    }
+                    break;
+            }
+        }
+        if (sb.Length > 0 && sb[^1] == ' ')
+        {
+            sb.Length--;
+        }
+        return sb.ToString();
+    }
+
+    public static string NormalizePunctuationAndHygiene(string? raw)
+    {
+        string s = NormalizePunctuationAndWhitespace(raw);
+        if (s.Length == 0) return "";
+        while (s.EndsWith("(writer)", StringComparison.OrdinalIgnoreCase))
+        {
+            s = s[..^"(writer)".Length].TrimEnd();
+        }
+        return s.Trim();
+    }
+
+    public static string NormalizePerformerName(string? raw)
+    {
+        string clean = NormalizePunctuationAndHygiene(raw);
+        if (clean.Length == 0) return "";
+        return Aliases.CanonicalAliases.TryGetValue(clean, out string? canonical) ? canonical : clean;
+    }
+
+    public static string NormalizeComposerName(string? raw)
+    {
+        string clean = NormalizePunctuationAndHygiene(raw);
+        if (clean.Length == 0) return "";
+        if (Aliases.ComposerShortAliases.TryGetValue(clean, out string? expanded))
+        {
+            return Aliases.CanonicalAliases.TryGetValue(expanded, out string? c) ? c : expanded;
+        }
+        return Aliases.CanonicalAliases.TryGetValue(clean, out string? canonical) ? canonical : clean;
+    }
+
+    public static bool TryExpandMultiValueAlias(string? raw, bool composerMode, out IReadOnlyList<string> expanded)
+    {
+        string clean = NormalizePunctuationAndHygiene(raw);
+        if (clean.Length > 0 && Aliases.MultiValueAliases.TryGetValue(clean, out var rawItems))
+        {
+            var list = new List<string>(rawItems.Count);
+            foreach (string item in rawItems)
+            {
+                string norm = composerMode ? NormalizeComposerName(item) : NormalizePerformerName(item);
+                if (!string.IsNullOrEmpty(norm)) list.Add(norm);
+            }
+            expanded = list;
+            return list.Count > 0;
+        }
+        expanded = [];
+        return false;
+    }
+
+    public static IReadOnlyList<string> NormalizeEntityArray(IEnumerable<string?> items, bool composerMode = false)
+    {
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string? raw in items)
+        {
+            string clean = NormalizePunctuationAndHygiene(raw);
+            if (clean.Length == 0) continue;
+            if (TryExpandMultiValueAlias(clean, composerMode, out var expanded))
+            {
+                foreach (string e in expanded)
+                {
+                    if (seen.Add(e)) result.Add(e);
+                }
+            }
+            else
+            {
+                string norm = composerMode ? NormalizeComposerName(clean) : NormalizePerformerName(clean);
+                if (norm.Length > 0 && seen.Add(norm)) result.Add(norm);
+            }
+        }
+        return result;
+    }
+
+    private static (string Working, List<(string Token, string Original)> Replacements) ProtectWhitelistAndJrSr(string working)
+    {
         var replacements = new List<(string Token, string Original)>();
         int seq = 0;
+        var whitelist = Whitelist;
         for (int i = 0; i < whitelist.Count; i++)
         {
             string protectedName = whitelist[i];
@@ -401,38 +585,143 @@ public static class ArtistEntitySplitter
             }
         }
 
-        static string Restore(string s, List<(string Token, string Original)> map)
+        working = JrSrSuffixRegex.Replace(working, m =>
         {
-            string res = s;
-            foreach (var (token, original) in map)
+            string token = $"__TW_JRSR_{seq++}__";
+            replacements.Add((token, m.Value));
+            return token;
+        });
+
+        return (working, replacements);
+    }
+
+    private static string RestorePlaceholders(string s, List<(string Token, string Original)> map)
+    {
+        string res = s;
+        for (int i = map.Count - 1; i >= 0; i--)
+        {
+            var (token, original) = map[i];
+            if (res.Contains(token, StringComparison.Ordinal))
             {
-                if (res.Contains(token, StringComparison.Ordinal))
-                {
-                    res = res.Replace(token, original, StringComparison.Ordinal);
-                }
+                res = res.Replace(token, original, StringComparison.Ordinal);
             }
-            return res.Trim();
+        }
+        return res.Trim();
+    }
+
+    public static string NormalizeAlbumArtist(string? raw)
+    {
+        string clean = NormalizePunctuationAndHygiene(raw);
+        if (clean.Length == 0) return "";
+        if (TryExpandMultiValueAlias(clean, composerMode: false, out var fullExpanded))
+        {
+            return string.Join(", ", fullExpanded);
+        }
+        if (Aliases.CanonicalAliases.TryGetValue(clean, out string? fullCanonical))
+        {
+            return fullCanonical;
         }
 
+        var (working, replacements) = ProtectWhitelistAndJrSr(clean);
+        string[] delimiters = ["; ", ", ", " & ", ";", ","];
+        var sb = new StringBuilder(clean.Length);
+        int pos = 0;
+        while (pos <= working.Length)
+        {
+            int bestIdx = -1;
+            string? bestDelim = null;
+            foreach (string delim in delimiters)
+            {
+                int found = working.IndexOf(delim, pos, StringComparison.Ordinal);
+                if (found >= 0 && (bestIdx < 0 || found < bestIdx || (found == bestIdx && delim.Length > bestDelim!.Length)))
+                {
+                    bestIdx = found;
+                    bestDelim = delim;
+                }
+            }
+
+            int segEnd = bestIdx >= 0 ? bestIdx : working.Length;
+            string segRaw = RestorePlaceholders(working[pos..segEnd], replacements);
+            string segClean = NormalizePunctuationAndHygiene(segRaw);
+            if (segClean.Length > 0)
+            {
+                if (TryExpandMultiValueAlias(segClean, composerMode: false, out var segExpanded))
+                {
+                    sb.Append(string.Join(", ", segExpanded));
+                }
+                else
+                {
+                    sb.Append(NormalizePerformerName(segClean));
+                }
+            }
+
+            if (bestDelim is null) break;
+            sb.Append(bestDelim);
+            pos = bestIdx + bestDelim.Length;
+        }
+        return sb.ToString().Trim();
+    }
+
+    public static IReadOnlyList<string> SplitPerformers(string? raw) =>
+        SplitEntitiesInternal(raw, composerMode: false);
+
+    public static IReadOnlyList<string> SplitComposers(string? raw) =>
+        SplitEntitiesInternal(raw, composerMode: true);
+
+    private static IReadOnlyList<string> SplitEntitiesInternal(string? raw, bool composerMode)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return [];
+        string working = NormalizePunctuationAndWhitespace(raw);
+        if (working.Length == 0) return [];
+
+        foreach (string w in Whitelist)
+        {
+            if (string.Equals(working, w, StringComparison.OrdinalIgnoreCase))
+            {
+                return [working];
+            }
+        }
+
+        var (protectedWorking, replacements) = ProtectWhitelistAndJrSr(working);
         var result = new List<string>();
-        foreach (string part in working.Split(['/', ';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void AddRestoredSegment(string rawPart)
+        {
+            string restored = RestorePlaceholders(rawPart, replacements);
+            string cleaned = NormalizePunctuationAndHygiene(restored);
+            if (cleaned.Length == 0) return;
+
+            if (TryExpandMultiValueAlias(cleaned, composerMode, out var expanded))
+            {
+                foreach (string item in expanded)
+                {
+                    if (seen.Add(item)) result.Add(item);
+                }
+            }
+            else
+            {
+                string norm = composerMode ? NormalizeComposerName(cleaned) : NormalizePerformerName(cleaned);
+                if (norm.Length > 0 && seen.Add(norm)) result.Add(norm);
+            }
+        }
+
+        foreach (string part in protectedWorking.Split(['/', ';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             if (string.IsNullOrWhiteSpace(part)) continue;
             if (part.Contains(" & ", StringComparison.Ordinal))
             {
                 foreach (string sub in part.Split([" & "], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 {
-                    string restored = Restore(sub, replacements);
-                    if (!string.IsNullOrWhiteSpace(restored)) result.Add(restored);
+                    AddRestoredSegment(sub);
                 }
             }
             else
             {
-                string restored = Restore(part, replacements);
-                if (!string.IsNullOrWhiteSpace(restored)) result.Add(restored);
+                AddRestoredSegment(part);
             }
         }
-        return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return result;
     }
 }
 

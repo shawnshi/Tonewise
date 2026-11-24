@@ -88,7 +88,9 @@ public sealed partial class BasicMetadataLookupService
             || (!effectiveYear.HasValue && !onlineYear.HasValue))
         {
             string queryTitle = effectiveTitle;
-            string queryArtist = !string.IsNullOrWhiteSpace(effectiveArtist) ? PrimaryToken(effectiveArtist) : (onlineArtist ?? "");
+            string queryArtist = !string.IsNullOrWhiteSpace(effectiveArtist)
+                ? PrimaryToken(effectiveArtist)
+                : (string.IsNullOrWhiteSpace(onlineArtist) ? "" : PrimaryToken(onlineArtist));
             if (!string.IsNullOrWhiteSpace(queryTitle))
             {
                 var mb = await QueryMusicBrainzRecordingAsync(queryArtist, queryTitle, q.DurationMs, ct);
@@ -107,7 +109,9 @@ public sealed partial class BasicMetadataLookupService
             || (string.IsNullOrWhiteSpace(effectiveAlbum) && string.IsNullOrWhiteSpace(onlineAlbum))
             || (string.IsNullOrWhiteSpace(q.Artists) && string.IsNullOrWhiteSpace(onlineArtist)))
         {
-            string? dbArtistQuery = !string.IsNullOrWhiteSpace(effectiveArtist) ? PrimaryToken(effectiveArtist) : onlineArtist;
+            string? dbArtistQuery = !string.IsNullOrWhiteSpace(effectiveArtist)
+                ? PrimaryToken(effectiveArtist)
+                : (string.IsNullOrWhiteSpace(onlineArtist) ? null : PrimaryToken(onlineArtist));
             string dbAlbumQuery = !string.IsNullOrWhiteSpace(effectiveAlbum) ? effectiveAlbum : (onlineAlbum ?? "");
             var db = await QueryDoubanMusicAsync(dbArtistQuery ?? "", dbAlbumQuery, effectiveTitle, ct);
             onlineArtist ??= db.Artist;
@@ -125,17 +129,25 @@ public sealed partial class BasicMetadataLookupService
             && (string.IsNullOrWhiteSpace(q.Genre) && string.IsNullOrWhiteSpace(onlineGenre)
                 || string.IsNullOrWhiteSpace(effectiveAlbum) && string.IsNullOrWhiteSpace(onlineAlbum)))
         {
-            string lfmArtist = !string.IsNullOrWhiteSpace(effectiveArtist) ? PrimaryToken(effectiveArtist) : onlineArtist!;
+            string lfmArtist = !string.IsNullOrWhiteSpace(effectiveArtist) ? PrimaryToken(effectiveArtist) : PrimaryToken(onlineArtist!);
             var (lfmAlbum, lfmGenre) = await QueryLastFmTrackInfoAsync(lastFmApiKey, lfmArtist, effectiveTitle, ct);
             onlineAlbum ??= lfmAlbum;
             onlineGenre ??= lfmGenre;
         }
 
-        // 5) Collect strictly Fill-Missing field updates
+        // 5) Collect strictly Fill-Missing field updates (normalized)
+        IReadOnlyList<string> resolvedArtists = [];
         if (string.IsNullOrWhiteSpace(q.Artists))
         {
             string? val = !string.IsNullOrWhiteSpace(onlineArtist) ? onlineArtist : pathArtist;
-            if (!string.IsNullOrWhiteSpace(val)) updates["artists_json"] = val.Trim();
+            if (!string.IsNullOrWhiteSpace(val))
+            {
+                resolvedArtists = ArtistEntitySplitter.SplitPerformers(val);
+                if (resolvedArtists.Count > 0)
+                {
+                    updates["artists_json"] = JsonSerializer.Serialize(resolvedArtists);
+                }
+            }
         }
         if (string.IsNullOrWhiteSpace(q.Album))
         {
@@ -158,7 +170,11 @@ public sealed partial class BasicMetadataLookupService
         }
         if (string.IsNullOrWhiteSpace(q.Composers) && !string.IsNullOrWhiteSpace(inferredComposer))
         {
-            updates["composers_json"] = inferredComposer;
+            var splitComposers = ArtistEntitySplitter.SplitComposers(inferredComposer);
+            if (splitComposers.Count > 0)
+            {
+                updates["composers_json"] = JsonSerializer.Serialize(splitComposers);
+            }
         }
         if (string.IsNullOrWhiteSpace(q.WorkName) && !string.IsNullOrWhiteSpace(inferredWork))
         {
@@ -168,7 +184,9 @@ public sealed partial class BasicMetadataLookupService
         // 6) Save folder cover.jpg if missing and directory is writable
         if (string.IsNullOrWhiteSpace(q.CoverArtPath) && !string.IsNullOrWhiteSpace(q.AlbumDirectory) && Directory.Exists(q.AlbumDirectory))
         {
-            string coverArtist = !string.IsNullOrWhiteSpace(q.Artists) ? q.Artists : (updates.GetValueOrDefault("artists_json") ?? "");
+            string coverArtist = !string.IsNullOrWhiteSpace(q.Artists)
+                ? PrimaryToken(q.Artists)
+                : (resolvedArtists.Count > 0 ? resolvedArtists[0] : "");
             string coverAlbum = !string.IsNullOrWhiteSpace(q.Album) ? q.Album : (updates.GetValueOrDefault("album") ?? "");
             if (!string.IsNullOrWhiteSpace(onlineCoverUrl))
             {
@@ -316,7 +334,8 @@ public sealed partial class BasicMetadataLookupService
         int expectedDurationMs,
         CancellationToken ct)
     {
-        foreach (string country in new[] { "cn", "us", "jp" })
+        string[] storefronts = ContainsCjk(term) ? ["cn", "jp", "us"] : ["us", "cn", "jp"];
+        foreach (string country in storefronts)
         {
             try
             {
@@ -505,6 +524,18 @@ public sealed partial class BasicMetadataLookupService
         }
         catch (OperationCanceledException) { throw; }
         catch { return (null, null); }
+    }
+
+    private static bool ContainsCjk(string text)
+    {
+        foreach (char ch in text)
+        {
+            if (ch is (>= '\u4E00' and <= '\u9FFF') or (>= '\u3040' and <= '\u30FF') or (>= '\uAC00' and <= '\uD7AF'))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static string PrimaryToken(string artists)

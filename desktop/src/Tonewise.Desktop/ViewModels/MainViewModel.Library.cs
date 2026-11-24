@@ -695,7 +695,7 @@ public sealed partial class MainViewModel
                 }
                 case ("artists", "composers"):
                 {
-                    foreach (string composer in SplitPerformers(track.ComposersDisplay))
+                    foreach (string composer in SplitComposers(track.ComposersDisplay))
                     {
                         AddToBucket(composer, "作曲", track);
                     }
@@ -713,7 +713,7 @@ public sealed partial class MainViewModel
                 {
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (string name in SplitPerformers(track.ArtistsDisplay)
-                                 .Concat(SplitPerformers(track.ComposersDisplay))
+                                 .Concat(SplitComposers(track.ComposersDisplay))
                                  .Concat(SplitPerformers(track.ConductorsDisplay)))
                     {
                         if (seen.Add(name))
@@ -731,7 +731,7 @@ public sealed partial class MainViewModel
                         : (!string.IsNullOrWhiteSpace(track.WorkDisplay) ? track.WorkDisplay : track.Album);
                     if (string.IsNullOrWhiteSpace(work)) break;
                     string sub = string.IsNullOrWhiteSpace(track.ComposersDisplay) ? track.ArtistsDisplay : track.ComposersDisplay;
-                    string composerKey = SplitPerformers(track.ComposersDisplay).FirstOrDefault()
+                    string composerKey = SplitComposers(track.ComposersDisplay).FirstOrDefault()
                         ?? SplitPerformers(track.ArtistsDisplay).FirstOrDefault()
                         ?? "classical";
                     AddToBucket($"{composerKey}::{work}", string.IsNullOrWhiteSpace(sub) ? "古典作品" : sub, track, titleOverride: work);
@@ -739,7 +739,7 @@ public sealed partial class MainViewModel
                 }
                 case ("classical", "composers"):
                 {
-                    foreach (string composer in SplitPerformers(track.ComposersDisplay))
+                    foreach (string composer in SplitComposers(track.ComposersDisplay))
                     {
                         AddToBucket(composer, "作曲家", track);
                     }
@@ -823,6 +823,9 @@ public sealed partial class MainViewModel
 
     public static IReadOnlyList<string> SplitPerformers(string? raw) =>
         ArtistEntitySplitter.SplitPerformers(raw);
+
+    public static IReadOnlyList<string> SplitComposers(string? raw) =>
+        ArtistEntitySplitter.SplitComposers(raw);
 
     private void UpdateClassicalAdaptiveState()
     {
@@ -1042,7 +1045,7 @@ public sealed partial class MainViewModel
                     t.Album,
                     WorkAwareShuffleEngine.BuildAlbumScope(t.Album, t.ConductorsDisplay)),
                 movement_order = t.MovementNumber is > 0 ? t.MovementNumber : (int?)null,
-                composers = SplitPerformers(t.ComposersDisplay),
+                composers = SplitComposers(t.ComposersDisplay),
                 conductors = SplitPerformers(t.ConductorsDisplay),
                 work_name = string.IsNullOrWhiteSpace(t.WorkName) ? null : t.WorkName.Trim(),
             });

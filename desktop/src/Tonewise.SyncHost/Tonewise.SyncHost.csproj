@@ -12,6 +12,7 @@
     <EmbeddedResource Include="..\..\..\protocol\schemas\manifest.sql" LogicalName="Tonewise.SyncHost.protocol.manifest.sql" />
     <EmbeddedResource Include="..\..\..\protocol\dictionaries\default_scenes_5d.json" LogicalName="Tonewise.SyncHost.protocol.default_scenes_5d.json" />
     <EmbeddedResource Include="..\..\..\protocol\dictionaries\artist_whitelist.json" LogicalName="Tonewise.SyncHost.protocol.artist_whitelist.json" />
+    <EmbeddedResource Include="..\..\..\protocol\dictionaries\artist_aliases.json" LogicalName="Tonewise.SyncHost.protocol.artist_aliases.json" />
     <EmbeddedResource Include="..\..\..\protocol\dictionaries\hanzi_pinyin_table.txt" LogicalName="Tonewise.SyncHost.protocol.hanzi_pinyin_table.txt" />
   </ItemGroup>
 </Project>

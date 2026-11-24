@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tonewise_dsp_core::{AudioAnalysisResult, analyze_audio_file};
 use tonewise_metadata::{
-    DjEnergy, DjVocals, TempoBucket, normalize_dj_scenes, normalize_year,
-    split_artists_preserving_whitelist, split_multi_value,
+    DjEnergy, DjVocals, TempoBucket, normalize_album_artist, normalize_dj_scenes, normalize_year,
+    split_artists_preserving_whitelist, split_composers_preserving_whitelist, split_multi_value,
 };
 use tonewise_rules::MoodDictionary;
 use tonewise_sync::{
@@ -383,7 +383,10 @@ fn process_single_track(
     let mut moods = Vec::new();
 
     if let Some(tag) = primary_tag {
-        album_artist = tag.get_string(&ItemKey::AlbumArtist).map(str::to_string);
+        album_artist = tag
+            .get_string(&ItemKey::AlbumArtist)
+            .map(normalize_album_artist)
+            .filter(|s| !s.is_empty());
         for item in tag.get_strings(&ItemKey::TrackArtists) {
             raw_artists.extend(split_artists_preserving_whitelist(item));
         }
@@ -394,7 +397,7 @@ fn process_single_track(
         }
 
         for item in tag.get_strings(&ItemKey::Composer) {
-            composers.extend(split_artists_preserving_whitelist(item));
+            composers.extend(split_composers_preserving_whitelist(item));
         }
         for item in tag.get_strings(&ItemKey::Conductor) {
             conductors.extend(split_artists_preserving_whitelist(item));
@@ -488,7 +491,7 @@ fn process_single_track(
                     movement_number = parse_movement_number(val);
                 }
                 "COMPOSER" if composers.is_empty() => {
-                    composers.extend(split_artists_preserving_whitelist(val));
+                    composers.extend(split_composers_preserving_whitelist(val));
                 }
                 "CONDUCTOR" if conductors.is_empty() => {
                     conductors.extend(split_artists_preserving_whitelist(val));

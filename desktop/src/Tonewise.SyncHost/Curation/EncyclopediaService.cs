@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
+using Tonewise.SyncHost.Workbench;
 
 namespace Tonewise.SyncHost.Curation;
 
@@ -43,10 +44,26 @@ public sealed partial class EncyclopediaService
         EnsureSchema();
     }
 
-    public static string NormalizeEntityName(string rawName)
+    public static string NormalizeEntityName(string rawName) =>
+        NormalizeEntityName(rawName, entityType: null);
+
+    public static string NormalizeEntityName(string rawName, string? entityType)
     {
-        string trimmed = rawName.Trim().ToLowerInvariant();
-        return MultiSpaceRegex().Replace(trimmed, " ");
+        string canonical = CanonicalizeDisplayName(rawName, entityType);
+        return MultiSpaceRegex().Replace(canonical.Trim().ToLowerInvariant(), " ");
+    }
+
+    public static string CanonicalizeDisplayName(string rawName, string? entityType)
+    {
+        if (string.IsNullOrWhiteSpace(rawName)) return "";
+        string kind = entityType?.Trim().ToLowerInvariant() ?? "";
+        string normalized = kind switch
+        {
+            EncyclopediaEntityType.Composer => ArtistEntitySplitter.NormalizeComposerName(rawName),
+            EncyclopediaEntityType.Album or EncyclopediaEntityType.Work => ArtistEntitySplitter.NormalizePunctuationAndWhitespace(rawName),
+            _ => ArtistEntitySplitter.NormalizePerformerName(rawName),
+        };
+        return string.IsNullOrWhiteSpace(normalized) ? rawName.Trim() : normalized;
     }
 
     public static string CleanLastFmBioText(string rawWikiSummary)
@@ -112,7 +129,7 @@ public sealed partial class EncyclopediaService
     public void UpsertBiography(EntityBiographyEntry entry)
     {
         string normType = entry.EntityType.Trim().ToLowerInvariant();
-        string normName = NormalizeEntityName(string.IsNullOrWhiteSpace(entry.NormalizedName) ? entry.DisplayName : entry.NormalizedName);
+        string normName = NormalizeEntityName(string.IsNullOrWhiteSpace(entry.NormalizedName) ? entry.DisplayName : entry.NormalizedName, normType);
         long ts = entry.UpdatedAtMs > 0 ? entry.UpdatedAtMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         using var conn = OpenConnection();
@@ -150,7 +167,7 @@ public sealed partial class EncyclopediaService
     public EntityBiographyEntry? GetBiography(string entityType, string name)
     {
         string normType = entityType.Trim().ToLowerInvariant();
-        string normName = NormalizeEntityName(name);
+        string normName = NormalizeEntityName(name, normType);
 
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
@@ -216,6 +233,7 @@ public sealed partial class EncyclopediaService
             return existing;
         }
 
+        string canonicalDisplay = CanonicalizeDisplayName(displayName, entityType);
         HttpClient client = httpClient ?? SharedHttpClient;
         string? qid = null;
         string? summaryZh = null;
@@ -243,8 +261,8 @@ public sealed partial class EncyclopediaService
                 ? "album.getinfo"
                 : "artist.getinfo";
             string param = entityType.Equals(EncyclopediaEntityType.Album, StringComparison.OrdinalIgnoreCase)
-                ? $"album={Uri.EscapeDataString(displayName)}"
-                : $"artist={Uri.EscapeDataString(displayName)}";
+                ? $"album={Uri.EscapeDataString(canonicalDisplay)}"
+                : $"artist={Uri.EscapeDataString(canonicalDisplay)}";
             string lfmUrl = $"https://ws.audioscrobbler.com/2.0/?method={method}&{param}&lang=zh&api_key={Uri.EscapeDataString(lastFmApiKey)}&format=json";
             string? lfmJson = await TryGetStringAsync(client, lfmUrl, acceptLanguage: null, ct);
             if (!string.IsNullOrWhiteSpace(lfmJson))
@@ -277,7 +295,7 @@ public sealed partial class EncyclopediaService
 
         if (string.IsNullOrWhiteSpace(summaryZh))
         {
-            string wikiTitle = Uri.EscapeDataString(displayName.Trim().Replace(' ', '_'));
+            string wikiTitle = Uri.EscapeDataString(canonicalDisplay.Replace(' ', '_'));
             string zhWikiUrl = $"https://zh.wikipedia.org/api/rest_v1/page/summary/{wikiTitle}";
             string? zhJson = await TryGetStringAsync(client, zhWikiUrl, "zh-cn,zh;q=0.9", ct);
             if (!string.IsNullOrWhiteSpace(zhJson))
@@ -287,7 +305,7 @@ public sealed partial class EncyclopediaService
 
             if (string.IsNullOrWhiteSpace(summaryZh))
             {
-                var douban = await DoubanMusicClient.TryFetchBioAsync(client, displayName, ct);
+                var douban = await DoubanMusicClient.TryFetchBioAsync(client, canonicalDisplay, ct);
                 if (!string.IsNullOrWhiteSpace(douban.SummaryZh))
                 {
                     summaryZh = douban.SummaryZh;
@@ -314,8 +332,8 @@ public sealed partial class EncyclopediaService
 
         var entry = new EntityBiographyEntry(
             EntityType: entityType,
-            NormalizedName: NormalizeEntityName(displayName),
-            DisplayName: displayName.Trim(),
+            NormalizedName: NormalizeEntityName(canonicalDisplay, entityType),
+            DisplayName: canonicalDisplay,
             Mbid: mbid,
             WikidataQid: qid,
             BirthDeathYears: null,

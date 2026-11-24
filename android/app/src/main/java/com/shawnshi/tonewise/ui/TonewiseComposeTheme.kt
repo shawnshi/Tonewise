@@ -10,6 +10,7 @@ import androidx.annotation.AttrRes
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -18,10 +19,95 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.em
 import androidx.core.graphics.ColorUtils
 import androidx.appcompat.R as AppCompatR
 import com.google.android.material.R as MaterialR
 import com.google.android.material.color.MaterialColors
+import com.shawnshi.tonewise.R
+
+private val TonewiseInterFontFamily =
+    FontFamily(
+        Font(R.font.inter_regular, FontWeight.Normal),
+        Font(R.font.inter_semibold, FontWeight.Medium),
+        Font(R.font.inter_semibold, FontWeight.SemiBold),
+        Font(R.font.inter_semibold, FontWeight.Bold),
+    )
+
+private val BaseMaterialTypography = Typography()
+
+private val TonewiseComposeTypography =
+    Typography(
+        displayLarge =
+            BaseMaterialTypography.displayLarge.copy(fontFamily = TonewiseInterFontFamily),
+        displayMedium =
+            BaseMaterialTypography.displayMedium.copy(fontFamily = TonewiseInterFontFamily),
+        displaySmall =
+            BaseMaterialTypography.displaySmall.copy(fontFamily = TonewiseInterFontFamily),
+        headlineLarge =
+            BaseMaterialTypography.headlineLarge.copy(fontFamily = TonewiseInterFontFamily),
+        headlineMedium =
+            BaseMaterialTypography.headlineMedium.copy(fontFamily = TonewiseInterFontFamily),
+        headlineSmall =
+            BaseMaterialTypography.headlineSmall.copy(fontFamily = TonewiseInterFontFamily),
+        titleLarge =
+            BaseMaterialTypography.titleLarge.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.Normal,
+                letterSpacing = (-0.01818181818).em,
+            ),
+        titleMedium =
+            BaseMaterialTypography.titleMedium.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.Normal,
+                letterSpacing = (-0.01125).em,
+            ),
+        titleSmall =
+            BaseMaterialTypography.titleSmall.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.Normal,
+                letterSpacing = 0.em,
+            ),
+        bodyLarge =
+            BaseMaterialTypography.bodyLarge.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.Normal,
+                letterSpacing = (-0.01125).em,
+            ),
+        bodyMedium =
+            BaseMaterialTypography.bodyMedium.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.Normal,
+                letterSpacing = (-0.0064285714).em,
+            ),
+        bodySmall =
+            BaseMaterialTypography.bodySmall.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.Normal,
+                letterSpacing = 0.0008333333.em,
+            ),
+        labelLarge =
+            BaseMaterialTypography.labelLarge.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = (-0.003).em,
+            ),
+        labelMedium =
+            BaseMaterialTypography.labelMedium.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.003.em,
+            ),
+        labelSmall =
+            BaseMaterialTypography.labelSmall.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.0075454545.em,
+            ),
+    )
 
 private val FallbackLightColorScheme =
     lightColorScheme(
@@ -200,5 +286,5 @@ fun TonewiseComposeTheme(content: @Composable () -> Unit) {
         remember(context, configuration, systemDark) {
             resolveColorSchemeFromTheme(context, systemDark)
         }
-    MaterialTheme(colorScheme = scheme, content = content)
+    MaterialTheme(colorScheme = scheme, typography = TonewiseComposeTypography, content = content)
 }

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Tonewise.SyncHost.Workbench;
 
 namespace Tonewise.SyncHost.Curation;
 
@@ -232,11 +233,16 @@ public static class ReleaseDisambiguatorService
     {
         if (!recording.TryGetProperty("artists", out var artists)) return "";
         var names = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var a in artists.EnumerateArray())
         {
-            if (a.TryGetProperty("name", out var n) && !string.IsNullOrWhiteSpace(n.GetString()))
+            if (a.TryGetProperty("name", out var n))
             {
-                names.Add(n.GetString()!);
+                string norm = ArtistEntitySplitter.NormalizePerformerName(n.GetString());
+                if (!string.IsNullOrEmpty(norm) && seen.Add(norm))
+                {
+                    names.Add(norm);
+                }
             }
         }
         return string.Join(" & ", names);

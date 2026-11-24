@@ -652,7 +652,10 @@ public sealed class LibraryStore
                     : (Path.GetFileName(Path.GetDirectoryName(cleanFile) ?? "") is { Length: > 0 } dirName
                         ? dirName
                         : "Unknown Album");
-                string? albumArtist = !string.IsNullOrWhiteSpace(embedded.AlbumArtist) ? embedded.AlbumArtist : null;
+                string? albumArtist = !string.IsNullOrWhiteSpace(embedded.AlbumArtist)
+                    ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.NormalizeAlbumArtist(embedded.AlbumArtist!)
+                    : null;
+                if (string.IsNullOrWhiteSpace(albumArtist)) albumArtist = null;
                 var splitArtists = !string.IsNullOrWhiteSpace(embedded.Artist)
                     ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.SplitPerformers(embedded.Artist!)
                     : (!string.IsNullOrWhiteSpace(albumArtist)
@@ -662,7 +665,7 @@ public sealed class LibraryStore
                     ? JsonSerializer.Serialize(splitArtists)
                     : "[]";
                 var splitComposers = !string.IsNullOrWhiteSpace(embedded.Composer)
-                    ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.SplitPerformers(embedded.Composer!)
+                    ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.SplitComposers(embedded.Composer!)
                     : [];
                 var splitConductors = !string.IsNullOrWhiteSpace(embedded.Conductor)
                     ? Tonewise.SyncHost.Workbench.ArtistEntitySplitter.SplitPerformers(embedded.Conductor!)

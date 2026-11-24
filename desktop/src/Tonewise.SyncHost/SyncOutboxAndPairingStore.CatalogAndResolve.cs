@@ -1029,10 +1029,13 @@ public sealed partial class SyncOutboxAndPairingStore
                 var list = new List<string>();
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                void AddSplit(string? raw)
+                void AddSplit(string? raw, bool composerMode = false)
                 {
                     if (string.IsNullOrWhiteSpace(raw)) return;
-                    foreach (string s in ArtistEntitySplitter.SplitPerformers(raw))
+                    var split = composerMode
+                        ? ArtistEntitySplitter.SplitComposers(raw)
+                        : ArtistEntitySplitter.SplitPerformers(raw);
+                    foreach (string s in split)
                     {
                         if (seen.Add(s)) list.Add(s);
                     }
@@ -1040,15 +1043,19 @@ public sealed partial class SyncOutboxAndPairingStore
 
                 AddSplit(AlbumArtist);
                 foreach (string item in ParseJsonArray(ArtistsJson)) AddSplit(item);
-                foreach (string item in ParseJsonArray(ComposersJson)) AddSplit(item);
+                foreach (string item in ParseJsonArray(ComposersJson)) AddSplit(item, composerMode: true);
                 foreach (string item in ParseJsonArray(ConductorsJson)) AddSplit(item);
                 _allArtists = list;
                 return _allArtists;
             }
         }
 
-        public bool MatchesArtist(string target) =>
-            AllArtists.Any(a => string.Equals(a, target, StringComparison.OrdinalIgnoreCase));
+        public bool MatchesArtist(string target)
+        {
+            string normTarget = ArtistEntitySplitter.NormalizePerformerName(target);
+            if (string.IsNullOrEmpty(normTarget)) return false;
+            return AllArtists.Any(a => string.Equals(a, normTarget, StringComparison.OrdinalIgnoreCase));
+        }
 
         private static List<string> ParseJsonArray(string json)
         {

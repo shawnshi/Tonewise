@@ -416,6 +416,15 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                         None => tag.remove_artist(),
                     }
                 }
+                "album_artist" | "albumartist" => {
+                    tag.remove_key(&ItemKey::AlbumArtist);
+                    tag.retain(|it| {
+                        !matches!(it.key(), ItemKey::Unknown(k) if k.eq_ignore_ascii_case("ALBUM ARTIST"))
+                    });
+                    if let Some(v) = clean_val {
+                        tag.insert_text(ItemKey::AlbumArtist, v.to_string());
+                    }
+                }
                 "composer" | "composers" | "composers_json" => {
                     tag.remove_key(&ItemKey::Composer);
                     if let Some(v) = clean_val {
@@ -1243,6 +1252,88 @@ mod tests {
         let tag = reloaded.primary_tag().unwrap();
         assert_eq!(tag.title().as_deref(), Some("晴天"));
         assert_eq!(tag.artist().as_deref(), Some("周杰伦"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn write_audio_tags_updates_and_clears_album_artist_on_flac() {
+        use lofty::config::WriteOptions;
+        use lofty::file::{AudioFile, TaggedFileExt};
+        use lofty::probe::Probe;
+        use lofty::tag::{ItemKey, ItemValue, Tag, TagItem};
+
+        let dir = std::env::temp_dir().join(format!("tw_ffi_aa_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let flac_path = dir.join("album_artist.flac");
+
+        let mut flac = Vec::new();
+        flac.extend_from_slice(b"fLaC");
+        flac.push(0x00);
+        flac.extend_from_slice(&[0, 0, 34]);
+        let mut streaminfo = [0u8; 34];
+        streaminfo[10] = 0x0A;
+        streaminfo[11] = 0xC4;
+        streaminfo[12] = 0x42;
+        streaminfo[13] = 0xF0;
+        flac.extend_from_slice(&streaminfo);
+        flac.push(0x81);
+        flac.extend_from_slice(&[0, 0, 128]);
+        flac.extend_from_slice(&[0u8; 128]);
+        flac.extend_from_slice(&vec![0xAAu8; 4096]);
+        std::fs::write(&flac_path, &flac).unwrap();
+
+        let mut initial = Probe::open(&flac_path).unwrap().read().unwrap();
+        let tag_type = initial.primary_tag_type();
+        let mut tag = Tag::new(tag_type);
+        tag.insert_text(ItemKey::AlbumArtist, "周杰倫".to_string());
+        tag.push_unchecked(TagItem::new(
+            ItemKey::Unknown("ALBUM ARTIST".to_string()),
+            ItemValue::Text("周杰倫".to_string()),
+        ));
+        initial.insert_tag(tag);
+        initial.save_to_path(&flac_path, WriteOptions::default()).unwrap();
+
+        let before: serde_json::Value =
+            serde_json::from_str(&fingerprint_path_impl(&flac_path.to_string_lossy())).unwrap();
+
+        let req_update = serde_json::json!({
+            "path": flac_path.to_string_lossy(),
+            "updates": {
+                "album_artist": "周杰伦"
+            }
+        })
+        .to_string();
+        let after_update: serde_json::Value =
+            serde_json::from_str(&write_audio_tags_json_impl(&req_update)).unwrap();
+        assert!(after_update.get("error").is_none(), "unexpected error: {after_update}");
+        assert_eq!(after_update["audio_frame_blake3_hex"], before["audio_frame_blake3_hex"]);
+
+        let reloaded = Probe::open(&flac_path).unwrap().read().unwrap();
+        let tag = reloaded.primary_tag().unwrap();
+        assert_eq!(tag.get_string(&ItemKey::AlbumArtist), Some("周杰伦"));
+        assert!(!tag.items().any(|it| matches!(
+            it.key(),
+            ItemKey::Unknown(k) if k.eq_ignore_ascii_case("ALBUM ARTIST")
+        )));
+
+        let req_clear = serde_json::json!({
+            "path": flac_path.to_string_lossy(),
+            "updates": {
+                "album_artist": null
+            }
+        })
+        .to_string();
+        let after_clear: serde_json::Value =
+            serde_json::from_str(&write_audio_tags_json_impl(&req_clear)).unwrap();
+        assert!(after_clear.get("error").is_none(), "unexpected error: {after_clear}");
+        assert_eq!(after_clear["audio_frame_blake3_hex"], before["audio_frame_blake3_hex"]);
+
+        let reloaded_clear = Probe::open(&flac_path).unwrap().read().unwrap();
+        let tag_clear = reloaded_clear.primary_tag().unwrap();
+        assert_eq!(tag_clear.get_string(&ItemKey::AlbumArtist), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

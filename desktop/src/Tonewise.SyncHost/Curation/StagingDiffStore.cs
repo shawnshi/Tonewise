@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
 using Tonewise.Interop;
+using Tonewise.SyncHost.Workbench;
 
 namespace Tonewise.SyncHost.Curation;
 
@@ -67,6 +68,8 @@ public sealed class StagingDiffStore
             ["movement"] = "movement_name",
             ["movement_name"] = "movement_name",
             ["title"] = "title",
+            ["album_artist"] = "album_artist",
+            ["albumartist"] = "album_artist",
             ["artist"] = "artists_json",
             ["artists"] = "artists_json",
             ["artists_json"] = "artists_json",
@@ -80,7 +83,7 @@ public sealed class StagingDiffStore
 
     private static bool IsPhysicalTagColumn(string column) => column switch
     {
-        "title" or "artists_json" or "composers_json" or "conductors_json"
+        "title" or "album_artist" or "artists_json" or "composers_json" or "conductors_json"
             or "album" or "genre" or "year" or "publisher"
             or "work_name" or "movement_name"
             or "tempo_bpm" or "mood_json" or "dj_scene_json"
@@ -419,7 +422,7 @@ public sealed class StagingDiffStore
                     trackUpdates = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
                     updatesByTrack[item.TrackUid] = trackUpdates;
                 }
-                trackUpdates[column] = item.SuggestedValue;
+                trackUpdates[column] = NormalizePersonColumnForWrite(column, item.SuggestedValue);
             }
         }
 
@@ -517,7 +520,7 @@ public sealed class StagingDiffStore
         foreach (var (key, val) in fieldUpdates)
         {
             string col = ResolveColumnName(key);
-            normalizedUpdates.Add((col, val));
+            normalizedUpdates.Add((col, NormalizePersonColumnForWrite(col, val)));
         }
 
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -871,6 +874,19 @@ public sealed class StagingDiffStore
         }
     }
 
+    private static string? NormalizePersonColumnForWrite(string column, string? rawValue)
+    {
+        if (rawValue is null) return null;
+        if (column is "album_artist" or "artists_json" or "composers_json" or "conductors_json")
+        {
+            object coerced = CoerceColumnValue(column, rawValue);
+            return coerced == DBNull.Value
+                ? null
+                : Convert.ToString(coerced, System.Globalization.CultureInfo.InvariantCulture);
+        }
+        return rawValue;
+    }
+
     private static string ResolveColumnName(string fieldName)
     {
         if (!FieldToColumnMap.TryGetValue(fieldName.Trim(), out string? col))
@@ -955,23 +971,31 @@ public sealed class StagingDiffStore
                 _ => DBNull.Value,
             };
         }
+        if (column == "album_artist")
+        {
+            string normalized = ArtistEntitySplitter.NormalizeAlbumArtist(rawValue);
+            return string.IsNullOrWhiteSpace(normalized) ? DBNull.Value : normalized;
+        }
         if (column == "artists_json" || column == "composers_json" || column == "conductors_json")
         {
+            bool composerMode = column == "composers_json";
             string trimmed = rawValue.Trim();
-            if (trimmed.StartsWith('[')) return trimmed;
-            var parts = new List<string>();
-            foreach (string seg in trimmed.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            if (trimmed.StartsWith('['))
             {
                 try
                 {
-                    parts.AddRange(TonewiseCoreClient.SplitArtists(seg));
+                    var items = JsonSerializer.Deserialize<List<string>>(trimmed) ?? [];
+                    return JsonSerializer.Serialize(ArtistEntitySplitter.NormalizeEntityArray(items, composerMode));
                 }
                 catch
                 {
-                    parts.AddRange(seg.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                    return trimmed;
                 }
             }
-            return JsonSerializer.Serialize(parts.Distinct(StringComparer.OrdinalIgnoreCase));
+            var normalized = composerMode
+                ? ArtistEntitySplitter.SplitComposers(trimmed)
+                : ArtistEntitySplitter.SplitPerformers(trimmed);
+            return JsonSerializer.Serialize(normalized);
         }
         if (column.EndsWith("_json", StringComparison.Ordinal))
         {
