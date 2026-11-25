@@ -78,12 +78,13 @@ public sealed partial class MainViewModel
                         hasPlaylistPins = true;
                         continue;
                     }
-                    var matched = loaded
-                        .Where(t => QuickplayPinMatcher.MatchesTrack(
-                            pin, t.TrackUid, t.Album, t.WorkName, t.Genre,
-                            t.ArtistsDisplay, t.ComposersDisplay, t.ConductorsDisplay,
-                            t.AlbumDirectory, t.RelPath))
-                        .ToList();
+                    var matched = OrderTracksForPin(
+                        loaded
+                            .Where(t => QuickplayPinMatcher.MatchesTrack(
+                                pin, t.TrackUid, t.Album, t.WorkName, t.Genre,
+                                t.ArtistsDisplay, t.ComposersDisplay, t.ConductorsDisplay,
+                                t.AlbumDirectory, t.RelPath)),
+                        pin);
                     string? cover = !string.IsNullOrWhiteSpace(pin.CoverPath) && File.Exists(pin.CoverPath)
                         ? pin.CoverPath
                         : matched.FirstOrDefault(t => !string.IsNullOrWhiteSpace(t.CoverArtPath))?.CoverArtPath;
@@ -120,7 +121,8 @@ public sealed partial class MainViewModel
 
     private static QuickplayTrackSeed ToQuickplaySeed(TrackItem t) => new(
         t.TrackUid, t.Title, t.Album, t.ArtistsDisplay, t.WorkName, t.ConductorsDisplay,
-        t.Rating, t.EffectivePlayCount, t.LastPlayedTsMs, t.MtimeMs, t.Year, t.CoverArtPath);
+        t.Rating, t.EffectivePlayCount, t.LastPlayedTsMs, t.MtimeMs, t.Year, t.CoverArtPath,
+        t.DiscNumber, t.MovementNumber, t.TrackNumber, t.RelPath);
 
     private void ApplyStage1LoadedLibrary(
         string musicRoot,
@@ -538,6 +540,7 @@ public sealed partial class MainViewModel
             "energy_asc" => "曲线: 能量渐强",
             "energy_desc_sleep" => "曲线: 助眠渐弱",
             "rediscovery_90d" => "曲线: 90天未听",
+            "work_shuffle" => "曲线: 作品随机",
             _ => "曲线",
         };
         IsArcFilterActive = !string.Equals(SelectedEnergyArc, "flat", StringComparison.OrdinalIgnoreCase);
@@ -1434,33 +1437,7 @@ public sealed partial class MainViewModel
         var groups = new List<EntityGroupItem>();
         foreach (var entry in ordered)
         {
-            if (isClassicalWorks && entry.Tracks.Count > 1)
-            {
-                entry.Tracks.Sort((a, b) =>
-                {
-                    string scopeA = WorkAwareShuffleEngine.BuildAlbumScope(a.Album, a.ConductorsDisplay);
-                    string scopeB = WorkAwareShuffleEngine.BuildAlbumScope(b.Album, b.ConductorsDisplay);
-                    int cmp = StringComparer.OrdinalIgnoreCase.Compare(scopeA, scopeB);
-                    if (cmp != 0) return cmp;
-                    int da = a.DiscNumber > 0 ? a.DiscNumber : int.MaxValue;
-                    int db = b.DiscNumber > 0 ? b.DiscNumber : int.MaxValue;
-                    cmp = da.CompareTo(db);
-                    if (cmp != 0) return cmp;
-                    int ma = a.MovementNumber is > 0 ? a.MovementNumber.Value : int.MaxValue;
-                    int mb = b.MovementNumber is > 0 ? b.MovementNumber.Value : int.MaxValue;
-                    cmp = ma.CompareTo(mb);
-                    if (cmp != 0) return cmp;
-                    int ta = a.TrackNumber > 0 ? a.TrackNumber : int.MaxValue;
-                    int tb = b.TrackNumber > 0 ? b.TrackNumber : int.MaxValue;
-                    cmp = ta.CompareTo(tb);
-                    if (cmp != 0) return cmp;
-                    return WorkAwareShuffleEngine.NaturalPathCompare(a.RelPath, b.RelPath);
-                });
-            }
-            else if (sortAlphabetical && entry.Tracks.Count > 1)
-            {
-                entry.Tracks.Sort((a, b) => StringComparer.CurrentCultureIgnoreCase.Compare(a.Title, b.Title));
-            }
+            SortEntityGroupTracks(SecondarySubTab, ShowClassicalEnsembles, entry.Tracks, sortAlphabetical);
             string badge = isClassicalWorks
                 ? $"{entry.Tracks.Count} 轨 · {Math.Max(1, entry.Tracks.Select(t => WorkAwareShuffleEngine.BuildAlbumScope(t.Album, t.ConductorsDisplay)).Distinct(StringComparer.OrdinalIgnoreCase).Count())} 版"
                 : $"{entry.Tracks.Count} 首";
@@ -1642,7 +1619,7 @@ public sealed partial class MainViewModel
                     FilterEnergy = "all";
                     FilterTempoBucket = "all";
                     FilterMoodCluster = "all";
-                    SelectedEnergyArc = "flat";
+                    SelectedEnergyArc = "work_shuffle";
                 });
                 break;
             case "relax":
@@ -1749,6 +1726,8 @@ public sealed partial class MainViewModel
                     t.Album,
                     WorkAwareShuffleEngine.BuildAlbumScope(t.Album, t.ConductorsDisplay)),
                 movement_order = t.MovementNumber is > 0 ? t.MovementNumber : (int?)null,
+                disc_number = t.DiscNumber > 0 ? t.DiscNumber : (int?)null,
+                track_number = t.TrackNumber > 0 ? t.TrackNumber : (int?)null,
                 composers = SplitComposers(t.ComposersDisplay),
                 conductors = SplitPerformers(t.ConductorsDisplay),
                 work_name = string.IsNullOrWhiteSpace(t.WorkName) ? null : t.WorkName.Trim(),
@@ -1967,8 +1946,8 @@ public sealed partial class MainViewModel
             return [];
         }
 
-        return _allTracks
-            .Where(t => QuickplayPinMatcher.MatchesTrack(
+        return OrderTracksForPin(
+            _allTracks.Where(t => QuickplayPinMatcher.MatchesTrack(
                 pin,
                 t.TrackUid,
                 t.Album,
@@ -1978,8 +1957,146 @@ public sealed partial class MainViewModel
                 t.ComposersDisplay,
                 t.ConductorsDisplay,
                 t.AlbumDirectory,
-                t.RelPath))
-            .ToList();
+                t.RelPath)),
+            pin);
+    }
+
+    private static List<TrackItem> OrderTracksForPin(IEnumerable<TrackItem> matches, QuickplayPinRecord pin)
+    {
+        var list = matches.ToList();
+        if (list.Count <= 1) return list;
+
+        if (string.Equals(pin.Kind, "work", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!pin.TargetKey.Contains("::", StringComparison.Ordinal))
+            {
+                // Legacy pure-workName pins keep only the primary recording block instead of queuing every conductor edition sequentially.
+                string? firstKey = BuildTrackWorkKey(list[0]);
+                if (!string.IsNullOrEmpty(firstKey))
+                {
+                    list = list
+                        .Where(t => string.Equals(BuildTrackWorkKey(t), firstKey, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                }
+            }
+            list.Sort(CompareClassicalMovements);
+            return list;
+        }
+
+        if (string.Equals(pin.Kind, "album", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(pin.Kind, "folder", StringComparison.OrdinalIgnoreCase))
+        {
+            list.Sort(CompareClassicalMovements);
+        }
+        return list;
+    }
+
+    private static int CompareClassicalMovements(TrackItem a, TrackItem b)
+    {
+        int da = a.DiscNumber > 0 ? a.DiscNumber : int.MaxValue;
+        int db = b.DiscNumber > 0 ? b.DiscNumber : int.MaxValue;
+        int cmp = da.CompareTo(db);
+        if (cmp != 0) return cmp;
+        int ma = a.MovementNumber is > 0 ? a.MovementNumber.Value : int.MaxValue;
+        int mb = b.MovementNumber is > 0 ? b.MovementNumber.Value : int.MaxValue;
+        cmp = ma.CompareTo(mb);
+        if (cmp != 0) return cmp;
+        int ta = a.TrackNumber > 0 ? a.TrackNumber : int.MaxValue;
+        int tb = b.TrackNumber > 0 ? b.TrackNumber : int.MaxValue;
+        cmp = ta.CompareTo(tb);
+        if (cmp != 0) return cmp;
+        return WorkAwareShuffleEngine.NaturalPathCompare(a.RelPath, b.RelPath);
+    }
+
+    private static void SortEntityGroupTracks(
+        string subTab,
+        bool showClassicalEnsembles,
+        List<TrackItem> tracks,
+        bool sortAlphabetical)
+    {
+        if (tracks.Count <= 1) return;
+
+        bool isClassicalWorks = subTab == "classical" && !showClassicalEnsembles;
+        if (isClassicalWorks)
+        {
+            tracks.Sort((a, b) =>
+            {
+                string scopeA = WorkAwareShuffleEngine.BuildAlbumScope(a.Album, a.ConductorsDisplay);
+                string scopeB = WorkAwareShuffleEngine.BuildAlbumScope(b.Album, b.ConductorsDisplay);
+                int cmp = StringComparer.OrdinalIgnoreCase.Compare(scopeA, scopeB);
+                return cmp != 0 ? cmp : CompareClassicalMovements(a, b);
+            });
+            return;
+        }
+
+        // Preserve contiguous work blocks across composers/conductors/artists/albums/folders instead of splitting movements alphabetically.
+        var blocks = GroupTracksIntoWorkBlocks(tracks);
+        foreach (var block in blocks)
+        {
+            if (block.Count > 1)
+            {
+                block.Sort(CompareClassicalMovements);
+            }
+        }
+
+        if (sortAlphabetical)
+        {
+            blocks.Sort((a, b) =>
+            {
+                string labelA = string.IsNullOrWhiteSpace(a[0].WorkName) ? a[0].Title : a[0].WorkName;
+                string labelB = string.IsNullOrWhiteSpace(b[0].WorkName) ? b[0].Title : b[0].WorkName;
+                return StringComparer.CurrentCultureIgnoreCase.Compare(labelA, labelB);
+            });
+        }
+        else if (subTab is "composers" or "conductors")
+        {
+            blocks.Sort((a, b) =>
+            {
+                string labelA = !string.IsNullOrWhiteSpace(a[0].WorkName) ? a[0].WorkName : a[0].Album;
+                string labelB = !string.IsNullOrWhiteSpace(b[0].WorkName) ? b[0].WorkName : b[0].Album;
+                int cmp = StringComparer.CurrentCultureIgnoreCase.Compare(labelA, labelB);
+                if (cmp != 0) return cmp;
+                string scopeA = WorkAwareShuffleEngine.BuildAlbumScope(a[0].Album, a[0].ConductorsDisplay);
+                string scopeB = WorkAwareShuffleEngine.BuildAlbumScope(b[0].Album, b[0].ConductorsDisplay);
+                cmp = StringComparer.OrdinalIgnoreCase.Compare(scopeA, scopeB);
+                return cmp != 0 ? cmp : CompareClassicalMovements(a[0], b[0]);
+            });
+        }
+        else if (subTab is "albums" or "folders")
+        {
+            blocks.Sort((a, b) => CompareClassicalMovements(a[0], b[0]));
+        }
+
+        tracks.Clear();
+        foreach (var block in blocks)
+        {
+            tracks.AddRange(block);
+        }
+    }
+
+    private static List<List<TrackItem>> GroupTracksIntoWorkBlocks(IReadOnlyList<TrackItem> tracks)
+    {
+        var blocks = new List<List<TrackItem>>(tracks.Count);
+        var byWorkKey = new Dictionary<string, List<TrackItem>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var track in tracks)
+        {
+            string? key = BuildTrackWorkKey(track);
+            if (!string.IsNullOrEmpty(key))
+            {
+                if (!byWorkKey.TryGetValue(key, out var list))
+                {
+                    list = [];
+                    byWorkKey[key] = list;
+                    blocks.Add(list);
+                }
+                list.Add(track);
+            }
+            else
+            {
+                blocks.Add([track]);
+            }
+        }
+        return blocks;
     }
 
     public void PlayQuickplayTile(QuickplayTileItem? tile)
@@ -2094,7 +2211,12 @@ public sealed partial class MainViewModel
         bool hasAlbum = !string.IsNullOrWhiteSpace(track.Album);
         string kind = useWork ? "work" : (hasAlbum ? "album" : "track");
         string title = useWork ? track.WorkName : (hasAlbum ? track.Album : track.Title);
-        string targetKey = kind == "track" ? track.TrackUid : title;
+        string targetKey = kind switch
+        {
+            "work" => BuildTrackWorkKey(track) ?? title,
+            "track" => track.TrackUid,
+            _ => title,
+        };
         string sub = string.IsNullOrWhiteSpace(track.ArtistsDisplay) ? track.ComposersDisplay : track.ArtistsDisplay;
         string pinId = $"{kind}::{targetKey.Trim().ToLowerInvariant()}";
         string stateDbPath = DesktopStateStore.ResolveStateDbPath(_store.ManifestDbPath);
@@ -2216,8 +2338,19 @@ public sealed partial class MainViewModel
             return dir * sx.CompareTo(sy);
         }
 
-        list.Sort((x, y) =>
+        var blocks = GroupTracksIntoWorkBlocks(list);
+        foreach (var block in blocks)
         {
+            if (block.Count > 1)
+            {
+                block.Sort(CompareClassicalMovements);
+            }
+        }
+
+        blocks.Sort((bx, by) =>
+        {
+            var x = bx[0];
+            var y = by[0];
             int cmp = TrackSortColumn.ToLowerInvariant() switch
             {
                 "title" => CompareStringsEmptyLast(x.Title, y.Title),
@@ -2233,12 +2366,20 @@ public sealed partial class MainViewModel
                 "playcount" => CompareZeroLast(
                     x.EffectivePlayCount > 0 ? x.EffectivePlayCount * 10 + x.Rating : (x.Rating >= 5 ? 5 : 0),
                     y.EffectivePlayCount > 0 ? y.EffectivePlayCount * 10 + y.Rating : (y.Rating >= 5 ? 5 : 0)),
-                "duration" => CompareZeroLast(x.DurationMs, y.DurationMs),
+                "duration" => CompareZeroLast(
+                    bx.Sum(t => t.DurationMs),
+                    by.Sum(t => t.DurationMs)),
                 _ => 0,
             };
             return cmp != 0 ? cmp : StringComparer.CurrentCultureIgnoreCase.Compare(x.Title, y.Title);
         });
-        return list;
+
+        var flattened = new List<TrackItem>(list.Count);
+        foreach (var block in blocks)
+        {
+            flattened.AddRange(block);
+        }
+        return flattened;
     }
 
     private void UpdateScenesStudioAndArcTelemetry()
@@ -2273,13 +2414,14 @@ public sealed partial class MainViewModel
         IsArcAsc = string.Equals(SelectedEnergyArc, "energy_asc", StringComparison.OrdinalIgnoreCase);
         IsArcSleep = string.Equals(SelectedEnergyArc, "energy_desc_sleep", StringComparison.OrdinalIgnoreCase);
         IsArcRediscovery = string.Equals(SelectedEnergyArc, "rediscovery_90d", StringComparison.OrdinalIgnoreCase);
+        IsArcWorkShuffle = string.Equals(SelectedEnergyArc, "work_shuffle", StringComparison.OrdinalIgnoreCase);
     }
 
     public void SetEnergyArc(string arcId)
     {
         SelectedEnergyArc = arcId switch
         {
-            "energy_asc" or "energy_desc_sleep" or "rediscovery_90d" => arcId,
+            "energy_asc" or "energy_desc_sleep" or "rediscovery_90d" or "work_shuffle" => arcId,
             _ => "flat",
         };
     }

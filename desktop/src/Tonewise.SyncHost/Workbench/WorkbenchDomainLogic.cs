@@ -1076,7 +1076,8 @@ public sealed record DesktopUserSettings(
     string MirrorPruneScope = "managed_only",
     bool AllowAdbForeignDeleteFallback = false,
     string? CustomAdbPath = null,
-    bool EnableDynamicCoverAccent = false
+    bool EnableDynamicCoverAccent = false,
+    string? AutoEqPolicyJson = null
 );
 
 public static class DesktopSettingsStore
@@ -1369,10 +1370,6 @@ public static class AutoDjPlaylistGenerator
         ApplyLocalUnitSmoothingSwaps(sequencedUnits);
 
         var sequenced = sequencedUnits.SelectMany(u => u.Nodes).ToList();
-        if (sequenced.Count > total)
-        {
-            sequenced = sequenced.Take(total).ToList();
-        }
 
         double maxBpmDelta = 0.0;
         for (int i = 1; i < sequenced.Count; i++)
@@ -1451,13 +1448,13 @@ public static class AutoDjPlaylistGenerator
             {
                 list.Sort((a, b) =>
                 {
-                    int ma = a.Candidate.MovementNumber is > 0 ? a.Candidate.MovementNumber.Value : int.MaxValue;
-                    int mb = b.Candidate.MovementNumber is > 0 ? b.Candidate.MovementNumber.Value : int.MaxValue;
-                    int cmp = ma.CompareTo(mb);
-                    if (cmp != 0) return cmp;
                     int da = a.Candidate.DiscNumber > 0 ? a.Candidate.DiscNumber : int.MaxValue;
                     int db = b.Candidate.DiscNumber > 0 ? b.Candidate.DiscNumber : int.MaxValue;
-                    cmp = da.CompareTo(db);
+                    int cmp = da.CompareTo(db);
+                    if (cmp != 0) return cmp;
+                    int ma = a.Candidate.MovementNumber is > 0 ? a.Candidate.MovementNumber.Value : int.MaxValue;
+                    int mb = b.Candidate.MovementNumber is > 0 ? b.Candidate.MovementNumber.Value : int.MaxValue;
+                    cmp = ma.CompareTo(mb);
                     if (cmp != 0) return cmp;
                     int ta = a.Candidate.TrackNumber > 0 ? a.Candidate.TrackNumber : int.MaxValue;
                     int tb = b.Candidate.TrackNumber > 0 ? b.Candidate.TrackNumber : int.MaxValue;
@@ -1608,11 +1605,15 @@ public static class AutoDjPlaylistGenerator
                 int unitLen = unit.Nodes.Count;
                 if (pickedTracks + unitLen > maxTotalTracks) continue;
                 if (pickedTracks > 0 && pickedTracks + unitLen > cap && unitLen > 1 && pickedTracks + 1 >= cap) continue;
-                if (enforceArtistCap && !string.IsNullOrEmpty(unit.PrimaryArtist)
-                    && artistCounts.TryGetValue(unit.PrimaryArtist, out int cnt)
-                    && cnt >= maxPerArtist)
+                if (enforceArtistCap && !string.IsNullOrEmpty(unit.PrimaryArtist))
                 {
-                    continue;
+                    int effectiveArtistCap = unit.UnitKey.StartsWith("work::", StringComparison.Ordinal)
+                        ? Math.Max(maxPerArtist, 3)
+                        : maxPerArtist;
+                    if (artistCounts.TryGetValue(unit.PrimaryArtist, out int cnt) && cnt >= effectiveArtistCap)
+                    {
+                        continue;
+                    }
                 }
 
                 usedUnitKeys.Add(unit.UnitKey);
@@ -1839,13 +1840,13 @@ public static class WorkAwareShuffleEngine
             {
                 indices.Sort((a, b) =>
                 {
-                    int ma = tracks[a].MovementNumber is > 0 ? tracks[a].MovementNumber!.Value : int.MaxValue;
-                    int mb = tracks[b].MovementNumber is > 0 ? tracks[b].MovementNumber!.Value : int.MaxValue;
-                    int cmp = ma.CompareTo(mb);
-                    if (cmp != 0) return cmp;
                     int da = tracks[a].DiscNumber > 0 ? tracks[a].DiscNumber : int.MaxValue;
                     int db = tracks[b].DiscNumber > 0 ? tracks[b].DiscNumber : int.MaxValue;
-                    cmp = da.CompareTo(db);
+                    int cmp = da.CompareTo(db);
+                    if (cmp != 0) return cmp;
+                    int ma = tracks[a].MovementNumber is > 0 ? tracks[a].MovementNumber!.Value : int.MaxValue;
+                    int mb = tracks[b].MovementNumber is > 0 ? tracks[b].MovementNumber!.Value : int.MaxValue;
+                    cmp = ma.CompareTo(mb);
                     if (cmp != 0) return cmp;
                     int ta = tracks[a].TrackNumber > 0 ? tracks[a].TrackNumber : int.MaxValue;
                     int tb = tracks[b].TrackNumber > 0 ? tracks[b].TrackNumber : int.MaxValue;
@@ -1984,6 +1985,34 @@ public static class WorkAwareShuffleEngine
         var moved = ordered.GetRange(0, blockLen);
         ordered.RemoveRange(0, blockLen);
         ordered.AddRange(moved);
+    }
+
+    public static int ComputeWorkSafeInsertNextIndex<T>(
+        IReadOnlyList<T> queue,
+        int currentIndex,
+        Func<T, string?> workSelector,
+        Func<T, string?> albumSelector,
+        Func<T, string?>? albumScopeSelector = null)
+    {
+        if (currentIndex < 0 || currentIndex >= queue.Count) return 0;
+        int insertIdx = Math.Min(currentIndex + 1, queue.Count);
+        string? curWorkKey = BuildWorkBlockKey(
+            workSelector(queue[currentIndex]),
+            albumSelector(queue[currentIndex]),
+            albumScopeSelector?.Invoke(queue[currentIndex]));
+        if (!string.IsNullOrEmpty(curWorkKey))
+        {
+            while (insertIdx < queue.Count)
+            {
+                string? nextKey = BuildWorkBlockKey(
+                    workSelector(queue[insertIdx]),
+                    albumSelector(queue[insertIdx]),
+                    albumScopeSelector?.Invoke(queue[insertIdx]));
+                if (!string.Equals(nextKey, curWorkKey, StringComparison.OrdinalIgnoreCase)) break;
+                insertIdx++;
+            }
+        }
+        return insertIdx;
     }
 }
 

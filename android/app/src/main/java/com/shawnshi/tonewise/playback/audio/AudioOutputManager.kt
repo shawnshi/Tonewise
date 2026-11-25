@@ -252,6 +252,19 @@ constructor(
             }
 
         val dspCfg = dspRepository.config.value
+        val deviceCfg = dspRepository.deviceConfig.value
+        val autoPolicy = dspRepository.autoEqPolicy.value
+        val autoRes = dspRepository.activeContentResolution.value
+        val autoLabel =
+            if (autoPolicy.enabled && autoRes.applied) {
+                if (!autoRes.hasNonZeroEq && autoRes.enableCrossfeed) {
+                    "Auto:${autoRes.displayLabel}(Flat+Crossfeed)"
+                } else {
+                    "Auto:${autoRes.displayLabel}"
+                }
+            } else {
+                null
+            }
         val dspSummary =
             when {
                 isBitPerfectActive -> "Bypassed (BIT-PERFECT)"
@@ -259,11 +272,12 @@ constructor(
                 dspCfg.gainMatchedBypass -> "Gain-Matched A/B Bypass"
                 dspCfg.hasNonIdentityProcessing() ->
                     buildString {
-                        append("64-bit ${dspCfg.presetId.name}")
+                        append("64-bit ${deviceCfg.presetId.name}")
+                        if (autoLabel != null) append(" + $autoLabel")
                         if (dspCfg.crossfeedEnabled) append(" + Crossfeed")
                         if (dspCfg.limiterEnabled) append(" + Limiter")
                     }
-                else -> "64-bit Flat"
+                else -> if (autoLabel != null) "64-bit Flat ($autoLabel)" else "64-bit Flat"
             }
 
         val song = lastSong

@@ -75,6 +75,7 @@ data class WorkRecording(
     val ensembleLabel: String,
     val year: Int?,
     val movements: List<Song>,
+    val scopeKey: String = album.uid.toString(),
 ) {
     val totalDurationMs: Long
         get() = movements.sumOf { it.durationMs }
@@ -714,20 +715,14 @@ constructor(
 
         val index = mutableMapOf<Music.UID, ClassicalWork>()
         val uniqueWorks = ArrayList<ClassicalWork>(songsByWorkKey.size)
+        val movementCmp = ClassicalWorkKey.movementComparator()
         for ((workKey, workSongs) in songsByWorkKey) {
             val recordings =
                 workSongs
-                    .groupBy { it.album.uid }
-                    .values
-                    .map { albumSongs ->
-                        val orderedMovements =
-                            albumSongs.sortedWith(
-                                compareBy<Song>(
-                                    { it.disc?.number ?: 0 },
-                                    { it.movementNumber ?: it.track ?: Int.MAX_VALUE },
-                                    { it.name },
-                                )
-                            )
+                    .groupBy { ClassicalWorkKey.recordingScope(it) }
+                    .entries
+                    .map { (scopeKey, scopedSongs) ->
+                        val orderedMovements = scopedSongs.sortedWith(movementCmp)
                         val first = orderedMovements.first()
                         val conductors =
                             orderedMovements.flatMap { it.conductors }.distinct().joinToString(", ")
@@ -744,9 +739,10 @@ constructor(
                             ensembleLabel = artists,
                             year = year,
                             movements = orderedMovements,
+                            scopeKey = scopeKey,
                         )
                     }
-                    .sortedWith(compareBy<WorkRecording>({ it.year ?: Int.MAX_VALUE }, { it.album.name }))
+                    .sortedWith(compareBy<WorkRecording>({ it.year ?: Int.MAX_VALUE }, { it.album.name }, { it.conductorLabel }))
 
             val classicalWork =
                 ClassicalWork(

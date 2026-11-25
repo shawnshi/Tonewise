@@ -478,6 +478,35 @@ constructor(
         }
     }
 
+    fun replaceQueuePreservingOrder(
+        songs: List<Song>,
+        index: Int,
+        positionMs: Long,
+        keepShuffled: Boolean,
+    ) {
+        if (songs.isEmpty()) return
+        val safeIndex = index.coerceIn(0, songs.lastIndex)
+        if (!keepShuffled) {
+            restoreSessionQueue(songs = songs, index = safeIndex, positionMs = positionMs)
+            return
+        }
+        val wasPlaying = playbackManager.progression.isPlaying
+        val savedState =
+            PlaybackStateManager.SavedState(
+                positionMs = positionMs.coerceAtLeast(0L),
+                repeatMode = playbackManager.repeatMode,
+                parent = playbackManager.parent,
+                heap = songs,
+                shuffledMapping = songs.indices.toList(),
+                index = safeIndex,
+                songUid = songs[safeIndex].uid,
+            )
+        playbackManager.applySavedState(savedState, destructive = true)
+        if (!wasPlaying) {
+            playbackManager.playing(true)
+        }
+    }
+
     /**
      * Shuffle a list of [Song]s.
      *

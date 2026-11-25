@@ -25,7 +25,9 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.UUID
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -383,6 +385,37 @@ class ReplayGainAudioProcessorTest {
         assertTrue("Expected soft-limited below ceiling ($ceiling), got $limited", limited <= ceiling + 1e-5f)
     }
 
+    @Test
+    fun dynamicMode_isolatesConductorsWithinSameCompilationAlbumForWorkGain() {
+        val compAlbum = FakeAlbum("compilation-box")
+        val karajan =
+            FakeSong(
+                ReplayGainAdjustment(track = -1f, album = -7f),
+                songAlbum = compAlbum,
+                songWorkName = "Symphony No. 5",
+                songConductors = listOf("Herbert von Karajan"),
+            )
+        val bernstein =
+            FakeSong(
+                ReplayGainAdjustment(track = -2f, album = -7f),
+                songAlbum = compAlbum,
+                songWorkName = "Symphony No. 5",
+                songConductors = listOf("Leonard Bernstein"),
+            )
+
+        val shuffledQueue = listOf(karajan, bernstein)
+        // Different conductors on same compilation album must NOT count as contiguous work in Shuffle mode
+        assertFalse(
+            ReplayGainAudioProcessor.shouldUseAlbumGainDynamic(
+                queue = shuffledQueue,
+                currentIndex = 0,
+                currentSong = karajan,
+                isSingleAlbumParent = false,
+                isShuffled = true,
+            )
+        )
+    }
+
     private class FakeDspConfigSource(initial: DspChainConfig) : DspConfigSource {
         override val config: StateFlow<DspChainConfig> = MutableStateFlow(initial)
     }
@@ -494,6 +527,8 @@ class ReplayGainAudioProcessorTest {
     private class FakeSong(
         override val replayGainAdjustment: ReplayGainAdjustment,
         private val songAlbum: Album? = null,
+        private val songWorkName: String? = null,
+        private val songConductors: List<String> = emptyList(),
     ) : Song {
         override val uid: Music.UID
             get() = error("unused")
@@ -504,6 +539,7 @@ class ReplayGainAudioProcessorTest {
         override val track: Int? = null
         override val disc: Disc? = null
         override val date: Date? = null
+        override val workName: String? = songWorkName
         override val uri: Uri
             get() = error("unused")
 
@@ -526,12 +562,12 @@ class ReplayGainAudioProcessorTest {
         override val artists: List<Artist> = emptyList()
         override val genres: List<Genre> = emptyList()
         override val composers: List<String> = emptyList()
-        override val conductors: List<String> = emptyList()
+        override val conductors: List<String> = songConductors
     }
 
-    private class FakeAlbum : Album {
-        override val uid: Music.UID
-            get() = error("unused")
+    private class FakeAlbum(title: String = "default-album") : Album {
+        override val uid: Music.UID =
+            requireNotNull(Music.UID.fromString("uaa${UUID.nameUUIDFromBytes(title.toByteArray())}"))
         override val name: Name
             get() = error("unused")
         override val songs: Collection<Song> = emptyList()

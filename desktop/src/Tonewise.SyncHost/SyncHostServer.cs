@@ -139,6 +139,9 @@ public sealed class SyncHostServer : IAsyncDisposable
     public Func<UsbPushTracksApiRequest, Func<UsbDirectPushProgress, Task>, CancellationToken, Task<UsbDirectPushSummary>>? UsbDirectPushHandler { get; set; }
     public event Action? SyncStateChanged;
     public event Action<SyncSessionProgressReport>? SyncSessionProgressChanged;
+    public event Action<string>? AutoEqPolicyUpdated;
+
+    private static readonly Lock AutoEqFileLock = new();
 
     public SyncSessionProgressReport? LatestSyncProgress { get; private set; }
     public int ListeningPort { get; private set; }
@@ -613,6 +616,43 @@ public sealed class SyncHostServer : IAsyncDisposable
                 WriteSessionsUnlocked(merged);
             }
             return Results.Json(merged);
+        });
+
+        app.MapGet("/api/v1/auto-eq", (HttpRequest request) =>
+        {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
+            var policy = ReadAutoEqPolicy();
+            return Results.Text(SerializeAutoEqPolicy(policy), "application/json", Encoding.UTF8);
+        });
+
+        app.MapPost("/api/v1/auto-eq", async (HttpRequest request) =>
+        {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+            if (!RequireJsonContentType(request, out var ctErr))
+                return ctErr!;
+
+            AutoEqPolicyDto? incoming;
+            try
+            {
+                incoming = await JsonSerializer.DeserializeAsync<AutoEqPolicyDto>(request.Body);
+            }
+            catch
+            {
+                return Results.BadRequest(new { error = "invalid auto-eq policy json" });
+            }
+            if (incoming is null) return Results.BadRequest(new { error = "empty auto-eq policy" });
+
+            var (winner, changed) = MergeAutoEqPolicyWithChangeFlag(incoming);
+            string json = SerializeAutoEqPolicy(winner);
+            if (changed)
+            {
+                AutoEqPolicyUpdated?.Invoke(json);
+                SyncStateChanged?.Invoke();
+            }
+            return Results.Text(json, "application/json", Encoding.UTF8);
         });
 
         // === v2 LAN Sync Content & Auth Endpoints ===
@@ -1810,6 +1850,70 @@ public sealed class SyncHostServer : IAsyncDisposable
     });
 
     public static string DefaultScenesJson() => LazyDefaultScenesJson.Value;
+
+    public static AutoEqPolicyDto DeserializeAutoEqPolicy(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new AutoEqPolicyDto();
+        try
+        {
+            return JsonSerializer.Deserialize<AutoEqPolicyDto>(json) ?? new AutoEqPolicyDto();
+        }
+        catch
+        {
+            return new AutoEqPolicyDto();
+        }
+    }
+
+    public static string SerializeAutoEqPolicy(AutoEqPolicyDto policy) =>
+        JsonSerializer.Serialize(policy with { CustomRules = policy.CustomRules ?? [] });
+
+    public AutoEqPolicyDto ReadAutoEqPolicy()
+    {
+        lock (AutoEqFileLock)
+        {
+            return ReadAutoEqPolicyUnlocked();
+        }
+    }
+
+    public void WriteAutoEqPolicy(AutoEqPolicyDto policy)
+    {
+        lock (AutoEqFileLock)
+        {
+            WriteAutoEqPolicyUnlocked(policy);
+        }
+    }
+
+    public (AutoEqPolicyDto Winner, bool Changed) MergeAutoEqPolicyWithChangeFlag(AutoEqPolicyDto incoming)
+    {
+        lock (AutoEqFileLock)
+        {
+            var local = ReadAutoEqPolicyUnlocked();
+            bool incomingWins = incoming.UpdatedAtMs > local.UpdatedAtMs;
+            if (!incomingWins)
+            {
+                return (local, false);
+            }
+            WriteAutoEqPolicyUnlocked(incoming);
+            return (incoming, true);
+        }
+    }
+
+    private AutoEqPolicyDto ReadAutoEqPolicyUnlocked()
+    {
+        string path = Path.Combine(_tonewiseDir, "auto_eq_policy.json");
+        if (!File.Exists(path)) return new AutoEqPolicyDto();
+        return DeserializeAutoEqPolicy(File.ReadAllText(path, Encoding.UTF8));
+    }
+
+    private void WriteAutoEqPolicyUnlocked(AutoEqPolicyDto policy)
+    {
+        Directory.CreateDirectory(_tonewiseDir);
+        string path = Path.Combine(_tonewiseDir, "auto_eq_policy.json");
+        string json = SerializeAutoEqPolicy(policy);
+        string tmp = path + ".tmp." + Guid.NewGuid().ToString("N")[..6];
+        File.WriteAllText(tmp, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        File.Move(tmp, path, overwrite: true);
+    }
 
     public async ValueTask DisposeAsync()
     {

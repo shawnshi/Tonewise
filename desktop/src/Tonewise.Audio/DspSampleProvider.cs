@@ -590,7 +590,7 @@ public sealed class DspSampleProvider : ISampleProvider, IDisposable
     private bool IsIdentityLocked(int channels)
     {
         bool abBypass = _gainMatchedBypass;
-        bool anyEq = !abBypass && _biquadNode.TotalSpecCount > 0;
+        bool anyEq = !abBypass && _biquadNode.HasActiveNonZeroFilter;
         bool anyIso = !abBypass && _iso226.IsEnabled && _iso226.VolumeAttenuationDb < -0.5;
         bool anyFir = !abBypass && _firConvolver.IsEnabled && _firConvolver.LoadedTapCount > 0;
         bool anyVst3 = !abBypass && _vst3Bridge.ActiveSlotCount > 0 && _vst3Bridge.IsWorkerConnected;

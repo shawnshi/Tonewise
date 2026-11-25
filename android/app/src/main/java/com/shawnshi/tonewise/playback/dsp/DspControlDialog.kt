@@ -106,7 +106,9 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
         return ComposeView(requireContext()).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
-                val config by dspRepository.config.collectAsStateWithLifecycle()
+                val config by dspRepository.deviceConfig.collectAsStateWithLifecycle()
+                val autoEqPolicy by dspRepository.autoEqPolicy.collectAsStateWithLifecycle()
+                val activeAutoEq by dspRepository.activeContentResolution.collectAsStateWithLifecycle()
                 val profileLabel by dspRepository.activeProfileLabel.collectAsStateWithLifecycle()
                 val signalPath by playbackModel.signalPath.collectAsStateWithLifecycle()
                 val romHint by dspRepository.romConflictHint.collectAsStateWithLifecycle()
@@ -118,6 +120,8 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
                 ) {
                     DspControlSheet(
                         config = config,
+                        autoEqPolicy = autoEqPolicy,
+                        activeAutoEq = activeAutoEq,
                         profileLabel = profileLabel,
                         isBitPerfect = signalPath.dspBypassed,
                         romHint = romHint,
@@ -125,6 +129,14 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
                         onApplyPreset = { preset -> dspRepository.applyPreset(preset) },
                         onImportApo = { raw ->
                             val count = dspRepository.importEqualizerApo(raw)
+                            requireContext().showToast(R.string.fmt_dsp_apo_imported)
+                            count
+                        },
+                        onUpdateAutoEqPolicy = { transform -> dspRepository.updateAutoEqPolicy(transform) },
+                        onSaveAutoEqRule = { slotKey, rule -> dspRepository.saveAutoEqRule(slotKey, rule) },
+                        onResetAutoEqRule = { slotKey -> dspRepository.resetAutoEqRule(slotKey) },
+                        onImportAutoEqRuleApo = { slotKey, raw, crossOverride ->
+                            val count = dspRepository.importApoToAutoEqRule(slotKey, raw, crossOverride)
                             requireContext().showToast(R.string.fmt_dsp_apo_imported)
                             count
                         },
@@ -157,17 +169,30 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
 @Composable
 private fun DspControlSheet(
     config: DspChainConfig,
+    autoEqPolicy: AutoEqPolicy,
+    activeAutoEq: ResolvedAutoEq,
     profileLabel: String,
     isBitPerfect: Boolean,
     romHint: String?,
     onUpdateConfig: ((DspChainConfig) -> DspChainConfig) -> Unit,
     onApplyPreset: (DspPresetId) -> Unit,
     onImportApo: (String) -> Int,
+    onUpdateAutoEqPolicy: ((AutoEqPolicy) -> AutoEqPolicy) -> Unit,
+    onSaveAutoEqRule: (String, AutoEqRuleOverride) -> Unit,
+    onResetAutoEqRule: (String) -> Unit,
+    onImportAutoEqRuleApo: (String, String, Boolean?) -> Int,
     onLaunchExternalEq: () -> Unit,
 ) {
     var showApoBox by remember { mutableStateOf(false) }
     var apoDraft by remember {
         mutableStateOf("Preamp: -4.5 dB\nFilter: ON LSC Fc 85 Hz Gain 4.5 dB Q 0.71")
+    }
+    var showRuleEditor by remember { mutableStateOf(false) }
+    var selectedGenre by remember { mutableStateOf(AutoEqGenreFamily.CLASSICAL) }
+    var selectedVocal by remember { mutableStateOf(AutoEqVocalClass.INSTRUMENTAL) }
+    var showRuleApoBox by remember { mutableStateOf(false) }
+    var ruleApoDraft by remember {
+        mutableStateOf("Preamp: 0.0 dB\nFilter: ON PK Fc 2000 Hz Gain 1.5 dB Q 1.41")
     }
 
     Surface(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface) {
@@ -508,6 +533,277 @@ private fun DspControlSheet(
                         onUpdateConfig { it.copy(limiterEnabled = checked) }
                     },
                 )
+            }
+
+            HorizontalDivider()
+
+            // Layer B: Genre + Vocal Auto-EQ (Cascade Overlay)
+            ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.lbl_auto_eq_title),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            val activeBadgeText =
+                                when {
+                                    isBitPerfect -> stringResource(R.string.lbl_dsp_usb_bypass_notice)
+                                    !autoEqPolicy.enabled -> "已关闭（手动设备层 Layer A 独立运行）"
+                                    !config.enabled -> "随内置 DSP 总开关旁路"
+                                    !activeAutoEq.applied -> "就绪（等待播放曲目）"
+                                    !activeAutoEq.hasNonZeroEq && activeAutoEq.enableCrossfeed ->
+                                        "${activeAutoEq.displayLabel} · Flat 0 dB + Crossfeed"
+                                    !activeAutoEq.hasNonZeroEq -> "${activeAutoEq.displayLabel} · Flat 0 dB"
+                                    activeAutoEq.enableCrossfeed ->
+                                        "${activeAutoEq.displayLabel} · 已叠加 EQ + Crossfeed"
+                                    else -> "${activeAutoEq.displayLabel} · 已叠加 EQ"
+                                }
+                            Text(
+                                text = activeBadgeText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = autoEqPolicy.enabled,
+                            onCheckedChange = { checked ->
+                                onUpdateAutoEqPolicy { it.copy(enabled = checked) }
+                            },
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = stringResource(R.string.lbl_auto_eq_classical_crossfeed),
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Switch(
+                            checked = autoEqPolicy.classicalAutoCrossfeed,
+                            onCheckedChange = { checked ->
+                                onUpdateAutoEqPolicy { it.copy(classicalAutoCrossfeed = checked) }
+                            },
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = stringResource(R.string.lbl_auto_eq_lock_work),
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Switch(
+                            checked = autoEqPolicy.lockWithinClassicalWork,
+                            onCheckedChange = { checked ->
+                                onUpdateAutoEqPolicy { it.copy(lockWithinClassicalWork = checked) }
+                            },
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = { showRuleEditor = !showRuleEditor },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(stringResource(R.string.lbl_auto_eq_customize_rules))
+                    }
+
+                    if (showRuleEditor) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            for (g in AutoEqGenreFamily.entries) {
+                                FilterChip(
+                                    selected = selectedGenre == g,
+                                    onClick = { selectedGenre = g },
+                                    label = { Text(g.displayName) },
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            for (v in AutoEqVocalClass.entries) {
+                                FilterChip(
+                                    selected = selectedVocal == v,
+                                    onClick = { selectedVocal = v },
+                                    label = { Text(v.displayName) },
+                                )
+                            }
+                        }
+
+                        val slotKey = "${selectedGenre.slotKey}:${selectedVocal.slotKey}"
+                        val catalogEntry =
+                            remember(slotKey) {
+                                AutoEqResolverBridge.defaultCatalog().firstOrNull { it.slotKey == slotKey }
+                            }
+                        val customRule = autoEqPolicy.customRules[slotKey]
+                        val slotBands =
+                            remember(slotKey, customRule, catalogEntry) {
+                                (customRule?.bands ?: catalogEntry?.defaultBands ?: DspChainConfig.defaultTenBands())
+                                    .take(10)
+                            }
+                        val crossOverride = customRule?.crossfeedOverride
+
+                        Text(
+                            text = if (customRule != null) "已自定义规则：$slotKey" else "默认规则：$slotKey",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            FilterChip(
+                                selected = crossOverride == null,
+                                onClick = {
+                                    onSaveAutoEqRule(
+                                        slotKey,
+                                        AutoEqRuleOverride(
+                                            preampDb = customRule?.preampDb ?: 0.0,
+                                            bands = slotBands,
+                                            crossfeedOverride = null,
+                                        ),
+                                    )
+                                },
+                                label = { Text("Crossfeed: 自动") },
+                            )
+                            FilterChip(
+                                selected = crossOverride == true,
+                                onClick = {
+                                    onSaveAutoEqRule(
+                                        slotKey,
+                                        AutoEqRuleOverride(
+                                            preampDb = customRule?.preampDb ?: 0.0,
+                                            bands = slotBands,
+                                            crossfeedOverride = true,
+                                        ),
+                                    )
+                                },
+                                label = { Text("强制开启") },
+                            )
+                            FilterChip(
+                                selected = crossOverride == false,
+                                onClick = {
+                                    onSaveAutoEqRule(
+                                        slotKey,
+                                        AutoEqRuleOverride(
+                                            preampDb = customRule?.preampDb ?: 0.0,
+                                            bands = slotBands,
+                                            crossfeedOverride = false,
+                                        ),
+                                    )
+                                },
+                                label = { Text("强制关闭") },
+                            )
+                        }
+
+                        slotBands.forEachIndexed { idx, band ->
+                            val freqLabel =
+                                if (band.freqHz >= 1000.0) {
+                                    String.format(Locale.US, "%.1fk Hz", band.freqHz / 1000.0)
+                                } else {
+                                    String.format(Locale.US, "%.0f Hz", band.freqHz)
+                                }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = freqLabel,
+                                    modifier = Modifier.weight(0.28f),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                                Slider(
+                                    value = band.gainDb.toFloat(),
+                                    onValueChange = { v ->
+                                        val snapped = (v * 2f).roundToInt() / 2.0
+                                        val mutable = slotBands.toMutableList()
+                                        if (idx in mutable.indices) {
+                                            mutable[idx] = mutable[idx].copy(gainDb = snapped, enabled = true)
+                                        }
+                                        onSaveAutoEqRule(
+                                            slotKey,
+                                            AutoEqRuleOverride(
+                                                preampDb = customRule?.preampDb ?: 0.0,
+                                                bands = mutable,
+                                                crossfeedOverride = crossOverride,
+                                            ),
+                                        )
+                                    },
+                                    valueRange = -12f..12f,
+                                    modifier = Modifier.weight(0.54f),
+                                )
+                                Text(
+                                    text = String.format(Locale.US, "%+.1f", band.gainDb),
+                                    modifier = Modifier.weight(0.18f),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = { showRuleApoBox = !showRuleApoBox },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text(stringResource(R.string.lbl_dsp_import_apo))
+                            }
+                            OutlinedButton(
+                                onClick = { onResetAutoEqRule(slotKey) },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text(stringResource(R.string.lbl_auto_eq_reset_slot))
+                            }
+                        }
+
+                        if (showRuleApoBox) {
+                            OutlinedTextField(
+                                value = ruleApoDraft,
+                                onValueChange = { ruleApoDraft = it },
+                                label = { Text("EqualizerAPO .txt ($slotKey)") },
+                                minLines = 3,
+                                maxLines = 6,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Button(
+                                onClick = {
+                                    onImportAutoEqRuleApo(slotKey, ruleApoDraft, crossOverride)
+                                    showRuleApoBox = false
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(stringResource(R.string.lbl_dsp_apply_apo))
+                            }
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(6.dp))

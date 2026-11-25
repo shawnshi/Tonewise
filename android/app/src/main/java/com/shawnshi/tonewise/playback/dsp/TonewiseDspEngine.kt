@@ -35,6 +35,7 @@ import kotlin.math.tanh
 import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONArray
 import org.json.JSONObject
+import org.oxycblt.musikr.core.TonewiseCore
 
 internal fun softLimitSample(normalized: Double, ceiling: Double): Double {
     val c = ceiling.coerceIn(0.1, 1.0)
@@ -107,6 +108,38 @@ data class DspChainConfig(
         if (abs(balanceDb) > 1e-4 || invertLeftPhase || invertRightPhase || monoFold) return true
         return false
     }
+
+    fun toJsonString(): String =
+        TonewiseCore.stringifyJson(
+            linkedMapOf(
+                "preset_id" to presetId.name,
+                "enabled" to enabled,
+                "external_bridge_mode" to externalBridgeMode,
+                "gain_matched_bypass" to gainMatchedBypass,
+                "preamp_db" to preampDb,
+                "crossfeed_enabled" to crossfeedEnabled,
+                "crossfeed_cutoff_hz" to crossfeedCutoffHz,
+                "crossfeed_feed_db" to crossfeedFeedDb,
+                "crossfeed_delay_ms" to crossfeedDelayMs,
+                "balance_db" to balanceDb,
+                "invert_left_phase" to invertLeftPhase,
+                "invert_right_phase" to invertRightPhase,
+                "mono_fold" to monoFold,
+                "limiter_enabled" to limiterEnabled,
+                "limiter_ceiling_db" to limiterCeilingDb,
+                "bands" to
+                    bands.map { b ->
+                        linkedMapOf(
+                            "type" to b.type.name,
+                            "freq_hz" to b.freqHz,
+                            "gain_db" to b.gainDb,
+                            "q" to b.q,
+                            "enabled" to b.enabled,
+                            "channel_mask" to b.channelMask,
+                        )
+                    },
+            )
+        )
 
     fun toJson(): JSONObject =
         JSONObject()
@@ -213,6 +246,52 @@ data class DspChainConfig(
                 DspPresetId.CUSTOM -> DspChainConfig(presetId = DspPresetId.CUSTOM, enabled = true)
             }
 
+        fun fromJsonString(raw: String): DspChainConfig {
+            @Suppress("UNCHECKED_CAST")
+            val obj = TonewiseCore.parseJson(raw) as? Map<String, Any?> ?: return DspChainConfig()
+            @Suppress("UNCHECKED_CAST")
+            val bandsArr = obj["bands"] as? List<Any?>
+            val parsedBands =
+                if (!bandsArr.isNullOrEmpty()) {
+                    bandsArr.mapNotNull { rawBand ->
+                        @Suppress("UNCHECKED_CAST")
+                        val b = rawBand as? Map<String, Any?> ?: return@mapNotNull null
+                        BiquadBand(
+                            type =
+                                runCatching { BiquadType.valueOf(b["type"]?.toString() ?: "PEAKING") }
+                                    .getOrDefault(BiquadType.PEAKING),
+                            freqHz = (b["freq_hz"] as? Number)?.toDouble() ?: 1000.0,
+                            gainDb = (b["gain_db"] as? Number)?.toDouble() ?: 0.0,
+                            q = (b["q"] as? Number)?.toDouble() ?: 1.41,
+                            enabled = b["enabled"] as? Boolean ?: true,
+                            channelMask = (b["channel_mask"] as? Number)?.toInt() ?: BiquadBand.CHANNEL_ALL,
+                        )
+                    }.ifEmpty { defaultTenBands() }
+                } else {
+                    defaultTenBands()
+                }
+            return DspChainConfig(
+                presetId =
+                    runCatching { DspPresetId.valueOf(obj["preset_id"]?.toString() ?: "FLAT") }
+                        .getOrDefault(DspPresetId.FLAT),
+                enabled = obj["enabled"] as? Boolean ?: false,
+                externalBridgeMode = obj["external_bridge_mode"] as? Boolean ?: false,
+                gainMatchedBypass = obj["gain_matched_bypass"] as? Boolean ?: false,
+                preampDb = (obj["preamp_db"] as? Number)?.toDouble() ?: 0.0,
+                bands = parsedBands,
+                crossfeedEnabled = obj["crossfeed_enabled"] as? Boolean ?: false,
+                crossfeedCutoffHz = (obj["crossfeed_cutoff_hz"] as? Number)?.toDouble() ?: 700.0,
+                crossfeedFeedDb = (obj["crossfeed_feed_db"] as? Number)?.toDouble() ?: 4.5,
+                crossfeedDelayMs = (obj["crossfeed_delay_ms"] as? Number)?.toDouble() ?: 0.28,
+                balanceDb = (obj["balance_db"] as? Number)?.toDouble() ?: 0.0,
+                invertLeftPhase = obj["invert_left_phase"] as? Boolean ?: false,
+                invertRightPhase = obj["invert_right_phase"] as? Boolean ?: false,
+                monoFold = obj["mono_fold"] as? Boolean ?: false,
+                limiterEnabled = obj["limiter_enabled"] as? Boolean ?: true,
+                limiterCeilingDb = (obj["limiter_ceiling_db"] as? Number)?.toDouble() ?: -0.2,
+            )
+        }
+
         fun fromJson(obj: JSONObject): DspChainConfig {
             val bandsArr = obj.optJSONArray("bands")
             val parsedBands =
@@ -266,14 +345,27 @@ interface DspConfigSource {
  * RBJ Audio EQ Cookbook and desktop `BiquadFilter64`.
  */
 class BiquadFilter64(band: BiquadBand, sampleRateHz: Int, channels: Int) {
+    private val channelCount: Int = max(channels, 1)
     private var channelMask: Int = band.channelMask
     private var b0: Double = 1.0
     private var b1: Double = 0.0
     private var b2: Double = 0.0
     private var a1: Double = 0.0
     private var a2: Double = 0.0
-    private val z1 = DoubleArray(max(channels, 1))
-    private val z2 = DoubleArray(max(channels, 1))
+    private var tb0: Double = 1.0
+    private var tb1: Double = 0.0
+    private var tb2: Double = 0.0
+    private var ta1: Double = 0.0
+    private var ta2: Double = 0.0
+    private var db0: Double = 0.0
+    private var db1: Double = 0.0
+    private var db2: Double = 0.0
+    private var da1: Double = 0.0
+    private var da2: Double = 0.0
+    private var rampRemaining: Int = 0
+    private var initialized: Boolean = false
+    private val z1 = DoubleArray(channelCount)
+    private val z2 = DoubleArray(channelCount)
 
     init {
         updateCoefficients(band, sampleRateHz)
@@ -281,84 +373,122 @@ class BiquadFilter64(band: BiquadBand, sampleRateHz: Int, channels: Int) {
 
     fun updateCoefficients(band: BiquadBand, sampleRateHz: Int) {
         channelMask = band.channelMask
-        if (!band.enabled ||
-            (band.type != BiquadType.LOW_PASS &&
-                band.type != BiquadType.HIGH_PASS &&
-                abs(band.gainDb) <= 1e-4)
+        var nextB0 = 1.0
+        var nextB1 = 0.0
+        var nextB2 = 0.0
+        var nextA1 = 0.0
+        var nextA2 = 0.0
+        if (band.enabled &&
+            (band.type == BiquadType.LOW_PASS ||
+                band.type == BiquadType.HIGH_PASS ||
+                abs(band.gainDb) > 1e-4)
         ) {
-            b0 = 1.0
-            b1 = 0.0
-            b2 = 0.0
-            a1 = 0.0
-            a2 = 0.0
+            val fs = max(sampleRateHz, 8000).toDouble()
+            val fc = band.freqHz.coerceIn(10.0, fs * 0.49)
+            val w0 = 2.0 * PI * fc / fs
+            val cosW0 = cos(w0)
+            val sinW0 = sin(w0)
+            val q = band.q.coerceIn(0.05, 30.0)
+            val alpha = sinW0 / (2.0 * q)
+            val a = 10.0.pow(band.gainDb.coerceIn(-24.0, 24.0) / 40.0)
+
+            var rb0 = 1.0
+            var rb1 = 0.0
+            var rb2 = 0.0
+            var ra0 = 1.0
+            var ra1 = 0.0
+            var ra2 = 0.0
+
+            when (band.type) {
+                BiquadType.PEAKING -> {
+                    rb0 = 1.0 + alpha * a
+                    rb1 = -2.0 * cosW0
+                    rb2 = 1.0 - alpha * a
+                    ra0 = 1.0 + alpha / a
+                    ra1 = -2.0 * cosW0
+                    ra2 = 1.0 - alpha / a
+                }
+                BiquadType.LOW_SHELF -> {
+                    val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+                    rb0 = a * ((a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha)
+                    rb1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosW0)
+                    rb2 = a * ((a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha)
+                    ra0 = (a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha
+                    ra1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosW0)
+                    ra2 = (a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha
+                }
+                BiquadType.HIGH_SHELF -> {
+                    val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+                    rb0 = a * ((a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha)
+                    rb1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosW0)
+                    rb2 = a * ((a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha)
+                    ra0 = (a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha
+                    ra1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosW0)
+                    ra2 = (a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha
+                }
+                BiquadType.LOW_PASS -> {
+                    rb0 = (1.0 - cosW0) / 2.0
+                    rb1 = 1.0 - cosW0
+                    rb2 = (1.0 - cosW0) / 2.0
+                    ra0 = 1.0 + alpha
+                    ra1 = -2.0 * cosW0
+                    ra2 = 1.0 - alpha
+                }
+                BiquadType.HIGH_PASS -> {
+                    rb0 = (1.0 + cosW0) / 2.0
+                    rb1 = -(1.0 + cosW0)
+                    rb2 = (1.0 + cosW0) / 2.0
+                    ra0 = 1.0 + alpha
+                    ra1 = -2.0 * cosW0
+                    ra2 = 1.0 - alpha
+                }
+            }
+
+            nextB0 = rb0 / ra0
+            nextB1 = rb1 / ra0
+            nextB2 = rb2 / ra0
+            nextA1 = ra1 / ra0
+            nextA2 = ra2 / ra0
+        }
+
+        tb0 = nextB0
+        tb1 = nextB1
+        tb2 = nextB2
+        ta1 = nextA1
+        ta2 = nextA2
+
+        if (!initialized) {
+            b0 = tb0
+            b1 = tb1
+            b2 = tb2
+            a1 = ta1
+            a2 = ta2
+            rampRemaining = 0
+            initialized = true
             return
         }
-        val fs = max(sampleRateHz, 8000).toDouble()
-        val fc = band.freqHz.coerceIn(10.0, fs * 0.49)
-        val w0 = 2.0 * PI * fc / fs
-        val cosW0 = cos(w0)
-        val sinW0 = sin(w0)
-        val q = band.q.coerceIn(0.05, 30.0)
-        val alpha = sinW0 / (2.0 * q)
-        val a = 10.0.pow(band.gainDb.coerceIn(-24.0, 24.0) / 40.0)
 
-        var rb0 = 1.0
-        var rb1 = 0.0
-        var rb2 = 0.0
-        var ra0 = 1.0
-        var ra1 = 0.0
-        var ra2 = 0.0
-
-        when (band.type) {
-            BiquadType.PEAKING -> {
-                rb0 = 1.0 + alpha * a
-                rb1 = -2.0 * cosW0
-                rb2 = 1.0 - alpha * a
-                ra0 = 1.0 + alpha / a
-                ra1 = -2.0 * cosW0
-                ra2 = 1.0 - alpha / a
-            }
-            BiquadType.LOW_SHELF -> {
-                val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
-                rb0 = a * ((a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha)
-                rb1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosW0)
-                rb2 = a * ((a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha)
-                ra0 = (a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha
-                ra1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosW0)
-                ra2 = (a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha
-            }
-            BiquadType.HIGH_SHELF -> {
-                val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
-                rb0 = a * ((a + 1.0) + (a - 1.0) * cosW0 + twoSqrtAAlpha)
-                rb1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosW0)
-                rb2 = a * ((a + 1.0) + (a - 1.0) * cosW0 - twoSqrtAAlpha)
-                ra0 = (a + 1.0) - (a - 1.0) * cosW0 + twoSqrtAAlpha
-                ra1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosW0)
-                ra2 = (a + 1.0) - (a - 1.0) * cosW0 - twoSqrtAAlpha
-            }
-            BiquadType.LOW_PASS -> {
-                rb0 = (1.0 - cosW0) / 2.0
-                rb1 = 1.0 - cosW0
-                rb2 = (1.0 - cosW0) / 2.0
-                ra0 = 1.0 + alpha
-                ra1 = -2.0 * cosW0
-                ra2 = 1.0 - alpha
-            }
-            BiquadType.HIGH_PASS -> {
-                rb0 = (1.0 + cosW0) / 2.0
-                rb1 = -(1.0 + cosW0)
-                rb2 = (1.0 + cosW0) / 2.0
-                ra0 = 1.0 + alpha
-                ra1 = -2.0 * cosW0
-                ra2 = 1.0 - alpha
-            }
+        val maxDiff = max(
+            abs(tb0 - b0),
+            max(abs(tb1 - b1), max(abs(tb2 - b2), max(abs(ta1 - a1), abs(ta2 - a2)))),
+        )
+        if (maxDiff < 1e-10) {
+            b0 = tb0
+            b1 = tb1
+            b2 = tb2
+            a1 = ta1
+            a2 = ta2
+            rampRemaining = 0
+            return
         }
 
-        b0 = rb0 / ra0
-        b1 = rb1 / ra0
-        b2 = rb2 / ra0
-        a1 = ra1 / ra0
-        a2 = ra2 / ra0
+        val rampSamples = (0.015 * max(sampleRateHz, 8000)).roundToInt().coerceAtLeast(1)
+        rampRemaining = rampSamples
+        db0 = (tb0 - b0) / rampSamples
+        db1 = (tb1 - b1) / rampSamples
+        db2 = (tb2 - b2) / rampSamples
+        da1 = (ta1 - a1) / rampSamples
+        da2 = (ta2 - a2) / rampSamples
     }
 
     fun processSample(x: Double, channel: Int): Double {
@@ -366,6 +496,24 @@ class BiquadFilter64(band: BiquadBand, sampleRateHz: Int, channels: Int) {
             (channelMask == BiquadBand.CHANNEL_RIGHT && channel != 1)
         ) {
             return x
+        }
+        if (rampRemaining > 0) {
+            val stepChannel = if (channelCount > 1 && channelMask == BiquadBand.CHANNEL_RIGHT) 1 else 0
+            if (channel == stepChannel || channelCount == 1) {
+                if (--rampRemaining == 0) {
+                    b0 = tb0
+                    b1 = tb1
+                    b2 = tb2
+                    a1 = ta1
+                    a2 = ta2
+                } else {
+                    b0 += db0
+                    b1 += db1
+                    b2 += db2
+                    a1 += da1
+                    a2 += da2
+                }
+            }
         }
         val y = b0 * x + z1[channel]
         z1[channel] = b1 * x - a1 * y + z2[channel]
@@ -379,15 +527,21 @@ class BiquadFilter64(band: BiquadBand, sampleRateHz: Int, channels: Int) {
         val sw = sin(w)
         val c2w = cos(2.0 * w)
         val s2w = sin(2.0 * w)
-        val numRe = b0 + b1 * cw + b2 * c2w
-        val numIm = -(b1 * sw + b2 * s2w)
-        val denRe = 1.0 + a1 * cw + a2 * c2w
-        val denIm = -(a1 * sw + a2 * s2w)
+        val numRe = tb0 + tb1 * cw + tb2 * c2w
+        val numIm = -(tb1 * sw + tb2 * s2w)
+        val denRe = 1.0 + ta1 * cw + ta2 * c2w
+        val denIm = -(ta1 * sw + ta2 * s2w)
         val den = hypot(denRe, denIm)
         return if (den > 1e-12) hypot(numRe, numIm) / den else 1.0
     }
 
     fun reset() {
+        b0 = tb0
+        b1 = tb1
+        b2 = tb2
+        a1 = ta1
+        a2 = ta2
+        rampRemaining = 0
         z1.fill(0.0)
         z2.fill(0.0)
     }
@@ -418,6 +572,9 @@ class TonewiseDspEngine {
     private var cachedRunBalancePhase: Boolean = false
     private var lastStage1ReplayGainDb: Double = Double.NaN
     private var cachedStage1LinearGain: Double = 1.0
+    private var currentStage1LinearGain: Double = 1.0
+    private var hasProcessedSamples: Boolean = false
+    private var stage1RampCoeff: Double = 0.0017
 
     // Stage 3: Bauer Crossfeed states (stereo only)
     private var crossLpL = 0.0
@@ -449,6 +606,7 @@ class TonewiseDspEngine {
         synchronized(stateLock) {
             this.sampleRateHz = max(sampleRateHz, 8000)
             this.channels = max(channels, 1)
+            this.stage1RampCoeff = 1.0 - exp(-1.0 / (0.012 * this.sampleRateHz))
             if (frameWork.size < this.channels) {
                 frameWork = DoubleArray(this.channels)
             }
@@ -513,11 +671,19 @@ class TonewiseDspEngine {
             frameWork = DoubleArray(chCount)
         }
         val frameWork = this.frameWork
+        val snapGain = !hasProcessedSamples
+        if (snapGain) {
+            currentStage1LinearGain = stage1Gain
+            hasProcessedSamples = frameCount > 0
+        }
+        val ramp = stage1RampCoeff
         for (frame in 0 until frameCount) {
             val base = frame * chCount
+            currentStage1LinearGain += (stage1Gain - currentStage1LinearGain) * ramp
+            val appliedGain = if (abs(stage1Gain - currentStage1LinearGain) < 1e-7) stage1Gain else currentStage1LinearGain
             // Stage 1 + Stage 2: Preamp + ReplayGain + 64-bit Biquad PEQ
             for (c in 0 until chCount) {
-                var x = samples[base + c] * stage1Gain
+                var x = samples[base + c] * appliedGain
                 if (runFilters) {
                     for (idx in filters.indices) {
                         x = filters[idx].processSample(x, c)
@@ -684,6 +850,8 @@ class TonewiseDspEngine {
             limiterDelayPos = 0
             limiterBufferedFrames = 0
             limiterEnvelope = 1.0
+            hasProcessedSamples = false
+            lastStage1ReplayGainDb = Double.NaN
         }
 
     private fun rebuildStages() {

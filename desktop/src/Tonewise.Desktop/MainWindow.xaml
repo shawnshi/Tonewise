@@ -1111,6 +1111,7 @@
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
                                             <Button Grid.Column="0" Style="{StaticResource StudioChipButtonStyle}" HorizontalAlignment="Stretch" Padding="10,8" Tag="flat" Click="OnSelectEnergyArcClick">
                                                 <StackPanel Spacing="3">
@@ -1138,6 +1139,13 @@
                                                     <TextBlock Text="90天未听再发现" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneStatusInfoBrush}" />
                                                     <TextBlock Text="优先捞取低曝光沉睡曲目" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextWrapping="Wrap" />
                                                     <TextBlock Text="■ 当前已选" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcRediscovery, Mode=OneWay}" />
+                                                </StackPanel>
+                                            </Button>
+                                            <Button Grid.Column="4" Style="{StaticResource StudioChipButtonStyle}" HorizontalAlignment="Stretch" Padding="10,8" Tag="work_shuffle" Click="OnSelectEnergyArcClick">
+                                                <StackPanel Spacing="3">
+                                                    <TextBlock Text="作品随机 (Work Shuffle)" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" />
+                                                    <TextBlock Text="整部作品成块随机连播" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextWrapping="Wrap" />
+                                                    <TextBlock Text="■ 当前已选" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcWorkShuffle, Mode=OneWay}" />
                                                 </StackPanel>
                                             </Button>
                                         </Grid>
@@ -1293,6 +1301,7 @@
                                                         <RadioMenuFlyoutItem GroupName="DrawerArcFilter" Text="能量渐强" Tag="energy_asc" Click="OnArcFilterItemClick" />
                                                         <RadioMenuFlyoutItem GroupName="DrawerArcFilter" Text="助眠渐弱" Tag="energy_desc_sleep" Click="OnArcFilterItemClick" />
                                                         <RadioMenuFlyoutItem GroupName="DrawerArcFilter" Text="90天未听优先" Tag="rediscovery_90d" Click="OnArcFilterItemClick" />
+                                                        <RadioMenuFlyoutItem GroupName="DrawerArcFilter" Text="作品随机" Tag="work_shuffle" Click="OnArcFilterItemClick" />
                                                     </MenuFlyout>
                                                 </DropDownButton.Flyout>
                                             </DropDownButton>
@@ -1992,6 +2001,83 @@
                                                     <ToggleSwitch Header="单声道折叠 (Mono)" IsOn="{x:Bind ViewModel.IsMonoFoldEnabled, Mode=TwoWay}" />
                                                     <ToggleSwitch Header="防削波限幅器 (-0.2 dBFS)" IsOn="{x:Bind ViewModel.IsLimiterEnabled, Mode=TwoWay}" />
                                                 </StackPanel>
+
+                                                <Border Margin="0,6,0,0" Padding="12" CornerRadius="6" BorderThickness="1" BorderBrush="{ThemeResource ZuneHairlineBrush}">
+                                                    <StackPanel Spacing="10">
+                                                        <Grid ColumnSpacing="12">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="Auto" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                                                <TextBlock Text="流派 + 人声自动内容 EQ（Layer B 双层串联叠加）" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                                <TextBlock Text="{x:Bind ViewModel.ActiveAutoEqBadge, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" TextWrapping="Wrap" />
+                                                            </StackPanel>
+                                                            <ToggleSwitch Grid.Column="1" Header="启用自动 EQ" IsOn="{x:Bind ViewModel.IsAutoEqEnabled, Mode=TwoWay}" />
+                                                        </Grid>
+
+                                                        <StackPanel Orientation="Horizontal" Spacing="24">
+                                                            <ToggleSwitch Header="古典纯器乐自动 Crossfeed (Flat + 声场)" IsOn="{x:Bind ViewModel.IsAutoEqClassicalCrossfeedEnabled, Mode=TwoWay}" />
+                                                            <ToggleSwitch Header="同一古典作品内锁定音色" IsOn="{x:Bind ViewModel.IsAutoEqLockClassicalWorkEnabled, Mode=TwoWay}" />
+                                                        </StackPanel>
+
+                                                        <Expander Header="按流派与人声自定义 Layer B 规则（支持双端同步）" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                                            <StackPanel Spacing="10" Padding="0,8,0,0">
+                                                                <Grid ColumnSpacing="12">
+                                                                    <Grid.ColumnDefinitions>
+                                                                        <ColumnDefinition Width="*" />
+                                                                        <ColumnDefinition Width="160" />
+                                                                        <ColumnDefinition Width="160" />
+                                                                    </Grid.ColumnDefinitions>
+                                                                    <ComboBox Grid.Column="0" Header="流派家族" HorizontalAlignment="Stretch" SelectedValuePath="Tag" SelectedValue="{x:Bind ViewModel.SelectedAutoEqGenre, Mode=TwoWay}">
+                                                                        <ComboBoxItem Content="古典 (Classical)" Tag="classical" />
+                                                                        <ComboBoxItem Content="爵士 (Jazz)" Tag="jazz" />
+                                                                        <ComboBoxItem Content="流行 / R&amp;B" Tag="pop_rnb" />
+                                                                        <ComboBoxItem Content="摇滚 / 金属" Tag="rock_metal" />
+                                                                        <ComboBoxItem Content="民谣 / 原声" Tag="folk_acoustic" />
+                                                                        <ComboBoxItem Content="电子 / 舞曲" Tag="electronic_dance" />
+                                                                        <ComboBoxItem Content="原声 / 氛围" Tag="ost_ambient" />
+                                                                        <ComboBoxItem Content="其他 (Other)" Tag="other" />
+                                                                    </ComboBox>
+                                                                    <ComboBox Grid.Column="1" Header="人声状态" HorizontalAlignment="Stretch" SelectedValuePath="Tag" SelectedValue="{x:Bind ViewModel.SelectedAutoEqVocal, Mode=TwoWay}">
+                                                                        <ComboBoxItem Content="人声 (Vocal)" Tag="vocal" />
+                                                                        <ComboBoxItem Content="纯器乐 (Instrumental)" Tag="instrumental" />
+                                                                        <ComboBoxItem Content="未知 (Unknown)" Tag="unknown" />
+                                                                    </ComboBox>
+                                                                    <ComboBox Grid.Column="2" Header="规则 Crossfeed" HorizontalAlignment="Stretch" SelectedValuePath="Tag" SelectedValue="{x:Bind ViewModel.AutoEqRuleCrossfeedMode, Mode=TwoWay}">
+                                                                        <ComboBoxItem Content="跟随策略默认" Tag="auto" />
+                                                                        <ComboBoxItem Content="强制开启 Crossfeed" Tag="on" />
+                                                                        <ComboBoxItem Content="强制关闭 Crossfeed" Tag="off" />
+                                                                    </ComboBox>
+                                                                </Grid>
+
+                                                                <TextBlock Text="{x:Bind ViewModel.SelectedAutoEqRuleStatusText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+
+                                                                <Grid ColumnSpacing="8">
+                                                                    <Grid.ColumnDefinitions>
+                                                                        <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                                                                        <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                                                                    </Grid.ColumnDefinitions>
+                                                                    <StackPanel Grid.Column="0" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand0Db, Mode=TwoWay}" AutomationProperties.Name="规则 31 Hz" /><TextBlock Text="31" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand0Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="1" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand1Db, Mode=TwoWay}" AutomationProperties.Name="规则 62 Hz" /><TextBlock Text="62" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand1Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="2" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand2Db, Mode=TwoWay}" AutomationProperties.Name="规则 125 Hz" /><TextBlock Text="125" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand2Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="3" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand3Db, Mode=TwoWay}" AutomationProperties.Name="规则 250 Hz" /><TextBlock Text="250" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand3Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="4" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand4Db, Mode=TwoWay}" AutomationProperties.Name="规则 500 Hz" /><TextBlock Text="500" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand4Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="5" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand5Db, Mode=TwoWay}" AutomationProperties.Name="规则 1k Hz" /><TextBlock Text="1k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand5Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="6" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand6Db, Mode=TwoWay}" AutomationProperties.Name="规则 2k Hz" /><TextBlock Text="2k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand6Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="7" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand7Db, Mode=TwoWay}" AutomationProperties.Name="规则 4k Hz" /><TextBlock Text="4k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand7Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="8" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand8Db, Mode=TwoWay}" AutomationProperties.Name="规则 8k Hz" /><TextBlock Text="8k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand8Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                    <StackPanel Grid.Column="9" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="84" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.AutoEqRuleBand9Db, Mode=TwoWay}" AutomationProperties.Name="规则 16k Hz" /><TextBlock Text="16k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.AutoEqRuleBand9Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                                </Grid>
+
+                                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                                    <Button Style="{StaticResource StudioChipButtonStyle}" Content="导入 EqualizerAPO (.txt) 到此规则" Click="OnImportAutoEqRuleApoClick" />
+                                                                    <Button Style="{StaticResource StudioChipButtonStyle}" Content="恢复此槽位默认" Command="{x:Bind ViewModel.ResetSelectedAutoEqRuleCommand}" />
+                                                                </StackPanel>
+                                                            </StackPanel>
+                                                        </Expander>
+                                                    </StackPanel>
+                                                </Border>
                                             </StackPanel>
                                         </Border>
 
@@ -2995,6 +3081,8 @@
                                         <Button Content="清除 FIR" Command="{x:Bind ViewModel.ClearFirImpulseCommand}" />
                                     </StackPanel>
                                     <ToggleSwitch Header="24-bit TPDF 抖动" IsOn="{x:Bind ViewModel.IsTpdfDitherEnabled, Mode=TwoWay}" />
+                                    <ToggleSwitch Header="流派 + 人声自动内容 EQ (串联叠加)" IsOn="{x:Bind ViewModel.IsAutoEqEnabled, Mode=TwoWay}" />
+                                    <TextBlock Text="{x:Bind ViewModel.ActiveAutoEqBadge, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneAccentBrush}" TextWrapping="Wrap" />
                                     <TextBlock Text="{x:Bind ViewModel.SignalPathSummary, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneStatusSuccessBrush}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Flyout>

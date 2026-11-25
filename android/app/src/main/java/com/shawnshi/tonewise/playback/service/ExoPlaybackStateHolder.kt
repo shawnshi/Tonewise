@@ -60,7 +60,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import com.shawnshi.tonewise.image.ImageSettings
+import com.shawnshi.tonewise.music.ClassicalWorkKey
 import com.shawnshi.tonewise.music.MusicRepository
+import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackSettings
 import com.shawnshi.tonewise.playback.audio.AudioOutputManager
 import com.shawnshi.tonewise.playback.dsp.DspRepository
@@ -68,6 +70,7 @@ import com.shawnshi.tonewise.playback.persist.PersistenceRepository
 import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
 import com.shawnshi.tonewise.playback.sleep.SleepTimerController
+import com.shawnshi.tonewise.playback.sleep.SleepTimerMode
 import com.shawnshi.tonewise.playback.state.DeferredPlayback
 import com.shawnshi.tonewise.playback.state.PlaybackCommand
 import com.shawnshi.tonewise.playback.state.PlaybackStateHolder
@@ -77,6 +80,7 @@ import com.shawnshi.tonewise.playback.state.RawQueue
 import com.shawnshi.tonewise.playback.state.RepeatMode
 import com.shawnshi.tonewise.playback.state.ShuffleMode
 import com.shawnshi.tonewise.playback.state.StateAck
+import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.LastFmRepository
 import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.MusicParent
@@ -100,6 +104,7 @@ class ExoPlaybackStateHolder(
     private val imageSettings: ImageSettings,
     private val lastFmRepository: LastFmRepository,
     private val sleepTimerController: SleepTimerController,
+    private val lanSyncRepository: LanSyncRepository,
 ) :
     PlaybackStateHolder,
     Player.Listener,
@@ -120,6 +125,7 @@ class ExoPlaybackStateHolder(
     private var countedCurrentPlay = false
     private var currentDecoderName: String? = null
     private var consecutiveErrorCount = 0
+    private var lastMediaItemIndex: Int = C.INDEX_UNSET
     private val analyticsListener =
         object : AnalyticsListener {
             override fun onAudioDecoderInitialized(
@@ -161,8 +167,13 @@ class ExoPlaybackStateHolder(
         }
         mainScope.launch {
             dspRepository.config
-                .map { it.enabled to it.externalBridgeMode }
+                .map { Triple(it.enabled, it.externalBridgeMode, it.crossfeedEnabled) }
                 .distinctUntilChanged()
+                .drop(1)
+                .collect { audioOutputManager.refreshRoute() }
+        }
+        mainScope.launch {
+            dspRepository.activeContentResolution
                 .drop(1)
                 .collect { audioOutputManager.refreshRoute() }
         }
@@ -170,6 +181,7 @@ class ExoPlaybackStateHolder(
             var lastHandledSleepExpiryMs = sleepTimerController.state.value.expiredEpochMs
             sleepTimerController.state.collect { st ->
                 player.volume = st.fadeGain.coerceIn(0f, 1f)
+                updatePauseAtEndOfMediaItems()
                 if (st.expiredEpochMs > lastHandledSleepExpiryMs) {
                     lastHandledSleepExpiryMs = st.expiredEpochMs
                     player.playWhenReady = false
@@ -370,6 +382,8 @@ class ExoPlaybackStateHolder(
         val target = startIndex ?: player.currentTimeline.getFirstWindowIndex(command.shuffled)
         sessionOngoing = true
         player.seekTo(target, C.TIME_UNSET)
+        lastMediaItemIndex = target
+        updatePauseAtEndOfMediaItems()
         player.prepare()
         player.play()
         playbackManager.ack(this, StateAck.NewPlayback)
@@ -389,6 +403,7 @@ class ExoPlaybackStateHolder(
                 }
             player.setShuffleOrder(order)
         }
+        updatePauseAtEndOfMediaItems()
         playbackManager.ack(this, StateAck.QueueReordered)
         deferSave()
     }
@@ -449,29 +464,50 @@ class ExoPlaybackStateHolder(
     }
 
     override fun playNext(songs: List<Song>, ack: StateAck.PlayNext) {
+        val (insertAt, skippedWorkMovements) = computeWorkSafeInsertIndex()
+        if (insertAt == C.INDEX_UNSET) {
+            player.addMediaItems(songs.map { it.buildMediaItem() })
+        } else {
+            player.addMediaItems(insertAt, songs.map { it.buildMediaItem() })
+        }
+        updatePauseAtEndOfMediaItems()
+        playbackManager.ack(this, StateAck.PlayNext(ack.at + skippedWorkMovements, ack.size))
+        deferSave()
+    }
+
+    private fun computeWorkSafeInsertIndex(): Pair<Int, Int> {
         val currTimeline = player.currentTimeline
-        val nextIndex =
-            if (currTimeline.isEmpty) {
-                C.INDEX_UNSET
-            } else {
+        val curIdx = player.currentMediaItemIndex
+        if (currTimeline.isEmpty || curIdx !in 0 until player.mediaItemCount) {
+            return C.INDEX_UNSET to 0
+        }
+        val curWorkKey = player.getMediaItemAt(curIdx).song?.let(ClassicalWorkKey::workBlockKey)
+        var cursor = curIdx
+        var skipped = 0
+        for (step in 0 until player.mediaItemCount) {
+            val candNext =
                 currTimeline.getNextWindowIndex(
-                    player.currentMediaItemIndex,
+                    cursor,
                     Player.REPEAT_MODE_OFF,
                     player.shuffleModeEnabled,
                 )
+            if (candNext == C.INDEX_UNSET) {
+                return C.INDEX_UNSET to skipped
             }
-
-        if (nextIndex == C.INDEX_UNSET) {
-            player.addMediaItems(songs.map { it.buildMediaItem() })
-        } else {
-            player.addMediaItems(nextIndex, songs.map { it.buildMediaItem() })
+            val candSong = player.getMediaItemAt(candNext).song
+            if (curWorkKey != null && candSong != null && ClassicalWorkKey.workBlockKey(candSong) == curWorkKey) {
+                cursor = candNext
+                skipped++
+                continue
+            }
+            return candNext to skipped
         }
-        playbackManager.ack(this, ack)
-        deferSave()
+        return C.INDEX_UNSET to skipped
     }
 
     override fun addToQueue(songs: List<Song>, ack: StateAck.AddToQueue) {
         player.addMediaItems(songs.map { it.buildMediaItem() })
+        updatePauseAtEndOfMediaItems()
         playbackManager.ack(this, ack)
         deferSave()
     }
@@ -497,6 +533,7 @@ class ExoPlaybackStateHolder(
             }
         }
         playbackManager.ack(this, ack)
+        updatePauseAtEndOfMediaItems()
         deferSave()
     }
 
@@ -512,6 +549,7 @@ class ExoPlaybackStateHolder(
         if (songWillChange && !playbackSettings.rememberPause) {
             player.play()
         }
+        updatePauseAtEndOfMediaItems()
         playbackManager.ack(this, ack)
         deferSave()
     }
@@ -542,6 +580,10 @@ class ExoPlaybackStateHolder(
                 player.shuffleModeEnabled = false
             }
             player.seekTo(rawQueue.heapIndex, C.TIME_UNSET)
+            lastMediaItemIndex = rawQueue.heapIndex
+            val initialSong = rawQueue.heap.getOrNull(rawQueue.heapIndex)
+            activePlaySong = initialSong
+            updateAutoEqForSong(initialSong)
             player.prepare()
             if (wasPlaying) {
                 sessionOngoing = true
@@ -554,6 +596,7 @@ class ExoPlaybackStateHolder(
         }
 
         repeatMode(repeatMode)
+        updatePauseAtEndOfMediaItems()
         // See if we differ by more than a second. This allows us to avoid a meaningless seek
         // in the case of a "tight restore" (i.e music was reloaded).
         // In the case that this is a false positive, it's not very percievable (at least compared
@@ -585,6 +628,8 @@ class ExoPlaybackStateHolder(
 
     override fun reset(ack: StateAck.NewPlayback) {
         player.setMediaItems(listOf())
+        lastMediaItemIndex = C.INDEX_UNSET
+        updatePauseAtEndOfMediaItems()
         playbackManager.ack(this, ack)
         deferSave()
     }
@@ -593,6 +638,30 @@ class ExoPlaybackStateHolder(
 
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
         super.onPlayWhenReadyChanged(playWhenReady, reason)
+
+        if (!playWhenReady && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
+            val mode = sleepTimerController.state.value.mode
+            if ((mode == SleepTimerMode.END_OF_TRACK || mode == SleepTimerMode.END_OF_WORK) &&
+                sleepTimerController.consumeEndOfItemStop()
+            ) {
+                updatePauseAtEndOfMediaItems()
+                val curIdx = player.currentMediaItemIndex
+                if (player.repeatMode == Player.REPEAT_MODE_ONE) {
+                    player.seekTo(0L)
+                } else if (curIdx in 0 until player.mediaItemCount) {
+                    val nextIdx =
+                        player.currentTimeline.getNextWindowIndex(
+                            curIdx,
+                            player.repeatMode,
+                            player.shuffleModeEnabled,
+                        )
+                    if (nextIdx != C.INDEX_UNSET) {
+                        player.seekTo(nextIdx, 0L)
+                    }
+                }
+                deferSave()
+            }
+        }
 
         if (player.playWhenReady) {
             // Mark that we have started playing so that the notification can now be posted.
@@ -661,6 +730,9 @@ class ExoPlaybackStateHolder(
         commitPlayCountIfQualified(completedNaturally = completedNaturally)
 
         val previousSong = activePlaySong
+        val prevMediaIdx = lastMediaItemIndex
+        val nextMediaIdx = player.currentMediaItemIndex
+        lastMediaItemIndex = nextMediaIdx
         val nextSong = mediaItem?.song
         activePlaySong = nextSong
         accumulatedPlayMs = 0L
@@ -671,17 +743,38 @@ class ExoPlaybackStateHolder(
 
         super.onMediaItemTransition(mediaItem, reason)
 
+        updateAutoEqForSong(nextSong)
         syncSignalPath(nextSong)
+
+        val isAutoOrRepeat =
+            reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+        if (isAutoOrRepeat) {
+            val isQueueWrapAround =
+                reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT ||
+                    (prevMediaIdx in 0 until player.mediaItemCount &&
+                        player.currentTimeline.getNextWindowIndex(
+                            prevMediaIdx,
+                            Player.REPEAT_MODE_OFF,
+                            player.shuffleModeEnabled,
+                        ) == C.INDEX_UNSET)
+            if (sleepTimerController.onAutoTrackTransition(previousSong, nextSong, isQueueWrapAround)) {
+                player.playWhenReady = false
+                player.seekTo(0L)
+                updatePauseAtEndOfMediaItems()
+                playbackManager.ack(this, StateAck.IndexMoved)
+                deferSave()
+                return
+            }
+        }
+
+        updatePauseAtEndOfMediaItems()
         if (nextSong != null && (player.isPlaying || player.playWhenReady)) {
             lastNowPlayingUid = nextSong.uid
             lastFmRepository.onNowPlaying(nextSong)
         }
 
         if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
-            if (sleepTimerController.onAutoTrackTransition(previousSong, nextSong)) {
-                player.playWhenReady = false
-                player.seekTo(0L)
-            }
             playbackManager.ack(this, StateAck.IndexMoved)
             deferSave()
         }
@@ -696,6 +789,22 @@ class ExoPlaybackStateHolder(
                 mediaCodecReplayGainProcessor
             else -> ffmpegReplayGainProcessor
         }
+    }
+
+    private fun updateAutoEqForSong(song: Song?) {
+        if (song == null) {
+            dspRepository.onTrackChanged(emptyList(), null, null, null)
+            return
+        }
+        val genreNames = song.genres.map { it.name.resolve(context) }
+        val effectiveVocals = lanSyncRepository.getEffectiveDjVocals(song)
+        val workKey = com.shawnshi.tonewise.music.ClassicalWorkKey.workBlockKey(song)
+        dspRepository.onTrackChanged(
+            genres = genreNames,
+            djVocals = effectiveVocals,
+            workName = song.workName,
+            workKey = workKey,
+        )
     }
 
     private fun syncSignalPath(song: Song?) {
@@ -819,8 +928,51 @@ class ExoPlaybackStateHolder(
     }
 
     private fun updatePauseOnRepeat() {
-        player.pauseAtEndOfMediaItems =
+        updatePauseAtEndOfMediaItems()
+    }
+
+    private fun updatePauseAtEndOfMediaItems() {
+        val repeatPause =
             player.repeatMode == Player.REPEAT_MODE_ONE && playbackSettings.pauseOnRepeat
+        val mode = sleepTimerController.state.value.mode
+        val sleepStopAtEnd =
+            if (mode == SleepTimerMode.END_OF_TRACK || mode == SleepTimerMode.END_OF_WORK) {
+                val timeline = player.currentTimeline
+                val curIdx = player.currentMediaItemIndex
+                if (timeline.isEmpty || curIdx !in 0 until player.mediaItemCount) {
+                    false
+                } else if (player.repeatMode == Player.REPEAT_MODE_ONE) {
+                    true
+                } else {
+                    val nextNoWrap =
+                        timeline.getNextWindowIndex(
+                            curIdx,
+                            Player.REPEAT_MODE_OFF,
+                            player.shuffleModeEnabled,
+                        )
+                    val isWrap = nextNoWrap == C.INDEX_UNSET
+                    val nextIdx =
+                        if (isWrap && player.repeatMode == Player.REPEAT_MODE_ALL) {
+                            timeline.getFirstWindowIndex(player.shuffleModeEnabled)
+                        } else {
+                            nextNoWrap
+                        }
+                    val nextSong =
+                        if (nextIdx != C.INDEX_UNSET && nextIdx in 0 until player.mediaItemCount) {
+                            player.getMediaItemAt(nextIdx).song
+                        } else {
+                            null
+                        }
+                    sleepTimerController.willStopAtTransition(
+                        currentSong = player.currentMediaItem?.song,
+                        nextSong = nextSong,
+                        isQueueWrapAround = isWrap,
+                    )
+                }
+            } else {
+                false
+            }
+        player.pauseAtEndOfMediaItems = repeatPause || sleepStopAtEnd
     }
 
     private fun save(cb: () -> Unit) {
@@ -919,6 +1071,7 @@ class ExoPlaybackStateHolder(
         private val imageSettings: ImageSettings,
         private val lastFmRepository: LastFmRepository,
         private val sleepTimerController: SleepTimerController,
+        private val lanSyncRepository: LanSyncRepository,
     ) {
         fun create(): ExoPlaybackStateHolder {
             val enableFloat = audioOutputManager.shouldUseFloatPipeline()
@@ -981,6 +1134,7 @@ class ExoPlaybackStateHolder(
                 imageSettings,
                 lastFmRepository,
                 sleepTimerController,
+                lanSyncRepository,
             )
         }
     }

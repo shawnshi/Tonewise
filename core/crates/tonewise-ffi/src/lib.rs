@@ -5,6 +5,10 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
 use std::fs::{File, OpenOptions};
+use tonewise_dsp_core::{
+    AutoEqPolicy, DspProfile, ResolvedAutoEq, TrackAutoEqInput, compose_dsp_profiles,
+    default_auto_eq_catalog, resolve_auto_eq,
+};
 use tonewise_rules::{RuleTrack, SceneCard, evaluate_scene};
 use tonewise_sync::{
     LwwTrackState, SessionSlot, TagMutationEvent, WaveformArchive, apply_header_delta_patch,
@@ -37,6 +41,53 @@ struct SessionMergeRequest {
 struct TagWriteRequest {
     path: String,
     updates: HashMap<String, Option<String>>,
+}
+
+#[derive(Deserialize)]
+struct AutoEqResolveRequest {
+    #[serde(default)]
+    policy: AutoEqPolicy,
+    track: TrackAutoEqInput,
+    #[serde(default)]
+    previous_work_key: Option<String>,
+    #[serde(default)]
+    previous_resolved: Option<ResolvedAutoEq>,
+}
+
+#[derive(Deserialize)]
+struct ComposeDspRequest {
+    #[serde(default)]
+    device_profile: DspProfile,
+    #[serde(default)]
+    content_profile: DspProfile,
+}
+
+fn resolve_auto_eq_json_impl(request_json: &str) -> String {
+    let req: AutoEqResolveRequest = match serde_json::from_str(request_json) {
+        Ok(r) => r,
+        Err(e) => return json_error(&format!("invalid auto eq request json: {e}")),
+    };
+    let resolved = resolve_auto_eq(
+        &req.policy,
+        &req.track,
+        req.previous_work_key.as_deref(),
+        req.previous_resolved.as_ref(),
+    );
+    serde_json::to_string(&resolved).unwrap_or_else(|e| json_error(&e.to_string()))
+}
+
+fn compose_dsp_json_impl(request_json: &str) -> String {
+    let req: ComposeDspRequest = match serde_json::from_str(request_json) {
+        Ok(r) => r,
+        Err(e) => return json_error(&format!("invalid compose dsp request json: {e}")),
+    };
+    let composed = compose_dsp_profiles(&req.device_profile, &req.content_profile);
+    serde_json::to_string(&composed).unwrap_or_else(|e| json_error(&e.to_string()))
+}
+
+fn default_auto_eq_catalog_json_impl() -> String {
+    let catalog = default_auto_eq_catalog();
+    serde_json::to_string(&catalog).unwrap_or_else(|e| json_error(&e.to_string()))
 }
 
 fn split_artists_json_impl(raw: &str) -> String {
@@ -752,6 +803,33 @@ pub unsafe extern "C" fn tonewise_write_audio_tags_json(request_json: *const c_c
     ffi_catch(|| write_audio_tags_json_impl(req))
 }
 
+/// # Safety
+/// `request_json` must be a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tonewise_resolve_auto_eq_json(
+    request_json: *const c_char,
+) -> *mut c_char {
+    let Some(req) = (unsafe { read_c_str(request_json) }) else {
+        return into_c_string(json_error("null or invalid utf-8 input"));
+    };
+    ffi_catch(|| resolve_auto_eq_json_impl(req))
+}
+
+/// # Safety
+/// `request_json` must be a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tonewise_compose_dsp_json(request_json: *const c_char) -> *mut c_char {
+    let Some(req) = (unsafe { read_c_str(request_json) }) else {
+        return into_c_string(json_error("null or invalid utf-8 input"));
+    };
+    ffi_catch(|| compose_dsp_json_impl(req))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tonewise_default_auto_eq_catalog_json() -> *mut c_char {
+    ffi_catch(default_auto_eq_catalog_json_impl)
+}
+
 // -----------------------------------------------------------------------------
 // JNI exports for Android (:musikr -> org.oxycblt.musikr.core.TonewiseCoreJNI)
 // -----------------------------------------------------------------------------
@@ -1015,6 +1093,43 @@ pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeApplyH
     rust_to_jstring(&mut env, &out)
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeResolveAutoEqJson<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _cls: JClass<'local>,
+    request_json: JString<'local>,
+) -> jstring {
+    let out = match jstring_to_rust(&mut env, &request_json) {
+        Ok(r) => jni_catch(|| resolve_auto_eq_json_impl(&r)),
+        Err(e) => json_error(&e),
+    };
+    rust_to_jstring(&mut env, &out)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeComposeDspJson<'local>(
+    mut env: JNIEnv<'local>,
+    _cls: JClass<'local>,
+    request_json: JString<'local>,
+) -> jstring {
+    let out = match jstring_to_rust(&mut env, &request_json) {
+        Ok(r) => jni_catch(|| compose_dsp_json_impl(&r)),
+        Err(e) => json_error(&e),
+    };
+    rust_to_jstring(&mut env, &out)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_oxycblt_musikr_core_TonewiseCoreJNI_nativeDefaultAutoEqCatalogJson(
+    mut env: JNIEnv,
+    _cls: JClass,
+) -> jstring {
+    let out = jni_catch(default_auto_eq_catalog_json_impl);
+    rust_to_jstring(&mut env, &out)
+}
+
 pub fn workspace_banner() -> String {
     format!(
         "tonewise-core abi=v{} mood_clusters={} protected_artists={}",
@@ -1040,6 +1155,29 @@ mod tests {
 
         let parsed: Vec<String> = serde_json::from_str(&out_str).unwrap();
         assert_eq!(parsed, vec!["Above & Beyond", "Andrew Bayer"]);
+    }
+
+    #[test]
+    fn ffi_auto_eq_and_compose_dsp_roundtrip() {
+        let req = serde_json::json!({
+            "policy": { "enabled": true, "classical_auto_crossfeed": true, "lock_within_classical_work": true },
+            "track": { "genres": ["Classical"], "dj_vocals": "instrumental", "work_name": "Symphony No. 5" }
+        })
+        .to_string();
+        let req_c = CString::new(req).unwrap();
+        let out_ptr = unsafe { tonewise_resolve_auto_eq_json(req_c.as_ptr()) };
+        let out_str = unsafe { CStr::from_ptr(out_ptr) }.to_str().unwrap().to_string();
+        unsafe { tonewise_free_string(out_ptr) };
+        let resolved: ResolvedAutoEq = serde_json::from_str(&out_str).unwrap();
+        assert!(resolved.applied);
+        assert!(resolved.enable_crossfeed);
+        assert!(!resolved.has_non_zero_eq);
+
+        let cat_ptr = tonewise_default_auto_eq_catalog_json();
+        let cat_str = unsafe { CStr::from_ptr(cat_ptr) }.to_str().unwrap().to_string();
+        unsafe { tonewise_free_string(cat_ptr) };
+        let catalog: serde_json::Value = serde_json::from_str(&cat_str).unwrap();
+        assert_eq!(catalog.as_array().unwrap().len(), 24);
     }
 
     #[test]

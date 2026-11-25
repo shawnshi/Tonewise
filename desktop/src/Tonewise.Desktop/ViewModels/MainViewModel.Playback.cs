@@ -224,7 +224,7 @@ public sealed partial class MainViewModel
         else
         {
             int curIdx = CurrentTrack is null ? -1 : FindQueueIndex(PlaybackQueue, CurrentTrack);
-            int insertIdx = curIdx >= 0 ? Math.Min(curIdx + 1, PlaybackQueue.Count) : 0;
+            int insertIdx = ComputeWorkSafeInsertNextIndex(PlaybackQueue, curIdx);
             PlaybackQueue.InsertRange(insertIdx, playable);
             if (!IsShuffleEnabled) _unshuffledQueueSnapshot = [.. PlaybackQueue];
         }
@@ -283,6 +283,7 @@ public sealed partial class MainViewModel
         }
         WaveformUpdated?.Invoke();
 
+        ResolveAndUpdateCurrentAutoEq(track, keepWorkLockFromPrevious: true, previousWorkKeyOverride: BuildTrackWorkKey(previousTrack));
         PushEnginePreferences();
         if (LongPathHelper.FileExists(track.FullPath))
         {
@@ -438,6 +439,22 @@ public sealed partial class MainViewModel
                     t => WorkAwareShuffleEngine.BuildAlbumScope(t.Album, t.ConductorsDisplay));
                 ReplaceQueueItems(updatedQueue);
             }
+            if (_unshuffledQueueSnapshot.Count > 0)
+            {
+                int snapIdx = _unshuffledQueueSnapshot.FindIndex(t => string.Equals(t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal));
+                if (snapIdx >= 0)
+                {
+                    var (updatedSnap, _) = ClassicalAbSwitchHelper.ReplaceWorkBlockInQueue(
+                        _unshuffledQueueSnapshot,
+                        snapIdx,
+                        alternate,
+                        altWorkOrdered,
+                        t => t.TrackUid,
+                        t => t.WorkName,
+                        t => WorkAwareShuffleEngine.BuildAlbumScope(t.Album, t.ConductorsDisplay));
+                    _unshuffledQueueSnapshot = updatedSnap;
+                }
+            }
         }
         else if (altWorkOrdered.Count > 1)
         {
@@ -550,6 +567,21 @@ public sealed partial class MainViewModel
         EvaluateAndCommitPlayCountIfQualified(completedNaturally: true);
         if (RepeatMode == "one" && CurrentTrack is not null)
         {
+            string? curWork = BuildTrackWorkKey(CurrentTrack);
+            if (_sleepTimer.ShouldStopAtTrackTransition(curWork, curWork, isQueueWrapAround: true))
+            {
+                CancelPendingPlaybackRecovery();
+                _engine.SetSleepFadeLinear(1.0);
+                _pausedSinceUtc = DateTime.UtcNow;
+                IsPlaying = false;
+                SleepTimerBadge = "";
+                IsSleepTimerActive = false;
+                PersistPlaybackSessionSnapshot(force: true);
+                StatusMessage = "睡眠定时（本曲/本作品结束）已暂停播放。";
+                SleepTimerExpired?.Invoke();
+                PlayTrack(CurrentTrack, startPaused: true);
+                return;
+            }
             PlayTrack(CurrentTrack, startPaused: PauseOnSingleRepeat);
             return;
         }
@@ -563,14 +595,17 @@ public sealed partial class MainViewModel
         IList<TrackItem> source = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
         int curIdx = CurrentTrack is null ? -1 : FindQueueIndex(source, CurrentTrack);
         TrackItem? nextTrack = null;
+        int nextIdx = -1;
         if (curIdx >= 0)
         {
             for (int offset = 1; offset <= source.Count; offset++)
             {
-                var cand = source[(curIdx + offset) % source.Count];
+                int candIdx = (curIdx + offset) % source.Count;
+                var cand = source[candIdx];
                 if (string.Equals(cand.FullPath, nextPath, StringComparison.OrdinalIgnoreCase))
                 {
                     nextTrack = cand;
+                    nextIdx = candIdx;
                     break;
                 }
             }
@@ -582,7 +617,8 @@ public sealed partial class MainViewModel
         var previousTrack = CurrentTrack;
         string? prevWorkKey = BuildTrackWorkKey(previousTrack);
         string? nextWorkKey = BuildTrackWorkKey(nextTrack);
-        if (_sleepTimer.ShouldStopAtTrackTransition(prevWorkKey, nextWorkKey))
+        bool isWrapAround = curIdx >= 0 && nextIdx >= 0 && nextIdx <= curIdx;
+        if (_sleepTimer.ShouldStopAtTrackTransition(prevWorkKey, nextWorkKey, isQueueWrapAround: isWrapAround))
         {
             CancelPendingPlaybackRecovery();
             _engine.Pause();
@@ -599,6 +635,7 @@ public sealed partial class MainViewModel
 
         CurrentTrack = nextTrack;
         _pendingRestorePositionSec = 0.0;
+        ResolveAndUpdateCurrentAutoEq(nextTrack, keepWorkLockFromPrevious: true, previousWorkKeyOverride: prevWorkKey);
         ResetScrobbleSession(nextTrack);
         if (previousTrack is not null && !string.Equals(previousTrack.TrackUid, nextTrack.TrackUid, StringComparison.Ordinal))
         {
@@ -640,6 +677,7 @@ public sealed partial class MainViewModel
         int maxAttempts = autoAdvance ? Math.Min(5, source.Count) : 1;
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
+            int prevIdx = CurrentTrack is null ? -1 : FindQueueIndex(source, CurrentTrack);
             TrackItem? candidate = ResolveNextCandidate(source, autoAdvance, allowReshuffle: attempt == 0);
             if (candidate is null)
             {
@@ -650,7 +688,7 @@ public sealed partial class MainViewModel
                 _engine.ReleasePowerKeepAlive();
                 if (autoAdvance && _sleepTimer.Mode != SleepTimerMode.Off)
                 {
-                    _sleepTimer.ShouldStopAtTrackTransition(BuildTrackWorkKey(CurrentTrack), null);
+                    _sleepTimer.ShouldStopAtTrackTransition(BuildTrackWorkKey(CurrentTrack), null, isQueueWrapAround: true);
                     _engine.SetSleepFadeLinear(1.0);
                     SleepTimerBadge = "";
                     IsSleepTimerActive = false;
@@ -660,7 +698,10 @@ public sealed partial class MainViewModel
                 StatusMessage = "当前列表已顺序播放完毕。";
                 return;
             }
-            if (autoAdvance && _sleepTimer.ShouldStopAtTrackTransition(BuildTrackWorkKey(CurrentTrack), BuildTrackWorkKey(candidate)))
+            int nextIdx = FindQueueIndex(source, candidate);
+            bool isWrapAround = (prevIdx >= 0 && nextIdx >= 0 && nextIdx <= prevIdx)
+                || (IsShuffleEnabled && PlaybackQueue.Count > 1 && prevIdx == source.Count - 1);
+            if (autoAdvance && _sleepTimer.ShouldStopAtTrackTransition(BuildTrackWorkKey(CurrentTrack), BuildTrackWorkKey(candidate), isQueueWrapAround: isWrapAround))
             {
                 EvaluateAndCommitPlayCountIfQualified(completedNaturally: true);
                 IsPlaying = false;
@@ -740,13 +781,16 @@ public sealed partial class MainViewModel
             return;
         }
         IList<TrackItem> source = PlaybackQueue.Count > 0 ? PlaybackQueue : FilteredTracks;
+        int curIdx = FindQueueIndex(source, CurrentTrack);
         var next = ResolveNextCandidate(source, autoAdvance: true, allowReshuffle: false);
         if (next is null || string.IsNullOrWhiteSpace(next.FullPath))
         {
             _engine.ClearPreloadedNext();
             return;
         }
-        if (_sleepTimer.WillStopAtTransition(BuildTrackWorkKey(CurrentTrack), BuildTrackWorkKey(next)))
+        int nextIdx = FindQueueIndex(source, next);
+        bool isWrapAround = curIdx >= 0 && nextIdx >= 0 && nextIdx <= curIdx;
+        if (_sleepTimer.WillStopAtTransition(BuildTrackWorkKey(CurrentTrack), BuildTrackWorkKey(next), isQueueWrapAround: isWrapAround))
         {
             _engine.ClearPreloadedNext();
             return;
@@ -754,10 +798,11 @@ public sealed partial class MainViewModel
 
         string nextPath = next.FullPath;
         double nextRg = ResolveReplayGainForTrack(next);
+        GaplessDspTransition nextTransition = BuildGaplessDspTransition(next, nextRg);
         _ = Task.Run(() =>
         {
             if (Volatile.Read(ref _gaplessPreloadGen) != gen) return;
-            _engine.PreloadNextFile(nextPath, nextRg);
+            _engine.PreloadNextFile(nextPath, nextRg, nextTransition);
             if (Volatile.Read(ref _gaplessPreloadGen) != gen)
             {
                 _engine.ClearPreloadedNext();
@@ -843,7 +888,7 @@ public sealed partial class MainViewModel
             FilterEnergy = "all";
             FilterTempoBucket = "all";
             FilterMoodCluster = "all";
-            SelectedEnergyArc = "flat";
+            SelectedEnergyArc = "work_shuffle";
         });
         if (FilteredTracks.Count > 0)
         {
@@ -888,6 +933,14 @@ public sealed partial class MainViewModel
         RefreshProgress();
         WaveformUpdated?.Invoke();
     }
+
+    internal static int ComputeWorkSafeInsertNextIndex(IReadOnlyList<TrackItem> queue, int currentIndex) =>
+        WorkAwareShuffleEngine.ComputeWorkSafeInsertNextIndex(
+            queue,
+            currentIndex,
+            t => t.WorkName,
+            t => t.Album,
+            t => WorkAwareShuffleEngine.BuildAlbumScope(t.Album, t.ConductorsDisplay));
 
     private static string? BuildTrackWorkKey(TrackItem? track) =>
         track is null
@@ -1385,9 +1438,20 @@ public sealed partial class MainViewModel
 
         var tailMovements = ResolveRemainingWorkMovementsAfter(CurrentTrack);
         var excludedUids = new HashSet<string>(StringComparer.Ordinal) { CurrentTrack.TrackUid };
+        string? activeWorkKey = BuildTrackWorkKey(CurrentTrack);
+        if (!string.IsNullOrEmpty(activeWorkKey))
+        {
+            foreach (var t in _allTracks)
+            {
+                if (string.Equals(BuildTrackWorkKey(t), activeWorkKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    excludedUids.Add(t.TrackUid);
+                }
+            }
+        }
         foreach (var tail in tailMovements) excludedUids.Add(tail.TrackUid);
 
-        var rawMatches = _allTracks
+        var matchedList = _allTracks
             .Where(t => !string.IsNullOrWhiteSpace(t.FullPath)
                         && !excludedUids.Contains(t.TrackUid)
                         && (kind switch
@@ -1398,6 +1462,33 @@ public sealed partial class MainViewModel
                             _ => false,
                         }))
             .ToList();
+
+        var matchedWorkKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in matchedList)
+        {
+            string? wk = BuildTrackWorkKey(m);
+            if (!string.IsNullOrEmpty(wk)) matchedWorkKeys.Add(wk);
+        }
+
+        var rawMatches = new List<TrackItem>(matchedList.Count);
+        var addedUids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var t in _allTracks)
+        {
+            if (string.IsNullOrWhiteSpace(t.FullPath) || excludedUids.Contains(t.TrackUid)) continue;
+            string? wk = BuildTrackWorkKey(t);
+            bool include = (wk is not null && matchedWorkKeys.Contains(wk))
+                || (kind switch
+                {
+                    "scene" => t.DjScene.Any(s => string.Equals(s.Trim(), val, StringComparison.OrdinalIgnoreCase)),
+                    "mood" => t.Moods.Any(m => string.Equals(m.Trim(), val, StringComparison.OrdinalIgnoreCase)),
+                    "vocals" => string.Equals(t.DjVocals?.Trim(), val, StringComparison.OrdinalIgnoreCase),
+                    _ => false,
+                });
+            if (include && addedUids.Add(t.TrackUid))
+            {
+                rawMatches.Add(t);
+            }
+        }
 
         if (rawMatches.Count == 0 && tailMovements.Count == 0)
         {

@@ -46,6 +46,63 @@ public sealed record NativeAudioAnalysisDto(
     [property: JsonPropertyName("peak_linear")] float PeakLinear
 );
 
+public sealed record AutoEqBiquadDto(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("freq_hz")] float FreqHz,
+    [property: JsonPropertyName("gain_db")] float GainDb,
+    [property: JsonPropertyName("q")] float Q
+);
+
+public sealed record DspProfileDto(
+    [property: JsonPropertyName("preamp_db")] float PreampDb,
+    [property: JsonPropertyName("filters")] List<AutoEqBiquadDto> Filters
+);
+
+public sealed record AutoEqRuleOverrideDto(
+    [property: JsonPropertyName("preamp_db")] float PreampDb,
+    [property: JsonPropertyName("filters")] List<AutoEqBiquadDto> Filters,
+    [property: JsonPropertyName("crossfeed_override")] bool? CrossfeedOverride = null
+);
+
+public sealed record AutoEqPolicyDto(
+    [property: JsonPropertyName("enabled")] bool Enabled = false,
+    [property: JsonPropertyName("classical_auto_crossfeed")] bool ClassicalAutoCrossfeed = true,
+    [property: JsonPropertyName("lock_within_classical_work")] bool LockWithinClassicalWork = true,
+    [property: JsonPropertyName("updated_at_ms")] ulong UpdatedAtMs = 0,
+    [property: JsonPropertyName("custom_rules")] Dictionary<string, AutoEqRuleOverrideDto>? CustomRules = null
+);
+
+public sealed record TrackAutoEqInputDto(
+    [property: JsonPropertyName("genres")] List<string> Genres,
+    [property: JsonPropertyName("dj_vocals")] string? DjVocals = null,
+    [property: JsonPropertyName("work_name")] string? WorkName = null,
+    [property: JsonPropertyName("work_key")] string? WorkKey = null
+);
+
+public sealed record ResolvedAutoEqDto(
+    [property: JsonPropertyName("applied")] bool Applied,
+    [property: JsonPropertyName("genre_family")] string GenreFamily,
+    [property: JsonPropertyName("vocal_class")] string VocalClass,
+    [property: JsonPropertyName("matched_rule_key")] string MatchedRuleKey,
+    [property: JsonPropertyName("display_label")] string DisplayLabel,
+    [property: JsonPropertyName("is_custom_rule")] bool IsCustomRule,
+    [property: JsonPropertyName("locked_to_previous_work")] bool LockedToPreviousWork,
+    [property: JsonPropertyName("preamp_db")] float PreampDb,
+    [property: JsonPropertyName("filters")] List<AutoEqBiquadDto> Filters,
+    [property: JsonPropertyName("enable_crossfeed")] bool EnableCrossfeed,
+    [property: JsonPropertyName("has_non_zero_eq")] bool HasNonZeroEq
+);
+
+public sealed record AutoEqCatalogEntryDto(
+    [property: JsonPropertyName("slot_key")] string SlotKey,
+    [property: JsonPropertyName("genre_family")] string GenreFamily,
+    [property: JsonPropertyName("vocal_class")] string VocalClass,
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("default_preamp_db")] float DefaultPreampDb,
+    [property: JsonPropertyName("default_filters")] List<AutoEqBiquadDto> DefaultFilters,
+    [property: JsonPropertyName("default_crossfeed")] bool DefaultCrossfeed
+);
+
 public static class TonewiseCoreClient
 {
     private const uint ExpectedAbiVersion = 1;
@@ -287,6 +344,70 @@ public static class TonewiseCoreClient
         {
             Marshal.FreeHGlobal(pReq);
         }
+    }
+
+    public static ResolvedAutoEqDto ResolveAutoEq(
+        AutoEqPolicyDto policy,
+        TrackAutoEqInputDto track,
+        string? previousWorkKey = null,
+        ResolvedAutoEqDto? previousResolved = null)
+    {
+        EnsureAbiVersion();
+        string req = JsonSerializer.Serialize(new
+        {
+            policy = policy with { CustomRules = policy.CustomRules ?? [] },
+            track,
+            previous_work_key = previousWorkKey,
+            previous_resolved = previousResolved,
+        });
+        IntPtr pReq = TonewiseCoreNative.AllocUtf8(req);
+        try
+        {
+            string json = TonewiseCoreNative.ConsumeOwnedUtf8(
+                TonewiseCoreNative.tonewise_resolve_auto_eq_json(pReq)
+            );
+            ThrowIfError(json);
+            return JsonSerializer.Deserialize<ResolvedAutoEqDto>(json)
+                ?? throw new InvalidOperationException("Empty auto eq result from tonewise_core");
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pReq);
+        }
+    }
+
+    public static DspProfileDto ComposeDsp(DspProfileDto deviceProfile, DspProfileDto contentProfile)
+    {
+        EnsureAbiVersion();
+        string req = JsonSerializer.Serialize(new
+        {
+            device_profile = deviceProfile,
+            content_profile = contentProfile,
+        });
+        IntPtr pReq = TonewiseCoreNative.AllocUtf8(req);
+        try
+        {
+            string json = TonewiseCoreNative.ConsumeOwnedUtf8(
+                TonewiseCoreNative.tonewise_compose_dsp_json(pReq)
+            );
+            ThrowIfError(json);
+            return JsonSerializer.Deserialize<DspProfileDto>(json)
+                ?? throw new InvalidOperationException("Empty compose dsp result from tonewise_core");
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pReq);
+        }
+    }
+
+    public static List<AutoEqCatalogEntryDto> GetDefaultAutoEqCatalog()
+    {
+        EnsureAbiVersion();
+        string json = TonewiseCoreNative.ConsumeOwnedUtf8(
+            TonewiseCoreNative.tonewise_default_auto_eq_catalog_json()
+        );
+        ThrowIfError(json);
+        return JsonSerializer.Deserialize<List<AutoEqCatalogEntryDto>>(json) ?? [];
     }
 
     private static void ThrowIfError(string json)

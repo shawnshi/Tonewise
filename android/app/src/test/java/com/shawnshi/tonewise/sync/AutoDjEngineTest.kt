@@ -15,9 +15,10 @@ class AutoDjEngineTest {
         workKey: String? = null,
         movementNumber: Int? = null,
         artist: String = "Artist ${idx % 30}",
+        trackUid: String = "uid-$idx",
     ) =
         AutoDjTrackCandidate(
-            trackUid = "uid-$idx",
+            trackUid = trackUid,
             title = "Track $idx",
             artist = artist,
             effectivePlayCount = playCount,
@@ -122,5 +123,80 @@ class AutoDjEngineTest {
         assertEquals(50, morning.orderedTrackUids.size)
         assertEquals(50, lateNight.orderedTrackUids.size)
         assertTrue(morning.orderedTrackUids != lateNight.orderedTrackUids)
+    }
+
+    @Test
+    fun `scene Auto DJ keeps matched classical works un-displaced by BPM penalty and honors sortArc`() {
+        val candidates = ArrayList<AutoDjTrackCandidate>()
+        val matchedUids = HashSet<String>()
+        // 50 matched tracks including a slow 42 BPM 3-movement work outside evening window (72..114)
+        for (m in 1..3) {
+            val uid = "sym-$m"
+            matchedUids.add(uid)
+            candidates.add(
+                makeCandidate(
+                    idx = m,
+                    playCount = 3,
+                    bpm = 42.0,
+                    energy = "low",
+                    scenes = listOf("focus"),
+                    workKey = "alb|cond::sym",
+                    movementNumber = m,
+                    artist = "Vienna Phil",
+                    trackUid = uid,
+                )
+            )
+        }
+        for (i in 4..50) {
+            val uid = "matched-$i"
+            matchedUids.add(uid)
+            candidates.add(
+                makeCandidate(
+                    idx = i,
+                    playCount = if (i % 3 == 0) 0 else 4,
+                    bpm = if (i % 2 == 0) 90.0 else 115.0,
+                    energy = if (i % 2 == 0) "medium" else "high",
+                    scenes = listOf("focus"),
+                    trackUid = uid,
+                )
+            )
+        }
+        // 40 non-matched tracks with "perfect" BPM center score
+        for (i in 100..140) {
+            candidates.add(makeCandidate(idx = i, playCount = 10, bpm = 92.0, energy = "low"))
+        }
+
+        val ctx =
+            AutoDjSceneContext(
+                sceneId = "focus",
+                sceneTitle = "Focus",
+                matchedUids = matchedUids,
+                sortArc = "energy_asc",
+            )
+        val res = AutoDjEngine.generate(candidates, hourOfDay = 20, targetCount = 50, sceneContext = ctx, randomSeed = 5)
+        assertTrue(res.orderedTrackUids.all { it in matchedUids })
+        val symIdx = res.orderedTrackUids.indexOf("sym-1")
+        assertTrue("Expected slow classical matched work included", symIdx >= 0)
+        assertEquals(0, symIdx)
+        assertEquals("sym-2", res.orderedTrackUids[symIdx + 1])
+        assertEquals("sym-3", res.orderedTrackUids[symIdx + 2])
+    }
+
+    @Test
+    fun `Auto DJ does not truncate a single multi-movement work exceeding targetCount`() {
+        val candidates =
+            (1..6).reversed().map { m ->
+                makeCandidate(
+                    idx = m,
+                    playCount = 2,
+                    bpm = 96.0,
+                    energy = "low",
+                    workKey = "partita::4",
+                    movementNumber = m,
+                    artist = "Bach Pianist",
+                )
+            }
+        val res = AutoDjEngine.generate(candidates, hourOfDay = 10, targetCount = 4, randomSeed = 1)
+        assertEquals(listOf("uid-1", "uid-2", "uid-3", "uid-4", "uid-5", "uid-6"), res.orderedTrackUids)
     }
 }

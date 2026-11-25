@@ -581,6 +581,12 @@
     <string name="lbl_dsp_balance">L/R Channel Balance</string>
     <string name="lbl_dsp_limiter">Lookahead soft limiter (-0.2 dBFS)</string>
     <string name="lbl_dsp_open_console">Open 64-bit DSP &amp; EQ Console</string>
+    <string name="lbl_auto_eq_title">Genre &amp; Vocal Auto-EQ (Layer B Cascade)</string>
+    <string name="lbl_auto_eq_enable">Enable Genre + Vocal Auto-EQ</string>
+    <string name="lbl_auto_eq_classical_crossfeed">Classical instrumental auto Crossfeed (Flat + Stage)</string>
+    <string name="lbl_auto_eq_lock_work">Lock tone within classical work</string>
+    <string name="lbl_auto_eq_customize_rules">Customize per-genre rules (LAN Synced)</string>
+    <string name="lbl_auto_eq_reset_slot">Reset this slot</string>
     <string name="lbl_usb_ear_protection">USB BIT-PERFECT uses hardware DAC direct mode: dongles without physical volume buttons may output full scale. Verify volume before wearing earphones.</string>
     <string name="lbl_usb_ear_confirm">I verified DAC volume</string>
     <string name="lbl_work_none">Current track has no classical WORK metadata</string>

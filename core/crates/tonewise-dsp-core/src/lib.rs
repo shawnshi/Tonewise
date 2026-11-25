@@ -1,8 +1,16 @@
+#[cfg(feature = "analysis")]
 pub mod analysis;
+pub mod auto_eq;
 
+#[cfg(feature = "analysis")]
 pub use analysis::{
     AudioAnalysisError, AudioAnalysisResult, ENVELOPE_POINTS, analyze_audio_file, estimate_bpm,
     estimate_track_replaygain_db, extract_150_rms_envelope,
+};
+pub use auto_eq::{
+    AutoEqCatalogEntry, AutoEqPolicy, AutoEqRuleOverride, CanonicalGenre, ResolvedAutoEq,
+    STANDARD_TEN_BAND_FREQS, TrackAutoEqInput, VocalClass, classify_genre, classify_vocal,
+    compose_dsp_profiles, default_auto_eq_catalog, resolve_auto_eq,
 };
 
 use serde::{Deserialize, Serialize};

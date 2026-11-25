@@ -33,6 +33,7 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import kotlin.math.tanh
+import com.shawnshi.tonewise.music.ClassicalWorkKey
 import com.shawnshi.tonewise.playback.PlaybackSettings
 import com.shawnshi.tonewise.playback.dsp.DspChainConfig
 import com.shawnshi.tonewise.playback.dsp.DspConfigSource
@@ -505,10 +506,7 @@ constructor(
         private const val MIN_INT24 = -8_388_608
         private const val MAX_INT24 = 8_388_607
 
-        internal fun buildWorkBlockKey(song: Song): String? {
-            val work = song.workName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
-            return "${song.album.uid}::$work"
-        }
+        internal fun buildWorkBlockKey(song: Song): String? = ClassicalWorkKey.workBlockKey(song)
 
         internal fun shouldUseAlbumGainDynamic(
             queue: List<Song>,

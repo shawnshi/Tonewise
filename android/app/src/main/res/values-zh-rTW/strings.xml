@@ -432,6 +432,12 @@
     <string name="lbl_dsp_balance">左右聲道平衡</string>
     <string name="lbl_dsp_limiter">前瞻軟限幅器 (-0.2 dBFS)</string>
     <string name="lbl_dsp_open_console">開啟 64-bit DSP 與等化控制台</string>
+    <string name="lbl_auto_eq_title">曲風 + 人聲自動內容 EQ（Layer B 串聯疊加）</string>
+    <string name="lbl_auto_eq_enable">啟用曲風 + 人聲自動 EQ</string>
+    <string name="lbl_auto_eq_classical_crossfeed">古典純器樂自動 Crossfeed（平直 + 聲場）</string>
+    <string name="lbl_auto_eq_lock_work">同一古典作品內鎖定音色</string>
+    <string name="lbl_auto_eq_customize_rules">自訂曲風與人聲規則（支援雙端同步）</string>
+    <string name="lbl_auto_eq_reset_slot">恢復此槽位預設</string>
     <string name="lbl_usb_ear_protection">USB BIT-PERFECT 採用硬體 DAC 直通模式：無實體音量鍵的小尾巴可能以滿幅度輸出，配戴耳機前請先確認音量安全。</string>
     <string name="lbl_usb_ear_confirm">已確認 DAC 音量安全</string>
     <string name="lbl_work_none">目前曲目尚無古典 WORK 作品中繼資料</string>

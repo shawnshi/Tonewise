@@ -437,12 +437,47 @@ public sealed class TonewiseAudioEngine : IDisposable
                     sourceWaveStream,
                     readAhead,
                     readAhead,
-                    onTransitionSync: (newPath, newRgDb) =>
+                    onTransitionSync: (newPath, transition) =>
                     {
                         bool nextIsDsd = Path.GetExtension(newPath).ToLowerInvariant() is ".dsf" or ".dff";
+                        double newRgDb = transition.ReplayGainDb;
                         CurrentFilePath = newPath;
                         _isDsdSource = nextIsDsd;
-                        dsp?.SetReplayGainDb(newRgDb);
+                        _activeReplayGainDb = newRgDb;
+                        bool dspChanged = false;
+                        if (transition.HasProfileOverride)
+                        {
+                            _activeProfile = transition.ComposedProfile;
+                            dspChanged = true;
+                        }
+                        if (transition.CrossfeedEnabled.HasValue && _extendedDsp.CrossfeedEnabled != transition.CrossfeedEnabled.Value)
+                        {
+                            _extendedDsp = _extendedDsp with { CrossfeedEnabled = transition.CrossfeedEnabled.Value };
+                            dspChanged = true;
+                        }
+                        if (dspChanged && dsp is not null)
+                        {
+                            dsp.Configure(_activeProfile, newRgDb);
+                            bool extActive = _extendedDsp.Enabled;
+                            bool firLoaded = _hasFirWavFile || (_firLeftIr is not null && _firRightIr is not null);
+                            bool hasEq = _activeProfile is not null && _activeProfile.Filters.Any(HasNonIdentityFilter);
+                            dsp.ConfigureExtendedDsp(
+                                gainMatchedBypass: extActive && _extendedDsp.GainMatchedBypass,
+                                rmsShiftDbOverride: null,
+                                crossfeedEnabled: extActive && _extendedDsp.CrossfeedEnabled,
+                                crossfeedCutoffHz: _extendedDsp.CrossfeedCutoffHz,
+                                crossfeedFeedDb: _extendedDsp.CrossfeedFeedDb,
+                                crossfeedDelayMs: _extendedDsp.CrossfeedDelayMs,
+                                balanceDb: extActive ? _extendedDsp.BalanceDb : 0.0,
+                                monoFold: extActive && _extendedDsp.MonoFold,
+                                limiterEnabled: _extendedDsp.LimiterEnabled && (extActive || hasEq || firLoaded || Math.Abs(newRgDb) > 1e-4),
+                                limiterCeilingDb: _extendedDsp.LimiterCeilingDb);
+                            UpdateBypassSnapshotLocked();
+                        }
+                        else
+                        {
+                            dsp?.SetReplayGainDb(newRgDb);
+                        }
                         if (dsp is not null)
                         {
                             dsp.IsBypassed = ShouldBypassDspFromSnapshot(_bypassSnapshot, exclusiveOk, nextIsDsd, newRgDb);
@@ -771,7 +806,10 @@ public sealed class TonewiseAudioEngine : IDisposable
         capturedException?.Throw();
     }
 
-    public bool PreloadNextFile(string? nextFilePath, double nextReplayGainDb)
+    public bool PreloadNextFile(string? nextFilePath, double nextReplayGainDb) =>
+        PreloadNextFile(nextFilePath, nextReplayGainDb, null);
+
+    public bool PreloadNextFile(string? nextFilePath, double nextReplayGainDb, GaplessDspTransition? dspTransition)
     {
         GaplessSampleProvider? activeGapless;
         bool currentIsDsd;
@@ -788,8 +826,10 @@ public sealed class TonewiseAudioEngine : IDisposable
             return false;
         }
 
+        var effectiveTransition = dspTransition ?? new GaplessDspTransition(nextReplayGainDb);
         if (string.Equals(activeGapless.StagedNextPath, nextFilePath, StringComparison.OrdinalIgnoreCase))
         {
+            activeGapless.TryUpdateStagedTransition(nextFilePath, effectiveTransition);
             return true;
         }
 
@@ -832,7 +872,7 @@ public sealed class TonewiseAudioEngine : IDisposable
                     nextReadAhead.Dispose();
                     return false;
                 }
-                return activeGapless.TryStageNext(nextFilePath, ws, nextReadAhead, nextReadAhead, nextReplayGainDb);
+                return activeGapless.TryStageNext(nextFilePath, ws, nextReadAhead, nextReadAhead, effectiveTransition);
             }
         }
         catch
@@ -938,10 +978,13 @@ public sealed class TonewiseAudioEngine : IDisposable
         return UpdateSignalPathSnapshotLocked(CurrentSignalPath.IsExclusive);
     }
 
+    private static bool HasNonIdentityFilter(BiquadSpec f) =>
+        Math.Abs(f.GainDb) > 1e-4 || f.Kind is BiquadKind.LowPass or BiquadKind.HighPass;
+
     private void UpdateBypassSnapshotLocked()
     {
         _bypassSnapshot = new BypassSnapshot(
-            HasEq: _activeProfile is not null && _activeProfile.Filters.Count > 0,
+            HasEq: _activeProfile is not null && _activeProfile.Filters.Any(HasNonIdentityFilter),
             ProfilePreampDb: _activeProfile?.PreampDb ?? 0.0,
             HasIso: _iso226Enabled && _volumeAttenuationDb < -0.5,
             HasVolume: _isMuted || _volumeAttenuationDb < -0.05,
@@ -959,6 +1002,7 @@ public sealed class TonewiseAudioEngine : IDisposable
         dsp.ConfigureDither(_tpdfDitherEnabled, 24);
         bool extActive = _extendedDsp.Enabled;
         bool firLoaded = _hasFirWavFile || (_firLeftIr is not null && _firRightIr is not null);
+        bool hasEq = _activeProfile is not null && _activeProfile.Filters.Any(HasNonIdentityFilter);
         dsp.ConfigureExtendedDsp(
             gainMatchedBypass: extActive && _extendedDsp.GainMatchedBypass,
             rmsShiftDbOverride: null,
@@ -968,7 +1012,7 @@ public sealed class TonewiseAudioEngine : IDisposable
             crossfeedDelayMs: _extendedDsp.CrossfeedDelayMs,
             balanceDb: extActive ? _extendedDsp.BalanceDb : 0.0,
             monoFold: extActive && _extendedDsp.MonoFold,
-            limiterEnabled: _extendedDsp.LimiterEnabled && (extActive || (_activeProfile?.Filters.Count > 0) || firLoaded || Math.Abs(_activeReplayGainDb) > 1e-4),
+            limiterEnabled: _extendedDsp.LimiterEnabled && (extActive || hasEq || firLoaded || Math.Abs(_activeReplayGainDb) > 1e-4),
             limiterCeilingDb: _extendedDsp.LimiterCeilingDb);
         if (reloadFir)
         {

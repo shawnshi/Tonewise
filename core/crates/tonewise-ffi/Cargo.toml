@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 jni.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tonewise-dsp-core = { path = "../tonewise-dsp-core", default-features = false }
 tonewise-metadata = { path = "../tonewise-metadata" }
 tonewise-rules = { path = "../tonewise-rules" }
 tonewise-sync = { path = "../tonewise-sync" }

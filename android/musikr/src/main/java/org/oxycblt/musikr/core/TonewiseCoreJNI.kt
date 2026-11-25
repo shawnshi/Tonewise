@@ -90,4 +90,10 @@ internal object TonewiseCoreJNI {
         expectedOldHex: String,
         newHeader: ByteArray,
     ): String
+
+    external fun nativeResolveAutoEqJson(requestJson: String): String
+
+    external fun nativeComposeDspJson(requestJson: String): String
+
+    external fun nativeDefaultAutoEqCatalogJson(): String
 }

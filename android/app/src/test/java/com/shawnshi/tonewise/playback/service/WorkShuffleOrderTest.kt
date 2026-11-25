@@ -58,6 +58,22 @@ class WorkShuffleOrderTest {
         assertTrue(songs[order[goldbergPositions[1]]].movementNumber == 2)
     }
 
+    @Test
+    fun workShuffle_isolatesConductorsOnSameAlbum_andOrdersByDiscBeforeMovement() {
+        val box = FakeAlbum("Beethoven Box")
+        val k1 = FakeSong(box, "Sym 9", "I", movementNumber = 1, track = 1, discNum = 1, conductorsList = listOf("Karajan"))
+        val k2 = FakeSong(box, "Sym 9", "Act II", movementNumber = 1, track = 1, discNum = 2, conductorsList = listOf("Karajan"))
+        val b1 = FakeSong(box, "Sym 9", "I", movementNumber = 1, track = 3, discNum = 1, conductorsList = listOf("Bernstein"))
+
+        val songs = listOf(k2, b1, k1)
+        val order = WorkShuffleOrder.createWorkAwareOrder(songs, startIndex = 0, random = Random(7))
+        assertEquals(3, order.size)
+        // Anchor is Karajan block (index 0 & 2), ordered Disc 1 -> Disc 2 even though both have movementNumber=1
+        assertEquals(k1.uid, songs[order[0]].uid)
+        assertEquals(k2.uid, songs[order[1]].uid)
+        assertEquals(b1.uid, songs[order[2]].uid)
+    }
+
     private class FakeAlbum(title: String) : Album {
         override val uid: Music.UID =
             requireNotNull(Music.UID.fromString("uaa${UUID.nameUUIDFromBytes(title.toByteArray())}"))
@@ -77,16 +93,18 @@ class WorkShuffleOrderTest {
         override val movementName: String?,
         override val movementNumber: Int?,
         override val track: Int?,
+        discNum: Int? = null,
+        private val conductorsList: List<String> = emptyList(),
     ) : Song {
         override val uid: Music.UID =
             requireNotNull(
                 Music.UID.fromString(
-                    "uas${UUID.nameUUIDFromBytes("${album.uid}:$workName:$movementName:$track".toByteArray())}"
+                    "uas${UUID.nameUUIDFromBytes("${album.uid}:$workName:$movementName:$track:$discNum:${conductorsList.joinToString()}".toByteArray())}"
                 )
             )
         override val name: Name.Known =
             Naming.simple().name(movementName ?: workName ?: "Track", null)
-        override val disc: Disc? = null
+        override val disc: Disc? = discNum?.let { Disc(it, null) }
         override val date: Date? = null
         override val uri: Uri get() = error("unused")
         override val path: Path get() = error("unused")
@@ -102,6 +120,6 @@ class WorkShuffleOrderTest {
         override val artists: List<Artist> = emptyList()
         override val genres: List<Genre> = emptyList()
         override val composers: List<String> = emptyList()
-        override val conductors: List<String> = emptyList()
+        override val conductors: List<String> = conductorsList
     }
 }

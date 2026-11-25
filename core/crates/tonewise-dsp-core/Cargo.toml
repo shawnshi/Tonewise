@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["analysis"]
+analysis = ["dep:symphonia", "dep:tonewise-metadata"]
+
 [dependencies]
 serde.workspace = true
-symphonia.workspace = true
+symphonia = { workspace = true, optional = true }
 thiserror.workspace = true
-tonewise-metadata = { path = "../tonewise-metadata" }
+tonewise-metadata = { path = "../tonewise-metadata", optional = true }

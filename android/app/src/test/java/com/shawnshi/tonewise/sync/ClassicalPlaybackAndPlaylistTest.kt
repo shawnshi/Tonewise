@@ -7,7 +7,11 @@ package com.shawnshi.tonewise.sync
 
 import android.net.Uri
 import com.shawnshi.tonewise.detail.WorkRecordingsDialog
+import com.shawnshi.tonewise.music.ClassicalWorkKey
 import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
+import com.shawnshi.tonewise.playback.service.BetterShuffleOrder
+import com.shawnshi.tonewise.playback.sleep.SleepTimerController
+import com.shawnshi.tonewise.playback.sleep.SleepTimerMode
 import java.io.File
 import java.util.UUID
 import org.junit.Assert.assertEquals
@@ -122,7 +126,7 @@ class ClassicalPlaybackAndPlaylistTest {
         @Suppress("UNCHECKED_CAST")
         val serialized = TonewiseCore.parseJson(tracksJson) as List<Map<String, Any?>>
         assertEquals(3, serialized.size)
-        assertEquals("${symAlbum.uid}::symphony no. 5", serialized[0]["work_key"])
+        assertEquals("${symAlbum.uid}|herbert von karajan::symphony no. 5", serialized[0]["work_key"])
         assertEquals(2, (serialized[0]["movement_order"] as Number).toInt())
         assertEquals(listOf("Ludwig van Beethoven"), serialized[0]["composers"])
         assertEquals(listOf("Herbert von Karajan"), serialized[0]["conductors"])
@@ -276,6 +280,42 @@ class ClassicalPlaybackAndPlaylistTest {
             )
         assertEquals(listOf(p0.uid, b1.uid, b2.uid, p1.uid), updatedQueue.map { it.uid })
         assertEquals(2, newIdx)
+    }
+
+    @Test
+    fun classicalWorkKey_isolatesConductorsOnCompilationAlbum_andSleepTimerHandlesWrapAround() {
+        val compAlb = FakeAlbum("Great Symphonies Box")
+        val kar1 = FakeSong("kar1", compAlb, "I", "Symphony No. 5", "I", 1, 400_000L, conductors = listOf("Herbert von Karajan"))
+        val bern1 = FakeSong("bern1", compAlb, "I", "Symphony No. 5", "I", 1, 420_000L, conductors = listOf("Leonard Bernstein"))
+        assertTrue(ClassicalWorkKey.recordingScope(kar1) != ClassicalWorkKey.recordingScope(bern1))
+        assertTrue(ClassicalWorkKey.workBlockKey(kar1) != ClassicalWorkKey.workBlockKey(bern1))
+
+        val timer = SleepTimerController()
+        timer.setEndOfWork(kar1)
+        assertFalse(timer.willStopAtTransition(kar1, kar1, isQueueWrapAround = false))
+        assertTrue(timer.willStopAtTransition(kar1, kar1, isQueueWrapAround = true))
+        assertTrue(timer.willStopAtTransition(kar1, bern1, isQueueWrapAround = false))
+        assertTrue(timer.onAutoTrackTransition(kar1, kar1, isQueueWrapAround = true))
+        assertEquals(SleepTimerMode.OFF, timer.state.value.mode)
+
+        timer.setEndOfWork(kar1)
+        assertTrue(timer.consumeEndOfItemStop())
+        assertEquals(SleepTimerMode.OFF, timer.state.value.mode)
+    }
+
+    @Test
+    fun betterShuffleOrder_insertsNextAfterWorkBlockContiguously() {
+        // Shuffled play sequence is [2, 3, 0, 1] where (2, 3) is one work and (0, 1) are remaining tracks.
+        // Inserting 2 tracks at anchor index 0 ("next after work") must produce [4, 5, 0, 1, 2, 3].
+        val order = BetterShuffleOrder(intArrayOf(2, 3, 0, 1))
+        val updated = order.cloneAndInsert(insertionIndex = 0, insertionCount = 2)
+        val seq = ArrayList<Int>(updated.length)
+        var cursor = updated.firstIndex
+        while (cursor != -1) {
+            seq.add(cursor)
+            cursor = updated.getNextIndex(cursor)
+        }
+        assertEquals(listOf(4, 5, 0, 1, 2, 3), seq)
     }
 
     private class FakeAlbum(title: String) : Album {

@@ -21,6 +21,7 @@ package com.shawnshi.tonewise.playback.service
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.source.ShuffleOrder
+import com.shawnshi.tonewise.music.ClassicalWorkKey
 import kotlin.random.Random
 import org.oxycblt.musikr.Song
 
@@ -46,15 +47,8 @@ object WorkShuffleOrder {
 
         val blocks = linkedMapOf<String, MutableList<Int>>()
         for (i in songs.indices) {
-            val s = songs[i]
-            val work = s.workName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
-            val conductor = s.conductors.firstOrNull()?.trim()?.lowercase().orEmpty()
-            val key =
-                if (work != null) {
-                    "work::${s.album.uid}::$conductor::$work"
-                } else {
-                    "track::$i"
-                }
+            val workKey = ClassicalWorkKey.workBlockKey(songs[i])
+            val key = if (workKey != null) "work::$workKey" else "track::$i"
             blocks.getOrPut(key) { mutableListOf() }.add(i)
         }
 
@@ -63,8 +57,9 @@ object WorkShuffleOrder {
                 .map { indices ->
                     indices.sortedWith(
                         compareBy(
-                            { songs[it].disc?.number ?: 0 },
-                            { songs[it].movementNumber ?: songs[it].track ?: it },
+                            { songs[it].disc?.number?.takeIf { d -> d > 0 } ?: Int.MAX_VALUE },
+                            { songs[it].movementNumber?.takeIf { m -> m > 0 } ?: Int.MAX_VALUE },
+                            { songs[it].track?.takeIf { t -> t > 0 } ?: Int.MAX_VALUE },
                             { it },
                         )
                     )

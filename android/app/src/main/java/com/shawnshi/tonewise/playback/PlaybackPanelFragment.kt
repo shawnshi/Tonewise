@@ -803,7 +803,19 @@ class PlaybackPanelFragment :
                 val preFreezePosMs = playbackModel.positionDs.value * 100L
                 val (tailMovements, remainingMatches) =
                     withContext(Dispatchers.Default) {
-                        val curWorkKey = ReplayGainAudioProcessor.buildWorkBlockKey(currentSong)
+                        val curWorkKey = com.shawnshi.tonewise.music.ClassicalWorkKey.workBlockKey(currentSong)
+                        val curScope = com.shawnshi.tonewise.music.ClassicalWorkKey.recordingScope(currentSong)
+                        val workSongs =
+                            if (curWorkKey == null) {
+                                emptyList()
+                            } else {
+                                musicRepository
+                                    .findWorkForSong(currentSong)
+                                    ?.recordings
+                                    ?.firstOrNull { it.scopeKey == curScope }
+                                    ?.movements
+                                    .orEmpty()
+                            }
                         val tail =
                             if (curWorkKey == null) {
                                 emptyList()
@@ -813,7 +825,7 @@ class PlaybackPanelFragment :
                                         pqSnapshot.queue
                                             .drop(pqSnapshot.index + 1)
                                             .takeWhile {
-                                                ReplayGainAudioProcessor.buildWorkBlockKey(it) == curWorkKey
+                                                com.shawnshi.tonewise.music.ClassicalWorkKey.workBlockKey(it) == curWorkKey
                                             }
                                     } else {
                                         emptyList()
@@ -821,23 +833,20 @@ class PlaybackPanelFragment :
                                 if (queuedTail.isNotEmpty()) {
                                     queuedTail
                                 } else {
-                                    val recMovements =
-                                        musicRepository
-                                            .findWorkForSong(currentSong)
-                                            ?.recordings
-                                            ?.firstOrNull { it.album.uid == currentSong.album.uid }
-                                            ?.movements
-                                            .orEmpty()
-                                    val pos = recMovements.indexOfFirst { it.uid == currentSong.uid }
-                                    if (pos >= 0 && pos + 1 < recMovements.size) {
-                                        recMovements.subList(pos + 1, recMovements.size)
+                                    val pos = workSongs.indexOfFirst { it.uid == currentSong.uid }
+                                    if (pos >= 0 && pos + 1 < workSongs.size) {
+                                        workSongs.subList(pos + 1, workSongs.size)
                                     } else {
                                         emptyList()
                                     }
                                 }
                             }
-                        val excludedUids = HashSet<Music.UID>(tail.size + 1).apply {
+                        val excludedUids = HashSet<Music.UID>(tail.size + workSongs.size + 1).apply {
                             add(currentSong.uid)
+                            workSongs.forEach { add(it.uid) }
+                            pqSnapshot.queue
+                                .filter { curWorkKey != null && com.shawnshi.tonewise.music.ClassicalWorkKey.workBlockKey(it) == curWorkKey }
+                                .forEach { add(it.uid) }
                             tail.forEach { add(it.uid) }
                         }
                         val matches =

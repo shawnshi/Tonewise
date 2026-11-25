@@ -427,6 +427,12 @@
     <string name="lbl_dsp_balance">左右声道平衡</string>
     <string name="lbl_dsp_limiter">前瞻软限幅安全阀 (-0.2 dBFS)</string>
     <string name="lbl_dsp_open_console">打开 64-bit DSP 调音台</string>
+    <string name="lbl_auto_eq_title">流派 + 人声自动内容 EQ（Layer B 串联叠加）</string>
+    <string name="lbl_auto_eq_enable">启用流派 + 人声自动 EQ</string>
+    <string name="lbl_auto_eq_classical_crossfeed">古典纯器乐自动 Crossfeed（平直 + 声场）</string>
+    <string name="lbl_auto_eq_lock_work">同一古典作品内锁定音色</string>
+    <string name="lbl_auto_eq_customize_rules">自定义流派与人声规则（支持双端同步）</string>
+    <string name="lbl_auto_eq_reset_slot">恢复此槽位默认</string>
     <string name="lbl_usb_ear_protection">USB 独占直通态将锁定硬件直通输出，部分无物理音量键小尾巴可能满幅推力输出，佩戴耳机前请先确认音量安全。</string>
     <string name="lbl_usb_ear_confirm">已确认硬件音量安全</string>
     <string name="lbl_work_none">当前曲目未包含古典 WORK 作品元数据</string>

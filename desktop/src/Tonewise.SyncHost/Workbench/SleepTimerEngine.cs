@@ -111,19 +111,19 @@ public sealed class SleepTimerEngine
         }
     }
 
-    public bool WillStopAtTransition(string? previousWorkKey, string? nextWorkKey)
+    public bool WillStopAtTransition(string? previousWorkKey, string? nextWorkKey, bool isQueueWrapAround = false)
     {
         lock (_lock)
         {
-            return WillStopAtTransitionUnlocked(previousWorkKey, nextWorkKey);
+            return WillStopAtTransitionUnlocked(previousWorkKey, nextWorkKey, isQueueWrapAround);
         }
     }
 
-    public bool ShouldStopAtTrackTransition(string? previousWorkKey, string? nextWorkKey)
+    public bool ShouldStopAtTrackTransition(string? previousWorkKey, string? nextWorkKey, bool isQueueWrapAround = false)
     {
         lock (_lock)
         {
-            if (!WillStopAtTransitionUnlocked(previousWorkKey, nextWorkKey))
+            if (!WillStopAtTransitionUnlocked(previousWorkKey, nextWorkKey, isQueueWrapAround))
             {
                 return false;
             }
@@ -134,19 +134,23 @@ public sealed class SleepTimerEngine
         }
     }
 
-    private bool WillStopAtTransitionUnlocked(string? previousWorkKey, string? nextWorkKey)
+    private bool WillStopAtTransitionUnlocked(string? previousWorkKey, string? nextWorkKey, bool isQueueWrapAround)
     {
         return _mode switch
         {
             SleepTimerMode.EndOfTrack => true,
             SleepTimerMode.EndOfWork =>
-                ResolveStopForEndOfWork(previousWorkKey, nextWorkKey),
+                ResolveStopForEndOfWork(previousWorkKey, nextWorkKey, isQueueWrapAround),
             _ => false,
         };
     }
 
-    private bool ResolveStopForEndOfWork(string? previousWorkKey, string? nextWorkKey)
+    private bool ResolveStopForEndOfWork(string? previousWorkKey, string? nextWorkKey, bool isQueueWrapAround)
     {
+        if (isQueueWrapAround)
+        {
+            return true;
+        }
         string? effectivePrev = string.IsNullOrWhiteSpace(previousWorkKey)
             ? _armedWorkKey
             : previousWorkKey.Trim();

@@ -18,6 +18,7 @@
 
 package com.shawnshi.tonewise.sync
 
+import com.shawnshi.tonewise.music.ClassicalWorkKey
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.core.MoodClustersRegistry
 import org.oxycblt.musikr.core.TonewiseCore
@@ -158,8 +159,10 @@ object SceneRuleEvaluator {
                 }
             val rating = getRatingOverride(uid)?.toIntOrNull() ?: if (loved) 5 else 0
             val workName = song.workName?.trim()?.takeIf { it.isNotEmpty() }
-            val workKey = workName?.let { "${song.album.uid}::${it.lowercase()}" }
+            val workKey = ClassicalWorkKey.workBlockKey(song)
             val movementOrder = song.movementNumber?.takeIf { it > 0 }
+            val discNumber = song.disc?.number?.takeIf { it > 0 }
+            val trackNumber = song.track?.takeIf { it > 0 }
             val composers = song.composers.mapNotNull { it.trim().takeIf { c -> c.isNotEmpty() } }
             val conductors = song.conductors.mapNotNull { it.trim().takeIf { c -> c.isNotEmpty() } }
             list.add(
@@ -176,6 +179,8 @@ object SceneRuleEvaluator {
                     "unplayed_days" to unplayedDays,
                     "work_key" to workKey,
                     "movement_order" to movementOrder,
+                    "disc_number" to discNumber,
+                    "track_number" to trackNumber,
                     "composers" to composers,
                     "conductors" to conductors,
                     "work_name" to workName,

@@ -182,8 +182,9 @@ data class Sort(val mode: Mode, val direction: Direction) {
 
             override fun sortSongs(songs: MutableList<Song>, direction: Direction) {
                 songs.sortBy { it.name }
-                songs.sortBy { it.track }
-                songs.sortBy { it.disc }
+                songs.sortBy { it.track?.takeIf { t -> t > 0 } ?: Int.MAX_VALUE }
+                songs.sortBy { it.movementNumber?.takeIf { m -> m > 0 } ?: Int.MAX_VALUE }
+                songs.sortBy { it.disc?.number?.takeIf { d -> d > 0 } ?: Int.MAX_VALUE }
                 when (direction) {
                     Direction.ASCENDING -> songs.sortBy { it.album.name }
                     Direction.DESCENDING -> songs.sortByDescending { it.album.name }
@@ -197,8 +198,9 @@ data class Sort(val mode: Mode, val direction: Direction) {
 
             override fun sortSongs(songs: MutableList<Song>, direction: Direction) {
                 songs.sortBy { it.name }
-                songs.sortBy { it.track }
-                songs.sortBy { it.disc }
+                songs.sortBy { it.track?.takeIf { t -> t > 0 } ?: Int.MAX_VALUE }
+                songs.sortBy { it.movementNumber?.takeIf { m -> m > 0 } ?: Int.MAX_VALUE }
+                songs.sortBy { it.disc?.number?.takeIf { d -> d > 0 } ?: Int.MAX_VALUE }
                 songs.sortBy { it.album.name }
                 songs.sortByDescending { it.album.dates }
                 when (direction) {
@@ -225,8 +227,9 @@ data class Sort(val mode: Mode, val direction: Direction) {
 
             override fun sortSongs(songs: MutableList<Song>, direction: Direction) {
                 songs.sortBy { it.name }
-                songs.sortBy { it.track }
-                songs.sortBy { it.disc }
+                songs.sortBy { it.track?.takeIf { t -> t > 0 } ?: Int.MAX_VALUE }
+                songs.sortBy { it.movementNumber?.takeIf { m -> m > 0 } ?: Int.MAX_VALUE }
+                songs.sortBy { it.disc?.number?.takeIf { d -> d > 0 } ?: Int.MAX_VALUE }
                 songs.sortByDescending { it.album.name }
                 when (direction) {
                     Direction.ASCENDING -> songs.sortBy { it.album.dates }

@@ -2,6 +2,13 @@ using NAudio.Wave;
 
 namespace Tonewise.Audio;
 
+public sealed record GaplessDspTransition(
+    double ReplayGainDb,
+    EqualizerApoProfile? ComposedProfile = null,
+    bool HasProfileOverride = false,
+    bool? CrossfeedEnabled = null
+);
+
 /// <summary>
 /// Seamless gapless PCM stream provider that transitions into a pre-opened next track
 /// of matching sample rate & channel count inside the same audio buffer pull without
@@ -10,7 +17,7 @@ namespace Tonewise.Audio;
 public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
 {
     private readonly Lock _sourceLock = new();
-    private readonly Action<string, double>? _onTransitionSync;
+    private readonly Action<string, GaplessDspTransition>? _onTransitionSync;
 
     private string _currentPath;
     private WaveStream? _currentWaveStream;
@@ -22,7 +29,7 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
     private WaveStream? _nextWaveStream;
     private ISampleProvider? _nextSamples;
     private IDisposable? _nextDisposable;
-    private double _nextReplayGainDb;
+    private GaplessDspTransition _nextTransition = new(0.0);
 
     private volatile bool _reachedEndOfStream;
 
@@ -32,6 +39,23 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
         ISampleProvider initialSamples,
         IDisposable? initialDisposable,
         Action<string, double>? onTransitionSync = null)
+        : this(
+            initialPath,
+            initialWaveStream,
+            initialSamples,
+            initialDisposable,
+            onTransitionSync is null
+                ? null
+                : (path, transition) => onTransitionSync(path, transition.ReplayGainDb))
+    {
+    }
+
+    public GaplessSampleProvider(
+        string initialPath,
+        WaveStream? initialWaveStream,
+        ISampleProvider initialSamples,
+        IDisposable? initialDisposable,
+        Action<string, GaplessDspTransition>? onTransitionSync)
     {
         _currentPath = initialPath;
         _currentWaveStream = initialWaveStream;
@@ -105,7 +129,15 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
         WaveStream? waveStream,
         ISampleProvider samples,
         IDisposable? disposable,
-        double replayGainDb)
+        double replayGainDb) =>
+        TryStageNext(filePath, waveStream, samples, disposable, new GaplessDspTransition(replayGainDb));
+
+    public bool TryStageNext(
+        string filePath,
+        WaveStream? waveStream,
+        ISampleProvider samples,
+        IDisposable? disposable,
+        GaplessDspTransition dspTransition)
     {
         if (samples.WaveFormat.SampleRate != WaveFormat.SampleRate
             || samples.WaveFormat.Channels != WaveFormat.Channels)
@@ -121,7 +153,21 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
             _nextWaveStream = waveStream;
             _nextSamples = samples;
             _nextDisposable = disposable;
-            _nextReplayGainDb = replayGainDb;
+            _nextTransition = dspTransition;
+            return true;
+        }
+    }
+
+    public bool TryUpdateStagedTransition(string filePath, GaplessDspTransition dspTransition)
+    {
+        lock (_sourceLock)
+        {
+            if (string.IsNullOrWhiteSpace(_nextPath)
+                || !string.Equals(_nextPath, filePath, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            _nextTransition = dspTransition;
             return true;
         }
     }
@@ -191,7 +237,7 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
         {
             int n;
             string? transitionedPath = null;
-            double transitionedRg = 0.0;
+            GaplessDspTransition transitionedDsp = new(0.0);
             IDisposable? oldDisposable = null;
 
             lock (_sourceLock)
@@ -223,13 +269,13 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
                 _currentReadAhead = _nextSamples as DecodeReadAheadSampleProvider;
                 _currentDisposable = _nextDisposable;
                 transitionedPath = _currentPath;
-                transitionedRg = _nextReplayGainDb;
+                transitionedDsp = _nextTransition;
 
                 _nextPath = null;
                 _nextWaveStream = null;
                 _nextSamples = null;
                 _nextDisposable = null;
-                _nextReplayGainDb = 0.0;
+                _nextTransition = new(0.0);
                 _reachedEndOfStream = false;
             }
 
@@ -243,7 +289,7 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
 
             if (transitionedPath is not null)
             {
-                _onTransitionSync?.Invoke(transitionedPath, transitionedRg);
+                _onTransitionSync?.Invoke(transitionedPath, transitionedDsp);
                 string captured = transitionedPath;
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
@@ -262,7 +308,7 @@ public sealed class GaplessSampleProvider : ISampleProvider, IDisposable
         _nextWaveStream = null;
         _nextSamples = null;
         _nextDisposable = null;
-        _nextReplayGainDb = 0.0;
+        _nextTransition = new(0.0);
         try { d?.Dispose(); } catch { }
     }
 

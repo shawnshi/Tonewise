@@ -21,12 +21,14 @@ package com.shawnshi.tonewise.playback.state
 import javax.inject.Inject
 import com.shawnshi.tonewise.list.ListSettings
 import com.shawnshi.tonewise.list.sort.Sort
+import com.shawnshi.tonewise.music.ClassicalWorkKey
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.PlaybackSettings
 import org.oxycblt.musikr.Album
 import org.oxycblt.musikr.Artist
 import org.oxycblt.musikr.Genre
 import org.oxycblt.musikr.MusicParent
+import org.oxycblt.musikr.PersonArtist
 import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.Song
 
@@ -161,8 +163,9 @@ constructor(
         sort: Sort,
         shuffle: ShuffleMode,
     ): PlaybackCommand? {
-        val songs = sort.songs(parent.songs)
-        return newCommand(song, parent, songs, sort, shuffle)
+        val sorted = sort.songs(parent.songs)
+        val songs = if (parent is PersonArtist) ClassicalWorkKey.orderPreservingWorks(sorted) else sorted
+        return newCommand(song, parent, songs, shuffle)
     }
 
     private fun newCommand(

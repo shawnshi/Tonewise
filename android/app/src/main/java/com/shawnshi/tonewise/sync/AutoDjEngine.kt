@@ -352,27 +352,78 @@ object AutoDjEngine {
         val selectedUnits = ArrayList<UnitNode>(units.size)
         val usedUnitKeys = HashSet<String>()
         val artistCounts = HashMap<String, Int>()
+        val matchedUnits = if (sceneContext != null) units.filter { it.isSceneMatched } else emptyList()
+        var selectedTracks = 0
 
-        var selectedTracks =
-            pickCohesiveUnitSubset(
-                pool = freqPool,
-                neededTracks = targetFrequent,
-                maxTotalTracks = total,
-                dest = selectedUnits,
-                usedUnitKeys = usedUnitKeys,
-                artistCounts = artistCounts,
-                maxPerArtist = 2,
-            )
-        selectedTracks +=
-            pickCohesiveUnitSubset(
-                pool = discPool,
-                neededTracks = minOf(targetDiscovery, (total - selectedTracks).coerceAtLeast(0)),
-                maxTotalTracks = (total - selectedTracks).coerceAtLeast(0),
-                dest = selectedUnits,
-                usedUnitKeys = usedUnitKeys,
-                artistCounts = artistCounts,
-                maxPerArtist = 2,
-            )
+        if (matchedUnits.isNotEmpty()) {
+            val matchedFreq = freqPool.filter { it.isSceneMatched }
+            val matchedDisc = discPool.filter { it.isSceneMatched }
+            selectedTracks +=
+                pickCohesiveUnitSubset(
+                    pool = matchedFreq,
+                    neededTracks = targetFrequent,
+                    maxTotalTracks = total,
+                    dest = selectedUnits,
+                    usedUnitKeys = usedUnitKeys,
+                    artistCounts = artistCounts,
+                    maxPerArtist = 2,
+                )
+            selectedTracks +=
+                pickCohesiveUnitSubset(
+                    pool = matchedDisc,
+                    neededTracks = minOf(targetDiscovery, (total - selectedTracks).coerceAtLeast(0)),
+                    maxTotalTracks = (total - selectedTracks).coerceAtLeast(0),
+                    dest = selectedUnits,
+                    usedUnitKeys = usedUnitKeys,
+                    artistCounts = artistCounts,
+                    maxPerArtist = 2,
+                )
+            if (selectedTracks < total) {
+                val remainingMatched =
+                    matchedUnits
+                        .filter { it.unitKey !in usedUnitKeys }
+                        .onEach { it.poolWeight = it.averageCompatibilityScore + it.jitter * 0.35 }
+                selectedTracks +=
+                    pickCohesiveUnitSubset(
+                        pool = remainingMatched,
+                        neededTracks = total - selectedTracks,
+                        maxTotalTracks = total - selectedTracks,
+                        dest = selectedUnits,
+                        usedUnitKeys = usedUnitKeys,
+                        artistCounts = artistCounts,
+                        maxPerArtist = 4,
+                    )
+            }
+        }
+
+        if (selectedTracks < total) {
+            val fallbackFreq = freqPool.filter { it.unitKey !in usedUnitKeys }
+            val fallbackDisc = discPool.filter { it.unitKey !in usedUnitKeys }
+            val freqPickedSoFar = selectedUnits.sumOf { if (it.isFrequent) it.nodes.size else 0 }
+            val discPickedSoFar = selectedTracks - freqPickedSoFar
+            val needFreq = (targetFrequent - freqPickedSoFar).coerceAtLeast(0)
+            selectedTracks +=
+                pickCohesiveUnitSubset(
+                    pool = fallbackFreq,
+                    neededTracks = minOf(needFreq, total - selectedTracks),
+                    maxTotalTracks = (total - selectedTracks).coerceAtLeast(0),
+                    dest = selectedUnits,
+                    usedUnitKeys = usedUnitKeys,
+                    artistCounts = artistCounts,
+                    maxPerArtist = 2,
+                )
+            val needDisc = (targetDiscovery - discPickedSoFar).coerceAtLeast(0)
+            selectedTracks +=
+                pickCohesiveUnitSubset(
+                    pool = fallbackDisc,
+                    neededTracks = minOf(needDisc, total - selectedTracks),
+                    maxTotalTracks = (total - selectedTracks).coerceAtLeast(0),
+                    dest = selectedUnits,
+                    usedUnitKeys = usedUnitKeys,
+                    artistCounts = artistCounts,
+                    maxPerArtist = 2,
+                )
+        }
 
         if (selectedTracks < total) {
             val remainingPool =
@@ -392,16 +443,38 @@ object AutoDjEngine {
         }
 
         if (selectedUnits.isEmpty() && units.isNotEmpty()) {
-            selectedUnits.add(units.minBy { it.nodes.size })
+            selectedUnits.add((matchedUnits.ifEmpty { units }).minBy { it.nodes.size })
         }
 
-        val sequencedUnits = sequenceUnitsSmoothly(selectedUnits, effectiveProfile, frequentRatio)
-        applyLocalUnitSmoothingSwaps(sequencedUnits)
+        val sequencedUnits =
+            when (sceneContext?.sortArc?.trim()?.lowercase()) {
+                "energy_asc" ->
+                    selectedUnits
+                        .sortedWith(compareBy<UnitNode> { unitEnergyScore(it) }.thenBy { it.entryNode.bpm })
+                        .toMutableList()
+                "energy_desc_sleep" ->
+                    selectedUnits
+                        .sortedWith(
+                            compareByDescending<UnitNode> { unitEnergyScore(it) }
+                                .thenByDescending { it.entryNode.bpm }
+                        )
+                        .toMutableList()
+                "rediscovery_90d" ->
+                    selectedUnits
+                        .sortedWith(
+                            compareByDescending<UnitNode> { it.isRediscoveryCandidate }
+                                .thenBy { it.effectivePlayCount }
+                                .thenBy { it.minLastPlayedTsMs }
+                        )
+                        .toMutableList()
+                "work_shuffle" -> selectedUnits.toMutableList().apply { shuffle(rng) }
+                else ->
+                    sequenceUnitsSmoothly(selectedUnits, effectiveProfile, frequentRatio).also {
+                        applyLocalUnitSmoothingSwaps(it)
+                    }
+            }
 
-        var sequenced = sequencedUnits.flatMap { it.nodes }
-        if (sequenced.size > total) {
-            sequenced = sequenced.take(total)
-        }
+        val sequenced = sequencedUnits.flatMap { it.nodes }
 
         var maxBpmDelta = 0.0
         for (i in 1 until sequenced.size) {
@@ -512,12 +585,26 @@ object AutoDjEngine {
         val jitter: Double,
         val primaryArtist: String,
         val isRediscoveryCandidate: Boolean,
+        val isSceneMatched: Boolean,
+        val minLastPlayedTsMs: Long,
     ) {
         val entryNode: FeatureNode get() = nodes.first()
         val exitNode: FeatureNode get() = nodes.last()
         var poolWeight: Double = 0.0
         var isFrequent: Boolean = false
     }
+
+    private fun unitEnergyScore(unit: UnitNode): Double =
+        unit.nodes
+            .map { node ->
+                when (node.candidate.djEnergy?.trim()?.lowercase()) {
+                    "low" -> 1.0
+                    "medium" -> 2.0
+                    "high" -> 3.0
+                    else -> node.arousal * 3.0
+                }
+            }
+            .average()
 
     private fun buildAtomicUnits(features: List<FeatureNode>): List<UnitNode> {
         val blocksByKey = LinkedHashMap<String, MutableList<FeatureNode>>(features.size)
@@ -531,12 +618,12 @@ object AutoDjEngine {
         for ((key, list) in blocksByKey) {
             if (list.size > 1) {
                 list.sortWith { a, b ->
-                    val ma = a.candidate.movementNumber?.takeIf { it > 0 } ?: Int.MAX_VALUE
-                    val mb = b.candidate.movementNumber?.takeIf { it > 0 } ?: Int.MAX_VALUE
-                    if (ma != mb) return@sortWith ma.compareTo(mb)
                     val da = a.candidate.discNumber.takeIf { it > 0 } ?: Int.MAX_VALUE
                     val db = b.candidate.discNumber.takeIf { it > 0 } ?: Int.MAX_VALUE
                     if (da != db) return@sortWith da.compareTo(db)
+                    val ma = a.candidate.movementNumber?.takeIf { it > 0 } ?: Int.MAX_VALUE
+                    val mb = b.candidate.movementNumber?.takeIf { it > 0 } ?: Int.MAX_VALUE
+                    if (ma != mb) return@sortWith ma.compareTo(mb)
                     val ta = a.candidate.trackNumber.takeIf { it > 0 } ?: Int.MAX_VALUE
                     val tb = b.candidate.trackNumber.takeIf { it > 0 } ?: Int.MAX_VALUE
                     if (ta != tb) return@sortWith ta.compareTo(tb)
@@ -554,6 +641,8 @@ object AutoDjEngine {
                     jitter = list.first().jitter,
                     primaryArtist = list.first().primaryArtist,
                     isRediscoveryCandidate = list.any { it.isRediscoveryCandidate },
+                    isSceneMatched = list.any { it.isSceneMatched },
+                    minLastPlayedTsMs = list.minOf { it.candidate.lastPlayedTsMs },
                 )
             )
         }
@@ -715,7 +804,9 @@ object AutoDjEngine {
                     continue
                 }
                 val artistKey = unit.primaryArtist.lowercase()
-                if (enforceArtistCap && artistKey.isNotEmpty() && (artistCounts[artistKey] ?: 0) >= maxPerArtist) {
+                val effectiveArtistCap =
+                    if (unit.unitKey.startsWith("work::")) maxOf(maxPerArtist, 3) else maxPerArtist
+                if (enforceArtistCap && artistKey.isNotEmpty() && (artistCounts[artistKey] ?: 0) >= effectiveArtistCap) {
                     continue
                 }
 

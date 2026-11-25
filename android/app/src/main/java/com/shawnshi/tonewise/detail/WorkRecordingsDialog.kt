@@ -62,12 +62,12 @@ import java.util.Locale
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.ClassicalWork
+import com.shawnshi.tonewise.music.ClassicalWorkKey
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.WorkRecording
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.formatDurationMs
-import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
 import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.ui.UISettings
@@ -181,7 +181,12 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
                 targetMovements = recording.movements,
                 targetOffsetInMovements = targetIndex,
             )
-        playbackModel.restoreSessionQueue(updatedQueue, newIndex, safeSeekMs)
+        playbackModel.replaceQueuePreservingOrder(
+            songs = updatedQueue,
+            index = newIndex,
+            positionMs = safeSeekMs,
+            keepShuffled = playbackModel.isShuffled.value,
+        )
         dismiss()
     }
 
@@ -223,17 +228,17 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
             }
 
             val curSong = currentQueue[currentIndex]
-            val curWorkKey = ReplayGainAudioProcessor.buildWorkBlockKey(curSong)
+            val curWorkKey = ClassicalWorkKey.workBlockKey(curSong)
             var blockStart = currentIndex
             var blockEnd = currentIndex
             if (curWorkKey != null) {
                 while (blockStart > 0 &&
-                    ReplayGainAudioProcessor.buildWorkBlockKey(currentQueue[blockStart - 1]) == curWorkKey
+                    ClassicalWorkKey.workBlockKey(currentQueue[blockStart - 1]) == curWorkKey
                 ) {
                     blockStart--
                 }
                 while (blockEnd + 1 < currentQueue.size &&
-                    ReplayGainAudioProcessor.buildWorkBlockKey(currentQueue[blockEnd + 1]) == curWorkKey
+                    ClassicalWorkKey.workBlockKey(currentQueue[blockEnd + 1]) == curWorkKey
                 ) {
                     blockEnd++
                 }
@@ -310,7 +315,7 @@ private fun WorkRecordingsSheet(
             )
 
             for (recording in work.recordings) {
-                val isCurrent = currentSong?.album?.uid == recording.album.uid
+                val isCurrent = currentSong?.let(ClassicalWorkKey::recordingScope) == recording.scopeKey
                 val leadSong = recording.movements.firstOrNull()
                 val rateLabel =
                     leadSong?.let {

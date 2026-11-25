@@ -286,6 +286,7 @@ public sealed partial class MainViewModel
             _lanSyncManuallyStopped = true;
             StopPairingCodeRefreshTimer();
             existing.SyncStateChanged -= OnSyncHostStateChanged;
+            existing.AutoEqPolicyUpdated -= OnSyncHostAutoEqPolicyUpdated;
             await existing.DisposeAsync();
             LanSyncStatus = "局域网同步服务：未开启";
             LanHostUrlsText = "服务启动后将显示本机局域网地址（端口 45820）";
@@ -316,7 +317,9 @@ public sealed partial class MainViewModel
             var store = EnsureSyncStore()!;
             ApplySyncPolicyToStore();
             var host = new SyncHostServer(_store.MusicRoot, store: store);
+            SyncAutoEqPolicyWithLibraryRoot();
             host.SyncStateChanged += OnSyncHostStateChanged;
+            host.AutoEqPolicyUpdated += OnSyncHostAutoEqPolicyUpdated;
             int port = await host.StartAsync(45820, enableMdns: true);
             _syncHost = host;
             _usbCoordinator?.AttachHostEvents(host);
@@ -372,6 +375,7 @@ public sealed partial class MainViewModel
         try
         {
             oldHost.SyncStateChanged -= OnSyncHostStateChanged;
+            oldHost.AutoEqPolicyUpdated -= OnSyncHostAutoEqPolicyUpdated;
             await oldHost.DisposeAsync().ConfigureAwait(false);
         }
         catch
@@ -393,11 +397,14 @@ public sealed partial class MainViewModel
         try
         {
             var host = new SyncHostServer(newMusicRoot, store: newStore);
+            SyncAutoEqPolicyWithLibraryRoot();
             host.SyncStateChanged += OnSyncHostStateChanged;
+            host.AutoEqPolicyUpdated += OnSyncHostAutoEqPolicyUpdated;
             int port = await host.StartAsync(45820, enableMdns: true).ConfigureAwait(false);
             if (!string.Equals(_store.MusicRoot, newMusicRoot, StringComparison.OrdinalIgnoreCase))
             {
                 host.SyncStateChanged -= OnSyncHostStateChanged;
+                host.AutoEqPolicyUpdated -= OnSyncHostAutoEqPolicyUpdated;
                 await host.DisposeAsync().ConfigureAwait(false);
                 return;
             }
@@ -421,6 +428,20 @@ public sealed partial class MainViewModel
                 LanPairingCode = "------";
             });
         }
+    }
+
+    private void OnSyncHostAutoEqPolicyUpdated(string json)
+    {
+        var policy = SyncHostServer.DeserializeAutoEqPolicy(json);
+        void Apply()
+        {
+            ApplyAutoEqPolicyToViewModel(policy, fromSync: true);
+            SaveUserSettings();
+        }
+        if (_uiContext is not null)
+            _uiContext.Post(_ => Apply(), null);
+        else
+            Apply();
     }
 
     private void OnSyncHostStateChanged()

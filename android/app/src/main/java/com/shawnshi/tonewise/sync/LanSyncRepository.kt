@@ -63,6 +63,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.detail.MusicBioRepository
 import com.shawnshi.tonewise.music.MusicRepository
+import com.shawnshi.tonewise.playback.dsp.DspRepository
 import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.playback.state.PlaybackStateManager
 import com.shawnshi.tonewise.playback.ui.WaveformRepository
@@ -161,6 +162,7 @@ constructor(
     private val managedSyncStorage: ManagedSyncStorage,
     private val lastFmRepository: LastFmRepository,
     private val playbackStateManager: PlaybackStateManager,
+    private val dspRepository: DspRepository,
 ) {
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val syncDb: TonewiseSyncDatabase by lazy { TonewiseSyncDatabase.getInstance(context) }
@@ -1418,6 +1420,21 @@ constructor(
                             val encJson = httpGetString("$cleanBase/api/v1/encyclopedia", token, cancelToken)
                             musicBioRepository.importSyncedEncyclopediaJson(encJson)
                         }
+                        try {
+                            val mergedAutoEqJson =
+                                httpPostJson(
+                                    "$cleanBase/api/v1/auto-eq",
+                                    dspRepository.exportAutoEqPolicyJson(),
+                                    token,
+                                    cancelToken,
+                                )
+                            dspRepository.mergeRemoteAutoEqPolicyJson(mergedAutoEqJson)
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (authErr: LanSyncAuthException) {
+                            throw authErr
+                        } catch (_: Throwable) {
+                        }
                     } catch (ce: CancellationException) {
                         throw ce
                     } catch (authErr: LanSyncAuthException) {
@@ -2011,8 +2028,7 @@ constructor(
                         .mapNotNull { (it.name as? Name.Known)?.raw }
                         .filter { it.isNotBlank() }
                         .joinToString("; ")
-                val workName = song.workName?.trim()?.takeIf { it.isNotEmpty() }
-                val workKey = workName?.let { "${song.album.uid}::${it.lowercase()}" }
+                val workKey = com.shawnshi.tonewise.music.ClassicalWorkKey.workBlockKey(song)
                 AutoDjTrackCandidate(
                     trackUid = uid,
                     title = song.name.raw,

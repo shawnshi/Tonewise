@@ -5,7 +5,7 @@
 
 package com.shawnshi.tonewise.playback.sleep
 
-import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
+import com.shawnshi.tonewise.music.ClassicalWorkKey
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -98,7 +98,7 @@ class SleepTimerController internal constructor(
             tickerJob?.cancel()
             tickerJob = null
             targetEndMs = 0L
-            armedWorkKey = activeSong?.let { ReplayGainAudioProcessor.buildWorkBlockKey(it) }
+            armedWorkKey = activeSong?.let { ClassicalWorkKey.workBlockKey(it) }
             _state.value =
                 _state.value.copy(
                     mode = SleepTimerMode.END_OF_WORK,
@@ -123,17 +123,56 @@ class SleepTimerController internal constructor(
         }
     }
 
-    fun onAutoTrackTransition(previousSong: Song?, nextSong: Song?): Boolean {
+    fun willStopAtTransition(
+        currentSong: Song?,
+        nextSong: Song?,
+        isQueueWrapAround: Boolean = false,
+    ): Boolean {
+        synchronized(stateLock) {
+            val curMode = _state.value.mode
+            if (curMode != SleepTimerMode.END_OF_TRACK && curMode != SleepTimerMode.END_OF_WORK) {
+                return false
+            }
+            val prevKey = currentSong?.let { ClassicalWorkKey.workBlockKey(it) } ?: armedWorkKey
+            val nextKey = nextSong?.let { ClassicalWorkKey.workBlockKey(it) }
+            return shouldStopAtTransition(curMode, prevKey, nextKey, isQueueWrapAround)
+        }
+    }
+
+    fun consumeEndOfItemStop(): Boolean {
+        synchronized(stateLock) {
+            val curMode = _state.value.mode
+            if (curMode != SleepTimerMode.END_OF_TRACK && curMode != SleepTimerMode.END_OF_WORK) {
+                return false
+            }
+            targetEndMs = 0L
+            armedWorkKey = null
+            _state.value =
+                SleepTimerState(
+                    mode = SleepTimerMode.OFF,
+                    remainingMs = 0L,
+                    fadeGain = 1f,
+                    expiredEpochMs = nowMs(),
+                )
+            return true
+        }
+    }
+
+    fun onAutoTrackTransition(
+        previousSong: Song?,
+        nextSong: Song?,
+        isQueueWrapAround: Boolean = false,
+    ): Boolean {
         synchronized(stateLock) {
             val curMode = _state.value.mode
             if (curMode != SleepTimerMode.END_OF_TRACK && curMode != SleepTimerMode.END_OF_WORK) {
                 return false
             }
             val prevKey =
-                previousSong?.let { ReplayGainAudioProcessor.buildWorkBlockKey(it) }
+                previousSong?.let { ClassicalWorkKey.workBlockKey(it) }
                     ?: armedWorkKey
-            val nextKey = nextSong?.let { ReplayGainAudioProcessor.buildWorkBlockKey(it) }
-            if (!shouldStopAtTransition(curMode, prevKey, nextKey)) {
+            val nextKey = nextSong?.let { ClassicalWorkKey.workBlockKey(it) }
+            if (!shouldStopAtTransition(curMode, prevKey, nextKey, isQueueWrapAround)) {
                 return false
             }
             targetEndMs = 0L
@@ -192,12 +231,17 @@ class SleepTimerController internal constructor(
             mode: SleepTimerMode,
             previousWorkKey: String?,
             nextWorkKey: String?,
+            isQueueWrapAround: Boolean = false,
         ): Boolean =
             when (mode) {
                 SleepTimerMode.END_OF_TRACK -> true
                 SleepTimerMode.END_OF_WORK -> {
-                    val prev = previousWorkKey?.trim()
-                    prev.isNullOrEmpty() || !prev.equals(nextWorkKey?.trim(), ignoreCase = true)
+                    if (isQueueWrapAround) {
+                        true
+                    } else {
+                        val prev = previousWorkKey?.trim()
+                        prev.isNullOrEmpty() || !prev.equals(nextWorkKey?.trim(), ignoreCase = true)
+                    }
                 }
                 else -> false
             }

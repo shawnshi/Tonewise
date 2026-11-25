@@ -166,6 +166,27 @@ object TonewiseCore {
         return json
     }
 
+    fun resolveAutoEqJson(requestJson: String): String {
+        TonewiseCoreJNI.ensureLoaded()
+        val json = TonewiseCoreJNI.nativeResolveAutoEqJson(requestJson)
+        checkNoError(MiniJson.parse(json))
+        return json
+    }
+
+    fun composeDspJson(requestJson: String): String {
+        TonewiseCoreJNI.ensureLoaded()
+        val json = TonewiseCoreJNI.nativeComposeDspJson(requestJson)
+        checkNoError(MiniJson.parse(json))
+        return json
+    }
+
+    fun defaultAutoEqCatalogJson(): String {
+        TonewiseCoreJNI.ensureLoaded()
+        val json = TonewiseCoreJNI.nativeDefaultAutoEqCatalogJson()
+        checkNoError(MiniJson.parse(json))
+        return json
+    }
+
     private fun parseWaveformJson(json: String): FloatArray? {
         val parsed = MiniJson.parse(json) ?: return null
         checkNoError(parsed)

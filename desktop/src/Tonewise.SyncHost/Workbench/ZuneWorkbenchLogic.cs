@@ -23,7 +23,11 @@ public sealed record QuickplayTrackSeed(
     long LastPlayedTsMs,
     long MtimeMs,
     int? Year,
-    string? CoverArtPath
+    string? CoverArtPath,
+    int DiscNumber = 0,
+    int? MovementNumber = null,
+    int TrackNumber = 0,
+    string RelPath = ""
 );
 
 public sealed record QuickplayCardSeed(
@@ -311,6 +315,7 @@ public static class QuickplayAggregator
         public int? MaxYear { get; set; }
         public int MaxRating { get; set; }
         public int TotalPlayCount { get; set; }
+        public List<QuickplayTrackSeed> Seeds { get; } = [];
         public List<string> TrackUids { get; } = [];
     }
 
@@ -350,7 +355,7 @@ public static class QuickplayAggregator
                 map[groupKey] = bucket;
             }
 
-            bucket.TrackUids.Add(t.TrackUid);
+            bucket.Seeds.Add(t);
             if (string.IsNullOrWhiteSpace(bucket.CoverArtPath) && !string.IsNullOrWhiteSpace(t.CoverArtPath))
                 bucket.CoverArtPath = t.CoverArtPath;
             if (t.LastPlayedTsMs > bucket.MaxLastPlayedTsMs)
@@ -362,6 +367,36 @@ public static class QuickplayAggregator
             if (t.Rating > bucket.MaxRating)
                 bucket.MaxRating = t.Rating;
             bucket.TotalPlayCount += Math.Max(0, t.EffectivePlayCount);
+        }
+
+        foreach (var bucket in map.Values)
+        {
+            if (bucket.Seeds.Count > 1)
+            {
+                bucket.Seeds.Sort((a, b) =>
+                {
+                    int da = a.DiscNumber > 0 ? a.DiscNumber : int.MaxValue;
+                    int db = b.DiscNumber > 0 ? b.DiscNumber : int.MaxValue;
+                    int cmp = da.CompareTo(db);
+                    if (cmp != 0) return cmp;
+                    if (bucket.IsWork)
+                    {
+                        int ma = a.MovementNumber is > 0 ? a.MovementNumber.Value : int.MaxValue;
+                        int mb = b.MovementNumber is > 0 ? b.MovementNumber.Value : int.MaxValue;
+                        cmp = ma.CompareTo(mb);
+                        if (cmp != 0) return cmp;
+                    }
+                    int ta = a.TrackNumber > 0 ? a.TrackNumber : int.MaxValue;
+                    int tb = b.TrackNumber > 0 ? b.TrackNumber : int.MaxValue;
+                    cmp = ta.CompareTo(tb);
+                    if (cmp != 0) return cmp;
+                    return WorkAwareShuffleEngine.NaturalPathCompare(a.RelPath, b.RelPath);
+                });
+            }
+            foreach (var seed in bucket.Seeds)
+            {
+                bucket.TrackUids.Add(seed.TrackUid);
+            }
         }
         return [.. map.Values];
     }
@@ -456,6 +491,15 @@ public static class QuickplayPinMatcher
 
         if (string.Equals(pin.Kind, "work", StringComparison.OrdinalIgnoreCase))
         {
+            string? trackWorkKey = WorkAwareShuffleEngine.BuildWorkBlockKey(
+                workName,
+                album,
+                WorkAwareShuffleEngine.BuildAlbumScope(album, conductorsDisplay));
+            if (pin.TargetKey.Contains("::", StringComparison.Ordinal))
+            {
+                return !string.IsNullOrEmpty(trackWorkKey)
+                    && string.Equals(trackWorkKey, pin.TargetKey, StringComparison.OrdinalIgnoreCase);
+            }
             return string.Equals(workName, pin.TargetKey, StringComparison.OrdinalIgnoreCase);
         }
 

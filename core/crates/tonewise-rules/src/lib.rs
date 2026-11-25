@@ -75,6 +75,8 @@ pub struct SceneCard {
     pub sort_arc: SortArc,
     #[serde(default = "default_true")]
     pub tempo_null_passthrough: bool,
+    #[serde(default = "default_true")]
+    pub expand_whole_works: bool,
     pub rule: RuleExpr,
 }
 
@@ -119,6 +121,10 @@ pub struct RuleTrack {
     #[serde(default)]
     pub movement_order: Option<i32>,
     #[serde(default)]
+    pub disc_number: Option<i32>,
+    #[serde(default)]
+    pub track_number: Option<i32>,
+    #[serde(default)]
     pub composers: Vec<String>,
     #[serde(default)]
     pub conductors: Vec<String>,
@@ -143,21 +149,46 @@ fn block_avg_energy_milli(block: &[(usize, &RuleTrack)]) -> u64 {
     (sum * 1000) / (block.len() as u64)
 }
 
+fn positive_order_key(val: Option<i32>) -> (u8, i32) {
+    match val {
+        Some(n) if n > 0 => (0u8, n),
+        _ => (1u8, i32::MAX),
+    }
+}
+
 pub fn evaluate_scene(scene: &SceneCard, tracks: &[RuleTrack]) -> Vec<String> {
     let dict = MoodDictionary::global();
-    let matched: Vec<&RuleTrack> = tracks
-        .iter()
-        .filter(|track| eval_expr(&scene.rule, track, scene.tempo_null_passthrough, dict))
-        .collect();
+    let mut direct_hits = vec![false; tracks.len()];
+    let mut matched_work_keys: HashSet<String> = HashSet::new();
 
-    if matches!(scene.sort_arc, SortArc::Flat | SortArc::WorkShuffle) {
-        return matched.into_iter().map(|t| t.track_uid.clone()).collect();
+    for (idx, track) in tracks.iter().enumerate() {
+        if eval_expr(&scene.rule, track, scene.tempo_null_passthrough, dict) {
+            direct_hits[idx] = true;
+            if scene.expand_whole_works {
+                if let Some(wk) = normalized_work_key(track) {
+                    matched_work_keys.insert(wk);
+                }
+            }
+        }
+    }
+
+    let mut matched: Vec<(usize, &RuleTrack)> = Vec::new();
+    for (idx, track) in tracks.iter().enumerate() {
+        let include = direct_hits[idx]
+            || (scene.expand_whole_works
+                && !matched_work_keys.is_empty()
+                && normalized_work_key(track)
+                    .map(|wk| matched_work_keys.contains(&wk))
+                    .unwrap_or(false));
+        if include {
+            matched.push((idx, track));
+        }
     }
 
     let mut blocks: Vec<(usize, Vec<(usize, &RuleTrack)>)> = Vec::new();
-    let mut work_indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut work_indices: HashMap<String, usize> = HashMap::new();
 
-    for (idx, track) in matched.into_iter().enumerate() {
+    for (idx, track) in matched {
         if let Some(work_key) = normalized_work_key(track) {
             if let Some(&slot) = work_indices.get(&work_key) {
                 blocks[slot].1.push((idx, track));
@@ -174,11 +205,12 @@ pub fn evaluate_scene(scene: &SceneCard, tracks: &[RuleTrack]) -> Vec<String> {
     for (_, items) in &mut blocks {
         if items.len() > 1 {
             items.sort_by_key(|(idx, track)| {
-                let mvt_key = match track.movement_order {
-                    Some(m) if m > 0 => (0u8, m),
-                    _ => (1u8, i32::MAX),
-                };
-                (mvt_key, *idx)
+                (
+                    positive_order_key(track.disc_number),
+                    positive_order_key(track.movement_order),
+                    positive_order_key(track.track_number),
+                    *idx,
+                )
             });
         }
     }
@@ -458,6 +490,7 @@ mod tests {
             updated_at_ms: 0,
             sort_arc: SortArc::Flat,
             tempo_null_passthrough: true,
+            expand_whole_works: true,
             rule: RuleExpr::All {
                 all: vec![
                     RuleExpr::Leaf {
@@ -526,6 +559,7 @@ mod tests {
             updated_at_ms: 0,
             sort_arc: SortArc::Flat,
             tempo_null_passthrough: false,
+            expand_whole_works: true,
             rule: RuleExpr::Leaf {
                 predicate: Predicate {
                     field: "tempo_bucket".into(),
@@ -543,6 +577,7 @@ mod tests {
             updated_at_ms: 0,
             sort_arc: SortArc::Flat,
             tempo_null_passthrough: true,
+            expand_whole_works: true,
             rule: RuleExpr::All {
                 all: vec![
                     RuleExpr::Leaf {
@@ -585,6 +620,7 @@ mod tests {
             updated_at_ms: 0,
             sort_arc: SortArc::Flat,
             tempo_null_passthrough: true,
+            expand_whole_works: true,
             rule: RuleExpr::Leaf {
                 predicate: Predicate {
                     field: "genre".into(),
@@ -665,6 +701,7 @@ mod tests {
             updated_at_ms: 0,
             sort_arc: SortArc::EnergyAsc,
             tempo_null_passthrough: true,
+            expand_whole_works: true,
             rule: RuleExpr::All {
                 all: vec![
                     RuleExpr::Leaf {
@@ -710,6 +747,7 @@ mod tests {
             updated_at_ms: 0,
             sort_arc: SortArc::EnergyAsc,
             tempo_null_passthrough: true,
+            expand_whole_works: true,
             rule: RuleExpr::Leaf {
                 predicate: Predicate {
                     field: "genre".into(),
@@ -741,6 +779,103 @@ mod tests {
         assert_eq!(
             evaluate_scene(&rediscovery, &tracks),
             vec!["sym_m1", "sym_m2", "sym_m3", "solo_mid", "solo_high"]
+        );
+    }
+
+    #[test]
+    fn partial_work_hits_expand_to_full_work_and_flat_orders_by_disc_movement_track() {
+        let tracks = vec![
+            RuleTrack {
+                track_uid: "opera_cd2_m1".into(),
+                title: "Act II Scene 1".into(),
+                dj_energy: Some(DjEnergy::High),
+                unplayed_days: 5,
+                work_key: Some("opera_alb|cond::don_giovanni".into()),
+                movement_order: Some(1),
+                disc_number: Some(2),
+                track_number: Some(1),
+                ..Default::default()
+            },
+            RuleTrack {
+                track_uid: "opera_cd1_m2".into(),
+                title: "Act I Scene 2".into(),
+                dj_energy: Some(DjEnergy::Low),
+                unplayed_days: 120,
+                work_key: Some("opera_alb|cond::don_giovanni".into()),
+                movement_order: Some(2),
+                disc_number: Some(1),
+                track_number: Some(2),
+                ..Default::default()
+            },
+            RuleTrack {
+                track_uid: "opera_cd1_m1".into(),
+                title: "Act I Scene 1".into(),
+                dj_energy: Some(DjEnergy::Medium),
+                unplayed_days: 10,
+                work_key: Some("opera_alb|cond::don_giovanni".into()),
+                movement_order: Some(1),
+                disc_number: Some(1),
+                track_number: Some(1),
+                ..Default::default()
+            },
+            RuleTrack {
+                track_uid: "no_mvt_t2".into(),
+                title: "Part 2".into(),
+                dj_energy: Some(DjEnergy::Low),
+                work_key: Some("suite_alb::cello_suite".into()),
+                movement_order: None,
+                disc_number: Some(1),
+                track_number: Some(2),
+                ..Default::default()
+            },
+            RuleTrack {
+                track_uid: "no_mvt_t1".into(),
+                title: "Part 1".into(),
+                dj_energy: Some(DjEnergy::High),
+                work_key: Some("suite_alb::cello_suite".into()),
+                movement_order: None,
+                disc_number: Some(1),
+                track_number: Some(1),
+                ..Default::default()
+            },
+        ];
+
+        // Even though only low-energy movements match dj_energy=low, expand_whole_works completes each work,
+        // SortArc::Flat groups them, and disc_number takes precedence over movement_order (then track_number).
+        let low_flat = SceneCard {
+            id: "low_flat".into(),
+            title: "Low Flat".into(),
+            updated_at_ms: 0,
+            sort_arc: SortArc::Flat,
+            tempo_null_passthrough: true,
+            expand_whole_works: true,
+            rule: RuleExpr::Leaf {
+                predicate: Predicate {
+                    field: "dj_energy".into(),
+                    op: "eq".into(),
+                    values: vec![serde_json::json!("low")],
+                },
+            },
+        };
+        assert_eq!(
+            evaluate_scene(&low_flat, &tracks),
+            vec![
+                "opera_cd1_m1",
+                "opera_cd1_m2",
+                "opera_cd2_m1",
+                "no_mvt_t1",
+                "no_mvt_t2",
+            ]
+        );
+
+        // Opt-out via expand_whole_works=false returns only directly matched tracks.
+        let partial_only = SceneCard {
+            expand_whole_works: false,
+            ..low_flat
+        };
+        assert_eq!(
+            evaluate_scene(&partial_only, &tracks),
+            vec!["opera_cd1_m2", "no_mvt_t2"]
         );
     }
 }

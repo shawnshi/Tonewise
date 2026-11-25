@@ -144,6 +144,60 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private double _eqBand9Db;
 
     [ObservableProperty]
+    private bool _isAutoEqEnabled;
+
+    [ObservableProperty]
+    private bool _isAutoEqClassicalCrossfeedEnabled = true;
+
+    [ObservableProperty]
+    private bool _isAutoEqLockClassicalWorkEnabled = true;
+
+    [ObservableProperty]
+    private string _activeAutoEqBadge = "自动内容 EQ：已关闭";
+
+    [ObservableProperty]
+    private string _selectedAutoEqGenre = "classical";
+
+    [ObservableProperty]
+    private string _selectedAutoEqVocal = "instrumental";
+
+    [ObservableProperty]
+    private string _autoEqRuleCrossfeedMode = "auto";
+
+    [ObservableProperty]
+    private string _selectedAutoEqRuleStatusText = "默认规则";
+
+    [ObservableProperty]
+    private double _autoEqRuleBand0Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand1Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand2Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand3Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand4Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand5Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand6Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand7Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand8Db;
+
+    [ObservableProperty]
+    private double _autoEqRuleBand9Db;
+
+    [ObservableProperty]
     private bool _rewindOnPrevious = true;
 
     [ObservableProperty]
@@ -881,6 +935,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isArcRediscovery;
 
+    [ObservableProperty]
+    private bool _isArcWorkShuffle;
+
     private readonly List<TrackItem> _playbackHistory = [];
     private List<TrackItem> _unshuffledQueueSnapshot = [];
     private (List<TrackItem> Queue, string QueueTitle, string FreezeToken)? _djFreezeBackup;
@@ -891,6 +948,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private List<DesktopPeqBand>? _activeBandTemplates;
     private bool _suppressDspSync;
     private bool _usingExternalEqFile;
+    private AutoEqPolicyDto _autoEqPolicy = new();
+    private ResolvedAutoEqDto? _activeAutoEqResolution;
+    private string? _lastAutoEqWorkKey;
+    private string? _activeAutoEqTrackUid;
+    private string? _activeAutoEqTrackMetaKey;
+    private bool _suppressAutoEqSync;
+    private bool _suppressAutoEqRuleSync;
     private int _gaplessPreloadGen;
     private int? _deskClockX;
     private int? _deskClockY;
@@ -1041,6 +1105,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             PauseOnSingleRepeat = saved.PauseOnSingleRepeat;
             ExclusiveIdleReleaseMinutes = saved.ExclusiveIdleReleaseMinutes is 0 or 5 or 15 or 30 ? saved.ExclusiveIdleReleaseMinutes : 15;
             _deviceDspProfiles = DesktopDspChainConfig.DeserializeDeviceProfileMap(saved.DeviceDspProfilesJson);
+            ApplyAutoEqPolicyToViewModel(SyncHostServer.DeserializeAutoEqPolicy(saved.AutoEqPolicyJson));
             _deskClockX = saved.DeskClockX;
             _deskClockY = saved.DeskClockY;
             _deskClockWidth = saved.DeskClockWidth;
@@ -1179,7 +1244,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             MirrorPruneScope: MirrorPruneScope,
             AllowAdbForeignDeleteFallback: AllowAdbForeignDeleteFallback,
             CustomAdbPath: _customAdbPath,
-            EnableDynamicCoverAccent: EnableDynamicCoverAccent);
+            EnableDynamicCoverAccent: EnableDynamicCoverAccent,
+            AutoEqPolicyJson: SyncHostServer.SerializeAutoEqPolicy(_autoEqPolicy));
 
         try
         {
@@ -1399,6 +1465,22 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     partial void OnEqBand7DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
     partial void OnEqBand8DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
     partial void OnEqBand9DbChanged(double value) => OnBuiltInDspChanged(markCustomEq: true);
+    partial void OnIsAutoEqEnabledChanged(bool value) => OnAutoEqToggleChanged(autoEnableDsp: value);
+    partial void OnIsAutoEqClassicalCrossfeedEnabledChanged(bool value) => OnAutoEqToggleChanged(autoEnableDsp: false);
+    partial void OnIsAutoEqLockClassicalWorkEnabledChanged(bool value) => OnAutoEqToggleChanged(autoEnableDsp: false);
+    partial void OnSelectedAutoEqGenreChanged(string value) => LoadSelectedAutoEqRuleSlots();
+    partial void OnSelectedAutoEqVocalChanged(string value) => LoadSelectedAutoEqRuleSlots();
+    partial void OnAutoEqRuleCrossfeedModeChanged(string value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand0DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand1DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand2DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand3DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand4DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand5DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand6DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand7DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand8DbChanged(double value) => OnAutoEqRuleSliderEdited();
+    partial void OnAutoEqRuleBand9DbChanged(double value) => OnAutoEqRuleSliderEdited();
 
     partial void OnCurrentTrackChanged(TrackItem? value)
     {
@@ -1406,6 +1488,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         CurrentTrackLoved = value?.IsLoved ?? false;
         RefreshCurrentFreezeCapsule();
         RefreshNowPlayingClassicalActions();
+        if (value is not null
+            && string.Equals(_activeAutoEqTrackUid, value.TrackUid, StringComparison.Ordinal)
+            && !string.Equals(_activeAutoEqTrackMetaKey, BuildAutoEqMetaFingerprint(value), StringComparison.Ordinal))
+        {
+            RefreshAutoEqAndPush();
+        }
     }
 
     partial void OnIsIso226EnabledChanged(bool value)

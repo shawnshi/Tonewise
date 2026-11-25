@@ -319,4 +319,155 @@ public sealed class ClassicalPlaylistAndPlaybackTests
         Assert.True(posM1 >= 0);
         Assert.Equal("sym_m2", uids[posM1 + 1]);
     }
+
+    [Fact]
+    public void CoreFfi_EvaluateScene_ExpandsPartialWorkUnderFlatAndOrdersByDiscMovementTrack()
+    {
+        const string sceneJson = """
+            {
+              "id": "flat_expand",
+              "title": "Flat Partial Work Expand",
+              "updated_at_ms": 0,
+              "sort_arc": "flat",
+              "tempo_null_passthrough": true,
+              "rule": {
+                "predicate": {
+                  "field": "dj_energy",
+                  "op": "eq",
+                  "values": ["low"]
+                }
+              }
+            }
+            """;
+        const string tracksJson = """
+            [
+              {
+                "track_uid": "cd2_m1",
+                "title": "Act II.1",
+                "dj_energy": "high",
+                "work_key": "opera|cond::figaro",
+                "disc_number": 2,
+                "movement_order": 1,
+                "track_number": 1
+              },
+              {
+                "track_uid": "cd1_m2",
+                "title": "Act I.2",
+                "dj_energy": "low",
+                "work_key": "opera|cond::figaro",
+                "disc_number": 1,
+                "movement_order": 2,
+                "track_number": 2
+              },
+              {
+                "track_uid": "cd1_m1",
+                "title": "Act I.1",
+                "dj_energy": "medium",
+                "work_key": "opera|cond::figaro",
+                "disc_number": 1,
+                "movement_order": 1,
+                "track_number": 1
+              }
+            ]
+            """;
+
+        var uids = TonewiseCoreClient.EvaluateScene(sceneJson, tracksJson);
+        Assert.Equal(new[] { "cd1_m1", "cd1_m2", "cd2_m1" }, uids.ToArray());
+    }
+
+    [Fact]
+    public void AutoDj_DoesNotTruncateSingleLongWorkExceedingTargetCount()
+    {
+        string scope = WorkAwareShuffleEngine.BuildAlbumScope("Partitas", "Andras Schiff");
+        string workKey = WorkAwareShuffleEngine.BuildWorkBlockKey("Partita No. 4", "Partitas", scope)!;
+        var candidates = Enumerable.Range(1, 6)
+            .Reverse()
+            .Select(m => new AutoDjTrackCandidate(
+                $"p4_{m}",
+                $"Partita No. 4 - {m}",
+                "Andras Schiff",
+                EffectivePlayCount: 2,
+                Rating: 5,
+                TempoBpm: 95,
+                TempoBucket: "Moderate",
+                DjEnergy: "low",
+                DjVocals: "instrumental",
+                ["focus"],
+                ["Calm"],
+                WorkKey: workKey,
+                MovementNumber: m,
+                DiscNumber: 1,
+                TrackNumber: m,
+                RelPath: $"Bach/0{m}.flac"))
+            .ToList();
+
+        var res = AutoDjPlaylistGenerator.Generate(
+            candidates,
+            new DateTime(2026, 11, 25, 10, 0, 0, DateTimeKind.Local),
+            targetCount: 4,
+            randomSeed: 3);
+
+        Assert.Equal(new[] { "p4_1", "p4_2", "p4_3", "p4_4", "p4_5", "p4_6" }, res.OrderedTrackUids.ToArray());
+    }
+
+    [Fact]
+    public void SleepTimer_EndOfWork_StopsOnWrapAroundAndDifferentWork()
+    {
+        var timer = new SleepTimerEngine();
+        string workA = "album_a|karajan::symphony no. 5";
+        string workB = "album_b|kleiber::symphony no. 7";
+        timer.SetEndOfWork(workA);
+
+        Assert.False(timer.WillStopAtTransition(workA, workA, isQueueWrapAround: false));
+        Assert.True(timer.WillStopAtTransition(workA, workA, isQueueWrapAround: true));
+        Assert.True(timer.ShouldStopAtTrackTransition(workA, workA, isQueueWrapAround: true));
+        Assert.Equal(SleepTimerMode.Off, timer.Mode);
+
+        timer.SetEndOfWork(workA);
+        Assert.True(timer.ShouldStopAtTrackTransition(workA, workB, isQueueWrapAround: false));
+    }
+
+    [Fact]
+    public void QuickplayAggregator_AndPinMatcher_OrderMovementsAndScopeConductorWorks()
+    {
+        var seeds = new[]
+        {
+            new QuickplayTrackSeed("m2", "II. Adagio", "Compilations", "BPO", "Symphony No. 9", "Karajan", 5, 3, 2000L, 2000L, 1977, null, DiscNumber: 1, MovementNumber: 2, TrackNumber: 2),
+            new QuickplayTrackSeed("m1", "I. Allegro", "Compilations", "BPO", "Symphony No. 9", "Karajan", 5, 3, 1000L, 1000L, 1977, null, DiscNumber: 1, MovementNumber: 1, TrackNumber: 1),
+            new QuickplayTrackSeed("b1", "I. Allegro", "Compilations", "VPO", "Symphony No. 9", "Bernstein", 4, 1, 500L, 500L, 1980, null, DiscNumber: 1, MovementNumber: 1, TrackNumber: 3),
+        };
+
+        var (hist, _, _) = QuickplayAggregator.BuildAll(seeds, nowMs: 3000L, maxCount: 8);
+        Assert.Equal(2, hist.Count);
+        Assert.Equal(new[] { "m1", "m2" }, hist[0].TrackUids.ToArray());
+
+        string karajanKey = WorkAwareShuffleEngine.BuildWorkBlockKey(
+            "Symphony No. 9",
+            "Compilations",
+            WorkAwareShuffleEngine.BuildAlbumScope("Compilations", "Karajan"))!;
+        var scopedPin = new QuickplayPinRecord("work::" + karajanKey, "work", karajanKey, "Symphony No. 9", "Karajan", null, 0, 0);
+
+        Assert.True(QuickplayPinMatcher.MatchesTrack(scopedPin, "m1", "Compilations", "Symphony No. 9", "Classical", "BPO", "Beethoven", "Karajan", "Comp", "01.flac"));
+        Assert.False(QuickplayPinMatcher.MatchesTrack(scopedPin, "b1", "Compilations", "Symphony No. 9", "Classical", "VPO", "Beethoven", "Bernstein", "Comp", "03.flac"));
+    }
+
+    [Fact]
+    public void EnqueueNext_SkipsRemainingMovementsOfCurrentWork()
+    {
+        var queue = new[]
+        {
+            (Uid: "m1", Album: "Alb", Work: "Sym 5", Cond: "Karajan"),
+            (Uid: "m2", Album: "Alb", Work: "Sym 5", Cond: "Karajan"),
+            (Uid: "m3", Album: "Alb", Work: "Sym 5", Cond: "Karajan"),
+            (Uid: "other", Album: "Alb", Work: "Overture", Cond: "Karajan"),
+        };
+
+        int insertIdx = WorkAwareShuffleEngine.ComputeWorkSafeInsertNextIndex(
+            queue,
+            0,
+            x => x.Work,
+            x => x.Album,
+            x => WorkAwareShuffleEngine.BuildAlbumScope(x.Album, x.Cond));
+        Assert.Equal(3, insertIdx);
+    }
 }

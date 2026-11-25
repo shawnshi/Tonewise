@@ -54,6 +54,15 @@ internal static class TonewiseCoreNative
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tonewise_write_audio_tags_json(IntPtr requestJson);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tonewise_resolve_auto_eq_json(IntPtr requestJson);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tonewise_compose_dsp_json(IntPtr requestJson);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tonewise_default_auto_eq_catalog_json();
+
     internal static IntPtr AllocUtf8(string value)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(value);

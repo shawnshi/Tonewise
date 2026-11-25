@@ -409,17 +409,28 @@ public sealed partial class MainViewModel
     private void PushEnginePreferences()
     {
         var extDsp = BuildCurrentExtendedDspConfig();
-        _engine.SetExtendedDsp(extDsp);
-        var activeProfile = _usingExternalEqFile
+        var layerAProfile = _usingExternalEqFile
             ? _eqProfile
             : (extDsp.Enabled ? extDsp.ToEqualizerApoProfile() : null);
+
+        var (composedProfile, effectiveCrossfeed) = ComposeActiveDspProfile(
+            extDsp,
+            layerAProfile,
+            _activeAutoEqResolution);
+
+        _engine.SetExtendedDsp(extDsp with
+        {
+            Enabled = extDsp.Enabled || _usingExternalEqFile,
+            CrossfeedEnabled = effectiveCrossfeed,
+        });
         _appliedEngineEndpointId = SelectedEndpoint?.Id;
         _engine.SetPreferences(
             PreferWasapiExclusive,
             SelectedEndpoint?.Id,
-            activeProfile,
+            composedProfile,
             ResolveReplayGainForTrack(CurrentTrack)
         );
+        UpdateAutoEqBadge();
         PushAcousticPipeline();
     }
 
@@ -432,6 +443,418 @@ public sealed partial class MainViewModel
             tpdfDitherEnabled: IsTpdfDitherEnabled,
             firDryWetMix: FirDryWetMix
         );
+    }
+
+    private static string BuildAutoEqMetaFingerprint(TrackItem track) =>
+        $"{track.Genre}|{track.DjVocals}|{track.WorkName}|{track.Album}|{track.ConductorsDisplay}";
+
+    private static TrackAutoEqInputDto BuildTrackAutoEqInput(TrackItem track)
+    {
+        var genres = string.IsNullOrWhiteSpace(track.Genre)
+            ? []
+            : track.Genre
+                .Split([';', '/', ',', '、', '|'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToList();
+        return new TrackAutoEqInputDto(
+            Genres: genres,
+            DjVocals: track.DjVocals,
+            WorkName: track.WorkName,
+            WorkKey: BuildTrackWorkKey(track));
+    }
+
+    private void ResolveAndUpdateCurrentAutoEq(
+        TrackItem? track,
+        bool keepWorkLockFromPrevious,
+        string? previousWorkKeyOverride = null)
+    {
+        if (track is null)
+        {
+            _activeAutoEqResolution = null;
+            _lastAutoEqWorkKey = null;
+            _activeAutoEqTrackUid = null;
+            _activeAutoEqTrackMetaKey = null;
+            UpdateAutoEqBadge();
+            return;
+        }
+
+        string? prevWorkKey = keepWorkLockFromPrevious
+            ? (previousWorkKeyOverride ?? _lastAutoEqWorkKey)
+            : null;
+        var prevRes = keepWorkLockFromPrevious ? _activeAutoEqResolution : null;
+
+        _activeAutoEqResolution = TonewiseCoreClient.ResolveAutoEq(
+            _autoEqPolicy,
+            BuildTrackAutoEqInput(track),
+            prevWorkKey,
+            prevRes);
+        _lastAutoEqWorkKey = BuildTrackWorkKey(track);
+        _activeAutoEqTrackUid = track.TrackUid;
+        _activeAutoEqTrackMetaKey = BuildAutoEqMetaFingerprint(track);
+        UpdateAutoEqBadge();
+    }
+
+    private GaplessDspTransition BuildGaplessDspTransition(TrackItem nextTrack, double nextReplayGainDb)
+    {
+        var extDsp = BuildCurrentExtendedDspConfig();
+        var layerAProfile = _usingExternalEqFile
+            ? _eqProfile
+            : (extDsp.Enabled ? extDsp.ToEqualizerApoProfile() : null);
+
+        var nextResolved = TonewiseCoreClient.ResolveAutoEq(
+            _autoEqPolicy,
+            BuildTrackAutoEqInput(nextTrack),
+            _lastAutoEqWorkKey,
+            _activeAutoEqResolution);
+
+        var (composedProfile, effectiveCrossfeed) = ComposeActiveDspProfile(
+            extDsp,
+            layerAProfile,
+            nextResolved);
+
+        return new GaplessDspTransition(
+            ReplayGainDb: nextReplayGainDb,
+            ComposedProfile: composedProfile,
+            HasProfileOverride: true,
+            CrossfeedEnabled: effectiveCrossfeed);
+    }
+
+    private (EqualizerApoProfile? Profile, bool EffectiveCrossfeed) ComposeActiveDspProfile(
+        DesktopDspChainConfig layerAConfig,
+        EqualizerApoProfile? externalLayerA,
+        ResolvedAutoEqDto? layerB)
+    {
+        bool masterActive = layerAConfig.Enabled || _usingExternalEqFile;
+        if (!masterActive)
+        {
+            return (null, false);
+        }
+
+        bool layerBActive = _autoEqPolicy.Enabled && layerB is { Applied: true };
+        if (!layerBActive || layerB is null)
+        {
+            return (externalLayerA ?? layerAConfig.ToEqualizerApoProfile(), layerAConfig.CrossfeedEnabled);
+        }
+
+        var deviceFilters = _usingExternalEqFile && externalLayerA is not null
+            ? externalLayerA.Filters
+                .Select(f => new AutoEqBiquadDto(f.Kind.ToString(), (float)f.FrequencyHz, (float)f.GainDb, (float)f.Q))
+                .ToList()
+            : layerAConfig.EffectiveBands
+                .Where(b => b.Enabled)
+                .Select(b => new AutoEqBiquadDto(b.Kind.ToString(), (float)b.FrequencyHz, (float)b.GainDb, (float)b.Q))
+                .ToList();
+        float devicePreamp = (float)(_usingExternalEqFile && externalLayerA is not null
+            ? externalLayerA.PreampDb
+            : layerAConfig.PreampDb);
+
+        var composed = TonewiseCoreClient.ComposeDsp(
+            new DspProfileDto(devicePreamp, deviceFilters),
+            new DspProfileDto(layerB.PreampDb, layerB.Filters));
+
+        var specs = composed.Filters.Select(MapDtoToBiquadSpec).ToList();
+        var mergedProfile = new EqualizerApoProfile(
+            PreampDb: composed.PreampDb,
+            Filters: specs,
+            BoundDeviceName: externalLayerA?.BoundDeviceName,
+            FirImpulsePath: externalLayerA?.FirImpulsePath,
+            EnableIso226: externalLayerA?.EnableIso226 ?? false,
+            ReferenceSplDb: externalLayerA?.ReferenceSplDb ?? 80.0);
+
+        bool effectiveCrossfeed = layerAConfig.CrossfeedEnabled || layerB.EnableCrossfeed;
+        return (mergedProfile, effectiveCrossfeed);
+    }
+
+    private static BiquadSpec MapDtoToBiquadSpec(AutoEqBiquadDto f)
+    {
+        var kind = f.Kind.Trim().ToLowerInvariant() switch
+        {
+            "lowshelf" or "low_shelf" or "lsc" or "ls" => BiquadKind.LowShelf,
+            "highshelf" or "high_shelf" or "hsc" or "hs" => BiquadKind.HighShelf,
+            "lowpass" or "low_pass" or "lp" or "lpq" => BiquadKind.LowPass,
+            "highpass" or "high_pass" or "hp" or "hpq" => BiquadKind.HighPass,
+            _ => BiquadKind.Peaking,
+        };
+        return new BiquadSpec(kind, f.FreqHz, f.GainDb, f.Q, BiquadChannelScope.All);
+    }
+
+    private void UpdateAutoEqBadge()
+    {
+        if (!_autoEqPolicy.Enabled)
+        {
+            ActiveAutoEqBadge = "自动内容 EQ：已关闭";
+            return;
+        }
+        if (!IsDspEnabled && !_usingExternalEqFile)
+        {
+            ActiveAutoEqBadge = "自动内容 EQ：随内置 DSP 旁路";
+            return;
+        }
+        var res = _activeAutoEqResolution;
+        if (res is null || !res.Applied)
+        {
+            ActiveAutoEqBadge = "自动内容 EQ：就绪（等待曲目）";
+            return;
+        }
+        string modeDetail = !res.HasNonZeroEq && res.EnableCrossfeed
+            ? "Flat + Crossfeed"
+            : !res.HasNonZeroEq
+                ? "Flat 0 dB"
+                : res.EnableCrossfeed
+                    ? "EQ + Crossfeed"
+                    : "已叠加 EQ";
+        string lockNote = res.LockedToPreviousWork ? " · 作品锁定" : "";
+        ActiveAutoEqBadge = $"自动内容层：{res.DisplayLabel}（{modeDetail}{lockNote}）";
+    }
+
+    public void RefreshAutoEqAndPush()
+    {
+        ResolveAndUpdateCurrentAutoEq(CurrentTrack, keepWorkLockFromPrevious: false);
+        PushEnginePreferences();
+        PreloadNextGaplessTrack();
+    }
+
+    private void ApplyAutoEqPolicyToViewModel(AutoEqPolicyDto policy, bool fromSync = false)
+    {
+        _autoEqPolicy = policy with { CustomRules = policy.CustomRules ?? [] };
+        bool prevSync = _suppressAutoEqSync;
+        _suppressAutoEqSync = true;
+        try
+        {
+            IsAutoEqEnabled = _autoEqPolicy.Enabled;
+            IsAutoEqClassicalCrossfeedEnabled = _autoEqPolicy.ClassicalAutoCrossfeed;
+            IsAutoEqLockClassicalWorkEnabled = _autoEqPolicy.LockWithinClassicalWork;
+        }
+        finally
+        {
+            _suppressAutoEqSync = prevSync;
+        }
+        LoadSelectedAutoEqRuleSlots();
+        ResolveAndUpdateCurrentAutoEq(CurrentTrack, keepWorkLockFromPrevious: false);
+        if (fromSync)
+        {
+            PushEnginePreferences();
+            PreloadNextGaplessTrack();
+        }
+        else
+        {
+            UpdateAutoEqBadge();
+        }
+    }
+
+    private void OnAutoEqToggleChanged(bool autoEnableDsp)
+    {
+        if (_suppressAutoEqSync) return;
+        _autoEqPolicy = _autoEqPolicy with
+        {
+            Enabled = IsAutoEqEnabled,
+            ClassicalAutoCrossfeed = IsAutoEqClassicalCrossfeedEnabled,
+            LockWithinClassicalWork = IsAutoEqLockClassicalWorkEnabled,
+            UpdatedAtMs = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            CustomRules = _autoEqPolicy.CustomRules ?? [],
+        };
+        if (autoEnableDsp && !IsDspEnabled)
+        {
+            _suppressDspSync = true;
+            try
+            {
+                IsDspEnabled = true;
+                var cfg = BuildCurrentExtendedDspConfig();
+                _deviceDspProfiles[GetCurrentDspProfileKey()] = cfg;
+            }
+            finally
+            {
+                _suppressDspSync = false;
+            }
+        }
+        PersistAutoEqPolicyToWorkspaceAndSettings();
+        RefreshAutoEqAndPush();
+    }
+
+    private void PersistAutoEqPolicyToWorkspaceAndSettings()
+    {
+        SaveUserSettings();
+        if (!string.IsNullOrWhiteSpace(_store.MusicRoot))
+        {
+            try
+            {
+                var host = new SyncHostServer(_store.MusicRoot, store: _syncStore);
+                host.WriteAutoEqPolicy(_autoEqPolicy);
+            }
+            catch
+            {
+                // Non-fatal if library root is temporarily read-only
+            }
+        }
+    }
+
+    private void SyncAutoEqPolicyWithLibraryRoot()
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot)) return;
+        try
+        {
+            var host = new SyncHostServer(_store.MusicRoot, store: _syncStore);
+            var (winner, changed) = host.MergeAutoEqPolicyWithChangeFlag(_autoEqPolicy);
+            if (!changed && winner.UpdatedAtMs > _autoEqPolicy.UpdatedAtMs)
+            {
+                ApplyAutoEqPolicyToViewModel(winner, fromSync: true);
+                SaveUserSettings();
+            }
+        }
+        catch
+        {
+            // Non-fatal fallback
+        }
+    }
+
+    private string CurrentRuleSlotKey =>
+        $"{(string.IsNullOrWhiteSpace(SelectedAutoEqGenre) ? "classical" : SelectedAutoEqGenre.Trim().ToLowerInvariant())}:{(string.IsNullOrWhiteSpace(SelectedAutoEqVocal) ? "instrumental" : SelectedAutoEqVocal.Trim().ToLowerInvariant())}";
+
+    private void LoadSelectedAutoEqRuleSlots()
+    {
+        string key = CurrentRuleSlotKey;
+        AutoEqRuleOverrideDto? custom = null;
+        bool isCustom = _autoEqPolicy.CustomRules is { } rulesMap &&
+            rulesMap.TryGetValue(key, out custom) &&
+            custom is not null;
+        IReadOnlyList<AutoEqBiquadDto> bands;
+        bool? crossOverride;
+        if (isCustom && custom is not null)
+        {
+            bands = custom.Filters;
+            crossOverride = custom.CrossfeedOverride;
+            SelectedAutoEqRuleStatusText = "已自定义（Layer B 跨端同步）";
+        }
+        else
+        {
+            var cat = TonewiseCoreClient.GetDefaultAutoEqCatalog()
+                .FirstOrDefault(e => string.Equals(e.SlotKey, key, StringComparison.OrdinalIgnoreCase));
+            bands = cat?.DefaultFilters ?? [];
+            crossOverride = null;
+            SelectedAutoEqRuleStatusText = cat is not null
+                ? $"默认规则 ({cat.Label})"
+                : "默认规则";
+        }
+
+        double Gain(int idx) => idx < bands.Count ? Math.Round(bands[idx].GainDb, 1) : 0.0;
+        bool prevRuleSup = _suppressAutoEqRuleSync;
+        _suppressAutoEqRuleSync = true;
+        try
+        {
+            AutoEqRuleBand0Db = Gain(0);
+            AutoEqRuleBand1Db = Gain(1);
+            AutoEqRuleBand2Db = Gain(2);
+            AutoEqRuleBand3Db = Gain(3);
+            AutoEqRuleBand4Db = Gain(4);
+            AutoEqRuleBand5Db = Gain(5);
+            AutoEqRuleBand6Db = Gain(6);
+            AutoEqRuleBand7Db = Gain(7);
+            AutoEqRuleBand8Db = Gain(8);
+            AutoEqRuleBand9Db = Gain(9);
+            AutoEqRuleCrossfeedMode = crossOverride switch
+            {
+                true => "on",
+                false => "off",
+                _ => "auto",
+            };
+        }
+        finally
+        {
+            _suppressAutoEqRuleSync = prevRuleSup;
+        }
+    }
+
+    private void OnAutoEqRuleSliderEdited()
+    {
+        if (_suppressAutoEqRuleSync) return;
+        SaveSelectedAutoEqRule();
+    }
+
+    [RelayCommand]
+    private void SaveSelectedAutoEqRule()
+    {
+        string key = CurrentRuleSlotKey;
+        var cat = TonewiseCoreClient.GetDefaultAutoEqCatalog()
+            .FirstOrDefault(e => string.Equals(e.SlotKey, key, StringComparison.OrdinalIgnoreCase));
+        var template = cat?.DefaultFilters ?? [];
+        double[] gains =
+        [
+            AutoEqRuleBand0Db, AutoEqRuleBand1Db, AutoEqRuleBand2Db, AutoEqRuleBand3Db, AutoEqRuleBand4Db,
+            AutoEqRuleBand5Db, AutoEqRuleBand6Db, AutoEqRuleBand7Db, AutoEqRuleBand8Db, AutoEqRuleBand9Db,
+        ];
+        var filters = new List<AutoEqBiquadDto>(10);
+        for (int i = 0; i < 10; i++)
+        {
+            var t = i < template.Count
+                ? template[i]
+                : new AutoEqBiquadDto("Peaking", (float)DesktopDspChainConfig.StandardTenBandFrequencies[i], 0f, 1.41f);
+            filters.Add(t with { GainDb = (float)Math.Clamp(gains[i], -12.0, 12.0) });
+        }
+        bool? crossOverride = AutoEqRuleCrossfeedMode switch
+        {
+            "on" => true,
+            "off" => false,
+            _ => null,
+        };
+        var rules = new Dictionary<string, AutoEqRuleOverrideDto>(_autoEqPolicy.CustomRules ?? [], StringComparer.OrdinalIgnoreCase)
+        {
+            [key] = new AutoEqRuleOverrideDto(0f, filters, crossOverride),
+        };
+        _autoEqPolicy = _autoEqPolicy with
+        {
+            UpdatedAtMs = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            CustomRules = rules,
+        };
+        SelectedAutoEqRuleStatusText = "已自定义（Layer B 跨端同步）";
+        PersistAutoEqPolicyToWorkspaceAndSettings();
+        RefreshAutoEqAndPush();
+    }
+
+    [RelayCommand]
+    private void ResetSelectedAutoEqRule()
+    {
+        string key = CurrentRuleSlotKey;
+        var rules = new Dictionary<string, AutoEqRuleOverrideDto>(_autoEqPolicy.CustomRules ?? [], StringComparer.OrdinalIgnoreCase);
+        if (rules.Remove(key))
+        {
+            _autoEqPolicy = _autoEqPolicy with
+            {
+                UpdatedAtMs = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                CustomRules = rules,
+            };
+            PersistAutoEqPolicyToWorkspaceAndSettings();
+            RefreshAutoEqAndPush();
+        }
+        LoadSelectedAutoEqRuleSlots();
+        Notify($"已恢复「{key}」为默认规则", "info");
+    }
+
+    public void ImportApoToSelectedAutoEqRule(string filePath)
+    {
+        string text = File.ReadAllText(filePath);
+        var parsed = EqualizerApoProfile.Parse(text);
+        string key = CurrentRuleSlotKey;
+        var filters = parsed.Filters
+            .Select(f => new AutoEqBiquadDto(f.Kind.ToString(), (float)f.FrequencyHz, (float)f.GainDb, (float)f.Q))
+            .ToList();
+        bool? crossOverride = AutoEqRuleCrossfeedMode switch
+        {
+            "on" => true,
+            "off" => false,
+            _ => null,
+        };
+        var rules = new Dictionary<string, AutoEqRuleOverrideDto>(_autoEqPolicy.CustomRules ?? [], StringComparer.OrdinalIgnoreCase)
+        {
+            [key] = new AutoEqRuleOverrideDto((float)parsed.PreampDb, filters, crossOverride),
+        };
+        _autoEqPolicy = _autoEqPolicy with
+        {
+            UpdatedAtMs = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            CustomRules = rules,
+        };
+        LoadSelectedAutoEqRuleSlots();
+        PersistAutoEqPolicyToWorkspaceAndSettings();
+        RefreshAutoEqAndPush();
+        Notify($"已导入 EqualizerAPO 至规则「{key}」（{filters.Count} 段）", "success");
     }
 
 }

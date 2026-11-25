@@ -221,6 +221,11 @@ public sealed record EqualizerApoProfile(
 public sealed class BiquadFilter64
 {
     private double _b0, _b1, _b2, _a1, _a2;
+    private double _tb0, _tb1, _tb2, _ta1, _ta2;
+    private double _db0, _db1, _db2, _da1, _da2;
+    private int _rampRemaining;
+    private bool _initialized;
+    private readonly int _channels;
     private readonly double[] _z1;
     private readonly double[] _z2;
 
@@ -228,8 +233,9 @@ public sealed class BiquadFilter64
 
     public BiquadFilter64(BiquadSpec spec, int sampleRateHz, int channels)
     {
-        _z1 = new double[Math.Max(channels, 1)];
-        _z2 = new double[Math.Max(channels, 1)];
+        _channels = Math.Max(channels, 1);
+        _z1 = new double[_channels];
+        _z2 = new double[_channels];
         UpdateCoefficients(spec, sampleRateHz);
     }
 
@@ -299,15 +305,74 @@ public sealed class BiquadFilter64
                 break;
         }
 
-        _b0 = b0 / a0;
-        _b1 = b1 / a0;
-        _b2 = b2 / a0;
-        _a1 = a1 / a0;
-        _a2 = a2 / a0;
+        _tb0 = b0 / a0;
+        _tb1 = b1 / a0;
+        _tb2 = b2 / a0;
+        _ta1 = a1 / a0;
+        _ta2 = a2 / a0;
+
+        if (!_initialized)
+        {
+            _b0 = _tb0;
+            _b1 = _tb1;
+            _b2 = _tb2;
+            _a1 = _ta1;
+            _a2 = _ta2;
+            _rampRemaining = 0;
+            _initialized = true;
+            return;
+        }
+
+        double maxDiff = Math.Max(
+            Math.Abs(_tb0 - _b0),
+            Math.Max(Math.Abs(_tb1 - _b1),
+                Math.Max(Math.Abs(_tb2 - _b2), Math.Max(Math.Abs(_ta1 - _a1), Math.Abs(_ta2 - _a2)))));
+        if (maxDiff < 1e-10)
+        {
+            _b0 = _tb0;
+            _b1 = _tb1;
+            _b2 = _tb2;
+            _a1 = _ta1;
+            _a2 = _ta2;
+            _rampRemaining = 0;
+            return;
+        }
+
+        int rampSamples = Math.Max(1, (int)Math.Round(0.015 * Math.Max(sampleRateHz, 8000)));
+        _rampRemaining = rampSamples;
+        _db0 = (_tb0 - _b0) / rampSamples;
+        _db1 = (_tb1 - _b1) / rampSamples;
+        _db2 = (_tb2 - _b2) / rampSamples;
+        _da1 = (_ta1 - _a1) / rampSamples;
+        _da2 = (_ta2 - _a2) / rampSamples;
     }
 
     public double ProcessSample(double x, int channel)
     {
+        if (_rampRemaining > 0)
+        {
+            int stepChannel = (_channels > 1 && ChannelScope == BiquadChannelScope.Right) ? 1 : 0;
+            if (channel == stepChannel || _channels == 1)
+            {
+                if (--_rampRemaining == 0)
+                {
+                    _b0 = _tb0;
+                    _b1 = _tb1;
+                    _b2 = _tb2;
+                    _a1 = _ta1;
+                    _a2 = _ta2;
+                }
+                else
+                {
+                    _b0 += _db0;
+                    _b1 += _db1;
+                    _b2 += _db2;
+                    _a1 += _da1;
+                    _a2 += _da2;
+                }
+            }
+        }
+
         double y = _b0 * x + _z1[channel];
         _z1[channel] = _b1 * x - _a1 * y + _z2[channel];
         _z2[channel] = _b2 * x - _a2 * y;
@@ -321,10 +386,10 @@ public sealed class BiquadFilter64
         double sw = Math.Sin(w);
         double c2w = Math.Cos(2.0 * w);
         double s2w = Math.Sin(2.0 * w);
-        double numRe = _b0 + _b1 * cw + _b2 * c2w;
-        double numIm = -(_b1 * sw + _b2 * s2w);
-        double denRe = 1.0 + _a1 * cw + _a2 * c2w;
-        double denIm = -(_a1 * sw + _a2 * s2w);
+        double numRe = _tb0 + _tb1 * cw + _tb2 * c2w;
+        double numIm = -(_tb1 * sw + _tb2 * s2w);
+        double denRe = 1.0 + _ta1 * cw + _ta2 * c2w;
+        double denIm = -(_ta1 * sw + _ta2 * s2w);
         double numMag = Math.Sqrt(numRe * numRe + numIm * numIm);
         double denMag = Math.Sqrt(denRe * denRe + denIm * denIm);
         return denMag > 1e-12 ? numMag / denMag : 1.0;
@@ -332,6 +397,12 @@ public sealed class BiquadFilter64
 
     public void Reset()
     {
+        _b0 = _tb0;
+        _b1 = _tb1;
+        _b2 = _tb2;
+        _a1 = _ta1;
+        _a2 = _ta2;
+        _rampRemaining = 0;
         Array.Clear(_z1);
         Array.Clear(_z2);
     }
@@ -349,6 +420,7 @@ public sealed class DualChannelBiquadNode
     private int _configuredChannels;
 
     public int TotalSpecCount { get; private set; }
+    public bool HasActiveNonZeroFilter { get; private set; }
     public int LeftBandCount => _leftChain.Count;
     public int RightBandCount => _rightChain.Count;
 
@@ -360,6 +432,7 @@ public sealed class DualChannelBiquadNode
             _rightChain.Clear();
             _extraChain.Clear();
             TotalSpecCount = 0;
+            HasActiveNonZeroFilter = false;
             _configuredSampleRateHz = sampleRateHz;
             _configuredChannels = channels;
             return;
@@ -368,15 +441,21 @@ public sealed class DualChannelBiquadNode
         var leftSpecs = new List<BiquadSpec>(profile.Filters.Count);
         var rightSpecs = new List<BiquadSpec>(profile.Filters.Count);
         var extraSpecs = new List<BiquadSpec>();
+        bool anyActive = false;
 
         foreach (var spec in profile.Filters)
         {
+            if (Math.Abs(spec.GainDb) > 1e-4 || spec.Kind is BiquadKind.LowPass or BiquadKind.HighPass)
+            {
+                anyActive = true;
+            }
             if (spec.Channel is BiquadChannelScope.All or BiquadChannelScope.Left) leftSpecs.Add(spec);
             if (spec.Channel is BiquadChannelScope.All or BiquadChannelScope.Right) rightSpecs.Add(spec);
             if (channels > 2 && spec.Channel == BiquadChannelScope.All) extraSpecs.Add(spec);
         }
 
         TotalSpecCount = profile.Filters.Count;
+        HasActiveNonZeroFilter = anyActive;
         bool canHotUpdate = _configuredSampleRateHz == sampleRateHz
             && _configuredChannels == channels
             && _leftChain.Count == leftSpecs.Count

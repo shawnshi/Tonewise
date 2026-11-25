@@ -260,6 +260,26 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private async void OnImportAutoEqRuleApoClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var picker = new FileOpenPicker();
+            picker.FileTypeFilter.Add(".txt");
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            var file = await picker.PickSingleFileAsync();
+            if (file is not null)
+            {
+                ViewModel.ImportApoToSelectedAutoEqRule(file.Path);
+            }
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnImportAutoEqRuleApoClick", ex);
+            ViewModel.Notify($"导入规则 EQ 失败：{ex.Message}", "error");
+        }
+    }
+
     private async void OnLoadFirClick(object sender, RoutedEventArgs e)
     {
         try
