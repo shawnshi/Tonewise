@@ -47,6 +47,8 @@ class AndroidPlaylistTrackMatcher<T>(
         val conductors: List<String> = emptyList(),
         val workName: String = "",
         val movementName: String = "",
+        val albumArtists: List<String> = emptyList(),
+        val genres: List<String> = emptyList(),
     )
 
     private data class StructuralMarkers(
@@ -68,6 +70,7 @@ class AndroidPlaylistTrackMatcher<T>(
         val titleVariants: List<TitleVariantInfo>,
         val workAndTitleMarkers: StructuralMarkers,
         val primaryArtistTokens: Set<String>,
+        val performerCreditTokens: Set<String>,
         val allCreditTokens: Set<String>,
         val artistFlat: String,
         val hardQualifiers: Int,
@@ -92,9 +95,12 @@ class AndroidPlaylistTrackMatcher<T>(
             val ref = refExtractor(item)
             val preTitle = preNormalizeUnicode(ref.title)
             val qualifiers = extractVersionQualifiers(preTitle)
-            val hasAlbumRemix =
-                ref.album.isNotBlank() &&
-                    (extractVersionQualifiers(preNormalizeUnicode(ref.album)) and QUALIFIER_REMIX) != 0
+            val preAlbum = preNormalizeUnicode(ref.album)
+            val albumQualifiers = if (ref.album.isNotBlank()) extractVersionQualifiers(preAlbum) else 0
+            val hasAlbumRemix = (albumQualifiers and QUALIFIER_REMIX) != 0
+            val hasAlbumLive =
+                (albumQualifiers and QUALIFIER_LIVE) != 0 ||
+                    (preAlbum.isNotEmpty() && ALBUM_LIVE_EXTRA_REGEX.containsMatchIn(preAlbum))
 
             val variantInfos = ArrayList<TitleVariantInfo>(6)
             val seenNorm = HashMap<String, Int>()
@@ -169,16 +175,47 @@ class AndroidPlaylistTrackMatcher<T>(
             for (a in ref.artists) {
                 primaryArtistTokens.addAll(extractArtistTokens(a))
             }
-            val allCreditTokens = LinkedHashSet<String>(primaryArtistTokens)
-            for (c in ref.composers) {
-                allCreditTokens.addAll(extractArtistTokens(c))
+            val performerCreditTokens = LinkedHashSet<String>(primaryArtistTokens)
+            val usefulAlbumArtists = ArrayList<String>()
+            for (aa in ref.albumArtists) {
+                if (aa.isBlank()) continue
+                var addedUseful = false
+                for (aat in extractArtistTokens(aa)) {
+                    if (aat.isNotEmpty() && aat !in PLACEHOLDER_ARTISTS) {
+                        performerCreditTokens.add(aat)
+                        addedUseful = true
+                    }
+                }
+                if (addedUseful) usefulAlbumArtists.add(aa)
             }
             for (c in ref.conductors) {
-                allCreditTokens.addAll(extractArtistTokens(c))
+                for (ct in extractArtistTokens(c)) {
+                    if (ct.isNotEmpty() && ct !in PLACEHOLDER_ARTISTS) {
+                        performerCreditTokens.add(ct)
+                    }
+                }
+            }
+
+            val composerTokens = LinkedHashSet<String>()
+            for (c in ref.composers) {
+                composerTokens.addAll(extractArtistTokens(c))
+            }
+            val allowComposerOnlyMatch =
+                composerTokens.isNotEmpty() &&
+                    shouldAllowComposerOnlyMatch(ref, performerCreditTokens, composerTokens)
+
+            val allCreditTokens = LinkedHashSet<String>(performerCreditTokens)
+            if (allowComposerOnlyMatch) {
+                allCreditTokens.addAll(composerTokens)
             }
             val artistFlat =
                 normalizeTokenText(
-                    (ref.artists + ref.composers + ref.conductors).filter { it.isNotBlank() }.joinToString(" ")
+                    buildList {
+                        addAll(ref.artists)
+                        addAll(usefulAlbumArtists)
+                        addAll(ref.conductors)
+                        if (allowComposerOnlyMatch) addAll(ref.composers)
+                    }.filter { it.isNotBlank() }.joinToString(" ")
                 )
 
             val indexed =
@@ -188,12 +225,13 @@ class AndroidPlaylistTrackMatcher<T>(
                     titleVariants = variantInfos,
                     workAndTitleMarkers = workAndTitleMarkers,
                     primaryArtistTokens = primaryArtistTokens,
+                    performerCreditTokens = performerCreditTokens,
                     allCreditTokens = allCreditTokens,
                     artistFlat = artistFlat,
                     hardQualifiers = qualifiers and HARD_BLOCK_MASK,
                     softQualifiers = qualifiers and SOFT_FALLBACK_MASK,
                     hasAlbumRemix = hasAlbumRemix,
-                    isLive = (qualifiers and QUALIFIER_LIVE) != 0,
+                    isLive = ((qualifiers and QUALIFIER_LIVE) != 0) || hasAlbumLive,
                     albumNorm = normalizeAlbum(ref.album),
                     originalIndex = index,
                 )
@@ -501,24 +539,35 @@ class AndroidPlaylistTrackMatcher<T>(
         if (nonPlaceholderCand.isEmpty()) return 0
 
         var score = 0
+        var matchedPerformer = false
         val matchedSet = HashSet<String>(effective.size)
         for (st in effective) {
             if (st in cand.allCreditTokens) {
                 score += 4
                 matchedSet.add(st)
+                if (st in cand.performerCreditTokens) matchedPerformer = true
                 continue
             }
             var bestPartial = 0
+            var partialMatchedPerformer = false
             for (ct in nonPlaceholderCand) {
-                if (isWholeWordContainment(st, ct) || isInitialSurnameMatch(st, ct)) {
-                    bestPartial = maxOf(bestPartial, 3)
-                } else if (bestPartial < 2 && isFuzzyArtistTokenMatch(st, ct)) {
-                    bestPartial = 2
+                val candScore =
+                    when {
+                        isWholeWordContainment(st, ct) || isInitialSurnameMatch(st, ct) -> 3
+                        bestPartial < 2 && isFuzzyArtistTokenMatch(st, ct) -> 2
+                        else -> 0
+                    }
+                if (candScore > bestPartial) {
+                    bestPartial = candScore
+                    partialMatchedPerformer = ct in cand.performerCreditTokens
+                } else if (candScore > 0 && candScore == bestPartial && ct in cand.performerCreditTokens) {
+                    partialMatchedPerformer = true
                 }
             }
             if (bestPartial > 0) {
                 score += bestPartial
                 matchedSet.add(st)
+                if (partialMatchedPerformer) matchedPerformer = true
             }
         }
         if (score > 0 &&
@@ -527,6 +576,9 @@ class AndroidPlaylistTrackMatcher<T>(
             effective.size == cand.primaryArtistTokens.size &&
             effective.all { it in cand.primaryArtistTokens }
         ) {
+            score += 1
+        }
+        if (score > 0 && matchedPerformer) {
             score += 1
         }
         if (score == 0 && seedFlat.isNotEmpty() && cand.artistFlat.isNotEmpty()) {
@@ -666,6 +718,16 @@ class AndroidPlaylistTrackMatcher<T>(
                                 shorterStr.length >= 6 &&
                                 !isGenericClassicalMovementLabel(shorterStr) &&
                                 longerStr.startsWith("$shorterStr ")
+                            ) {
+                                sim = maxOf(sim, 0.82)
+                            } else if (!containsEastAsian(shorterStr) &&
+                                sIdx == 0 &&
+                                variant.tier >= 985 &&
+                                shorterStr.length >= 8 &&
+                                shorterTokens.size >= 2 &&
+                                !isGenericClassicalMovementLabel(shorterStr) &&
+                                shorterStr.length.toDouble() / longerStr.length.toDouble() >= 0.45 &&
+                                longerStr.endsWith(" $shorterStr")
                             ) {
                                 sim = maxOf(sim, 0.82)
                             }
@@ -917,7 +979,164 @@ class AndroidPlaylistTrackMatcher<T>(
         private val ALBUM_EDITION_DASH_REGEX =
             Regex("""(?:\s+[-–—]\s+(?:deluxe(?:\s+edition)?|expanded(?:\s+edition)?|special(?:\s+edition)?|remaster(?:ed)?(?:\s+\d{4})?|single|ep|豪华版|精选辑|重制版))+$""")
 
-        private val PROTECTED_ARTISTS: List<String> by lazy { loadProtectedArtists() }
+        private val ALBUM_LIVE_EXTRA_REGEX = Regex("""(?:\bin\s+concert\b|\bunplugged\b)""")
+        private val SOUNDTRACK_GENRE_REGEX = Regex("""\b(?:soundtrack|score|ost|film)\b""")
+        private val CLASSICAL_CATALOGUE_REGEX = Regex("""\b(?:op|bwv|kv|hob|rv|woo|twv|hwv|sz|wwv)\.?\s*\d+""")
+        private val ENSEMBLE_CREDIT_INDICATORS =
+            listOf(
+                "orchestra", "philharmonic", "philharmoniker", "symphony", "sinfonie",
+                "ensemble", "quartet", "quintet", "trio", "choir", "chorus",
+                "交响", "爱乐", "管弦", "乐团", "合唱",
+            )
+        private val CLASSICAL_REPERTOIRE_KEYWORDS =
+            listOf(
+                "symphon", "concerto", "sonata", "nocturne", "etude", "prelude", "fugue",
+                "suite", "quartet", "quintet", "trio", "serenade", "waltz", "valse",
+                "mazurka", "polonaise", "impromptu", "rhapsody", "overture", "ouverture",
+                "requiem", "cantata", "oratorio", "opera", "aria", "adagio", "allegro",
+                "andante", "largo", "presto", "scherzo", "minuet", "menuet", "rondo",
+                "variation", "fantasia", "fantasy", "ballade", "berceuse", "barcarolle",
+                "intermezzo", "partita", "toccata", "sonatina", "divertimento", "caprice",
+                "capriccio", "humoresque", "elegy", "elegie", "romance", "pavane",
+                "bolero", "gymnopedie", "gnossienne", "clair de lune", "arabesque",
+                "canon", "passacaglia", "chaconne", "stabat mater", "ave maria",
+                "交响", "协奏", "奏鸣", "夜曲", "练习曲", "前奏曲", "赋格", "组曲",
+                "四重奏", "小夜曲", "圆舞曲", "狂想曲", "序曲", "安魂曲", "乐章", "变奏曲",
+            )
+        private val KNOWN_CLASSICAL_COMPOSERS: Set<String> by lazy {
+            setOf(
+                "johann sebastian bach", "j s bach", "bach",
+                "ludwig van beethoven", "beethoven",
+                "wolfgang amadeus mozart", "mozart",
+                "frederic chopin", "chopin",
+                "johannes brahms", "brahms",
+                "joseph haydn", "haydn",
+                "franz schubert", "schubert",
+                "robert schumann", "schumann",
+                "franz liszt", "liszt",
+                "claude debussy", "debussy",
+                "maurice ravel", "ravel",
+                "pyotr ilyich tchaikovsky", "peter iljitsch tschaikowsky", "tchaikovsky", "чайковский", "петр ильич чайковский",
+                "sergei rachmaninoff", "sergei rachmaninov", "rachmaninoff", "rachmaninov",
+                "antonio vivaldi", "vivaldi",
+                "gustav mahler", "mahler",
+                "antonin dvorak", "dvorak",
+                "dmitri shostakovich", "shostakovich",
+                "sergei prokofiev", "sergei prokofieff", "prokofiev",
+                "igor stravinsky", "stravinsky",
+                "felix mendelssohn", "mendelssohn",
+                "george frideric handel", "georg friedrich handel", "handel",
+                "richard wagner", "wagner",
+                "giuseppe verdi", "verdi",
+                "giacomo puccini", "puccini",
+                "georges bizet", "bizet",
+                "edouard lalo", "lalo",
+                "camille saint saens", "saint saens",
+                "jean sibelius", "sibelius",
+                "edward elgar", "elgar",
+                "edvard grieg", "grieg",
+                "bela bartok", "bartok",
+                "erik satie", "satie",
+                "alexander scriabin", "scriabin",
+                "nikolai rimsky korsakov", "rimsky korsakov",
+                "modest mussorgsky", "mussorgsky",
+                "alexander borodin", "borodin",
+                "domenico scarlatti", "scarlatti",
+                "max bruch", "bruch",
+                "pablo de sarasate", "sarasate",
+                "niccolo paganini", "paganini",
+                "anton webern", "webern",
+                "alban berg", "berg",
+                "arnold schoenberg", "schoenberg",
+                "richard strauss", "johann strauss", "johann strauss ii",
+                "sergei lyapunov", "lyapunov",
+                "alexander glazunov", "glazunov",
+                "nikolai medtner", "medtner",
+                "aram khachaturian", "khachaturian",
+                "alfred schnittke", "schnittke",
+                "myroslav skoryk", "skoryk",
+                "arvo part", "part",
+                "philip glass", "max richter", "ludovico einaudi",
+                "ennio morricone", "john williams", "hans zimmer", "howard shore", "james horner",
+                "joe hisaishi", "久石让",
+                "ryuichi sakamoto", "坂本龙一",
+                "alexandre desplat", "tan dun", "谭盾",
+                "shigeru umebayashi", "梅林茂",
+                "toru takemitsu", "武满彻",
+                "nobuo uematsu", "植松伸夫",
+                "kaoru wada", "和田薰",
+                "makoto yoshimori", "吉森信",
+                "toshio masuda", "增田俊郎",
+                "seiji yokoyama", "横山菁儿",
+                "yuki kajiura", "梶浦由记",
+                "yoko kanno", "菅野洋子",
+                "kenji kawai", "川井宪次",
+                "hiroyuki sawano", "泽野弘之",
+                "shiro sagisu", "鹭巢诗郎",
+                "naoki sato", "佐藤直纪",
+                "shinkichi mitsumune", "光宗信吉",
+                "kow otani", "大谷幸",
+                "shunsuke kikuchi", "菊池俊辅",
+                "michiru oshima", "大岛满",
+                "taku iwasaki", "岩崎琢",
+                "kohei tanaka", "田中公平",
+                "taro iwashiro", "岩代太郎",
+                "yasuharu takanashi", "高梨康治",
+                "masaru yokoyama", "横山克",
+                "cong su", "苏聪",
+                "zhao jiping", "赵季平",
+                "james wong", "黄霑",
+                "joseph koo", "顾嘉辉",
+                "michael lai", "黎小田",
+                "comfort chan", "陈光荣",
+                "peter kam", "金培达",
+                "san bao", "三宝",
+                "sergey khmelevsky", "sergei khmelevsky", "сергей хмелевский",
+            )
+        }
+
+        private fun isSoundtrackGenre(genres: List<String>): Boolean {
+            for (g in genres) {
+                if (g.isBlank()) continue
+                val preNorm = preNormalizeUnicode(g)
+                if (SOUNDTRACK_GENRE_REGEX.containsMatchIn(preNorm) ||
+                    preNorm.contains("stage & screen") ||
+                    preNorm.contains("配乐") ||
+                    preNorm.contains("原声")
+                ) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        private fun shouldAllowComposerOnlyMatch(
+            ref: TrackRef,
+            performerTokens: Set<String>,
+            composerTokens: Set<String>,
+        ): Boolean {
+            if (isSoundtrackGenre(ref.genres)) return true
+            if (ref.conductors.any { it.isNotBlank() }) return true
+            for (pt in performerTokens) {
+                for (ind in ENSEMBLE_CREDIT_INDICATORS) {
+                    if (ind in pt) return true
+                }
+            }
+            val combined = preNormalizeUnicode("${ref.title} ${ref.workName} ${ref.movementName}")
+            if (combined.isNotEmpty()) {
+                if (CLASSICAL_CATALOGUE_REGEX.containsMatchIn(combined)) return true
+                for (kw in CLASSICAL_REPERTOIRE_KEYWORDS) {
+                    if (kw in combined) return true
+                }
+            }
+            return composerTokens.any { it in KNOWN_CLASSICAL_COMPOSERS }
+        }
+
+        private val PROTECTED_ARTISTS: List<String> by lazy {
+            (loadProtectedArtists() + "brand x music")
+                .distinct()
+                .sortedByDescending { it.length }
+        }
 
         private fun loadProtectedArtists(): List<String> {
             val stream = AndroidPlaylistTrackMatcher::class.java.getResourceAsStream("/tonewise/artist_whitelist.json")
@@ -1021,9 +1240,40 @@ class AndroidPlaylistTrackMatcher<T>(
                 '箏' to '筝', '笛' to '笛', '簫' to '箫', '弦' to '弦', '管' to '管', '號' to '号',
                 '號' to '号', '響' to '响', '鳴' to '鸣', '啼' to '啼', '嘯' to '啸', '歌' to '歌',
                 '聖' to '圣', '償' to '偿', '曉' to '晓', '團' to '团', '隊' to '队', '組' to '组',
+                // Japanese Shinjitai -> Simplified Chinese equivalents
+                '譲' to '让', '薫' to '薰', '増' to '增', '児' to '儿', '満' to '满', '姫' to '姬',
+                '沢' to '泽', '広' to '广', '竜' to '龙', '桜' to '樱', '絵' to '绘', '黒' to '黑',
+                '辺' to '边', '実' to '实', '伝' to '传', '闘' to '斗', '鉄' to '铁', '剣' to '剑',
+                '気' to '气', '駅' to '站', '郷' to '乡', '斉' to '齐', '斎' to '斋', '滝' to '泷',
+                '蛍' to '萤', '聴' to '听',
             )
 
-        private val CJK_ARTIST_ALIASES: Map<String, List<String>> = run {
+        private fun loadCanonicalAliasGroups(): List<List<String>> {
+            val stream = AndroidPlaylistTrackMatcher::class.java.getResourceAsStream("/tonewise/artist_aliases.json")
+                ?: return emptyList()
+            val text = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val startIdx = text.indexOf("\"canonical_aliases\"")
+            if (startIdx < 0) return emptyList()
+            val objStart = text.indexOf('{', startIdx)
+            val objEnd = text.indexOf('}', objStart)
+            if (objStart < 0 || objEnd <= objStart) return emptyList()
+            val body = text.substring(objStart + 1, objEnd)
+            val grouped = LinkedHashMap<String, MutableList<String>>()
+            val pairRegex = Regex("\"((?:\\\\.|[^\"\\\\])*)\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"")
+            for (m in pairRegex.findAll(body)) {
+                val alias = m.groupValues[1].trim()
+                val canonical = m.groupValues[2].trim()
+                if (alias.isEmpty() || canonical.isEmpty()) continue
+                val keyLower = canonical.lowercase(java.util.Locale.ROOT)
+                val list = grouped.getOrPut(keyLower) { arrayListOf(canonical) }
+                if (list.none { it.equals(alias, ignoreCase = true) }) {
+                    list.add(alias)
+                }
+            }
+            return grouped.values.filter { it.size >= 2 }
+        }
+
+        private val CJK_ARTIST_ALIASES: Map<String, List<String>> by lazy {
             val groups =
                 listOf(
                     listOf("周杰伦", "jay chou"),
@@ -1138,13 +1388,117 @@ class AndroidPlaylistTrackMatcher<T>(
                     listOf("john cougar", "john cougar mellencamp", "john mellencamp"),
                     listOf("snoop doggy dogg", "snoop dogg"),
                     listOf("puff daddy", "p diddy", "diddy"),
+                    listOf("久石让", "久石譲", "joe hisaishi", "hisaishi joe"),
+                    listOf("坂本龙一", "ryuichi sakamoto", "sakamoto ryuichi"),
+                    listOf("梅林茂", "shigeru umebayashi", "umebayashi shigeru"),
+                    listOf("谭盾", "tan dun"),
+                    listOf("泽野弘之", "hiroyuki sawano", "sawano hiroyuki"),
+                    listOf("马友友", "yo yo ma"),
+                    listOf("朗朗", "郎朗", "lang lang"),
+                    listOf("王羽佳", "yuja wang"),
+                    listOf("喜多郎", "kitaro"),
+                    listOf("川井宪次", "kenji kawai"),
+                    listOf("菅野洋子", "yoko kanno"),
+                    listOf("鹭巢诗郎", "shiro sagisu"),
+                    listOf("梶浦由记", "yuki kajiura"),
+                    listOf("神前晓", "satoru kosaki"),
+                    listOf("上原ひろみ", "上原广美", "hiromi uehara", "hiromi"),
+                    listOf("吉森信", "makoto yoshimori"),
+                    listOf("和田薰", "kaoru wada"),
+                    listOf("增田俊郎", "toshio masuda"),
+                    listOf("横山菁儿", "seiji yokoyama"),
+                    listOf("中村由利子", "yuriko nakamura"),
+                    listOf("武满彻", "toru takemitsu"),
+                    listOf("植松伸夫", "nobuo uematsu"),
+                    listOf("佐藤直纪", "naoki sato"),
+                    listOf("光宗信吉", "shinkichi mitsumune"),
+                    listOf("大谷幸", "kow otani", "ko otani"),
+                    listOf("菊池俊辅", "shunsuke kikuchi"),
+                    listOf("麻枝准", "jun maeda"),
+                    listOf("西村由纪江", "yukie nishimura"),
+                    listOf("姬神", "himekami"),
+                    listOf("大岛满", "大島ミチル", "michiru oshima"),
+                    listOf("大野克夫", "大野克夫バンド", "katsuo ohno", "katsuo ono"),
+                    listOf("岩崎琢", "taku iwasaki"),
+                    listOf("田中公平", "kohei tanaka"),
+                    listOf("加藤达也", "tatsuya kato"),
+                    listOf("吉田兄弟", "yoshida brothers"),
+                    listOf("林有三", "yuzo hayashi"),
+                    listOf("都留教博", "norihiro tsuru"),
+                    listOf("岩代太郎", "taro iwashiro"),
+                    listOf("高梨康治", "yasuharu takanashi"),
+                    listOf("横山克", "masaru yokoyama"),
+                    listOf("村松崇继", "takatsugu muramatsu"),
+                    listOf("河野伸", "shin kono"),
+                    listOf("宗次郎", "sojiro"),
+                    listOf("阵内一真", "kazuma jinnouchi"),
+                    listOf("野见祐二", "yuji nomi"),
+                    listOf("佐桥俊彦", "toshihiko sahashi"),
+                    listOf("朝川朋之", "tomoyuki asakawa"),
+                    listOf("山下康介", "kosuke yamashita"),
+                    listOf("菊谷知树", "tomoki kikuya"),
+                    listOf("西乡宪一郎", "kenichiro saigo"),
+                    listOf("井内龙次", "ryuji iuchi"),
+                    listOf("오준성", "吴俊成", "oh joon sung", "oh joonsung"),
+                    listOf("정경화", "郑京和", "kyung wha chung"),
+                    listOf("苏聪", "cong su", "su cong"),
+                    listOf("黄霑", "james wong"),
+                    listOf("陈光荣", "comfort chan", "chan kwong wing", "kwong wing chan"),
+                    listOf("三宝", "san bao"),
+                    listOf("赵季平", "zhao jiping", "jiping zhao"),
+                    listOf("顾嘉辉", "joseph koo"),
+                    listOf("黎小田", "michael lai"),
+                    listOf("卢冠廷", "lowell lo"),
+                    listOf("袁卓繁", "richard yuen"),
+                    listOf("金培达", "peter kam"),
+                    listOf("黄英华", "raymond wong"),
+                    listOf("陈勋奇", "frankie chan"),
+                    listOf("鲍比达", "chris babida"),
+                    listOf("雷颂德", "mark lui"),
+                    listOf("贾鹏芳", "jia peng fang", "jia pengfang"),
+                    listOf("сергей хмелевский", "sergey khmelevsky", "sergei khmelevsky"),
+                    listOf("святослав рихтер", "святослав теофилович рихтер", "sviatoslav richter"),
+                    listOf("давид федорович ойстрах", "давид ойстрах", "david oistrakh"),
+                    listOf("российский национальный оркестр", "russian national orchestra"),
+                    listOf("юлия лежнева", "julia lezhneva"),
+                    listOf("анатолий угорский", "anatol ugorski"),
+                    listOf("李云迪", "yundi li", "yundi"),
+                    listOf("张昊辰", "haochen zhang"),
+                    listOf("内田光子", "mitsuko uchida"),
+                    listOf("小川典子", "noriko ogawa"),
+                    listOf("铃木雅明", "masaaki suzuki"),
                 )
             val map = HashMap<String, List<String>>()
-            for (g in groups) {
-                for (a in g) map[a] = g
+            fun mergeGroup(rawAliases: List<String>) {
+                val normalized = ArrayList<String>(rawAliases.size)
+                for (raw in rawAliases) {
+                    val norm = normalizeTokenText(raw)
+                    if (norm.length < 2 || norm in PLACEHOLDER_ARTISTS) continue
+                    if (norm !in normalized) normalized.add(norm)
+                }
+                if (normalized.size < 2) return
+                val mergedSet = LinkedHashSet<String>(normalized)
+                for (k in normalized) {
+                    map[k]?.let { mergedSet.addAll(it) }
+                }
+                val mergedList = mergedSet.toList()
+                for (k in mergedList) {
+                    map[k] = mergedList
+                }
             }
+            for (g in groups) mergeGroup(g)
+            for (cg in loadCanonicalAliasGroups()) mergeGroup(cg)
             map
         }
+
+        private val COLLECTIVE_ARTIST_ALIASES: Map<String, List<String>> =
+            mapOf(
+                "two steps from hell" to listOf("thomas bergersen", "nick phoenix"),
+                "immediate music" to listOf("yoav goren", "jeffrey fayman", "aleksandar dimitrijevic", "richard friedman"),
+                "audiomachine" to listOf("paul dinletir", "kevin rix"),
+                "brand x music" to listOf("john sponsler", "tom gire"),
+                "secret garden" to listOf("rolf lovland"),
+            )
 
         private val icuTransliterator: Any? by lazy {
             runCatching {
@@ -1328,6 +1682,12 @@ class AndroidPlaylistTrackMatcher<T>(
                         } else if (allEastAsian) {
                             for (sn in segNorms) {
                                 if (compactText(sn).length >= 2) addUnique(sn)
+                            }
+                        } else if (segNorms.size <= 3 && (" / " in cleaned || " ／ " in cleaned)) {
+                            for (sn in segNorms) {
+                                if (compactText(sn).length >= 6 && !isGenericClassicalMovementLabel(sn)) {
+                                    addUnique(sn)
+                                }
                             }
                         }
                     }
@@ -1533,6 +1893,7 @@ class AndroidPlaylistTrackMatcher<T>(
             val extra = ArrayList<String>()
             for (t in tokens) {
                 CJK_ARTIST_ALIASES[t]?.let { extra.addAll(it) }
+                COLLECTIVE_ARTIST_ALIASES[t]?.let { extra.addAll(it) }
             }
             tokens.addAll(extra)
             return tokens
@@ -1549,7 +1910,7 @@ class AndroidPlaylistTrackMatcher<T>(
             if (preNorm.contains("小样") || Regex("""\bdemo\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_DEMO
             if (preNorm.contains("翻唱") || Regex("""\bcover\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_COVER
             if (preNorm.contains("变速") || preNorm.contains("加速版") || preNorm.contains("降调") || Regex("""\b(?:sped\s+up|speed\s+up|slowed|nightcore)\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_SPEED
-            if (preNorm.contains("现场") || preNorm.contains("演唱会") || preNorm.contains("音乐会") || Regex("""\blive\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_LIVE
+            if (preNorm.contains("现场") || preNorm.contains("演唱会") || preNorm.contains("音乐会") || Regex("""(?<![a-z])live(?![a-z])""").containsMatchIn(preNorm)) q = q or QUALIFIER_LIVE
             return q
         }
 
@@ -1568,6 +1929,8 @@ class AndroidPlaylistTrackMatcher<T>(
         fun fromSongs(songs: Collection<Song>): AndroidPlaylistTrackMatcher<Song> =
             AndroidPlaylistTrackMatcher(songs.toList()) { song ->
                 val artistNames = song.artists.mapNotNull { (it.name as? Name.Known)?.raw }
+                val albumArtistNames = song.album.artists.mapNotNull { (it.name as? Name.Known)?.raw }
+                val genreNames = song.genres.mapNotNull { (it.name as? Name.Known)?.raw }
                 val albumName = (song.album.name as? Name.Known)?.raw.orEmpty()
                 TrackRef(
                     uid = song.uid.toString(),
@@ -1580,6 +1943,8 @@ class AndroidPlaylistTrackMatcher<T>(
                     conductors = song.conductors,
                     workName = song.workName.orEmpty(),
                     movementName = song.movementName.orEmpty(),
+                    albumArtists = albumArtistNames,
+                    genres = genreNames,
                 )
             }
     }

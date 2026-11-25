@@ -31,7 +31,9 @@ public sealed partial class MainViewModel
             t.ComposersDisplay,
             t.ConductorsDisplay,
             t.WorkName,
-            t.MovementName
+            t.MovementName,
+            t.AlbumArtist,
+            t.Genre
         )).ToList();
 
     public IReadOnlyList<TrackItem> SearchLibraryTracks(string query, int limit = 50)

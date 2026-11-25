@@ -1188,6 +1188,132 @@ public sealed class WorkbenchP4Tests
         }
     }
 
+    [Fact]
+    public void FiveDimQueryBuilder_GenreSingleAndMultiSelect_EvaluateViaRustCore()
+    {
+        var singleQuery = new FiveDimFilterQuery(Genres: ["Jazz"]);
+        Assert.True(FiveDimQueryBuilder.RequiresFilterOrSort(singleQuery));
+
+        var multiQuery = new FiveDimFilterQuery(
+            Scene: "focus",
+            ExcludeVocal: true,
+            Genres: ["Classical", "  jazz  ", "JAZZ", "R&B", "all"]
+        );
+        Assert.True(FiveDimQueryBuilder.RequiresFilterOrSort(multiQuery));
+        Assert.Equal(["Classical", "jazz", "R&B"], FiveDimQueryBuilder.NormalizeGenres(multiQuery.Genres));
+
+        string tracksJson = JsonSerializer.Serialize(new object[]
+        {
+            new { track_uid = "t_classical", title = "Prelude", dj_scene = new[] { "focus" }, dj_vocals = "instrumental", dj_energy = "low", tempo_bucket = "Slow", moods = new[] { "calm" }, genre = "Classical" },
+            new { track_uid = "t_jazz_case", title = "Blue Note", dj_scene = new[] { "focus" }, dj_vocals = "instrumental", dj_energy = "low", tempo_bucket = "Slow", moods = new[] { "calm" }, genre = "jazz" },
+            new { track_uid = "t_rnb_split", title = "Velvet", dj_scene = new[] { "focus" }, dj_vocals = "instrumental", dj_energy = "medium", tempo_bucket = "Moderate", moods = new[] { "warm" }, genre = "R&B/Soul" },
+            new { track_uid = "t_rnb_vocal", title = "Velvet Vocal", dj_scene = new[] { "focus" }, dj_vocals = "vocal", dj_energy = "medium", tempo_bucket = "Moderate", moods = new[] { "warm" }, genre = "R&B/Soul" },
+            new { track_uid = "t_pop", title = "Bright Day", dj_scene = new[] { "focus" }, dj_vocals = "instrumental", dj_energy = "high", tempo_bucket = "Fast", moods = new[] { "happy" }, genre = "Pop" },
+        });
+
+        var singleMatched = TonewiseCoreClient.EvaluateScene(FiveDimQueryBuilder.BuildSceneCardJson(singleQuery), tracksJson);
+        Assert.Equal(["t_jazz_case"], singleMatched);
+
+        var multiMatched = TonewiseCoreClient.EvaluateScene(FiveDimQueryBuilder.BuildSceneCardJson(multiQuery), tracksJson);
+        Assert.Equal(["t_classical", "t_jazz_case", "t_rnb_split"], multiMatched);
+    }
+
+    [Fact]
+    public void GenreFacetHelper_MergesCaseCollisions_SortsByCountDesc_AndFormatsChipLabel()
+    {
+        var facets = GenreFacetHelper.BuildFacets([
+            "Pop",
+            "ポップ",
+            "pop",
+            "Singer/Songwriter",
+            "Classical; クラシック",
+            "classical",
+            "Jazz, Pop",
+            null,
+            "   ",
+        ]);
+
+        Assert.Equal(4, facets.Count);
+        Assert.Equal("Pop", facets[0].CanonicalName);
+        Assert.Equal(4, facets[0].TrackCount);
+        Assert.Equal("Classical", facets[1].CanonicalName);
+        Assert.Equal(2, facets[1].TrackCount);
+        Assert.Contains(facets, f => f.CanonicalName == "Folk" && f.TrackCount == 1);
+        Assert.Contains(facets, f => f.CanonicalName == "Jazz" && f.TrackCount == 1);
+
+        Assert.Equal("流派", GenreFacetHelper.FormatGenreChipLabel([]));
+        Assert.Equal("流派: Classical", GenreFacetHelper.FormatGenreChipLabel(["Classical"]));
+        Assert.Equal("流派: Classical +2", GenreFacetHelper.FormatGenreChipLabel(["Classical", "Jazz", "Pop"]));
+    }
+
+    [Fact]
+    public void GenreCanonicalizer_MatchesSsotDictionary_AndNormalizesP0P1Variants()
+    {
+        Assert.Equal("Pop", GenreCanonicalizer.NormalizeGenre("ポップ"));
+        Assert.Equal("World Music", GenreCanonicalizer.NormalizeGenre("ワールド"));
+        Assert.Equal("World Music", GenreCanonicalizer.NormalizeGenre("Europe"));
+        Assert.Equal("Classical", GenreCanonicalizer.NormalizeGenre("クラシック"));
+        Assert.Equal("Cantopop", GenreCanonicalizer.NormalizeGenre("Cantopop/HK-Pop"));
+        Assert.Equal("Mandopop", GenreCanonicalizer.NormalizeGenre("C-Pop"));
+        Assert.Equal("Mandopop", GenreCanonicalizer.NormalizeGenre("中国风"));
+        Assert.Equal("Latin", GenreCanonicalizer.NormalizeGenre("reggaetón"));
+        Assert.Equal("R&B", GenreCanonicalizer.NormalizeGenre("R&B/Soul"));
+        Assert.Equal("Hip-Hop", GenreCanonicalizer.NormalizeGenre("ヒップホップ／ラップ"));
+        Assert.Equal("Folk; Pop", GenreCanonicalizer.NormalizeGenre("Singer/Songwriter; pop; 流行"));
+        Assert.Equal("Soundtrack", GenreCanonicalizer.NormalizeGenre("サウンドトラック"));
+        Assert.Equal("Opera", GenreCanonicalizer.NormalizeGenre("Opera"));
+        Assert.Equal("", GenreCanonicalizer.NormalizeGenre("   "));
+    }
+
+    [Fact]
+    public void GenreNormalizationAuditService_ScansManifest_AndProducesReversibleProposals()
+    {
+        string tempDb = Path.Combine(Path.GetTempPath(), "tw_genre_audit_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var conn = new SqliteConnection($"Data Source={tempDb}"))
+            {
+                conn.Open();
+                string schema = File.ReadAllText(FindSchemaSqlPath());
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = schema;
+                    cmd.ExecuteNonQuery();
+                }
+
+                void InsertTrack(string uid, string rel, string? genre)
+                {
+                    using var ins = conn.CreateCommand();
+                    ins.CommandText = """
+                        INSERT INTO tracks (track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes, rel_path, file_size, mtime_ms, codec, sample_rate_hz, bit_depth, duration_ms, title, artists_json, composers_json, conductors_json, genre, dj_scene_json, mood_json)
+                        VALUES ($uid, $hash, 0, $hash, 0, $rel, 100, 1, 'flac', 44100, 16, 1000, $uid, '["Artist"]', '[]', '[]', $genre, '[]', '[]');
+                        """;
+                    ins.Parameters.AddWithValue("$uid", uid);
+                    ins.Parameters.AddWithValue("$hash", Encoding.UTF8.GetBytes(uid));
+                    ins.Parameters.AddWithValue("$rel", rel);
+                    ins.Parameters.AddWithValue("$genre", (object?)genre ?? DBNull.Value);
+                    ins.ExecuteNonQuery();
+                }
+
+                InsertTrack("u_ok", "a.flac", "Classical");
+                InsertTrack("u_jp", "b.flac", "ポップ");
+                InsertTrack("u_sub", "c.flac", "C-Pop");
+                InsertTrack("u_null", "d.flac", null);
+            }
+
+            var report = GenreNormalizationAuditService.ScanManifest(tempDb);
+            Assert.Equal(3, report.TotalTracksScanned);
+            Assert.Equal(2, report.TracksWithChanges);
+            Assert.Contains(report.Proposals, p => p.TrackUid == "u_jp" && p.OriginalValue == "ポップ" && p.SuggestedValue == "Pop");
+            Assert.Contains(report.Proposals, p => p.TrackUid == "u_sub" && p.OriginalValue == "C-Pop" && p.SuggestedValue == "Mandopop");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(tempDb)) File.Delete(tempDb);
+        }
+    }
+
     private static string FindSchemaSqlPath()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

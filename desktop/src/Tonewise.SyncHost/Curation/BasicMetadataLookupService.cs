@@ -162,7 +162,8 @@ public sealed partial class BasicMetadataLookupService
         if (string.IsNullOrWhiteSpace(q.Genre))
         {
             string? g = !string.IsNullOrWhiteSpace(onlineGenre) ? onlineGenre : inferredGenre;
-            if (!string.IsNullOrWhiteSpace(g)) updates["genre"] = g.Trim();
+            string normalizedGenre = GenreCanonicalizer.NormalizeGenre(g);
+            if (!string.IsNullOrWhiteSpace(normalizedGenre)) updates["genre"] = normalizedGenre;
         }
         if (string.IsNullOrWhiteSpace(q.Publisher) && !string.IsNullOrWhiteSpace(onlinePublisher))
         {

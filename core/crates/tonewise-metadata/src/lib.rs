@@ -6,6 +6,8 @@ const ARTIST_WHITELIST_JSON: &str =
     include_str!("../../../../protocol/dictionaries/artist_whitelist.json");
 const ARTIST_ALIASES_JSON: &str =
     include_str!("../../../../protocol/dictionaries/artist_aliases.json");
+const GENRE_ALIASES_JSON: &str =
+    include_str!("../../../../protocol/dictionaries/genre_aliases.json");
 
 #[derive(Debug, Clone, Deserialize)]
 struct ArtistWhitelistFile {
@@ -553,6 +555,55 @@ pub fn normalize_year(raw: &str) -> Option<u16> {
     None
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct GenreAliasesFile {
+    #[serde(default)]
+    canonical_aliases: HashMap<String, String>,
+}
+
+static GENRE_ALIASES: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+fn genre_aliases() -> &'static HashMap<String, String> {
+    GENRE_ALIASES.get_or_init(|| {
+        let parsed: GenreAliasesFile = serde_json::from_str(GENRE_ALIASES_JSON)
+            .expect("invalid protocol/dictionaries/genre_aliases.json");
+        let mut map = HashMap::with_capacity(parsed.canonical_aliases.len());
+        for (k, v) in parsed.canonical_aliases {
+            let norm_k = k.trim().to_lowercase();
+            let norm_v = v.trim().to_string();
+            if !norm_k.is_empty() && !norm_v.is_empty() {
+                map.insert(norm_k, norm_v);
+            }
+        }
+        map
+    })
+}
+
+pub fn normalize_genre(raw: &str) -> String {
+    let trimmed_all = raw.trim();
+    if trimmed_all.is_empty() {
+        return String::new();
+    }
+
+    let aliases = genre_aliases();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for part in trimmed_all.split([';', ',', '|', '、']) {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let canonical = aliases
+            .get(&trimmed.to_lowercase())
+            .cloned()
+            .unwrap_or_else(|| trimmed.to_string());
+        if seen.insert(canonical.to_lowercase()) {
+            out.push(canonical);
+        }
+    }
+    out.join("; ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,5 +737,21 @@ mod tests {
             normalize_album_artist("Above & Beyond, Wiener Philharmoniker"),
             "Above & Beyond, Vienna Philharmonic"
         );
+    }
+
+    #[test]
+    fn normalizes_genres_across_scripts_cases_and_subgenres() {
+        assert_eq!(normalize_genre("  ポップ "), "Pop");
+        assert_eq!(normalize_genre("ワールド"), "World Music");
+        assert_eq!(normalize_genre("Europe"), "World Music");
+        assert_eq!(normalize_genre("クラシック"), "Classical");
+        assert_eq!(normalize_genre("Cantopop/HK-Pop"), "Cantopop");
+        assert_eq!(normalize_genre("C-Pop"), "Mandopop");
+        assert_eq!(normalize_genre("中国风"), "Mandopop");
+        assert_eq!(normalize_genre("reggaetón"), "Latin");
+        assert_eq!(normalize_genre("R&B/Soul"), "R&B");
+        assert_eq!(normalize_genre("ヒップホップ／ラップ"), "Hip-Hop");
+        assert_eq!(normalize_genre("Singer/Songwriter; pop; 流行"), "Folk; Pop");
+        assert_eq!(normalize_genre("   "), "");
     }
 }

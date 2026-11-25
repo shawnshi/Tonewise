@@ -246,6 +246,56 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private AudioOutputEndpoint? _selectedEndpoint;
 
+    private readonly List<string> _selectedGenres = [];
+
+    [ObservableProperty]
+    private string _genreFilterChipLabel = "流派";
+
+    [ObservableProperty]
+    private bool _isGenreFilterActive;
+
+    [ObservableProperty]
+    private string _sceneFilterChipLabel = "场景";
+
+    [ObservableProperty]
+    private bool _isSceneFilterActive;
+
+    [ObservableProperty]
+    private string _energyFilterChipLabel = "能量";
+
+    [ObservableProperty]
+    private bool _isEnergyFilterActive;
+
+    [ObservableProperty]
+    private string _vocalsFilterChipLabel = "人声";
+
+    [ObservableProperty]
+    private bool _isVocalsFilterActive;
+
+    [ObservableProperty]
+    private string _tempoFilterChipLabel = "节奏";
+
+    [ObservableProperty]
+    private bool _isTempoFilterActive;
+
+    [ObservableProperty]
+    private string _moodFilterChipLabel = "情绪";
+
+    [ObservableProperty]
+    private bool _isMoodFilterActive;
+
+    [ObservableProperty]
+    private string _arcFilterChipLabel = "曲线";
+
+    [ObservableProperty]
+    private bool _isArcFilterActive;
+
+    [ObservableProperty]
+    private string _tempoPassthroughChipLabel = "空Tempo: 透传";
+
+    [ObservableProperty]
+    private bool _hasAnyActiveStripFilter;
+
     [ObservableProperty]
     private string _filterScene = "all";
 
@@ -1030,16 +1080,45 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     partial void OnLibraryNavModeChanged(string value) => TriggerFilterRefresh();
-    partial void OnFilterSceneChanged(string value) => TriggerFilterRefresh();
-    partial void OnFilterEnergyChanged(string value) => TriggerFilterRefresh();
-    partial void OnFilterVocalsChanged(string value) => TriggerFilterRefresh();
-    partial void OnExcludeVocalChanged(bool value) => TriggerFilterRefresh();
-    partial void OnFilterTempoBucketChanged(string value) => TriggerFilterRefresh();
-    partial void OnFilterMoodClusterChanged(string value) => TriggerFilterRefresh();
-    partial void OnScenesTempoNullPassthroughChanged(bool value) => TriggerFilterRefresh();
+    partial void OnFilterSceneChanged(string value)
+    {
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+    partial void OnFilterEnergyChanged(string value)
+    {
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+    partial void OnFilterVocalsChanged(string value)
+    {
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+    partial void OnExcludeVocalChanged(bool value)
+    {
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+    partial void OnFilterTempoBucketChanged(string value)
+    {
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+    partial void OnFilterMoodClusterChanged(string value)
+    {
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+    partial void OnScenesTempoNullPassthroughChanged(bool value)
+    {
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
     partial void OnSelectedEnergyArcChanged(string value)
     {
         UpdateArcStateFlags();
+        UpdateFilterChipLabels();
         TriggerFilterRefresh();
     }
     partial void OnIsShuffleEnabledChanged(bool value)

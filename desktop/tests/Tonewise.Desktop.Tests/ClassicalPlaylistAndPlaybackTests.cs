@@ -222,6 +222,12 @@ public sealed class ClassicalPlaylistAndPlaybackTests
         Assert.True(TrackItem.ClassifyIsClassical("Pop", "Goldberg Variations", "J.S. Bach", ""));
         Assert.True(TrackItem.ClassifyIsClassical("", "", "Johannes Brahms", ""));
         Assert.True(TrackItem.ClassifyIsClassical("Orchestral", "", "", "Carlos Kleiber"));
+        Assert.False(TrackItem.ClassifyIsClassical("R&B", "End of Time", "Beyoncé", ""));
+        Assert.False(TrackItem.ClassifyIsClassical("Jazz", "Stella by Starlight", "Victor Young", ""));
+        Assert.False(TrackItem.ClassifyIsClassical("Cantopop", "海闊天空", "黃家駒", ""));
+        Assert.False(TrackItem.ClassifyIsClassical("Soundtrack", "The Girl Who Fell from the Sky", "久石譲", ""));
+        Assert.False(TrackItem.ClassifyIsClassical("New Age", "Only Time", "Enya", ""));
+        Assert.False(TrackItem.ClassifyIsClassical("Traditional", "Ave Verum Corpus", "Côr Meibion Caernarfon", ""));
     }
 
     [Fact]

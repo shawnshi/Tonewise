@@ -821,6 +821,7 @@ public sealed partial class MainViewModel
         RunBatchFilterUpdate(() =>
         {
             LibraryNavMode = "all";
+            _selectedGenres.Clear();
             FilterScene = "coding";
             ExcludeVocal = true;
             FilterVocals = "all";

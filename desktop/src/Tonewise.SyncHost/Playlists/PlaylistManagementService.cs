@@ -98,7 +98,9 @@ public sealed record LocalLibraryTrackRef(
     string ComposersDisplay = "",
     string ConductorsDisplay = "",
     string WorkName = "",
-    string MovementName = ""
+    string MovementName = "",
+    string AlbumArtist = "",
+    string Genre = ""
 );
 
 public static partial class PlaylistImporter
@@ -1235,6 +1237,18 @@ public static partial class PlaylistTrackMatcher
                         foreach (string sn in segNorms)
                         {
                             if (CompactText(sn).Length >= 2) AddUnique(variants, sn);
+                        }
+                    }
+                    else if (segNorms.Count <= 3
+                             && (cleaned.Contains(" / ", StringComparison.Ordinal)
+                                 || cleaned.Contains(" ／ ", StringComparison.Ordinal)))
+                    {
+                        foreach (string sn in segNorms)
+                        {
+                            if (CompactText(sn).Length >= 6 && !IsGenericClassicalMovementLabel(sn))
+                            {
+                                AddUnique(variants, sn);
+                            }
                         }
                     }
                 }

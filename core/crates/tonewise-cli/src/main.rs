@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tonewise_dsp_core::{AudioAnalysisResult, analyze_audio_file};
 use tonewise_metadata::{
-    DjEnergy, DjVocals, TempoBucket, normalize_album_artist, normalize_dj_scenes, normalize_year,
-    split_artists_preserving_whitelist, split_composers_preserving_whitelist, split_multi_value,
+    DjEnergy, DjVocals, TempoBucket, normalize_album_artist, normalize_dj_scenes, normalize_genre,
+    normalize_year, split_artists_preserving_whitelist, split_composers_preserving_whitelist,
+    split_multi_value,
 };
 use tonewise_rules::MoodDictionary;
 use tonewise_sync::{
@@ -352,7 +353,10 @@ fn process_single_track(
         .and_then(|t| t.title().map(|s| s.to_string()))
         .unwrap_or(fallback_title);
     let album = primary_tag.and_then(|t| t.album().map(|s| s.to_string()));
-    let genre = primary_tag.and_then(|t| t.genre().map(|s| s.to_string()));
+    let genre = primary_tag
+        .and_then(|t| t.genre())
+        .map(|s| normalize_genre(&s))
+        .filter(|s| !s.is_empty());
 
     let mut album_artist = None;
     let mut raw_artists = Vec::new();
@@ -630,9 +634,16 @@ fn save_tagged_file_atomically(
         .unwrap_or_else(|| "audio".to_string());
     let tmp_path = parent.join(format!("{base_name}.twtmp.{pid}.{seq}"));
 
+    use lofty::tag::TagExt;
+
     fs::copy(path, &tmp_path)
         .map_err(|e| format!("{}: temp copy failed: {e}", path.display()))?;
-    if let Err(e) = tagged.save_to_path(&tmp_path, WriteOptions::default()) {
+    let save_res = if let Some(primary) = tagged.primary_tag() {
+        primary.save_to_path(&tmp_path, WriteOptions::default())
+    } else {
+        tagged.save_to_path(&tmp_path, WriteOptions::default())
+    };
+    if let Err(e) = save_res {
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("{}: tag writeback failed: {e}", path.display()));
     }

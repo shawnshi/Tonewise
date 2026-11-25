@@ -274,17 +274,31 @@ fn parse_tag_list_value(v: &str) -> Vec<String> {
 }
 
 #[cfg(not(target_os = "android"))]
+fn save_primary_tag_or_file(
+    target: &std::path::Path,
+    tagged: &lofty::file::TaggedFile,
+) -> lofty::error::Result<()> {
+    use lofty::config::WriteOptions;
+    use lofty::file::{AudioFile, TaggedFileExt};
+    use lofty::tag::TagExt;
+
+    if let Some(primary) = tagged.primary_tag() {
+        primary.save_to_path(target, WriteOptions::default())
+    } else {
+        tagged.save_to_path(target, WriteOptions::default())
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn save_tagged_file_atomically(
     path: &std::path::Path,
     tagged: &lofty::file::TaggedFile,
 ) -> Result<(), String> {
-    use lofty::config::WriteOptions;
-    use lofty::file::AudioFile;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    // Fast path: let Lofty update metadata in place (or within container padding) without
-    // unconditionally copying 30-300 MB lossless audio files or issuing a synchronous fsync barrier.
-    if tagged.save_to_path(path, WriteOptions::default()).is_ok() {
+    // Fast path: persist only the mutated primary tag (e.g. ID3v2 on MP3) in place without
+    // re-encoding untouched legacy ID3v1 footers (which triggers lofty 0.22.4 UTF-8 slice panics).
+    if save_primary_tag_or_file(path, tagged).is_ok() {
         return Ok(());
     }
 
@@ -295,14 +309,19 @@ fn save_tagged_file_atomically(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
-    let base_name = path
-        .file_name()
+    let stem = path
+        .file_stem()
         .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "audio".to_string());
-    let tmp_path = parent.join(format!("{base_name}.twtmp.{pid}.{seq}"));
+    let tmp_name = match path.extension().and_then(|e| e.to_str()).filter(|s| !s.is_empty()) {
+        Some(ext) => format!("{stem}.twtmp.{pid}.{seq}.{ext}"),
+        None => format!("{stem}.twtmp.{pid}.{seq}"),
+    };
+    let tmp_path = parent.join(tmp_name);
 
     std::fs::copy(path, &tmp_path).map_err(|e| format!("temp copy failed: {e}"))?;
-    if let Err(e) = tagged.save_to_path(&tmp_path, WriteOptions::default()) {
+    if let Err(e) = save_primary_tag_or_file(&tmp_path, tagged) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("lofty save failed: {e}"));
     }
@@ -334,7 +353,7 @@ fn save_tagged_file_atomically(
         }
 
         // Fall back to explicit backup swap if MoveFileExW rejects replacement under external lock/ACL
-        let bak_path = parent.join(format!("{base_name}.twbak.{pid}.{seq}"));
+        let bak_path = parent.join(format!("{stem}.twbak.{pid}.{seq}"));
         let _ = std::fs::remove_file(&bak_path);
         if let Err(e) = std::fs::rename(path, &bak_path) {
             let _ = std::fs::remove_file(&tmp_path);
@@ -1334,6 +1353,95 @@ mod tests {
         let reloaded_clear = Probe::open(&flac_path).unwrap().read().unwrap();
         let tag_clear = reloaded_clear.primary_tag().unwrap();
         assert_eq!(tag_clear.get_string(&ItemKey::AlbumArtist), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn write_audio_tags_updates_mp3_with_latin1_id3v1_byte30_boundary_without_panic() {
+        use lofty::file::TaggedFileExt;
+        use lofty::probe::Probe;
+        use lofty::tag::{Accessor, ItemKey, TagType};
+
+        let dir = std::env::temp_dir().join(format!("tw_ffi_mp3_v1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mp3_path = dir.join("traeumerei.mp3");
+
+        let mut mp3 = Vec::new();
+        // Minimal empty ID3v2.3 header (10 bytes, zero payload)
+        mp3.extend_from_slice(b"ID3\x03\x00\x00\x00\x00\x00\x00");
+        // 8 MPEG-1 Layer III frames (128kbps, 44100Hz, stereo => 417 bytes/frame)
+        let mut frame = vec![0u8; 417];
+        frame[0] = 0xFF;
+        frame[1] = 0xFB;
+        frame[2] = 0x90;
+        frame[3] = 0x00;
+        for _ in 0..8 {
+            mp3.extend_from_slice(&frame);
+        }
+        // 128-byte ID3v1 footer whose 30-byte Latin-1 title ends in 0xE4 ('ä'), expanding
+        // to 31 UTF-8 bytes so byte index 30 falls inside 'ä' (bytes 29..31).
+        let mut id3v1 = Vec::with_capacity(128);
+        id3v1.extend_from_slice(b"TAG");
+        let title_v1 = b"Kinderszenen, Op. 15: VII. Tr\xe4";
+        assert_eq!(title_v1.len(), 30);
+        id3v1.extend_from_slice(title_v1);
+        let mut artist_v1 = [0u8; 30];
+        artist_v1[..15].copy_from_slice(b"Robert Schumann");
+        id3v1.extend_from_slice(&artist_v1);
+        let album_v1 = b"Kinderszenen / Fantasie op. 17";
+        assert_eq!(album_v1.len(), 30);
+        id3v1.extend_from_slice(album_v1);
+        id3v1.extend_from_slice(b"1990");
+        id3v1.extend_from_slice(&[0u8; 28]);
+        id3v1.push(0); // comment terminator (ID3v1.1)
+        id3v1.push(7); // track
+        id3v1.push(32); // Classical
+        assert_eq!(id3v1.len(), 128);
+        mp3.extend_from_slice(&id3v1);
+        std::fs::write(&mp3_path, &mp3).unwrap();
+
+        let initial_probe = Probe::open(&mp3_path).unwrap().read().unwrap();
+        assert!(
+            initial_probe.tag(TagType::Id3v1).is_some(),
+            "test fixture must expose legacy ID3v1 tag to lofty"
+        );
+
+        let before: serde_json::Value =
+            serde_json::from_str(&fingerprint_path_impl(&mp3_path.to_string_lossy())).unwrap();
+
+        let req = serde_json::json!({
+            "path": mp3_path.to_string_lossy(),
+            "updates": {
+                "title": "Kinderszenen, Op. 15: VII. Träumerei",
+                "artist": "Vladimir Horowitz",
+                "album_artist": "Robert Schumann; Vladimir Horowitz",
+                "genre": "Classical"
+            }
+        })
+        .to_string();
+
+        // Execute through write_audio_tags_json_impl (and catch_unwind via std::panic) to verify zero panic
+        let raw_resp = std::panic::catch_unwind(|| write_audio_tags_json_impl(&req))
+            .expect("must not trigger lofty ID3v1 byte-30 UTF-8 slice panic");
+        let after: serde_json::Value = serde_json::from_str(&raw_resp).unwrap();
+        assert!(after.get("error").is_none(), "unexpected error: {after}");
+        assert_eq!(after["audio_frame_blake3_hex"], before["audio_frame_blake3_hex"]);
+
+        let reloaded = Probe::open(&mp3_path).unwrap().read().unwrap();
+        let primary = reloaded.primary_tag().unwrap();
+        assert_eq!(primary.title().as_deref(), Some("Kinderszenen, Op. 15: VII. Träumerei"));
+        assert_eq!(primary.artist().as_deref(), Some("Vladimir Horowitz"));
+        assert_eq!(
+            primary.get_string(&ItemKey::AlbumArtist),
+            Some("Robert Schumann; Vladimir Horowitz")
+        );
+        assert_eq!(primary.genre().as_deref(), Some("Classical"));
+
+        let final_bytes = std::fs::read(&mp3_path).unwrap();
+        assert_eq!(&final_bytes[final_bytes.len() - 128..], id3v1.as_slice());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

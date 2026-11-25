@@ -85,7 +85,8 @@ public sealed record TrackItem(
     int? MovementNumber = null,
     double? ReplayGainAlbumDb = null,
     int DiscNumber = 0,
-    int TrackNumber = 0
+    int TrackNumber = 0,
+    string AlbumArtist = ""
 )
 {
     public bool IsLoved => Rating >= 5;
@@ -150,6 +151,18 @@ public sealed record TrackItem(
                || g.Contains("C-Pop", StringComparison.OrdinalIgnoreCase)
                || g.Contains("Mandopop", StringComparison.OrdinalIgnoreCase)
                || g.Contains("Cantopop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Tai-Pop", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("New Age", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Ambient", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Traditional", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Latin", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Ballad", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Disco", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Alternative", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("World Music", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Acoustic", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Fado", StringComparison.OrdinalIgnoreCase)
+               || g.Contains("Reggaeton", StringComparison.OrdinalIgnoreCase)
                || g.Contains("ACG", StringComparison.OrdinalIgnoreCase)
                || g.Contains("Anime", StringComparison.OrdinalIgnoreCase)
                || g.Contains("Soundtrack", StringComparison.OrdinalIgnoreCase)
@@ -165,6 +178,61 @@ public sealed record TrackItem(
                || g.Contains("原声", StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool IsClassicalWorkSignal(string? workName)
+    {
+        if (string.IsNullOrWhiteSpace(workName)) return false;
+        string w = workName.Trim();
+        return w.Contains("Symphony", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Symphonie", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Concerto", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Konzert", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Sonata", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Sonate", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Quartet", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Quintet", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Trio", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Variation", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Prelude", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Prélude", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Nocturne", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Etude", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Étude", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Fugue", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Toccata", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Suite", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Partita", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Requiem", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Cantata", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Oratorio", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Overture", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Ouvertüre", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Rhapsody", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Serenade", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Divertimento", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Scherzo", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Chaconne", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Passacaglia", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Mass in", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Op.", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("BWV", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("KV", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("K.", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("Hob.", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("RV ", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("交响", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("协奏", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("奏鸣", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("四重奏", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("变奏曲", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("前奏曲", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("夜曲", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("练习曲", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("组曲", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("弥撒", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("安魂曲", StringComparison.OrdinalIgnoreCase)
+               || w.Contains("歌剧", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static bool ClassifyIsClassical(
         string? genre,
         string? workName,
@@ -172,8 +240,11 @@ public sealed record TrackItem(
         string? conductorsDisplay)
     {
         if (IsClassicalGenre(genre)) return true;
+        if (IsExplicitNonClassicalGenre(genre))
+        {
+            return IsClassicalWorkSignal(workName);
+        }
         if (!string.IsNullOrWhiteSpace(workName)) return true;
-        if (IsExplicitNonClassicalGenre(genre)) return false;
         if (!string.IsNullOrWhiteSpace(conductorsDisplay)) return true;
         return string.IsNullOrWhiteSpace(genre) && !string.IsNullOrWhiteSpace(composersDisplay);
     }

@@ -20,7 +20,9 @@ public sealed class PlaylistTrackMatcherUpgradeTests
         string composers = "",
         string conductors = "",
         string work = "",
-        string movement = "")
+        string movement = "",
+        string albumArtist = "",
+        string genre = "")
     {
         string safeArtist = string.IsNullOrWhiteSpace(artist) ? "Unknown" : artist.Replace('/', '_');
         string safeTitle = title.Replace('/', '_').Replace(':', '_');
@@ -37,7 +39,9 @@ public sealed class PlaylistTrackMatcherUpgradeTests
             ComposersDisplay: composers,
             ConductorsDisplay: conductors,
             WorkName: work,
-            MovementName: movement);
+            MovementName: movement,
+            AlbumArtist: albumArtist,
+            Genre: genre);
     }
 
     [Fact]
@@ -989,5 +993,178 @@ public sealed class PlaylistTrackMatcherUpgradeTests
         Assert.False(resolved[1].IsLocalMatched);
         Assert.False(resolved[2].IsLocalMatched);
         Assert.False(resolved[3].IsLocalMatched);
+    }
+
+    [Fact]
+    public void P0_AlbumArtistIndexing_MatchesCollectiveLabelsAndExcludesPlaceholders()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            MakeTrack("tsfh_victory", "Victory", "Thomas Bergersen", album: "Battlecry", albumArtist: "Two Steps From Hell", genre: "Soundtrack"),
+            MakeTrack("am_breath", "Breath and Life", "Paul Dinletir", album: "Eterna", albumArtist: "Audiomachine", genre: "Soundtrack"),
+            MakeTrack("td_vow", "The Eternal Vow", "谭盾", album: "Classic Yo-Yo", albumArtist: "Yo-Yo Ma", genre: "Soundtrack"),
+            MakeTrack("va_fake", "Some Comp Song", "Real Singer", album: "Hits", albumArtist: "Various Artists", genre: "Pop"),
+            MakeTrack("va_other", "Some Comp Song", "Another Singer", album: "Hits Vol. 2", albumArtist: "Pop Collection", genre: "Pop"),
+        };
+
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(
+            [
+                new("Victory", "Two Steps From Hell"),
+                new("Breath and Life", "Audiomachine"),
+                new("The Eternal Vow", "Tan Dun, Yo-Yo Ma"),
+                new("Some Comp Song", "Various Artists"),
+                new("Some Comp Song", "Real Singer"),
+            ],
+            lib);
+
+        Assert.Equal("tsfh_victory", resolved[0].MatchedTrackUid);
+        Assert.Equal("am_breath", resolved[1].MatchedTrackUid);
+        Assert.Equal("td_vow", resolved[2].MatchedTrackUid);
+        Assert.False(resolved[3].IsLocalMatched);
+        Assert.Equal("va_fake", resolved[4].MatchedTrackUid);
+    }
+
+    [Fact]
+    public void P1_SoundtrackAliases_SpacedSlashSplitting_AndControlledSuffixMatching()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            MakeTrack("jh_summer", "Summer", "久石譲", album: "菊次郎の夏", albumArtist: "久石譲", genre: "Soundtrack"),
+            MakeTrack("rs_merry", "Merry Christmas Mr. Lawrence", "坂本龙一", album: "Three", albumArtist: "坂本龙一", genre: "Soundtrack"),
+            MakeTrack("su_yumeji", "Yumeji’s Theme / Li‐zhen’s Dialogue", "梅林茂", album: "In the Mood for Love", albumArtist: "Various Artists", genre: "Soundtrack"),
+            MakeTrack("tsfh_courage", "Heart of Courage", "Thomas Bergersen, Nick Phoenix", album: "Legend", albumArtist: "Thomas Bergersen & Nick Phoenix"),
+            MakeTrack("tsfh_solo_thomas", "Empire of Angels", "Thomas Bergersen", album: "Sun", albumArtist: "Thomas Bergersen"),
+            MakeTrack("tsfh_nick_only", "Nick Solo Track", "Nick Phoenix", album: "Speed of Sound", albumArtist: "Nick Phoenix"),
+            MakeTrack("imm_romeo", "Tales of the Electric Romeo", "Immediate Music", album: "Trailerhead: Triumph", albumArtist: "Immediate Music"),
+            MakeTrack("short_word_end", "Shadow of Love", "Other Band"),
+            MakeTrack("acdc_track", "Back In Black", "AC/DC"),
+        };
+
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(
+            [
+                new("Summer", "Joe Hisaishi"),
+                new("Merry Christmas Mr. Lawrence", "Ryuichi Sakamoto"),
+                new("Yumeji's Theme", "Shigeru Umebayashi"),
+                new("Heart of Courage", "Two Steps From Hell"),
+                new("Empire of Angels", "Two Steps From Hell"),
+                // Directional guard: Nick Phoenix must NOT expand to Thomas Bergersen
+                new("Nick Solo Track", "Thomas Bergersen"),
+                new("Electric Romeo", "Immediate Music"),
+                // Negative guard on short single-word suffix
+                new("Love", "Other Band"),
+                // Slash guard: AC/DC remains intact
+                new("Back In Black", "AC/DC"),
+            ],
+            lib);
+
+        Assert.Equal("jh_summer", resolved[0].MatchedTrackUid);
+        Assert.Equal("rs_merry", resolved[1].MatchedTrackUid);
+        Assert.Equal("su_yumeji", resolved[2].MatchedTrackUid);
+        Assert.Equal("tsfh_courage", resolved[3].MatchedTrackUid);
+        Assert.Equal("tsfh_solo_thomas", resolved[4].MatchedTrackUid);
+        Assert.False(resolved[5].IsLocalMatched);
+        Assert.Equal("imm_romeo", resolved[6].MatchedTrackUid);
+        Assert.False(resolved[7].IsLocalMatched);
+        Assert.Equal("acdc_track", resolved[8].MatchedTrackUid);
+    }
+
+    [Fact]
+    public void P2_ComposerOnlyCoverBlock_AndAlbumAwareIsLivePreference()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            // Non-classical piano cover with French chanson composer credit
+            MakeTrack("piano_java", "La Javanaise", "Khatia Buniatishvili", album: "Labyrinth", composers: "Serge Gainsbourg", work: "La Javanaise", genre: "Classical"),
+            // Pop cover with songwriter composer credit
+            MakeTrack("pop_lingwu", "领悟", "辛晓琪", album: "情牵女人心", composers: "李宗盛", genre: "Pop"),
+            // Classical concerto with only composer credit on seed & track
+            MakeTrack("cls_elgar", "Cello Concerto in E minor, Op. 85: I. Adagio", "Jacqueline du Pré", album: "Elgar", composers: "Edward Elgar", genre: "Classical"),
+            // Album-aware IsLive: Live album has higher sample rate and NO "(Live)" in title
+            MakeTrack("faye_live", "我願意", "王菲", album: "菲比尋常Live!", sampleRateHz: 96_000, genre: "Pop"),
+            MakeTrack("faye_studio", "我愿意", "王菲", album: "迷", sampleRateHz: 44_100, genre: "Pop"),
+            // Album-aware IsLive when studio is absent: Concert album should still serve as fallback
+            MakeTrack("jay_live_only", "青花瓷", "周杰伦", album: "魔天倫世界巡迴演唱會", sampleRateHz: 96_000, genre: "Pop"),
+        };
+
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(
+            [
+                new("La Javanaise", "Serge Gainsbourg"),
+                new("领悟", "李宗盛"),
+                new("Cello Concerto in E minor, Op. 85: I. Adagio", "Edward Elgar"),
+                new("我愿意", "王菲"),
+                new("青花瓷", "周杰伦"),
+            ],
+            lib);
+
+        Assert.False(resolved[0].IsLocalMatched);
+        Assert.False(resolved[1].IsLocalMatched);
+        Assert.Equal("cls_elgar", resolved[2].MatchedTrackUid);
+        Assert.Equal("faye_studio", resolved[3].MatchedTrackUid);
+        Assert.Equal("jay_live_only", resolved[4].MatchedTrackUid);
+    }
+
+    [Fact]
+    public void CrossScriptAliases_ShinjitaiFolding_MergedCanonicalAliases_AndExpandedCollectives()
+    {
+        var lib = new List<LocalLibraryTrackRef>
+        {
+            MakeTrack("jp_wada", "想いの果てにⅡ", "和田薫", album: "犬夜叉: 音楽篇", genre: "Soundtrack"),
+            MakeTrack("jp_masuda", "孤高の野狐", "増田俊郎", album: "神様はじめました", genre: "Soundtrack"),
+            MakeTrack("jp_yokoyama", "楼桑村にて", "横山菁児", album: "三国志", genre: "Soundtrack"),
+            MakeTrack("jp_hiromi", "Place to Be", "上原ひろみ", album: "Duet", genre: "Jazz"),
+            MakeTrack("jp_uematsu", "Zanarkand", "植松伸夫", album: "Final Fantasy", genre: "Soundtrack"),
+            MakeTrack("cn_su", "First Coronation", "苏聪", album: "The Last Emperor", genre: "Soundtrack"),
+            MakeTrack("cn_chan", "再見...警察", "陈光荣", album: "Infernal Affairs I", genre: "Soundtrack"),
+            MakeTrack("ru_tanks", "Move to Position", "Сергей Хмелевский", album: "World of Tanks", genre: "Soundtrack"),
+            MakeTrack("kr_city", "Sad Run", "오준성", album: "City Hunter OST", genre: "Soundtrack"),
+            // Merged from artist_aliases.json
+            MakeTrack("arm_khach", "Sabre Dance", "Արամ Խաչատրյան", album: "Gayane", genre: "Classical"),
+            MakeTrack("cls_bpo", "Symphony No. 9: IV. Finale", "Berliner Philharmoniker", composers: "Ludwig van Beethoven", genre: "Classical"),
+            MakeTrack("cls_richter", "Piano Concerto No. 2", "Святослав Рихтер", composers: "Sergei Rachmaninoff", genre: "Classical"),
+            // Expanded one-way collective -> composers
+            MakeTrack("coll_imm", "Lacrimosa", "Jeffrey Fayman, Yoav Goren", album: "Themes for Orchestra & Choir", albumArtist: "Jeffrey Fayman & Yoav Goren", genre: "Soundtrack"),
+            MakeTrack("coll_bxm", "Doomsday", "John Sponsler, Tom Gire", album: "Vol. 1", albumArtist: "John Sponsler & Tom Gire", genre: "Soundtrack"),
+            MakeTrack("coll_sg", "Nocturne", "Rolf Løvland", album: "Songs from a Secret Garden", albumArtist: "Rolf Løvland", genre: "New Age"),
+            // Solo non-leak guard: Yoav Goren solo track must NOT match Jeffrey Fayman
+            MakeTrack("solo_goren", "Yoav Solo Cue", "Yoav Goren", album: "Solo", albumArtist: "Yoav Goren", genre: "Soundtrack"),
+        };
+
+        var resolved = PlaylistTrackMatcher.ResolveSeeds(
+            [
+                new("想いの果てにⅡ", "和田薰"),
+                new("孤高の野狐", "增田俊郎"),
+                new("楼桑村にて", "Seiji Yokoyama"),
+                new("Place to Be", "Hiromi Uehara"),
+                new("Zanarkand", "Nobuo Uematsu"),
+                new("First Coronation", "Cong Su"),
+                new("再见 警察", "Chan Kwong-wing"),
+                new("Move to Position", "Sergey Khmelevsky"),
+                new("Sad Run", "Oh Joon-sung"),
+                new("Sabre Dance", "Aram Khachaturian"),
+                new("Symphony No. 9: IV. Finale", "Berlin Philharmonic"),
+                new("Piano Concerto No. 2", "Sviatoslav Richter"),
+                new("Lacrimosa", "Immediate Music"),
+                new("Doomsday", "Brand X Music"),
+                new("Nocturne", "Secret Garden"),
+                new("Yoav Solo Cue", "Jeffrey Fayman"),
+            ],
+            lib);
+
+        Assert.Equal("jp_wada", resolved[0].MatchedTrackUid);
+        Assert.Equal("jp_masuda", resolved[1].MatchedTrackUid);
+        Assert.Equal("jp_yokoyama", resolved[2].MatchedTrackUid);
+        Assert.Equal("jp_hiromi", resolved[3].MatchedTrackUid);
+        Assert.Equal("jp_uematsu", resolved[4].MatchedTrackUid);
+        Assert.Equal("cn_su", resolved[5].MatchedTrackUid);
+        Assert.Equal("cn_chan", resolved[6].MatchedTrackUid);
+        Assert.Equal("ru_tanks", resolved[7].MatchedTrackUid);
+        Assert.Equal("kr_city", resolved[8].MatchedTrackUid);
+        Assert.Equal("arm_khach", resolved[9].MatchedTrackUid);
+        Assert.Equal("cls_bpo", resolved[10].MatchedTrackUid);
+        Assert.Equal("cls_richter", resolved[11].MatchedTrackUid);
+        Assert.Equal("coll_imm", resolved[12].MatchedTrackUid);
+        Assert.Equal("coll_bxm", resolved[13].MatchedTrackUid);
+        Assert.Equal("coll_sg", resolved[14].MatchedTrackUid);
+        Assert.False(resolved[15].IsLocalMatched);
     }
 }

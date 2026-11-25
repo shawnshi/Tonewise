@@ -1018,7 +1018,9 @@ public sealed partial class SyncOutboxAndPairingStore
                 ComposersDisplay,
                 ConductorsDisplay,
                 WorkName,
-                MovementName
+                MovementName,
+                AlbumArtist,
+                Genre
             );
 
         public IReadOnlyList<string> AllArtists

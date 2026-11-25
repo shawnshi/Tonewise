@@ -230,6 +230,7 @@ public sealed class LibraryStore
         bool hasReplayGainAlbum = cols.Contains("replaygain_album_db");
         bool hasDiscNumber = cols.Contains("disc_number");
         bool hasTrackNumber = cols.Contains("track_number");
+        bool hasAlbumArtist = cols.Contains("album_artist");
         bool hasLedgerCols = cols.Contains("legacy_play_count")
                              && cols.Contains("lastfm_pulled_count")
                              && cols.Contains("local_unsynced_expired_count");
@@ -249,7 +250,8 @@ public sealed class LibraryStore
                 {(hasMovementNumber ? "movement_number" : "NULL")} AS movement_number,
                 {(hasReplayGainAlbum ? "replaygain_album_db" : "NULL")} AS replaygain_album_db,
                 {(hasDiscNumber ? "disc_number" : "0")} AS disc_number,
-                {(hasTrackNumber ? "track_number" : "0")} AS track_number
+                {(hasTrackNumber ? "track_number" : "0")} AS track_number,
+                {(hasAlbumArtist ? "album_artist" : "NULL")} AS album_artist
             FROM tracks
             {tailClause}
             """;
@@ -304,6 +306,7 @@ public sealed class LibraryStore
             double? rgAlbumDb = reader.IsDBNull(29) ? null : reader.GetDouble(29);
             int dbDisc = reader.IsDBNull(30) ? 0 : reader.GetInt32(30);
             int dbTrack = reader.IsDBNull(31) ? 0 : reader.GetInt32(31);
+            string albumArtist = reader.IsDBNull(32) ? "" : reader.GetString(32);
             var (pathDisc, pathTrack) = ParseDiscAndTrackFromRelPath(relPath);
             int discNumber = dbDisc > 0 ? dbDisc : pathDisc;
             int trackNumber = dbTrack > 0 ? dbTrack : pathTrack;
@@ -343,7 +346,8 @@ public sealed class LibraryStore
                     MovementNumber: movementNumber,
                     ReplayGainAlbumDb: rgAlbumDb,
                     DiscNumber: discNumber,
-                    TrackNumber: trackNumber
+                    TrackNumber: trackNumber,
+                    AlbumArtist: albumArtist
                 )
             );
         }

@@ -2222,6 +2222,253 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    public Windows.UI.Text.FontWeight FilterChipFontWeight(bool isActive) =>
+        isActive ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+
+    private static void SyncRadioMenuFlyoutSelection(object sender, string currentTag)
+    {
+        if (sender is not MenuFlyout flyout) return;
+        foreach (var item in flyout.Items)
+        {
+            if (item is RadioMenuFlyoutItem radio && radio.Tag is string tag)
+            {
+                radio.IsChecked = string.Equals(tag, currentTag, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+    }
+
+    private void OnSceneMenuFlyoutOpening(object sender, object e) =>
+        SyncRadioMenuFlyoutSelection(sender, ViewModel.FilterScene);
+
+    private void OnEnergyMenuFlyoutOpening(object sender, object e) =>
+        SyncRadioMenuFlyoutSelection(sender, ViewModel.FilterEnergy);
+
+    private void OnVocalsMenuFlyoutOpening(object sender, object e) =>
+        SyncRadioMenuFlyoutSelection(sender, ViewModel.CurrentVocalsOptionTag);
+
+    private void OnTempoMenuFlyoutOpening(object sender, object e) =>
+        SyncRadioMenuFlyoutSelection(sender, ViewModel.FilterTempoBucket);
+
+    private void OnMoodMenuFlyoutOpening(object sender, object e) =>
+        SyncRadioMenuFlyoutSelection(sender, ViewModel.FilterMoodCluster);
+
+    private void OnArcMenuFlyoutOpening(object sender, object e) =>
+        SyncRadioMenuFlyoutSelection(sender, ViewModel.SelectedEnergyArc);
+
+    private void OnSceneFilterItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: string tag }) ViewModel.FilterScene = tag;
+    }
+
+    private void OnEnergyFilterItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: string tag }) ViewModel.FilterEnergy = tag;
+    }
+
+    private void OnVocalsFilterItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: string tag }) ViewModel.SetVocalsFilterOption(tag);
+    }
+
+    private void OnTempoFilterItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: string tag }) ViewModel.FilterTempoBucket = tag;
+    }
+
+    private void OnMoodFilterItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: string tag }) ViewModel.FilterMoodCluster = tag;
+    }
+
+    private void OnArcFilterItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItem { Tag: string tag }) ViewModel.SetEnergyArc(tag);
+    }
+
+    private void OnGenreFilterFlyoutOpening(object sender, object e)
+    {
+        if (sender is not Flyout flyout) return;
+
+        bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
+        var accentBrush = new SolidColorBrush(isLight
+            ? Color.FromArgb(0xFF, 0x8D, 0x67, 0x26)
+            : Color.FromArgb(0xFF, 0xD9, 0xB3, 0x72));
+        var mutedBrush = new SolidColorBrush(isLight
+            ? Color.FromArgb(0xFF, 0x47, 0x56, 0x6B)
+            : Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8));
+
+        var allFacets = ViewModel.GetAvailableGenreFacets();
+
+        var root = new StackPanel
+        {
+            Width = 310,
+            Spacing = 8,
+        };
+
+        var headerGrid = new Grid { ColumnSpacing = 8 };
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var titleText = new TextBlock
+        {
+            Text = "流派筛选",
+            FontSize = 13,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Grid.SetColumn(titleText, 0);
+
+        var countText = new TextBlock
+        {
+            FontSize = 11,
+            Foreground = mutedBrush,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Grid.SetColumn(countText, 1);
+
+        var clearBtn = new Button
+        {
+            Content = "清空",
+            FontSize = 11,
+            Padding = new Thickness(8, 2, 8, 2),
+            Height = 24,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Grid.SetColumn(clearBtn, 2);
+
+        headerGrid.Children.Add(titleText);
+        headerGrid.Children.Add(countText);
+        headerGrid.Children.Add(clearBtn);
+        root.Children.Add(headerGrid);
+
+        var searchBox = new TextBox
+        {
+            PlaceholderText = "搜索流派（如 Classical、Jazz、Pop）...",
+            FontSize = 12,
+            Height = 30,
+        };
+        root.Children.Add(searchBox);
+
+        var listPanel = new StackPanel { Spacing = 2 };
+        var scroll = new ScrollViewer
+        {
+            MaxHeight = 290,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Content = listPanel,
+        };
+        root.Children.Add(scroll);
+
+        void SyncHeader()
+        {
+            int count = ViewModel.SelectedGenres.Count;
+            countText.Text = count > 0 ? $"已选 {count} 项" : $"共 {allFacets.Count} 类";
+            clearBtn.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        void RenderRows(string query)
+        {
+            listPanel.Children.Clear();
+            string q = query.Trim();
+
+            var matches = allFacets
+                .Where(f => string.IsNullOrEmpty(q) || f.CanonicalName.Contains(q, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (matches.Count == 0)
+            {
+                listPanel.Children.Add(new TextBlock
+                {
+                    Text = allFacets.Count == 0 ? "当前曲库暂无流派标签" : $"未找到匹配 \"{q}\" 的流派",
+                    FontSize = 12,
+                    Foreground = mutedBrush,
+                    Margin = new Thickness(4, 8, 4, 8),
+                });
+                return;
+            }
+
+            foreach (var facet in matches)
+            {
+                var row = new Grid
+                {
+                    ColumnSpacing = 4,
+                    Padding = new Thickness(2, 1, 2, 1),
+                };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                var check = new CheckBox
+                {
+                    Content = new TextBlock
+                    {
+                        Text = facet.CanonicalName,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                    },
+                    IsChecked = ViewModel.IsGenreSelected(facet.CanonicalName),
+                    FontSize = 12,
+                    MinWidth = 0,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    VerticalAlignment = VerticalAlignment.Center,
+                };
+                check.Click += (_, _) =>
+                {
+                    ViewModel.ToggleGenreFilter(facet.CanonicalName);
+                    SyncHeader();
+                };
+                Grid.SetColumn(check, 0);
+
+                var onlyBtn = new Button
+                {
+                    Content = "仅选",
+                    FontSize = 11,
+                    Padding = new Thickness(6, 2, 6, 2),
+                    Height = 24,
+                    Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                    BorderThickness = new Thickness(0),
+                    Foreground = accentBrush,
+                    VerticalAlignment = VerticalAlignment.Center,
+                };
+                ToolTipService.SetToolTip(onlyBtn, $"仅按 {facet.CanonicalName} 筛选");
+                onlyBtn.Click += (_, _) =>
+                {
+                    ViewModel.SelectSingleGenreFilter(facet.CanonicalName);
+                    flyout.Hide();
+                };
+                Grid.SetColumn(onlyBtn, 1);
+
+                var totalText = new TextBlock
+                {
+                    Text = facet.TrackCount.ToString("N0"),
+                    FontSize = 11,
+                    Foreground = mutedBrush,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(4, 0, 2, 0),
+                };
+                Grid.SetColumn(totalText, 2);
+
+                row.Children.Add(check);
+                row.Children.Add(onlyBtn);
+                row.Children.Add(totalText);
+                listPanel.Children.Add(row);
+            }
+        }
+
+        clearBtn.Click += (_, _) =>
+        {
+            ViewModel.ClearGenreFilters();
+            SyncHeader();
+            RenderRows(searchBox.Text ?? "");
+        };
+
+        searchBox.TextChanged += (_, _) => RenderRows(searchBox.Text ?? "");
+
+        SyncHeader();
+        RenderRows("");
+        flyout.Content = root;
+    }
+
     private async void OnFetchMissingBasicInfoClick(object sender, RoutedEventArgs e)
     {
         var targets = _inlineTargets.Count > 0

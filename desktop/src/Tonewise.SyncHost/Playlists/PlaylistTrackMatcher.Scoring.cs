@@ -57,9 +57,12 @@ public static partial class PlaylistTrackMatcher
         public VersionQualifiers HardQualifiers => Qualifiers & HardBlockQualifierMask;
         public VersionQualifiers SoftQualifiers => Qualifiers & SoftFallbackQualifierMask;
         public bool HasAlbumRemix { get; }
-        public bool IsLive => (Qualifiers & VersionQualifiers.Live) != 0;
+        public bool HasAlbumLive { get; }
+        public bool IsLive => ((Qualifiers & VersionQualifiers.Live) != 0) || HasAlbumLive;
         public HashSet<string> PrimaryArtistTokens { get; }
+        public HashSet<string> PerformerCreditTokens { get; }
         public HashSet<string> AllCreditTokens { get; }
+        public bool AllowComposerOnlyMatch { get; }
         public string CombinedCreditFlat { get; }
         public string PrimaryArtistKey { get; }
         public string NormalizedAlbum { get; }
@@ -74,21 +77,53 @@ public static partial class PlaylistTrackMatcher
 
             string preNormTitle = PreNormalizeUnicode(track.Title);
             Qualifiers = ExtractVersionQualifiersFromPreNorm(preNormTitle);
-            HasAlbumRemix = !string.IsNullOrWhiteSpace(track.Album)
-                && (ExtractVersionQualifiersFromPreNorm(PreNormalizeUnicode(track.Album)) & VersionQualifiers.Remix) != 0;
+            string preNormAlbum = PreNormalizeUnicode(track.Album);
+            VersionQualifiers albumQualifiers = ExtractVersionQualifiersFromPreNorm(preNormAlbum);
+            HasAlbumRemix = (albumQualifiers & VersionQualifiers.Remix) != 0;
+            HasAlbumLive = (albumQualifiers & VersionQualifiers.Live) != 0
+                || (!string.IsNullOrEmpty(preNormAlbum) && AlbumLiveExtraRegex().IsMatch(preNormAlbum));
 
             PrimaryArtistTokens = ExtractArtistTokens(track.ArtistsDisplay);
-            AllCreditTokens = new HashSet<string>(PrimaryArtistTokens, StringComparer.Ordinal);
-            if (!string.IsNullOrWhiteSpace(track.ComposersDisplay))
+            var performerTokens = new HashSet<string>(PrimaryArtistTokens, StringComparer.Ordinal);
+            bool hasUsefulAlbumArtist = false;
+            if (!string.IsNullOrWhiteSpace(track.AlbumArtist))
             {
-                AllCreditTokens.UnionWith(ExtractArtistTokens(track.ComposersDisplay));
+                var albumArtistTokens = ExtractArtistTokens(track.AlbumArtist);
+                foreach (string aat in albumArtistTokens)
+                {
+                    if (!string.IsNullOrEmpty(aat) && !PlaceholderArtists.Contains(aat))
+                    {
+                        performerTokens.Add(aat);
+                        hasUsefulAlbumArtist = true;
+                    }
+                }
             }
             if (!string.IsNullOrWhiteSpace(track.ConductorsDisplay))
             {
-                AllCreditTokens.UnionWith(ExtractArtistTokens(track.ConductorsDisplay));
+                foreach (string ct in ExtractArtistTokens(track.ConductorsDisplay))
+                {
+                    if (!string.IsNullOrEmpty(ct) && !PlaceholderArtists.Contains(ct))
+                    {
+                        performerTokens.Add(ct);
+                    }
+                }
+            }
+            PerformerCreditTokens = performerTokens;
+
+            HashSet<string>? composerTokens = !string.IsNullOrWhiteSpace(track.ComposersDisplay)
+                ? ExtractArtistTokens(track.ComposersDisplay)
+                : null;
+            AllowComposerOnlyMatch = composerTokens is { Count: > 0 }
+                && ShouldAllowComposerOnlyMatch(track, performerTokens, composerTokens);
+
+            AllCreditTokens = new HashSet<string>(performerTokens, StringComparer.Ordinal);
+            if (AllowComposerOnlyMatch && composerTokens is not null)
+            {
+                AllCreditTokens.UnionWith(composerTokens);
             }
 
-            CombinedCreditFlat = NormalizeTokenText($"{track.ArtistsDisplay} {track.ComposersDisplay} {track.ConductorsDisplay}");
+            string combinedRaw = $"{track.ArtistsDisplay} {(hasUsefulAlbumArtist ? track.AlbumArtist : "")} {track.ConductorsDisplay} {(AllowComposerOnlyMatch ? track.ComposersDisplay : "")}";
+            CombinedCreditFlat = NormalizeTokenText(combinedRaw);
             PrimaryArtistKey = BuildCanonicalArtistKey(PrimaryArtistTokens, AllCreditTokens);
             NormalizedAlbum = NormalizeAlbum(track.Album);
             LosslessTier = GetLosslessTier(track.RelPath, track.FullPath);
@@ -258,6 +293,7 @@ public static partial class PlaylistTrackMatcher
 
     private static readonly Lazy<IReadOnlyList<string>> NormalizedWhitelist = new(() =>
         ArtistEntitySplitter.Whitelist
+            .Concat(["Brand X Music"])
             .Select(PreNormalizeUnicode)
             .Where(s => !string.IsNullOrEmpty(s))
             .Distinct(StringComparer.Ordinal)
@@ -319,6 +355,33 @@ public static partial class PlaylistTrackMatcher
                 '穀' => '谷',
                 '闆' => '板',
                 '夥' => '伙',
+                // Japanese Shinjitai -> Simplified Chinese equivalents (not folded by zh-CN LCMapStringEx)
+                '譲' => '让',
+                '薫' => '薰',
+                '増' => '增',
+                '児' => '儿',
+                '満' => '满',
+                '姫' => '姬',
+                '沢' => '泽',
+                '広' => '广',
+                '竜' => '龙',
+                '桜' => '樱',
+                '絵' => '绘',
+                '黒' => '黑',
+                '辺' => '边',
+                '実' => '实',
+                '伝' => '传',
+                '闘' => '斗',
+                '鉄' => '铁',
+                '剣' => '剑',
+                '気' => '气',
+                '駅' => '站',
+                '郷' => '乡',
+                '斉' => '齐',
+                '斎' => '斋',
+                '滝' => '泷',
+                '蛍' => '萤',
+                '聴' => '听',
                 _ => input[i],
             };
             if (mapped != input[i] && sb is null)
@@ -449,18 +512,137 @@ public static partial class PlaylistTrackMatcher
             new[] { "john cougar", "john cougar mellencamp", "john mellencamp" },
             new[] { "snoop doggy dogg", "snoop dogg" },
             new[] { "puff daddy", "p diddy", "diddy" },
+            new[] { "久石让", "久石譲", "joe hisaishi", "hisaishi joe" },
+            new[] { "坂本龙一", "ryuichi sakamoto", "sakamoto ryuichi" },
+            new[] { "梅林茂", "shigeru umebayashi", "umebayashi shigeru" },
+            new[] { "谭盾", "tan dun" },
+            new[] { "泽野弘之", "hiroyuki sawano", "sawano hiroyuki" },
+            new[] { "马友友", "yo yo ma" },
+            new[] { "朗朗", "郎朗", "lang lang" },
+            new[] { "王羽佳", "yuja wang" },
+            new[] { "喜多郎", "kitaro" },
+            new[] { "川井宪次", "kenji kawai" },
+            new[] { "菅野洋子", "yoko kanno" },
+            new[] { "鹭巢诗郎", "shiro sagisu" },
+            new[] { "梶浦由记", "yuki kajiura" },
+            new[] { "神前晓", "satoru kosaki" },
+            new[] { "上原ひろみ", "上原广美", "hiromi uehara", "hiromi" },
+            new[] { "吉森信", "makoto yoshimori" },
+            new[] { "和田薰", "kaoru wada" },
+            new[] { "增田俊郎", "toshio masuda" },
+            new[] { "横山菁儿", "seiji yokoyama" },
+            new[] { "中村由利子", "yuriko nakamura" },
+            new[] { "武满彻", "toru takemitsu" },
+            new[] { "植松伸夫", "nobuo uematsu" },
+            new[] { "佐藤直纪", "naoki sato" },
+            new[] { "光宗信吉", "shinkichi mitsumune" },
+            new[] { "大谷幸", "kow otani", "ko otani" },
+            new[] { "菊池俊辅", "shunsuke kikuchi" },
+            new[] { "麻枝准", "jun maeda" },
+            new[] { "西村由纪江", "yukie nishimura" },
+            new[] { "姬神", "himekami" },
+            new[] { "大岛满", "大島ミチル", "michiru oshima" },
+            new[] { "大野克夫", "大野克夫バンド", "katsuo ohno", "katsuo ono" },
+            new[] { "岩崎琢", "taku iwasaki" },
+            new[] { "田中公平", "kohei tanaka" },
+            new[] { "加藤达也", "tatsuya kato" },
+            new[] { "吉田兄弟", "yoshida brothers" },
+            new[] { "林有三", "yuzo hayashi" },
+            new[] { "都留教博", "norihiro tsuru" },
+            new[] { "岩代太郎", "taro iwashiro" },
+            new[] { "高梨康治", "yasuharu takanashi" },
+            new[] { "横山克", "masaru yokoyama" },
+            new[] { "村松崇继", "takatsugu muramatsu" },
+            new[] { "河野伸", "shin kono" },
+            new[] { "宗次郎", "sojiro" },
+            new[] { "阵内一真", "kazuma jinnouchi" },
+            new[] { "野见祐二", "yuji nomi" },
+            new[] { "佐桥俊彦", "toshihiko sahashi" },
+            new[] { "朝川朋之", "tomoyuki asakawa" },
+            new[] { "山下康介", "kosuke yamashita" },
+            new[] { "菊谷知树", "tomoki kikuya" },
+            new[] { "西乡宪一郎", "kenichiro saigo" },
+            new[] { "井内龙次", "ryuji iuchi" },
+            new[] { "오준성", "吴俊成", "oh joon sung", "oh joonsung" },
+            new[] { "정경화", "郑京和", "kyung wha chung" },
+            new[] { "苏聪", "cong su", "su cong" },
+            new[] { "黄霑", "james wong" },
+            new[] { "陈光荣", "comfort chan", "chan kwong wing", "kwong wing chan" },
+            new[] { "三宝", "san bao" },
+            new[] { "赵季平", "zhao jiping", "jiping zhao" },
+            new[] { "顾嘉辉", "joseph koo" },
+            new[] { "黎小田", "michael lai" },
+            new[] { "卢冠廷", "lowell lo" },
+            new[] { "袁卓繁", "richard yuen" },
+            new[] { "金培达", "peter kam" },
+            new[] { "黄英华", "raymond wong" },
+            new[] { "陈勋奇", "frankie chan" },
+            new[] { "鲍比达", "chris babida" },
+            new[] { "雷颂德", "mark lui" },
+            new[] { "贾鹏芳", "jia peng fang", "jia pengfang" },
+            new[] { "сергей хмелевский", "sergey khmelevsky", "sergei khmelevsky" },
+            new[] { "святослав рихтер", "святослав теофилович рихтер", "sviatoslav richter" },
+            new[] { "давид федорович ойстрах", "давид ойстрах", "david oistrakh" },
+            new[] { "российский национальный оркестр", "russian national orchestra" },
+            new[] { "юлия лежнева", "julia lezhneva" },
+            new[] { "анатолий угорский", "anatol ugorski" },
+            new[] { "李云迪", "yundi li", "yundi" },
+            new[] { "张昊辰", "haochen zhang" },
+            new[] { "内田光子", "mitsuko uchida" },
+            new[] { "小川典子", "noriko ogawa" },
+            new[] { "铃木雅明", "masaaki suzuki" },
         };
 
         var map = new Dictionary<string, string[]>(StringComparer.Ordinal);
+
+        void MergeGroup(IEnumerable<string> rawAliases)
+        {
+            var normalized = new List<string>();
+            foreach (string raw in rawAliases)
+            {
+                string norm = NormalizeTokenText(raw);
+                if (norm.Length < 2 || PlaceholderArtists.Contains(norm)) continue;
+                if (!normalized.Contains(norm, StringComparer.Ordinal))
+                {
+                    normalized.Add(norm);
+                }
+            }
+            if (normalized.Count < 2) return;
+
+            var mergedSet = new HashSet<string>(normalized, StringComparer.Ordinal);
+            foreach (string key in normalized)
+            {
+                if (map.TryGetValue(key, out string[]? existingGroup))
+                {
+                    mergedSet.UnionWith(existingGroup);
+                }
+            }
+            string[] mergedArray = [.. mergedSet];
+            foreach (string key in mergedArray)
+            {
+                map[key] = mergedArray;
+            }
+        }
+
         foreach (string[] group in groups)
         {
-            foreach (string alias in group)
-            {
-                map[alias] = group;
-            }
+            MergeGroup(group);
+        }
+        foreach (var canonicalGroup in ArtistEntitySplitter.GetCanonicalAliasGroups())
+        {
+            MergeGroup(canonicalGroup);
         }
         return map;
     }
+
+    private static readonly Dictionary<string, string[]> CollectiveArtistAliases = new(StringComparer.Ordinal)
+    {
+        ["two steps from hell"] = ["thomas bergersen", "nick phoenix"],
+        ["immediate music"] = ["yoav goren", "jeffrey fayman", "aleksandar dimitrijevic", "richard friedman"],
+        ["audiomachine"] = ["paul dinletir", "kevin rix"],
+        ["brand x music"] = ["john sponsler", "tom gire"],
+        ["secret garden"] = ["rolf lovland"],
+    };
 
     internal static void ExpandCjkArtistAliases(HashSet<string> tokens)
     {
@@ -472,6 +654,11 @@ public static partial class PlaylistTrackMatcher
             {
                 extra ??= [];
                 extra.AddRange(aliases);
+            }
+            if (CollectiveArtistAliases.TryGetValue(t, out string[]? collective))
+            {
+                extra ??= [];
+                extra.AddRange(collective);
             }
         }
         if (extra is not null)
@@ -820,6 +1007,185 @@ public static partial class PlaylistTrackMatcher
         return string.Join("|", source.Where(t => !PlaceholderArtists.Contains(t)).OrderBy(t => t, StringComparer.Ordinal));
     }
 
+    private static readonly HashSet<string> KnownClassicalComposers = new(StringComparer.Ordinal)
+    {
+        "johann sebastian bach", "j s bach", "bach",
+        "ludwig van beethoven", "beethoven",
+        "wolfgang amadeus mozart", "mozart",
+        "frederic chopin", "chopin",
+        "johannes brahms", "brahms",
+        "joseph haydn", "haydn",
+        "franz schubert", "schubert",
+        "robert schumann", "schumann",
+        "franz liszt", "liszt",
+        "claude debussy", "debussy",
+        "maurice ravel", "ravel",
+        "pyotr ilyich tchaikovsky", "peter iljitsch tschaikowsky", "tchaikovsky", "чайковский", "петр ильич чайковский",
+        "sergei rachmaninoff", "sergei rachmaninov", "rachmaninoff", "rachmaninov",
+        "antonio vivaldi", "vivaldi",
+        "gustav mahler", "mahler",
+        "antonin dvorak", "dvorak",
+        "dmitri shostakovich", "shostakovich",
+        "sergei prokofiev", "sergei prokofieff", "prokofiev",
+        "igor stravinsky", "stravinsky",
+        "felix mendelssohn", "mendelssohn",
+        "george frideric handel", "georg friedrich handel", "handel",
+        "richard wagner", "wagner",
+        "giuseppe verdi", "verdi",
+        "giacomo puccini", "puccini",
+        "georges bizet", "bizet",
+        "edouard lalo", "lalo",
+        "camille saint saens", "saint saens",
+        "jean sibelius", "sibelius",
+        "edward elgar", "elgar",
+        "edvard grieg", "grieg",
+        "bela bartok", "bartok",
+        "erik satie", "satie",
+        "alexander scriabin", "scriabin",
+        "nikolai rimsky korsakov", "rimsky korsakov",
+        "modest mussorgsky", "mussorgsky",
+        "alexander borodin", "borodin",
+        "domenico scarlatti", "scarlatti",
+        "max bruch", "bruch",
+        "pablo de sarasate", "sarasate",
+        "niccolo paganini", "paganini",
+        "anton webern", "webern",
+        "alban berg", "berg",
+        "arnold schoenberg", "schoenberg",
+        "richard strauss", "johann strauss", "johann strauss ii",
+        "sergei lyapunov", "lyapunov",
+        "alexander glazunov", "glazunov",
+        "nikolai medtner", "medtner",
+        "aram khachaturian", "khachaturian",
+        "alfred schnittke", "schnittke",
+        "myroslav skoryk", "skoryk",
+        "arvo part", "part",
+        "philip glass", "max richter", "ludovico einaudi",
+        "ennio morricone", "john williams", "hans zimmer", "howard shore", "james horner",
+        "joe hisaishi", "久石让", "久石譲",
+        "ryuichi sakamoto", "坂本龙一",
+        "alexandre desplat", "tan dun", "谭盾",
+        "shigeru umebayashi", "梅林茂",
+        "toru takemitsu", "武满彻",
+        "nobuo uematsu", "植松伸夫",
+        "kaoru wada", "和田薰",
+        "makoto yoshimori", "吉森信",
+        "toshio masuda", "增田俊郎",
+        "seiji yokoyama", "横山菁儿",
+        "yuki kajiura", "梶浦由记",
+        "yoko kanno", "菅野洋子",
+        "kenji kawai", "川井宪次",
+        "hiroyuki sawano", "泽野弘之",
+        "shiro sagisu", "鹭巢诗郎",
+        "naoki sato", "佐藤直纪",
+        "shinkichi mitsumune", "光宗信吉",
+        "kow otani", "大谷幸",
+        "shunsuke kikuchi", "菊池俊辅",
+        "michiru oshima", "大岛满",
+        "taku iwasaki", "岩崎琢",
+        "kohei tanaka", "田中公平",
+        "taro iwashiro", "岩代太郎",
+        "yasuharu takanashi", "高梨康治",
+        "masaru yokoyama", "横山克",
+        "cong su", "苏聪",
+        "zhao jiping", "赵季平",
+        "james wong", "黄霑",
+        "joseph koo", "顾嘉辉",
+        "michael lai", "黎小田",
+        "comfort chan", "陈光荣",
+        "peter kam", "金培达",
+        "san bao", "三宝",
+        "sergey khmelevsky", "sergei khmelevsky", "сергей хмелевский",
+    };
+
+    private static readonly string[] EnsembleCreditIndicators =
+    [
+        "orchestra", "philharmonic", "philharmoniker", "symphony", "sinfonie",
+        "ensemble", "quartet", "quintet", "trio", "choir", "chorus",
+        "交响", "爱乐", "管弦", "乐团", "合唱",
+    ];
+
+    private static readonly string[] ClassicalRepertoireKeywords =
+    [
+        "symphon", "concerto", "sonata", "nocturne", "etude", "prelude", "fugue",
+        "suite", "quartet", "quintet", "trio", "serenade", "waltz", "valse",
+        "mazurka", "polonaise", "impromptu", "rhapsody", "overture", "ouverture",
+        "requiem", "cantata", "oratorio", "opera", "aria", "adagio", "allegro",
+        "andante", "largo", "presto", "scherzo", "minuet", "menuet", "rondo",
+        "variation", "fantasia", "fantasy", "ballade", "berceuse", "barcarolle",
+        "intermezzo", "partita", "toccata", "sonatina", "divertimento", "caprice",
+        "capriccio", "humoresque", "elegy", "elegie", "romance", "pavane",
+        "bolero", "gymnopedie", "gnossienne", "clair de lune", "arabesque",
+        "canon", "passacaglia", "chaconne", "stabat mater", "ave maria",
+        "交响", "协奏", "奏鸣", "夜曲", "练习曲", "前奏曲", "赋格", "组曲",
+        "四重奏", "小夜曲", "圆舞曲", "狂想曲", "序曲", "安魂曲", "乐章", "变奏曲",
+    ];
+
+    internal static bool IsSoundtrackGenre(string? genre)
+    {
+        if (string.IsNullOrWhiteSpace(genre)) return false;
+        string preNorm = PreNormalizeUnicode(genre);
+        return SoundtrackGenreRegex().IsMatch(preNorm)
+            || preNorm.Contains("stage & screen", StringComparison.Ordinal)
+            || preNorm.Contains("配乐", StringComparison.Ordinal)
+            || preNorm.Contains("原声", StringComparison.Ordinal);
+    }
+
+    private static bool HasEnsembleCredit(HashSet<string> performerTokens)
+    {
+        foreach (string token in performerTokens)
+        {
+            foreach (string indicator in EnsembleCreditIndicators)
+            {
+                if (token.Contains(indicator, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static bool HasClassicalRepertoireSignal(string? title, string? workName, string? movementName)
+    {
+        string combined = PreNormalizeUnicode($"{title} {workName} {movementName}");
+        if (string.IsNullOrEmpty(combined)) return false;
+        if (ClassicalCatalogueRegex().IsMatch(combined)) return true;
+
+        foreach (string kw in ClassicalRepertoireKeywords)
+        {
+            if (combined.Contains(kw, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool HasKnownClassicalComposer(HashSet<string> composerTokens)
+    {
+        foreach (string ct in composerTokens)
+        {
+            if (KnownClassicalComposers.Contains(ct))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool ShouldAllowComposerOnlyMatch(
+        LocalLibraryTrackRef track,
+        HashSet<string> performerTokens,
+        HashSet<string> composerTokens)
+    {
+        if (IsSoundtrackGenre(track.Genre)) return true;
+        if (!string.IsNullOrWhiteSpace(track.ConductorsDisplay)) return true;
+        if (HasEnsembleCredit(performerTokens)) return true;
+        if (HasClassicalRepertoireSignal(track.Title, track.WorkName, track.MovementName)) return true;
+        return HasKnownClassicalComposer(composerTokens);
+    }
+
     internal static int ScoreArtistMatch(HashSet<string> seedTokens, string seedFlat, IndexedTrack cand)
     {
         var effectiveSeedTokens = seedTokens.Where(t => !string.IsNullOrEmpty(t) && !PlaceholderArtists.Contains(t)).ToList();
@@ -831,6 +1197,7 @@ public static partial class PlaylistTrackMatcher
         if (nonPlaceholderCandTokens.Count == 0) return 0;
 
         int score = 0;
+        bool matchedPerformer = false;
         var seedMatchedSet = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (string st in effectiveSeedTokens)
@@ -839,19 +1206,35 @@ public static partial class PlaylistTrackMatcher
             {
                 score += 4;
                 seedMatchedSet.Add(st);
+                if (cand.PerformerCreditTokens.Contains(st))
+                {
+                    matchedPerformer = true;
+                }
                 continue;
             }
 
             int bestSingleTokenScore = 0;
+            bool tokenMatchedPerformer = false;
             foreach (string ct in nonPlaceholderCandTokens)
             {
+                int candScore = 0;
                 if (IsWholeWordContainment(st, ct) || IsInitialSurnameMatch(st, ct))
                 {
-                    bestSingleTokenScore = Math.Max(bestSingleTokenScore, 3);
+                    candScore = 3;
                 }
                 else if (bestSingleTokenScore < 2 && IsFuzzyArtistTokenMatch(st, ct))
                 {
-                    bestSingleTokenScore = 2;
+                    candScore = 2;
+                }
+
+                if (candScore > bestSingleTokenScore)
+                {
+                    bestSingleTokenScore = candScore;
+                    tokenMatchedPerformer = cand.PerformerCreditTokens.Contains(ct);
+                }
+                else if (candScore > 0 && candScore == bestSingleTokenScore && cand.PerformerCreditTokens.Contains(ct))
+                {
+                    tokenMatchedPerformer = true;
                 }
             }
 
@@ -859,6 +1242,10 @@ public static partial class PlaylistTrackMatcher
             {
                 score += bestSingleTokenScore;
                 seedMatchedSet.Add(st);
+                if (tokenMatchedPerformer)
+                {
+                    matchedPerformer = true;
+                }
             }
         }
 
@@ -867,6 +1254,11 @@ public static partial class PlaylistTrackMatcher
             && seedMatchedSet.Count == effectiveSeedTokens.Count
             && effectiveSeedTokens.Count == cand.PrimaryArtistTokens.Count
             && effectiveSeedTokens.All(st => cand.PrimaryArtistTokens.Contains(st)))
+        {
+            score += 1;
+        }
+
+        if (score > 0 && matchedPerformer)
         {
             score += 1;
         }
@@ -1253,6 +1645,17 @@ public static partial class PlaylistTrackMatcher
                             {
                                 localSim = Math.Max(localSim, 0.82);
                             }
+                            else if (!ContainsEastAsianScript(shorterStr)
+                                     && sIdx == 0
+                                     && variant.Tier >= 985
+                                     && shorterStr.Length >= 8
+                                     && shorterTokens.Length >= 2
+                                     && !IsGenericClassicalMovementLabel(shorterStr)
+                                     && (double)shorterStr.Length / longerStr.Length >= 0.45
+                                     && longerStr.EndsWith(" " + shorterStr, StringComparison.Ordinal))
+                            {
+                                localSim = Math.Max(localSim, 0.82);
+                            }
                         }
 
                         string shorterCompact = seedCompact.Length <= variant.Compact.Length ? seedCompact : variant.Compact;
@@ -1525,8 +1928,17 @@ public static partial class PlaylistTrackMatcher
     [GeneratedRegex(@"\b(?:sped\s+up|speed\s+up|slowed(?:\s*\+?\s*reverb)?|nightcore)\b")]
     private static partial Regex SpeedModQualifierRegex();
 
-    [GeneratedRegex(@"\b(?:live)\b")]
+    [GeneratedRegex(@"(?<![a-z])live(?![a-z])")]
     private static partial Regex LiveQualifierRegex();
+
+    [GeneratedRegex(@"(?:\bin\s+concert\b|\bunplugged\b)")]
+    private static partial Regex AlbumLiveExtraRegex();
+
+    [GeneratedRegex(@"\b(?:soundtrack|score|ost|film)\b")]
+    private static partial Regex SoundtrackGenreRegex();
+
+    [GeneratedRegex(@"\b(?:op|bwv|kv|hob|rv|woo|twv|hwv|sz|wwv)\.?\s*\d+")]
+    private static partial Regex ClassicalCatalogueRegex();
 
     [GeneratedRegex(@"[\(\[【]\s*[^\)\]】]*(?:deluxe|remaster(?:ed)?|expanded|special|anniversary|collector|bonus\s+track|standard|explicit|clean|edition|豪华版|精选辑|精选集|重制版|重置版|典藏版|纪念版|周年版)[^\)\]】]*[\)\]】]")]
     private static partial Regex AlbumEditionParenRegex();

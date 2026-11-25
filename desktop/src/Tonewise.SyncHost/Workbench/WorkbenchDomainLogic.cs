@@ -13,11 +13,43 @@ public sealed record FiveDimFilterQuery(
     string TempoBucket = "all",
     string MoodCluster = "all",
     string SortArc = "flat",
-    bool TempoNullPassthrough = true
+    bool TempoNullPassthrough = true,
+    IReadOnlyList<string>? Genres = null
 );
 
 public static class FiveDimQueryBuilder
 {
+    public static IReadOnlyList<string> NormalizeGenres(IReadOnlyList<string>? genres)
+    {
+        if (genres is null || genres.Count == 0)
+        {
+            return [];
+        }
+
+        var result = new List<string>(genres.Count);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string? raw in genres)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            string trimmed = raw.Trim();
+            if (string.Equals(trimmed, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (seen.Add(trimmed))
+            {
+                result.Add(trimmed);
+            }
+        }
+
+        return result;
+    }
+
     public static bool RequiresFilterOrSort(FiveDimFilterQuery query) =>
         query.Scene != "all"
         || query.Energy != "all"
@@ -25,12 +57,18 @@ public static class FiveDimQueryBuilder
         || query.ExcludeVocal
         || query.TempoBucket != "all"
         || query.MoodCluster != "all"
+        || NormalizeGenres(query.Genres).Count > 0
         || !string.Equals(query.SortArc, "flat", StringComparison.OrdinalIgnoreCase);
 
     public static string BuildSceneCardJson(FiveDimFilterQuery query)
     {
         var predicates = new List<object>();
 
+        var genres = NormalizeGenres(query.Genres);
+        if (genres.Count > 0)
+        {
+            predicates.Add(new { predicate = new { field = "genre", op = "in", values = genres } });
+        }
         if (!string.IsNullOrWhiteSpace(query.Scene) && query.Scene != "all")
         {
             predicates.Add(new { predicate = new { field = "dj_scene", op = "in", values = new[] { query.Scene } } });
@@ -75,6 +113,158 @@ public static class FiveDimQueryBuilder
             tempo_null_passthrough = query.TempoNullPassthrough,
             rule = ruleObj,
         });
+    }
+}
+
+public sealed record GenreFacetItem(string CanonicalName, int TrackCount);
+
+public static class GenreCanonicalizer
+{
+    private static readonly char[] SplitSeparators = [';', ',', '|', '、'];
+
+    private static readonly Lazy<IReadOnlyDictionary<string, string>> LazyAliases = new(() =>
+    {
+        var asm = typeof(GenreCanonicalizer).Assembly;
+        const string resourceName = "Tonewise.SyncHost.protocol.genre_aliases.json";
+        using Stream? stream = asm.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded genre dictionary resource '{resourceName}' not found.");
+        using var doc = JsonDocument.Parse(stream);
+
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (doc.RootElement.TryGetProperty("canonical_aliases", out var cObj) && cObj.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in cObj.EnumerateObject())
+            {
+                string key = prop.Name.Trim();
+                string? val = prop.Value.GetString()?.Trim();
+                if (!string.IsNullOrEmpty(key) && !string.IsNullOrEmpty(val))
+                {
+                    map[key] = val;
+                }
+            }
+        }
+        return map;
+    });
+
+    public static IReadOnlyDictionary<string, string> CanonicalAliases => LazyAliases.Value;
+
+    public static string NormalizeGenre(string? rawGenre)
+    {
+        if (string.IsNullOrWhiteSpace(rawGenre))
+        {
+            return "";
+        }
+
+        var map = LazyAliases.Value;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var tokens = new List<string>();
+        foreach (string part in rawGenre.Split(SplitSeparators, StringSplitOptions.RemoveEmptyEntries))
+        {
+            string trimmed = part.Trim();
+            if (trimmed.Length == 0)
+            {
+                continue;
+            }
+
+            string canonical = map.TryGetValue(trimmed, out string? mapped) ? mapped : trimmed;
+            if (seen.Add(canonical))
+            {
+                tokens.Add(canonical);
+            }
+        }
+
+        return string.Join("; ", tokens);
+    }
+}
+
+public static class GenreFacetHelper
+{
+    private static readonly char[] FacetSeparators = [';', ',', '|', '、'];
+
+    public static IReadOnlyList<GenreFacetItem> BuildFacets(IEnumerable<string?> rawGenres)
+    {
+        var variantsByKey = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string? raw in rawGenres)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            var seenInTrack = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string part in raw.Split(FacetSeparators, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string trimmed = part.Trim();
+                if (trimmed.Length == 0)
+                {
+                    continue;
+                }
+
+                string canonical = GenreCanonicalizer.NormalizeGenre(trimmed);
+                if (canonical.Length == 0 || !seenInTrack.Add(canonical))
+                {
+                    continue;
+                }
+
+                if (!variantsByKey.TryGetValue(canonical, out var variantCounts))
+                {
+                    variantCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+                    variantsByKey[canonical] = variantCounts;
+                }
+
+                variantCounts[canonical] = variantCounts.TryGetValue(canonical, out int existing) ? existing + 1 : 1;
+            }
+        }
+
+        var facets = new List<GenreFacetItem>(variantsByKey.Count);
+        foreach (var variantCounts in variantsByKey.Values)
+        {
+            int total = 0;
+            string? bestName = null;
+            int bestCount = -1;
+
+            foreach (var (variant, count) in variantCounts)
+            {
+                total += count;
+                if (count > bestCount
+                    || (count == bestCount && IsBetterVariant(variant, bestName!)))
+                {
+                    bestCount = count;
+                    bestName = variant;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(bestName))
+            {
+                facets.Add(new GenreFacetItem(bestName, total));
+            }
+        }
+
+        facets.Sort((a, b) =>
+        {
+            int cmp = b.TrackCount.CompareTo(a.TrackCount);
+            return cmp != 0 ? cmp : StringComparer.OrdinalIgnoreCase.Compare(a.CanonicalName, b.CanonicalName);
+        });
+        return facets;
+    }
+
+    public static string FormatGenreChipLabel(IReadOnlyList<string> selectedGenres) => selectedGenres.Count switch
+    {
+        0 => "流派",
+        1 => $"流派: {selectedGenres[0]}",
+        _ => $"流派: {selectedGenres[0]} +{selectedGenres.Count - 1}",
+    };
+
+    private static bool IsBetterVariant(string candidate, string current)
+    {
+        bool candUpper = char.IsUpper(candidate[0]);
+        bool currUpper = char.IsUpper(current[0]);
+        if (candUpper != currUpper)
+        {
+            return candUpper;
+        }
+        return StringComparer.Ordinal.Compare(candidate, current) < 0;
     }
 }
 
@@ -441,6 +631,28 @@ public static class ArtistEntitySplitter
 
     public static IReadOnlyList<string> Whitelist => LazyWhitelist.Value;
     private static AliasTable Aliases => LazyAliases.Value;
+
+    public static IReadOnlyList<IReadOnlyList<string>> GetCanonicalAliasGroups()
+    {
+        var grouped = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in Aliases.CanonicalAliases)
+        {
+            if (string.IsNullOrWhiteSpace(kv.Key) || string.IsNullOrWhiteSpace(kv.Value))
+            {
+                continue;
+            }
+            if (!grouped.TryGetValue(kv.Value, out var list))
+            {
+                list = [kv.Value];
+                grouped[kv.Value] = list;
+            }
+            if (!list.Contains(kv.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                list.Add(kv.Key);
+            }
+        }
+        return grouped.Values.Where(g => g.Count >= 2).Select(IReadOnlyList<string> (g) => g).ToList();
+    }
 
     public static string NormalizePunctuationAndWhitespace(string? raw)
     {

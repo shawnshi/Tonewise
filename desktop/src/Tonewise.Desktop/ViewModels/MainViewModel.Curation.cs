@@ -570,6 +570,7 @@ public sealed partial class MainViewModel
             || !string.Equals(FilterEnergy, "all", StringComparison.OrdinalIgnoreCase)
             || !string.Equals(FilterTempoBucket, "all", StringComparison.OrdinalIgnoreCase)
             || !string.Equals(FilterMoodCluster, "all", StringComparison.OrdinalIgnoreCase)
+            || _selectedGenres.Count > 0
             || ExcludeVocal
             || !string.Equals(SelectedEnergyArc, "flat", StringComparison.OrdinalIgnoreCase))
         {

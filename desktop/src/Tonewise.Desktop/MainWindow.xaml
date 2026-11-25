@@ -74,6 +74,17 @@
                 <Setter Property="FontSize" Value="12" />
                 <Setter Property="FontWeight" Value="SemiBold" />
             </Style>
+            <Style x:Key="FilterPillDropDownStyle" TargetType="DropDownButton">
+                <Setter Property="Background" Value="{ThemeResource TwBg1B2230Brush}" />
+                <Setter Property="Foreground" Value="{ThemeResource TwFgE2E8F0Brush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource TwLine2A3447Brush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="6" />
+                <Setter Property="Height" Value="30" />
+                <Setter Property="Padding" Value="10,0,8,0" />
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="VerticalAlignment" Value="Center" />
+            </Style>
             <Style x:Key="StudioCardStyle" TargetType="Border">
                 <Setter Property="Background" Value="{ThemeResource TwBg141923Brush}" />
                 <Setter Property="BorderBrush" Value="{ThemeResource TwLine242E42Brush}" />
@@ -596,57 +607,149 @@
 
                             <!-- Rule Studio SubTab -->
                             <StackPanel Spacing="8" Visibility="{x:Bind ViewModel.IsScenesStudioSubTab, Mode=OneWay}">
-                                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Padding="0,0,0,8">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <ComboBox Width="126" Header="场景域" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterScene, Mode=TwoWay}" SelectedValuePath="Tag">
-                                            <ComboBoxItem Content="全部场景" Tag="all" />
-                                            <ComboBoxItem Content="专注" Tag="focus" />
-                                            <ComboBoxItem Content="编程" Tag="coding" />
-                                            <ComboBoxItem Content="放松" Tag="relax" />
-                                            <ComboBoxItem Content="活力" Tag="energy" />
-                                            <ComboBoxItem Content="流行" Tag="pop" />
-                                        </ComboBox>
-                                        <ComboBox Width="116" Header="能量等级" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterEnergy, Mode=TwoWay}" SelectedValuePath="Tag">
-                                            <ComboBoxItem Content="全部能量" Tag="all" />
-                                            <ComboBoxItem Content="低" Tag="low" />
-                                            <ComboBoxItem Content="中" Tag="medium" />
-                                            <ComboBoxItem Content="高" Tag="high" />
-                                        </ComboBox>
-                                        <ComboBox Width="128" Header="人声门控" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterVocals, Mode=TwoWay}" SelectedValuePath="Tag">
-                                            <ComboBoxItem Content="全部人声" Tag="all" />
-                                            <ComboBoxItem Content="纯器乐" Tag="instrumental" />
-                                            <ComboBoxItem Content="含人声" Tag="vocal" />
-                                            <ComboBoxItem Content="未知" Tag="unknown" />
-                                        </ComboBox>
-                                        <ComboBox Width="124" Header="节奏分档" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterTempoBucket, Mode=TwoWay}" SelectedValuePath="Tag">
-                                            <ComboBoxItem Content="全部节奏" Tag="all" />
-                                            <ComboBoxItem Content="Very Slow" Tag="Very Slow" />
-                                            <ComboBoxItem Content="Slow" Tag="Slow" />
-                                            <ComboBoxItem Content="Moderate" Tag="Moderate" />
-                                            <ComboBoxItem Content="Fast" Tag="Fast" />
-                                            <ComboBoxItem Content="Very Fast" Tag="Very Fast" />
-                                        </ComboBox>
-                                        <ComboBox Width="140" Header="情绪簇" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterMoodCluster, Mode=TwoWay}" SelectedValuePath="Tag">
-                                            <ComboBoxItem Content="全部情绪" Tag="all" />
-                                            <ComboBoxItem Content="平静舒缓" Tag="calm_relaxed" />
-                                            <ComboBoxItem Content="温暖浪漫" Tag="warm_romantic" />
-                                            <ComboBoxItem Content="沉思专注" Tag="focus_deep" />
-                                            <ComboBoxItem Content="明快振奋" Tag="bright_energetic" />
-                                            <ComboBoxItem Content="忧郁深沉" Tag="melancholic_dark" />
-                                        </ComboBox>
-                                        <CheckBox
-                                            Content="排除人声"
-                                            IsChecked="{x:Bind ViewModel.ExcludeVocal, Mode=TwoWay}"
-                                            VerticalAlignment="Bottom"
-                                            Margin="2,0,4,3"
+                                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                            <DropDownButton.Content>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsGenreFilterActive, Mode=OneWay}" />
+                                                    <TextBlock Text="{x:Bind ViewModel.GenreFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsGenreFilterActive), Mode=OneWay}" />
+                                                </StackPanel>
+                                            </DropDownButton.Content>
+                                            <DropDownButton.Flyout>
+                                                <Flyout Placement="BottomEdgeAlignedLeft" Opening="OnGenreFilterFlyoutOpening">
+                                                    <Flyout.FlyoutPresenterStyle>
+                                                        <Style TargetType="FlyoutPresenter">
+                                                            <Setter Property="Background" Value="{ThemeResource TwBg151B26Brush}" />
+                                                            <Setter Property="BorderBrush" Value="{ThemeResource TwLine55D9B372Brush}" />
+                                                            <Setter Property="BorderThickness" Value="1" />
+                                                            <Setter Property="Padding" Value="12" />
+                                                        </Style>
+                                                    </Flyout.FlyoutPresenterStyle>
+                                                </Flyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+
+                                        <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                            <DropDownButton.Content>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsSceneFilterActive, Mode=OneWay}" />
+                                                    <TextBlock Text="{x:Bind ViewModel.SceneFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsSceneFilterActive), Mode=OneWay}" />
+                                                </StackPanel>
+                                            </DropDownButton.Content>
+                                            <DropDownButton.Flyout>
+                                                <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnSceneMenuFlyoutOpening">
+                                                    <RadioMenuFlyoutItem GroupName="StudioSceneFilter" Text="全部场景" Tag="all" Click="OnSceneFilterItemClick" />
+                                                    <MenuFlyoutSeparator />
+                                                    <RadioMenuFlyoutItem GroupName="StudioSceneFilter" Text="专注" Tag="focus" Click="OnSceneFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioSceneFilter" Text="编程" Tag="coding" Click="OnSceneFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioSceneFilter" Text="放松" Tag="relax" Click="OnSceneFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioSceneFilter" Text="活力" Tag="energy" Click="OnSceneFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioSceneFilter" Text="流行" Tag="pop" Click="OnSceneFilterItemClick" />
+                                                </MenuFlyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+
+                                        <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                            <DropDownButton.Content>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsEnergyFilterActive, Mode=OneWay}" />
+                                                    <TextBlock Text="{x:Bind ViewModel.EnergyFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsEnergyFilterActive), Mode=OneWay}" />
+                                                </StackPanel>
+                                            </DropDownButton.Content>
+                                            <DropDownButton.Flyout>
+                                                <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnEnergyMenuFlyoutOpening">
+                                                    <RadioMenuFlyoutItem GroupName="StudioEnergyFilter" Text="全部能量" Tag="all" Click="OnEnergyFilterItemClick" />
+                                                    <MenuFlyoutSeparator />
+                                                    <RadioMenuFlyoutItem GroupName="StudioEnergyFilter" Text="低" Tag="low" Click="OnEnergyFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioEnergyFilter" Text="中" Tag="medium" Click="OnEnergyFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioEnergyFilter" Text="高" Tag="high" Click="OnEnergyFilterItemClick" />
+                                                </MenuFlyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+
+                                        <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                            <DropDownButton.Content>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsVocalsFilterActive, Mode=OneWay}" />
+                                                    <TextBlock Text="{x:Bind ViewModel.VocalsFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsVocalsFilterActive), Mode=OneWay}" />
+                                                </StackPanel>
+                                            </DropDownButton.Content>
+                                            <DropDownButton.Flyout>
+                                                <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnVocalsMenuFlyoutOpening">
+                                                    <RadioMenuFlyoutItem GroupName="StudioVocalsFilter" Text="全部人声" Tag="all" Click="OnVocalsFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioVocalsFilter" Text="排除人声 (非Vocal)" Tag="exclude_vocal" Click="OnVocalsFilterItemClick" />
+                                                    <MenuFlyoutSeparator />
+                                                    <RadioMenuFlyoutItem GroupName="StudioVocalsFilter" Text="纯器乐" Tag="instrumental" Click="OnVocalsFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioVocalsFilter" Text="含人声" Tag="vocal" Click="OnVocalsFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioVocalsFilter" Text="未知" Tag="unknown" Click="OnVocalsFilterItemClick" />
+                                                </MenuFlyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+
+                                        <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                            <DropDownButton.Content>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsTempoFilterActive, Mode=OneWay}" />
+                                                    <TextBlock Text="{x:Bind ViewModel.TempoFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsTempoFilterActive), Mode=OneWay}" />
+                                                </StackPanel>
+                                            </DropDownButton.Content>
+                                            <DropDownButton.Flyout>
+                                                <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnTempoMenuFlyoutOpening">
+                                                    <RadioMenuFlyoutItem GroupName="StudioTempoFilter" Text="全部节奏" Tag="all" Click="OnTempoFilterItemClick" />
+                                                    <MenuFlyoutSeparator />
+                                                    <RadioMenuFlyoutItem GroupName="StudioTempoFilter" Text="Very Slow" Tag="Very Slow" Click="OnTempoFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioTempoFilter" Text="Slow" Tag="Slow" Click="OnTempoFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioTempoFilter" Text="Moderate" Tag="Moderate" Click="OnTempoFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioTempoFilter" Text="Fast" Tag="Fast" Click="OnTempoFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioTempoFilter" Text="Very Fast" Tag="Very Fast" Click="OnTempoFilterItemClick" />
+                                                </MenuFlyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+
+                                        <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                            <DropDownButton.Content>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsMoodFilterActive, Mode=OneWay}" />
+                                                    <TextBlock Text="{x:Bind ViewModel.MoodFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsMoodFilterActive), Mode=OneWay}" />
+                                                </StackPanel>
+                                            </DropDownButton.Content>
+                                            <DropDownButton.Flyout>
+                                                <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnMoodMenuFlyoutOpening">
+                                                    <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="全部情绪" Tag="all" Click="OnMoodFilterItemClick" />
+                                                    <MenuFlyoutSeparator />
+                                                    <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="平静舒缓" Tag="calm_relaxed" Click="OnMoodFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="温暖浪漫" Tag="warm_romantic" Click="OnMoodFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="沉思专注" Tag="focus_deep" Click="OnMoodFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="明快振奋" Tag="bright_energetic" Click="OnMoodFilterItemClick" />
+                                                    <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="忧郁深沉" Tag="melancholic_dark" Click="OnMoodFilterItemClick" />
+                                                </MenuFlyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+
+                                        <ToggleButton
+                                            Height="30"
+                                            Padding="10,0"
+                                            CornerRadius="6"
                                             FontSize="12"
-                                            Foreground="{ThemeResource TwFgD9B372Brush}" />
-                                        <ToggleSwitch
-                                            Header="Tempo 未知透传"
-                                            IsOn="{x:Bind ViewModel.ScenesTempoNullPassthrough, Mode=TwoWay}"
-                                            OnContent="透传"
-                                            OffContent="严格"
-                                            FontSize="12" />
+                                            VerticalAlignment="Center"
+                                            IsChecked="{x:Bind ViewModel.ScenesTempoNullPassthrough, Mode=TwoWay}"
+                                            Content="{x:Bind ViewModel.TempoPassthroughChipLabel, Mode=OneWay}"
+                                            ToolTipService.ToolTip="开启时允许缺少 Tempo 标签的曲目通过节奏筛选；关闭时严格要求 Tempo 非空" />
+
+                                        <Button
+                                            Style="{StaticResource StudioChipButtonStyle}"
+                                            Height="30"
+                                            Padding="9,0"
+                                            VerticalAlignment="Center"
+                                            Visibility="{x:Bind ViewModel.HasAnyActiveStripFilter, Mode=OneWay}"
+                                            Command="{x:Bind ViewModel.ResetAllFiltersCommand}"
+                                            ToolTipService.ToolTip="清空全部筛选条件">
+                                            <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                                                <FontIcon Glyph="&#xE711;" FontSize="11" />
+                                                <TextBlock Text="清空" FontSize="12" />
+                                            </StackPanel>
+                                        </Button>
                                     </StackPanel>
                                 </ScrollViewer>
                                 <Border Background="{ThemeResource TwBg141923Brush}" BorderBrush="{ThemeResource TwLine242E42Brush}" BorderThickness="1" CornerRadius="6" Padding="10,7">
@@ -711,63 +814,163 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- 3) Five-Dim Focus Filter Strip (Collapsible Drawer in Library Tracks, Always Visible in Scenes Presets) -->
+                    <!-- 3) Five-Dim + Genre Compact Filter Pill Strip (Collapsible Drawer in Library Tracks, Always Visible in Scenes Presets) -->
                     <Border
                         Style="{StaticResource StudioCardStyle}"
-                        Padding="10,8"
+                        Padding="8,5"
                         Visibility="{x:Bind ViewModel.IsFilterDrawerOpen, Mode=OneWay}">
                         <StackPanel Spacing="6">
                             <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <ComboBox Width="132" Header="场景" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterScene, Mode=TwoWay}" SelectedValuePath="Tag">
-                                        <ComboBoxItem Content="全部场景" Tag="all" />
-                                        <ComboBoxItem Content="专注" Tag="focus" />
-                                        <ComboBoxItem Content="编程" Tag="coding" />
-                                        <ComboBoxItem Content="放松" Tag="relax" />
-                                        <ComboBoxItem Content="活力" Tag="energy" />
-                                        <ComboBoxItem Content="流行" Tag="pop" />
-                                    </ComboBox>
-                                    <ComboBox Width="122" Header="能量" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterEnergy, Mode=TwoWay}" SelectedValuePath="Tag">
-                                        <ComboBoxItem Content="全部能量" Tag="all" />
-                                        <ComboBoxItem Content="低" Tag="low" />
-                                        <ComboBoxItem Content="中" Tag="medium" />
-                                        <ComboBoxItem Content="高" Tag="high" />
-                                    </ComboBox>
-                                    <ComboBox Width="136" Header="人声" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterVocals, Mode=TwoWay}" SelectedValuePath="Tag">
-                                        <ComboBoxItem Content="全部人声" Tag="all" />
-                                        <ComboBoxItem Content="纯器乐" Tag="instrumental" />
-                                        <ComboBoxItem Content="含人声" Tag="vocal" />
-                                        <ComboBoxItem Content="未知" Tag="unknown" />
-                                    </ComboBox>
-                                    <CheckBox
-                                        Content="排除人声"
-                                        IsChecked="{x:Bind ViewModel.ExcludeVocal, Mode=TwoWay}"
-                                        VerticalAlignment="Bottom"
-                                        Margin="2,0,4,3"
-                                        FontSize="12"
-                                        Foreground="{ThemeResource TwFgD9B372Brush}" />
-                                    <ComboBox Width="128" Header="节奏" SelectedValue="{x:Bind ViewModel.FilterTempoBucket, Mode=TwoWay}" SelectedValuePath="Tag">
-                                        <ComboBoxItem Content="全部节奏" Tag="all" />
-                                        <ComboBoxItem Content="Very Slow" Tag="Very Slow" />
-                                        <ComboBoxItem Content="Slow" Tag="Slow" />
-                                        <ComboBoxItem Content="Moderate" Tag="Moderate" />
-                                        <ComboBoxItem Content="Fast" Tag="Fast" />
-                                        <ComboBoxItem Content="Very Fast" Tag="Very Fast" />
-                                    </ComboBox>
-                                    <ComboBox Width="152" Header="情绪" FontSize="12" SelectedValue="{x:Bind ViewModel.FilterMoodCluster, Mode=TwoWay}" SelectedValuePath="Tag">
-                                        <ComboBoxItem Content="全部情绪" Tag="all" />
-                                        <ComboBoxItem Content="平静舒缓" Tag="calm_relaxed" />
-                                        <ComboBoxItem Content="温暖浪漫" Tag="warm_romantic" />
-                                        <ComboBoxItem Content="沉思专注" Tag="focus_deep" />
-                                        <ComboBoxItem Content="明快振奋" Tag="bright_energetic" />
-                                        <ComboBoxItem Content="忧郁深沉" Tag="melancholic_dark" />
-                                    </ComboBox>
-                                    <ComboBox Width="152" Header="能量曲线" FontSize="12" SelectedValue="{x:Bind ViewModel.SelectedEnergyArc, Mode=TwoWay}" SelectedValuePath="Tag">
-                                        <ComboBoxItem Content="默认顺序" Tag="flat" />
-                                        <ComboBoxItem Content="能量渐强" Tag="energy_asc" />
-                                        <ComboBoxItem Content="助眠渐弱" Tag="energy_desc_sleep" />
-                                        <ComboBoxItem Content="90天未听优先" Tag="rediscovery_90d" />
-                                    </ComboBox>
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                        <DropDownButton.Content>
+                                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsGenreFilterActive, Mode=OneWay}" />
+                                                <TextBlock Text="{x:Bind ViewModel.GenreFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsGenreFilterActive), Mode=OneWay}" />
+                                            </StackPanel>
+                                        </DropDownButton.Content>
+                                        <DropDownButton.Flyout>
+                                            <Flyout Placement="BottomEdgeAlignedLeft" Opening="OnGenreFilterFlyoutOpening">
+                                                <Flyout.FlyoutPresenterStyle>
+                                                    <Style TargetType="FlyoutPresenter">
+                                                        <Setter Property="Background" Value="{ThemeResource TwBg151B26Brush}" />
+                                                        <Setter Property="BorderBrush" Value="{ThemeResource TwLine55D9B372Brush}" />
+                                                        <Setter Property="BorderThickness" Value="1" />
+                                                        <Setter Property="Padding" Value="12" />
+                                                    </Style>
+                                                </Flyout.FlyoutPresenterStyle>
+                                            </Flyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+
+                                    <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                        <DropDownButton.Content>
+                                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsSceneFilterActive, Mode=OneWay}" />
+                                                <TextBlock Text="{x:Bind ViewModel.SceneFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsSceneFilterActive), Mode=OneWay}" />
+                                            </StackPanel>
+                                        </DropDownButton.Content>
+                                        <DropDownButton.Flyout>
+                                            <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnSceneMenuFlyoutOpening">
+                                                <RadioMenuFlyoutItem GroupName="DrawerSceneFilter" Text="全部场景" Tag="all" Click="OnSceneFilterItemClick" />
+                                                <MenuFlyoutSeparator />
+                                                <RadioMenuFlyoutItem GroupName="DrawerSceneFilter" Text="专注" Tag="focus" Click="OnSceneFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerSceneFilter" Text="编程" Tag="coding" Click="OnSceneFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerSceneFilter" Text="放松" Tag="relax" Click="OnSceneFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerSceneFilter" Text="活力" Tag="energy" Click="OnSceneFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerSceneFilter" Text="流行" Tag="pop" Click="OnSceneFilterItemClick" />
+                                            </MenuFlyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+
+                                    <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                        <DropDownButton.Content>
+                                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsEnergyFilterActive, Mode=OneWay}" />
+                                                <TextBlock Text="{x:Bind ViewModel.EnergyFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsEnergyFilterActive), Mode=OneWay}" />
+                                            </StackPanel>
+                                        </DropDownButton.Content>
+                                        <DropDownButton.Flyout>
+                                            <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnEnergyMenuFlyoutOpening">
+                                                <RadioMenuFlyoutItem GroupName="DrawerEnergyFilter" Text="全部能量" Tag="all" Click="OnEnergyFilterItemClick" />
+                                                <MenuFlyoutSeparator />
+                                                <RadioMenuFlyoutItem GroupName="DrawerEnergyFilter" Text="低" Tag="low" Click="OnEnergyFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerEnergyFilter" Text="中" Tag="medium" Click="OnEnergyFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerEnergyFilter" Text="高" Tag="high" Click="OnEnergyFilterItemClick" />
+                                            </MenuFlyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+
+                                    <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                        <DropDownButton.Content>
+                                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsVocalsFilterActive, Mode=OneWay}" />
+                                                <TextBlock Text="{x:Bind ViewModel.VocalsFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsVocalsFilterActive), Mode=OneWay}" />
+                                            </StackPanel>
+                                        </DropDownButton.Content>
+                                        <DropDownButton.Flyout>
+                                            <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnVocalsMenuFlyoutOpening">
+                                                <RadioMenuFlyoutItem GroupName="DrawerVocalsFilter" Text="全部人声" Tag="all" Click="OnVocalsFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerVocalsFilter" Text="排除人声 (非Vocal)" Tag="exclude_vocal" Click="OnVocalsFilterItemClick" />
+                                                <MenuFlyoutSeparator />
+                                                <RadioMenuFlyoutItem GroupName="DrawerVocalsFilter" Text="纯器乐" Tag="instrumental" Click="OnVocalsFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerVocalsFilter" Text="含人声" Tag="vocal" Click="OnVocalsFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerVocalsFilter" Text="未知" Tag="unknown" Click="OnVocalsFilterItemClick" />
+                                            </MenuFlyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+
+                                    <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                        <DropDownButton.Content>
+                                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsTempoFilterActive, Mode=OneWay}" />
+                                                <TextBlock Text="{x:Bind ViewModel.TempoFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsTempoFilterActive), Mode=OneWay}" />
+                                            </StackPanel>
+                                        </DropDownButton.Content>
+                                        <DropDownButton.Flyout>
+                                            <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnTempoMenuFlyoutOpening">
+                                                <RadioMenuFlyoutItem GroupName="DrawerTempoFilter" Text="全部节奏" Tag="all" Click="OnTempoFilterItemClick" />
+                                                <MenuFlyoutSeparator />
+                                                <RadioMenuFlyoutItem GroupName="DrawerTempoFilter" Text="Very Slow" Tag="Very Slow" Click="OnTempoFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerTempoFilter" Text="Slow" Tag="Slow" Click="OnTempoFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerTempoFilter" Text="Moderate" Tag="Moderate" Click="OnTempoFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerTempoFilter" Text="Fast" Tag="Fast" Click="OnTempoFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerTempoFilter" Text="Very Fast" Tag="Very Fast" Click="OnTempoFilterItemClick" />
+                                            </MenuFlyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+
+                                    <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                        <DropDownButton.Content>
+                                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsMoodFilterActive, Mode=OneWay}" />
+                                                <TextBlock Text="{x:Bind ViewModel.MoodFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsMoodFilterActive), Mode=OneWay}" />
+                                            </StackPanel>
+                                        </DropDownButton.Content>
+                                        <DropDownButton.Flyout>
+                                            <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnMoodMenuFlyoutOpening">
+                                                <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="全部情绪" Tag="all" Click="OnMoodFilterItemClick" />
+                                                <MenuFlyoutSeparator />
+                                                <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="平静舒缓" Tag="calm_relaxed" Click="OnMoodFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="温暖浪漫" Tag="warm_romantic" Click="OnMoodFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="沉思专注" Tag="focus_deep" Click="OnMoodFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="明快振奋" Tag="bright_energetic" Click="OnMoodFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="忧郁深沉" Tag="melancholic_dark" Click="OnMoodFilterItemClick" />
+                                            </MenuFlyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+
+                                    <DropDownButton Style="{StaticResource FilterPillDropDownStyle}">
+                                        <DropDownButton.Content>
+                                            <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <Ellipse Width="6" Height="6" Fill="{ThemeResource TwFgD9B372Brush}" Visibility="{x:Bind ViewModel.IsArcFilterActive, Mode=OneWay}" />
+                                                <TextBlock Text="{x:Bind ViewModel.ArcFilterChipLabel, Mode=OneWay}" FontWeight="{x:Bind FilterChipFontWeight(ViewModel.IsArcFilterActive), Mode=OneWay}" />
+                                            </StackPanel>
+                                        </DropDownButton.Content>
+                                        <DropDownButton.Flyout>
+                                            <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnArcMenuFlyoutOpening">
+                                                <RadioMenuFlyoutItem GroupName="DrawerArcFilter" Text="默认顺序" Tag="flat" Click="OnArcFilterItemClick" />
+                                                <MenuFlyoutSeparator />
+                                                <RadioMenuFlyoutItem GroupName="DrawerArcFilter" Text="能量渐强" Tag="energy_asc" Click="OnArcFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerArcFilter" Text="助眠渐弱" Tag="energy_desc_sleep" Click="OnArcFilterItemClick" />
+                                                <RadioMenuFlyoutItem GroupName="DrawerArcFilter" Text="90天未听优先" Tag="rediscovery_90d" Click="OnArcFilterItemClick" />
+                                            </MenuFlyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+
+                                    <Button
+                                        Style="{StaticResource StudioChipButtonStyle}"
+                                        Height="30"
+                                        Padding="9,0"
+                                        VerticalAlignment="Center"
+                                        Visibility="{x:Bind ViewModel.HasAnyActiveStripFilter, Mode=OneWay}"
+                                        Command="{x:Bind ViewModel.ResetAllFiltersCommand}"
+                                        ToolTipService.ToolTip="清空全部筛选条件">
+                                        <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                                            <FontIcon Glyph="&#xE711;" FontSize="11" />
+                                            <TextBlock Text="清空" FontSize="12" />
+                                        </StackPanel>
+                                    </Button>
                                 </StackPanel>
                             </ScrollViewer>
 

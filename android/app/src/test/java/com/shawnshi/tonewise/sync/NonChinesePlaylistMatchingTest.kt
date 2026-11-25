@@ -240,4 +240,105 @@ class NonChinesePlaylistMatchingTest {
         )
         assertNull(matcher.match("Allegro non troppo", "Tchaikovsky"))
     }
+
+    @Test
+    fun `matches soundtrack albumArtist, shinjitai aliases, merged canonical json, collectives, and guards P2 covers`() {
+        val lib =
+            listOf(
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "tsfh_victory",
+                    title = "Victory",
+                    artists = listOf("Thomas Bergersen"),
+                    album = "Battlecry",
+                    albumArtists = listOf("Two Steps From Hell"),
+                    genres = listOf("Soundtrack"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "jh_summer",
+                    title = "Summer",
+                    artists = listOf("久石譲"),
+                    album = "菊次郎の夏",
+                    albumArtists = listOf("久石譲"),
+                    genres = listOf("Soundtrack"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "jp_wada",
+                    title = "想いの果てにⅡ",
+                    artists = listOf("和田薫"),
+                    album = "犬夜叉: 音楽篇",
+                    genres = listOf("Soundtrack"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "su_yumeji",
+                    title = "Yumeji’s Theme / Li‐zhen’s Dialogue",
+                    artists = listOf("梅林茂"),
+                    album = "In the Mood for Love",
+                    albumArtists = listOf("Various Artists"),
+                    genres = listOf("Soundtrack"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "imm_romeo",
+                    title = "Tales of the Electric Romeo",
+                    artists = listOf("Immediate Music"),
+                    album = "Trailerhead: Triumph",
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "arm_khach",
+                    title = "Sabre Dance",
+                    artists = listOf("Արամ Խաչատրյան"),
+                    album = "Gayane",
+                    genres = listOf("Classical"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "piano_java",
+                    title = "La Javanaise",
+                    artists = listOf("Khatia Buniatishvili"),
+                    album = "Labyrinth",
+                    composers = listOf("Serge Gainsbourg"),
+                    workName = "La Javanaise",
+                    genres = listOf("Classical"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "cls_elgar",
+                    title = "Cello Concerto in E minor, Op. 85: I. Adagio",
+                    artists = listOf("Jacqueline du Pré"),
+                    composers = listOf("Edward Elgar"),
+                    genres = listOf("Classical"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "faye_live",
+                    title = "我願意",
+                    artists = listOf("王菲"),
+                    album = "菲比尋常Live!",
+                    genres = listOf("Pop"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "faye_studio",
+                    title = "我愿意",
+                    artists = listOf("王菲"),
+                    album = "迷",
+                    genres = listOf("Pop"),
+                ),
+                AndroidPlaylistTrackMatcher.TrackRef(
+                    uid = "solo_goren",
+                    title = "Yoav Solo Cue",
+                    artists = listOf("Yoav Goren"),
+                    album = "Solo",
+                    genres = listOf("Soundtrack"),
+                ),
+            )
+
+        val matcher = AndroidPlaylistTrackMatcher(lib) { it }
+
+        assertEquals("tsfh_victory", matcher.match("Victory", "Two Steps From Hell")?.uid)
+        assertEquals("jh_summer", matcher.match("Summer", "Joe Hisaishi")?.uid)
+        assertEquals("jp_wada", matcher.match("想いの果てにⅡ", "和田薰")?.uid)
+        assertEquals("su_yumeji", matcher.match("Yumeji's Theme", "Shigeru Umebayashi")?.uid)
+        assertEquals("imm_romeo", matcher.match("Electric Romeo", "Immediate Music")?.uid)
+        assertEquals("arm_khach", matcher.match("Sabre Dance", "Aram Khachaturian")?.uid)
+        assertNull(matcher.match("La Javanaise", "Serge Gainsbourg"))
+        assertEquals("cls_elgar", matcher.match("Cello Concerto in E minor, Op. 85: I. Adagio", "Edward Elgar")?.uid)
+        assertEquals("faye_studio", matcher.match("我愿意", "王菲")?.uid)
+        assertNull(matcher.match("Yoav Solo Cue", "Jeffrey Fayman"))
+    }
 }

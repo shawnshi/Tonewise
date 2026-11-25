@@ -349,7 +349,7 @@ public sealed class CurationEngineP2Tests
             Assert.False(updates.ContainsKey("artists_json")); // Fill-Missing Only preserves non-empty Artists
             Assert.Equal("昨夜之灯", updates["album"]);
             Assert.Equal("1983", updates["year"]);
-            Assert.Equal("流行", updates["genre"]);
+            Assert.Equal("Pop", updates["genre"]);
             Assert.Equal("海山唱片股份有限公司", updates["publisher"]);
 
             var enc = new EncyclopediaService(bioDbPath);

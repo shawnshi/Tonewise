@@ -137,7 +137,158 @@ public sealed partial class MainViewModel
         {
             _suppressFilterRefresh = false;
         }
+        UpdateFilterChipLabels();
         ApplyFiveDimFilter();
+    }
+
+    public IReadOnlyList<string> SelectedGenres => _selectedGenres;
+
+    public IReadOnlyList<GenreFacetItem> GetAvailableGenreFacets() =>
+        GenreFacetHelper.BuildFacets(_allTracks.Select(t => t.Genre));
+
+    public bool IsGenreSelected(string? genre) =>
+        !string.IsNullOrWhiteSpace(genre)
+        && _selectedGenres.Any(g => string.Equals(g, genre.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    public void ToggleGenreFilter(string genre)
+    {
+        if (string.IsNullOrWhiteSpace(genre)) return;
+        string clean = genre.Trim();
+        int idx = _selectedGenres.FindIndex(g => string.Equals(g, clean, StringComparison.OrdinalIgnoreCase));
+        if (idx >= 0)
+        {
+            _selectedGenres.RemoveAt(idx);
+        }
+        else
+        {
+            _selectedGenres.Add(clean);
+        }
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+
+    public void SelectSingleGenreFilter(string genre)
+    {
+        if (string.IsNullOrWhiteSpace(genre)) return;
+        string clean = genre.Trim();
+        _selectedGenres.Clear();
+        _selectedGenres.Add(clean);
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+
+    public void ClearGenreFilters()
+    {
+        if (_selectedGenres.Count == 0) return;
+        _selectedGenres.Clear();
+        UpdateFilterChipLabels();
+        TriggerFilterRefresh();
+    }
+
+    public string CurrentVocalsOptionTag => ExcludeVocal ? "exclude_vocal" : FilterVocals;
+
+    public void SetVocalsFilterOption(string? optionTag)
+    {
+        RunBatchFilterUpdate(() =>
+        {
+            switch (optionTag?.Trim().ToLowerInvariant())
+            {
+                case "exclude_vocal":
+                    ExcludeVocal = true;
+                    FilterVocals = "all";
+                    break;
+                case "instrumental":
+                    ExcludeVocal = false;
+                    FilterVocals = "instrumental";
+                    break;
+                case "vocal":
+                    ExcludeVocal = false;
+                    FilterVocals = "vocal";
+                    break;
+                case "unknown":
+                    ExcludeVocal = false;
+                    FilterVocals = "unknown";
+                    break;
+                default:
+                    ExcludeVocal = false;
+                    FilterVocals = "all";
+                    break;
+            }
+        });
+    }
+
+    private void UpdateFilterChipLabels()
+    {
+        GenreFilterChipLabel = GenreFacetHelper.FormatGenreChipLabel(_selectedGenres);
+        IsGenreFilterActive = _selectedGenres.Count > 0;
+
+        SceneFilterChipLabel = FilterScene switch
+        {
+            "focus" => "场景: 专注",
+            "coding" => "场景: 编程",
+            "relax" => "场景: 放松",
+            "energy" => "场景: 活力",
+            "pop" => "场景: 流行",
+            _ => "场景",
+        };
+        IsSceneFilterActive = !string.Equals(FilterScene, "all", StringComparison.OrdinalIgnoreCase);
+
+        EnergyFilterChipLabel = FilterEnergy switch
+        {
+            "low" => "能量: 低",
+            "medium" => "能量: 中",
+            "high" => "能量: 高",
+            _ => "能量",
+        };
+        IsEnergyFilterActive = !string.Equals(FilterEnergy, "all", StringComparison.OrdinalIgnoreCase);
+
+        VocalsFilterChipLabel = ExcludeVocal
+            ? "人声: 排除人声"
+            : FilterVocals switch
+            {
+                "instrumental" => "人声: 纯器乐",
+                "vocal" => "人声: 含人声",
+                "unknown" => "人声: 未知",
+                _ => "人声",
+            };
+        IsVocalsFilterActive = ExcludeVocal || !string.Equals(FilterVocals, "all", StringComparison.OrdinalIgnoreCase);
+
+        TempoFilterChipLabel = string.Equals(FilterTempoBucket, "all", StringComparison.OrdinalIgnoreCase)
+            ? "节奏"
+            : $"节奏: {FilterTempoBucket}";
+        IsTempoFilterActive = !string.Equals(FilterTempoBucket, "all", StringComparison.OrdinalIgnoreCase);
+
+        MoodFilterChipLabel = FilterMoodCluster switch
+        {
+            "calm_relaxed" => "情绪: 平静舒缓",
+            "warm_romantic" => "情绪: 温暖浪漫",
+            "focus_deep" => "情绪: 沉思专注",
+            "bright_energetic" => "情绪: 明快振奋",
+            "melancholic_dark" => "情绪: 忧郁深沉",
+            _ => "情绪",
+        };
+        IsMoodFilterActive = !string.Equals(FilterMoodCluster, "all", StringComparison.OrdinalIgnoreCase);
+
+        ArcFilterChipLabel = SelectedEnergyArc switch
+        {
+            "energy_asc" => "曲线: 能量渐强",
+            "energy_desc_sleep" => "曲线: 助眠渐弱",
+            "rediscovery_90d" => "曲线: 90天未听",
+            _ => "曲线",
+        };
+        IsArcFilterActive = !string.Equals(SelectedEnergyArc, "flat", StringComparison.OrdinalIgnoreCase);
+
+        TempoPassthroughChipLabel = ScenesTempoNullPassthrough ? "空Tempo: 透传" : "空Tempo: 严格";
+
+        HasAnyActiveStripFilter =
+            IsGenreFilterActive
+            || IsSceneFilterActive
+            || IsEnergyFilterActive
+            || IsVocalsFilterActive
+            || IsTempoFilterActive
+            || IsMoodFilterActive
+            || IsArcFilterActive
+            || !ScenesTempoNullPassthrough;
     }
 
     [RelayCommand]
@@ -146,6 +297,7 @@ public sealed partial class MainViewModel
         RunBatchFilterUpdate(() =>
         {
             LibraryNavMode = "all";
+            _selectedGenres.Clear();
             FilterScene = "all";
             FilterEnergy = "all";
             FilterVocals = "all";
@@ -153,6 +305,7 @@ public sealed partial class MainViewModel
             FilterTempoBucket = "all";
             FilterMoodCluster = "all";
             SelectedEnergyArc = "flat";
+            ScenesTempoNullPassthrough = true;
             SearchQuery = "";
             SearchBoxText = "";
         });
@@ -864,6 +1017,7 @@ public sealed partial class MainViewModel
         RunBatchFilterUpdate(() =>
         {
             LibraryNavMode = "all";
+            _selectedGenres.Clear();
             FilterScene = "focus";
             ExcludeVocal = true;
             FilterVocals = "all";
@@ -887,6 +1041,7 @@ public sealed partial class MainViewModel
         RunBatchFilterUpdate(() =>
         {
             LibraryNavMode = "all";
+            _selectedGenres.Clear();
             FilterScene = "relax";
             ExcludeVocal = false;
             FilterVocals = "vocal";
@@ -910,6 +1065,7 @@ public sealed partial class MainViewModel
         RunBatchFilterUpdate(() =>
         {
             LibraryNavMode = "all";
+            _selectedGenres.Clear();
             FilterScene = "all";
             ExcludeVocal = false;
             FilterVocals = "all";
@@ -930,6 +1086,7 @@ public sealed partial class MainViewModel
                 RunBatchFilterUpdate(() =>
                 {
                     LibraryNavMode = "all";
+                    _selectedGenres.Clear();
                     FilterScene = "focus";
                     ExcludeVocal = true;
                     FilterVocals = "all";
@@ -943,6 +1100,7 @@ public sealed partial class MainViewModel
                 RunBatchFilterUpdate(() =>
                 {
                     LibraryNavMode = "all";
+                    _selectedGenres.Clear();
                     FilterScene = "coding";
                     ExcludeVocal = true;
                     FilterVocals = "all";
@@ -956,6 +1114,7 @@ public sealed partial class MainViewModel
                 RunBatchFilterUpdate(() =>
                 {
                     LibraryNavMode = "all";
+                    _selectedGenres.Clear();
                     FilterScene = "relax";
                     ExcludeVocal = false;
                     FilterVocals = "vocal";
@@ -969,6 +1128,7 @@ public sealed partial class MainViewModel
                 RunBatchFilterUpdate(() =>
                 {
                     LibraryNavMode = "all";
+                    _selectedGenres.Clear();
                     FilterScene = "all";
                     ExcludeVocal = false;
                     FilterVocals = "all";
@@ -1007,6 +1167,7 @@ public sealed partial class MainViewModel
             : "全库 Tempo 元数据已就绪";
         UpdateInboxAuditBadge();
 
+        UpdateFilterChipLabels();
         var query = new FiveDimFilterQuery(
             Scene: FilterScene,
             Energy: FilterEnergy,
@@ -1015,7 +1176,8 @@ public sealed partial class MainViewModel
             TempoBucket: FilterTempoBucket,
             MoodCluster: FilterMoodCluster,
             SortArc: SelectedEnergyArc,
-            TempoNullPassthrough: ScenesTempoNullPassthrough
+            TempoNullPassthrough: ScenesTempoNullPassthrough,
+            Genres: _selectedGenres.Count > 0 ? _selectedGenres.ToArray() : null
         );
 
         IEnumerable<TrackItem> working;
@@ -1139,6 +1301,7 @@ public sealed partial class MainViewModel
         CurrentViewHeader = $"{navLabel} ({FilteredTracks.Count} / {_allTracks.Count})";
 
         var pills = new List<string>();
+        if (_selectedGenres.Count > 0) pills.Add($"流派: {string.Join(", ", _selectedGenres)}");
         if (FilterScene != "all") pills.Add($"SCENE: {FilterScene}");
         if (ExcludeVocal) pills.Add("NOT vocal");
         else if (FilterVocals != "all") pills.Add($"VOCALS: {FilterVocals}");
@@ -1280,6 +1443,7 @@ public sealed partial class MainViewModel
     private void UpdateScenesStudioAndArcTelemetry()
     {
         var clauses = new List<string>();
+        if (_selectedGenres.Count > 0) clauses.Add($"genre IN [{string.Join(", ", _selectedGenres.Select(g => $"'{g}'"))}]");
         if (FilterScene != "all") clauses.Add($"scene = '{FilterScene}'");
         if (ExcludeVocal) clauses.Add("vocals != 'vocal'");
         else if (FilterVocals != "all") clauses.Add($"vocals = '{FilterVocals}'");
