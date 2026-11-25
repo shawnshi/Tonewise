@@ -521,7 +521,7 @@ public sealed partial class MainViewModel
         {
             ReplaceFilteredTracksInPlace(refreshedMap);
         }
-        else if (IsViewingPlaylist && SelectedPlaylist is not null && PrimaryNavId == "playlists")
+        else if (IsViewingPlaylist && SelectedPlaylist is not null && PrimaryNavId == "collection" && SecondarySubTab == "playlists")
         {
             LoadPlaylistTracksIntoView(SelectedPlaylist);
         }
@@ -553,7 +553,7 @@ public sealed partial class MainViewModel
 
     internal bool CanUpdateFilteredTracksInPlace(IReadOnlyCollection<string>? editedFields)
     {
-        if (IsViewingPlaylist && PrimaryNavId == "playlists")
+        if (IsViewingPlaylist && PrimaryNavId == "collection" && SecondarySubTab == "playlists")
         {
             return true;
         }
@@ -1074,24 +1074,27 @@ public sealed partial class MainViewModel
 
     private void RefreshStagingProposals()
     {
-        StagingProposals.Clear();
-        StagingProposalItems.Clear();
         var diffStore = _store.GetStagingDiffStore();
         if (diffStore is null)
         {
-            _totalPendingStagingCount = 0;
-            HasStagingProposals = false;
-            StagingSummaryText = "待审队列：未加载曲库";
-            UpdateInboxAuditBadge();
+            ApplyStagingSnapshot(0, 0, []);
             return;
         }
 
         var (approvedCount, pendingCount) = diffStore.GetPendingProposalCounts();
+        var pendingList = diffStore.GetPendingProposals(limit: 300);
+        ApplyStagingSnapshot(approvedCount, pendingCount, pendingList);
+    }
+
+    private void ApplyStagingSnapshot(int approvedCount, int pendingCount, IReadOnlyList<TagDiffProposal> pendingList)
+    {
+        StagingProposals.Clear();
+        StagingProposalItems.Clear();
         _totalPendingStagingCount = approvedCount + pendingCount;
 
         var trackMap = _allTracks.ToDictionary(t => t.TrackUid, StringComparer.Ordinal);
-        var viewItems = new List<StagingProposalViewItem>();
-        foreach (var p in diffStore.GetPendingProposals(limit: 300))
+        var viewItems = new List<StagingProposalViewItem>(pendingList.Count);
+        foreach (var p in pendingList)
         {
             StagingProposals.Add(p);
             string trackLabel = trackMap.TryGetValue(p.TrackUid, out var tr)
@@ -1311,7 +1314,7 @@ public sealed partial class MainViewModel
             }
         }
 
-        if (PrimaryNavId == "inbox")
+        if (PrimaryNavId == "studio" && SecondarySubTab == "inbox")
         {
             await RefreshStagingProposalsAsync();
         }

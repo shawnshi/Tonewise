@@ -173,4 +173,15 @@
         <item name="colorSurfaceContainerHigh">@color/grey_surfaceContainerHigh_black</item>
         <item name="colorSurfaceContainerHighest">@color/grey_surfaceContainerHighest_black</item>
     </style>
+    <style name="Theme.Auxio.ZuneMagenta.Black" parent="Theme.Auxio.ZuneMagenta">
+        <item name="android:colorBackground">@color/zune_magenta_surface_black</item>
+        <item name="colorSurface">@color/zune_magenta_surface_black</item>
+        <item name="colorSurfaceDim">@color/zune_magenta_surfaceDim_black</item>
+        <item name="colorSurfaceBright">@color/zune_magenta_surfaceBright_black</item>
+        <item name="colorSurfaceContainerLowest">@color/zune_magenta_surfaceContainerLowest_black</item>
+        <item name="colorSurfaceContainerLow">@color/zune_magenta_surfaceContainerLow_black</item>
+        <item name="colorSurfaceContainer">@color/zune_magenta_surfaceContainer_black</item>
+        <item name="colorSurfaceContainerHigh">@color/zune_magenta_surfaceContainerHigh_black</item>
+        <item name="colorSurfaceContainerHighest">@color/zune_magenta_surfaceContainerHighest_black</item>
+    </style>
 </resources>

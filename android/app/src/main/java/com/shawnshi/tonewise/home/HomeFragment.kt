@@ -35,25 +35,15 @@ import androidx.navigation.fragment.findNavController
 import androidx.viewpager2.adapter.FragmentStateAdapter
 import androidx.viewpager2.widget.ViewPager2
 import com.google.android.material.appbar.AppBarLayout
-import com.google.android.material.tabs.TabLayoutMediator
 import com.google.android.material.transition.MaterialSharedAxis
 import dagger.hilt.android.AndroidEntryPoint
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentHomeBinding
 import com.shawnshi.tonewise.detail.DetailViewModel
 import com.shawnshi.tonewise.detail.Show
-import com.shawnshi.tonewise.home.focus.FocusFilterDialog
-import com.shawnshi.tonewise.playback.ui.clock.DeskClockDialog
-import com.shawnshi.tonewise.home.list.AlbumListFragment
-import com.shawnshi.tonewise.home.list.ArtistListFragment
-import com.shawnshi.tonewise.home.list.ComposerListFragment
-import com.shawnshi.tonewise.home.list.ConductorListFragment
-import com.shawnshi.tonewise.home.list.GenreListFragment
-import com.shawnshi.tonewise.home.list.PlaylistListFragment
-import com.shawnshi.tonewise.home.list.SceneListFragment
-import com.shawnshi.tonewise.home.list.SongListFragment
-import com.shawnshi.tonewise.home.tabs.NamedTabStrategy
-import com.shawnshi.tonewise.home.tabs.Tab
+import com.shawnshi.tonewise.home.autodj.AutoDjHubFragment
+import com.shawnshi.tonewise.home.collection.CollectionHubFragment
+import com.shawnshi.tonewise.home.quickplay.QuickplayFragment
 import com.shawnshi.tonewise.list.ListViewModel
 import com.shawnshi.tonewise.list.SelectionFragment
 import com.shawnshi.tonewise.list.menu.Menu
@@ -64,8 +54,8 @@ import com.shawnshi.tonewise.music.PlaylistDecision
 import com.shawnshi.tonewise.music.PlaylistMessage
 import com.shawnshi.tonewise.playback.PlaybackDecision
 import com.shawnshi.tonewise.playback.PlaybackViewModel
-import com.shawnshi.tonewise.sync.ScenesAndSyncDialog
 import com.shawnshi.tonewise.ui.FadingToolbarOffsetListener
+import com.shawnshi.tonewise.ui.ZuneAppBarDrawerSheet
 import com.shawnshi.tonewise.util.collect
 import com.shawnshi.tonewise.util.collectImmediately
 import com.shawnshi.tonewise.util.dampen
@@ -139,13 +129,20 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
         }
 
         binding.homePager.apply {
-            // Update HomeViewModel whenever the user swipes through the ViewPager.
-            // This would be implemented in HomeFragment itself, but OnPageChangeCallback
-            // is an object for some reason.
             registerOnPageChangeCallback(
                 object : ViewPager2.OnPageChangeCallback() {
+                    override fun onPageScrolled(
+                        position: Int,
+                        positionOffset: Float,
+                        positionOffsetPixels: Int,
+                    ) {
+                        binding.homePanoramaHeader.updateScroll(position, positionOffset)
+                    }
+
                     override fun onPageSelected(position: Int) {
-                        homeModel.synchronizeTabPosition(position)
+                        homeModel.setPanoramaPage(position)
+                        binding.homePanoramaHeader.updateScroll(position, 0f)
+                        updateLiftTarget(binding)
                     }
                 }
             )
@@ -155,13 +152,13 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
             // listener with a non-consuming listener.
             setOnApplyWindowInsetsListener { _, insets -> insets }
 
-            // We know that there will only be a fixed amount of tabs, so we manually set this
-            // limit to the maximum amount possible. This will prevent the tab ripple from
-            // bugging out due to dynamically inflating each fragment, at the cost of slower
-            // debug UI performance.
-            offscreenPageLimit = Tab.MAX_SEQUENCE_IDX + 1
+            offscreenPageLimit = 2
 
             dampen()
+        }
+
+        binding.homePanoramaHeader.onSelectHub = { index ->
+            binding.homePager.setCurrentItem(index, true)
         }
 
         // Further initialization must be done in the function that also handles
@@ -171,6 +168,7 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
         // --- VIEWMODEL SETUP ---
         collect(homeModel.recreateTabs.flow, ::handleRecreate)
         collect(homeModel.chooseMusicLocations.flow, ::handleChooseFolders)
+        collect(homeModel.requestSortDialog.flow, ::handleSortDialog)
         collectImmediately(homeModel.currentTabType, ::updateCurrentTab)
         collect(detailModel.toShow.flow, ::handleShow)
         collect(listModel.menu.flow, ::handleMenu)
@@ -199,31 +197,10 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
                 findNavController().navigateSafe(HomeFragmentDirections.search())
                 true
             }
-            R.id.action_focus_filter -> {
-                FocusFilterDialog.newInstance()
-                    .show(parentFragmentManager, FocusFilterDialog.TAG)
-                true
-            }
-            R.id.action_desk_clock -> {
-                if (parentFragmentManager.findFragmentByTag(DeskClockDialog.TAG) == null) {
-                    DeskClockDialog.newInstance()
-                        .show(parentFragmentManager, DeskClockDialog.TAG)
+            R.id.action_zune_drawer -> {
+                if (parentFragmentManager.findFragmentByTag(ZuneAppBarDrawerSheet.TAG) == null) {
+                    ZuneAppBarDrawerSheet().show(parentFragmentManager, ZuneAppBarDrawerSheet.TAG)
                 }
-                true
-            }
-            R.id.action_scenes_sync -> {
-                ScenesAndSyncDialog.newInstance()
-                    .show(parentFragmentManager, ScenesAndSyncDialog.TAG)
-                true
-            }
-            R.id.action_settings -> {
-                L.d("Navigating to preferences")
-                homeModel.showSettings()
-                true
-            }
-            R.id.action_about -> {
-                L.d("Navigating to about")
-                homeModel.showAbout()
                 true
             }
             else -> {
@@ -235,59 +212,66 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
 
     private fun setupPager(binding: FragmentHomeBinding) {
         binding.homePager.adapter =
-            HomePagerAdapter(homeModel.currentTabTypes, childFragmentManager, viewLifecycleOwner)
+            HomePagerAdapter(childFragmentManager, viewLifecycleOwner)
 
         val toolbarParams = binding.homeToolbar.layoutParams as AppBarLayout.LayoutParams
-        if (homeModel.currentTabTypes.size == 1) {
-            // A single tab makes the tab layout redundant, hide it and disable the collapsing
-            // behavior.
-            L.d("Single tab shown, disabling TabLayout")
-            binding.homeTabs.isVisible = false
-            binding.homeAppbar.setExpanded(true, false)
-            toolbarParams.scrollFlags = 0
-        } else {
-            binding.homeTabs.isVisible = true
-            toolbarParams.scrollFlags =
-                AppBarLayout.LayoutParams.SCROLL_FLAG_SCROLL or
-                    AppBarLayout.LayoutParams.SCROLL_FLAG_ENTER_ALWAYS
-        }
+        toolbarParams.scrollFlags =
+            AppBarLayout.LayoutParams.SCROLL_FLAG_SCROLL or
+                AppBarLayout.LayoutParams.SCROLL_FLAG_ENTER_ALWAYS
 
-        // Set up the mapping between the ViewPager and TabLayout.
-        TabLayoutMediator(
-                binding.homeTabs,
-                binding.homePager,
-                NamedTabStrategy(homeModel.currentTabTypes),
-            )
-            .attach()
+        val targetPage = homeModel.panoramaPage.value.coerceIn(0, 2)
+        binding.homePager.setCurrentItem(targetPage, false)
+        binding.homePanoramaHeader.updateScroll(targetPage, 0f)
+        updateLiftTarget(binding)
     }
 
     private fun updateCurrentTab(tabType: MusicType) {
-        val binding = requireBinding()
+        updateLiftTarget(requireBinding(), tabType)
+    }
 
-        // Update the scrolling view in AppBarLayout to align with the current tab's
-        // scrolling state. This prevents the lift state from being confused as one
-        // goes between different tabs.
+    private fun updateLiftTarget(
+        binding: FragmentHomeBinding,
+        tabType: MusicType = homeModel.currentTabType.value,
+    ) {
         binding.homeAppbar.liftOnScrollTargetViewId =
-            when (tabType) {
-                MusicType.SONGS -> R.id.home_song_recycler
-                MusicType.ALBUMS -> R.id.home_album_recycler
-                MusicType.ARTISTS -> R.id.home_artist_recycler
-                MusicType.COMPOSERS -> R.id.home_composer_recycler
-                MusicType.CONDUCTORS -> R.id.home_conductor_recycler
-                MusicType.GENRES -> R.id.home_genre_recycler
-                MusicType.PLAYLISTS -> R.id.home_playlist_recycler
-                MusicType.SCENES -> android.view.View.NO_ID
+            if (homeModel.panoramaPage.value != 1) {
+                android.view.View.NO_ID
+            } else {
+                when (tabType) {
+                    MusicType.SONGS -> R.id.home_song_recycler
+                    MusicType.ALBUMS -> R.id.home_album_recycler
+                    MusicType.ARTISTS -> R.id.home_artist_recycler
+                    MusicType.COMPOSERS -> R.id.home_composer_recycler
+                    MusicType.CONDUCTORS -> R.id.home_conductor_recycler
+                    MusicType.GENRES -> R.id.home_genre_recycler
+                    MusicType.PLAYLISTS -> R.id.home_playlist_recycler
+                    MusicType.SCENES -> android.view.View.NO_ID
+                }
             }
+    }
+
+    private fun handleSortDialog(type: MusicType?) {
+        if (type == null) return
+        val directions =
+            when (type) {
+                MusicType.SONGS -> HomeFragmentDirections.sortSongs()
+                MusicType.ALBUMS -> HomeFragmentDirections.sortAlbums()
+                MusicType.ARTISTS -> HomeFragmentDirections.sortArtists()
+                MusicType.COMPOSERS -> HomeFragmentDirections.sortComposers()
+                MusicType.CONDUCTORS -> HomeFragmentDirections.sortConductors()
+                MusicType.GENRES -> HomeFragmentDirections.sortGenres()
+                MusicType.PLAYLISTS -> HomeFragmentDirections.sortPlaylists()
+                MusicType.SCENES -> null
+            }
+        if (directions != null) {
+            findNavController().navigateSafe(directions)
+        }
+        homeModel.requestSortDialog.consume()
     }
 
     private fun handleRecreate(recreate: Unit?) {
         if (recreate == null) return
-        val binding = requireBinding()
-        L.d("Recreating ViewPager")
-        // Move back to position zero, as there must be a tab there.
-        binding.homePager.currentItem = 0
-        // Make sure tabs are set up to also follow the new ViewPager configuration.
-        setupPager(binding)
+        L.d("Tabs configuration updated; CollectionHubFragment refreshes pivots in place")
         homeModel.recreateTabs.consume()
     }
 
@@ -488,30 +472,19 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
     }
 
     /**
-     * [FragmentStateAdapter] implementation for the [HomeFragment]'s [ViewPager2] instance.
-     *
-     * @param tabs The current tab configuration. This will define the [Fragment]s created.
-     * @param fragmentManager The [FragmentManager] required by [FragmentStateAdapter].
-     * @param lifecycleOwner The [LifecycleOwner], whose Lifecycle is required by
-     *   [FragmentStateAdapter].
+     * [FragmentStateAdapter] for Zune Panorama Level-1 hubs (`quickplay · collection · autodj`).
      */
     private class HomePagerAdapter(
-        private val tabs: List<MusicType>,
         fragmentManager: FragmentManager,
         lifecycleOwner: LifecycleOwner,
     ) : FragmentStateAdapter(fragmentManager, lifecycleOwner.lifecycle) {
-        override fun getItemCount() = tabs.size
+        override fun getItemCount() = 3
 
         override fun createFragment(position: Int): Fragment =
-            when (tabs[position]) {
-                MusicType.SONGS -> SongListFragment()
-                MusicType.ALBUMS -> AlbumListFragment()
-                MusicType.ARTISTS -> ArtistListFragment()
-                MusicType.COMPOSERS -> ComposerListFragment()
-                MusicType.CONDUCTORS -> ConductorListFragment()
-                MusicType.GENRES -> GenreListFragment()
-                MusicType.PLAYLISTS -> PlaylistListFragment()
-                MusicType.SCENES -> SceneListFragment()
+            when (position) {
+                0 -> QuickplayFragment()
+                1 -> CollectionHubFragment()
+                else -> AutoDjHubFragment()
             }
     }
 }

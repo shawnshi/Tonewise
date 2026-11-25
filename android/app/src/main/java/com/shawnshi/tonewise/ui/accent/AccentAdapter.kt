@@ -37,11 +37,12 @@ import com.shawnshi.tonewise.util.inflater
  */
 class AccentAdapter(private val listener: ClickableListListener<Accent>) :
     RecyclerView.Adapter<AccentViewHolder>() {
+    private val accents = Accent.availableAccents
     /** The currently selected [Accent]. */
     var selectedAccent: Accent? = null
         private set
 
-    override fun getItemCount() = Accent.MAX
+    override fun getItemCount() = accents.size
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
         AccentViewHolder.from(parent)
@@ -54,7 +55,7 @@ class AccentAdapter(private val listener: ClickableListListener<Accent>) :
         position: Int,
         payloads: MutableList<Any>,
     ) {
-        val item = Accent.from(position)
+        val item = accents[position]
         if (payloads.isEmpty()) {
             // Not a re-selection, re-bind with new data.
             holder.bind(item, listener)
@@ -74,9 +75,13 @@ class AccentAdapter(private val listener: ClickableListListener<Accent>) :
         }
 
         // Update ViewHolders for the old selected accent and new selected accent.
-        selectedAccent?.let { old -> notifyItemChanged(old.index, PAYLOAD_SELECTION_CHANGED) }
+        selectedAccent?.let { old ->
+            val oldPos = accents.indexOf(old)
+            if (oldPos >= 0) notifyItemChanged(oldPos, PAYLOAD_SELECTION_CHANGED)
+        }
         selectedAccent = accent
-        notifyItemChanged(accent.index, PAYLOAD_SELECTION_CHANGED)
+        val newPos = accents.indexOf(accent)
+        if (newPos >= 0) notifyItemChanged(newPos, PAYLOAD_SELECTION_CHANGED)
     }
 
     private companion object {

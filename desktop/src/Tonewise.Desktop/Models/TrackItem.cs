@@ -86,7 +86,8 @@ public sealed record TrackItem(
     double? ReplayGainAlbumDb = null,
     int DiscNumber = 0,
     int TrackNumber = 0,
-    string AlbumArtist = ""
+    string AlbumArtist = "",
+    long MtimeMs = 0
 )
 {
     public bool IsLoved => Rating >= 5;
@@ -358,7 +359,20 @@ public sealed record EntityGroupItem(
     string Title,
     string Subtitle,
     string BadgeText,
-    IReadOnlyList<TrackItem> Tracks
+    IReadOnlyList<TrackItem> Tracks,
+    string? CoverArtPath = null
+);
+
+public sealed record QuickplayTileItem(
+    string TileId,
+    string Kind,
+    string TargetKey,
+    string Title,
+    string Subtitle,
+    string BadgeText,
+    string? CoverArtPath,
+    IReadOnlyList<TrackItem> Tracks,
+    bool IsPinned = false
 );
 
 public sealed record SubTabOption(

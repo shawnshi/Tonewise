@@ -23,6 +23,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import com.shawnshi.tonewise.home.collection.CollectionPivot
 import com.shawnshi.tonewise.home.tabs.Tab
 import com.shawnshi.tonewise.list.ListSettings
 import com.shawnshi.tonewise.list.adapter.UpdateInstructions
@@ -166,7 +167,18 @@ constructor(
     var currentTabTypes = homeGenerator.tabs()
         private set
 
-    private val _currentTabType = MutableStateFlow(currentTabTypes[0])
+    private val _visibleCollectionPivots =
+        MutableStateFlow(CollectionPivot.resolveVisiblePivots(currentTabTypes))
+    /** Ordered list of visible level-2 Zune pivots inside `collection`. */
+    val visibleCollectionPivots: StateFlow<List<CollectionPivot>> = _visibleCollectionPivots
+
+    private val _collectionPivot =
+        MutableStateFlow(_visibleCollectionPivots.value.firstOrNull() ?: CollectionPivot.ALBUMS)
+    /** Active Zune Level-2 sub-pivot inside `collection`. */
+    val collectionPivot: StateFlow<CollectionPivot> = _collectionPivot
+
+    private val _currentTabType =
+        MutableStateFlow(_collectionPivot.value.musicType ?: currentTabTypes[0])
     /** The [MusicType] of the currently shown [Tab]. */
     val currentTabType: StateFlow<MusicType> = _currentTabType
 
@@ -186,6 +198,16 @@ constructor(
         field = MutableEvent<Outer>()
 
     val chooseMusicLocations: Event<Unit>
+        field = MutableEvent<Unit>()
+
+    private val _panoramaPage = MutableStateFlow(0)
+    /** Active Zune Level-1 Panorama hub index (0=quickplay, 1=collection, 2=autodj). */
+    val panoramaPage: StateFlow<Int> = _panoramaPage
+
+    val requestSortDialog: Event<MusicType>
+        field = MutableEvent<MusicType>()
+
+    val openSearch: Event<Unit>
         field = MutableEvent<Unit>()
 
     init {
@@ -236,6 +258,13 @@ constructor(
 
     override fun invalidateTabs() {
         currentTabTypes = homeGenerator.tabs()
+        val nextPivots = CollectionPivot.resolveVisiblePivots(currentTabTypes)
+        _visibleCollectionPivots.value = nextPivots
+        if (_collectionPivot.value !in nextPivots) {
+            val fallback = nextPivots.firstOrNull() ?: CollectionPivot.ALBUMS
+            _collectionPivot.value = fallback
+            fallback.musicType?.let { _currentTabType.value = it }
+        }
         recreateTabs.put(Unit)
     }
 
@@ -332,6 +361,26 @@ constructor(
     fun synchronizeTabPosition(pagerPos: Int) {
         L.d("Updating current tab to ${currentTabTypes[pagerPos]}")
         _currentTabType.value = currentTabTypes[pagerPos]
+    }
+
+    fun setPanoramaPage(page: Int) {
+        _panoramaPage.value = page.coerceIn(0, 2)
+    }
+
+    fun selectCollectionPivot(pivot: CollectionPivot) {
+        _collectionPivot.value = pivot
+        pivot.musicType?.let { _currentTabType.value = it }
+    }
+
+    fun openSortForCurrentPivot() {
+        val type = _collectionPivot.value.musicType ?: return
+        if (type != MusicType.SCENES) {
+            requestSortDialog.put(type)
+        }
+    }
+
+    fun showSearch() {
+        openSearch.put(Unit)
     }
 
     /**

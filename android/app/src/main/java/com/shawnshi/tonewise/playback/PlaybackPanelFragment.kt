@@ -21,6 +21,7 @@ package com.shawnshi.tonewise.playback
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -46,6 +47,11 @@ import androidx.dynamicanimation.animation.SpringForce
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
+import coil3.ImageLoader
+import coil3.request.ImageRequest
+import coil3.request.SuccessResult
+import coil3.request.allowHardware
+import coil3.toBitmap
 import com.google.android.material.R as MaterialR
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -86,9 +92,13 @@ import com.shawnshi.tonewise.sync.FocusPillState
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.QuickTagDialog
 import com.shawnshi.tonewise.sync.SessionSlotStore
+import com.shawnshi.tonewise.ui.DynamicAccentController
+import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.ui.ViewBindingFragment
+import com.shawnshi.tonewise.ui.ZuneColorMath
 import com.shawnshi.tonewise.util.collectImmediately
 import com.shawnshi.tonewise.util.dampen
+import com.shawnshi.tonewise.util.isNight
 import com.shawnshi.tonewise.util.recycler
 import com.shawnshi.tonewise.util.showToast
 import com.shawnshi.tonewise.util.smoothScrollByPageTo
@@ -116,6 +126,9 @@ class PlaybackPanelFragment :
     @Inject lateinit var lanSyncRepository: LanSyncRepository
     @Inject lateinit var sessionSlotStore: SessionSlotStore
     @Inject lateinit var playCountRepository: PlayCountRepository
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
+    @Inject lateinit var imageLoader: ImageLoader
     private val coverPagerAdapter = CoverPagerAdapter(this)
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
@@ -126,6 +139,9 @@ class PlaybackPanelFragment :
     private var djFreezeBackup: Pair<List<Song>, Int>? = null
     private var activeFreezeToken: String? = null
     private var latestSignalPath: SignalPathState? = null
+    private var accentSampleJob: Job? = null
+    private var defaultPlayPauseBgTint: ColorStateList? = null
+    private var defaultPlayPauseIconTint: ColorStateList? = null
 
     override fun onCreateBinding(inflater: LayoutInflater) =
         FragmentPlaybackPanelBinding.inflate(inflater)
@@ -155,7 +171,7 @@ class PlaybackPanelFragment :
             setOnMenuItemClickListener(this@PlaybackPanelFragment)
         }
 
-        binding.playbackPager?.apply {
+        binding.playbackPager.apply {
             // intentional LTR override since thepager is a chronological element
             layoutDirection = View.LAYOUT_DIRECTION_LTR
             adapter = coverPagerAdapter
@@ -199,7 +215,13 @@ class PlaybackPanelFragment :
             setOnClickListener { playbackModel.song.value?.let(detailModel::showSong) }
         }
 
-        binding.playbackSeekBar?.listener = this
+        binding.playbackSeekBar?.apply {
+            listener = this@PlaybackPanelFragment
+            setRectilinearMode(!uiSettings.roundMode)
+        }
+        defaultPlayPauseBgTint = binding.playbackPlayPause.backgroundTintList
+        defaultPlayPauseIconTint = binding.playbackPlayPause.iconTint
+        refreshMosaicBackdrop()
 
         // Set up actions
         // TODO: Add better playback button accessibility
@@ -253,6 +275,7 @@ class PlaybackPanelFragment :
         collectImmediately(playbackModel.isPlaying, ::updatePlaying)
         collectImmediately(playbackModel.isShuffled, ::updateShuffled)
         collectImmediately(playbackModel.pagerQueue, ::updatePager)
+        collectImmediately(dynamicAccentController.activeAccentArgb, ::applyDynamicAccent)
     }
 
     // FIXME: Old code!! Maybe not necessary anymore?
@@ -291,6 +314,8 @@ class PlaybackPanelFragment :
     //    }
 
     override fun onDestroyBinding(binding: FragmentPlaybackPanelBinding) {
+        accentSampleJob?.cancel()
+        accentSampleJob = null
         equalizerLauncher = null
         binding.playbackRepeat.clearPendingIcon()
         binding.playbackSong.isSelected = false
@@ -299,7 +324,7 @@ class PlaybackPanelFragment :
         binding.playbackMeta.isSelected = false
         binding.playbackToolbar.setOnMenuItemClickListener(null)
         userAwarePagerCallback?.release()
-        binding.playbackPager?.adapter = null
+        binding.playbackPager.adapter = null
     }
 
     override fun onMenuItemClick(item: MenuItem): Boolean {
@@ -433,6 +458,95 @@ class PlaybackPanelFragment :
         updateLoveButton(song)
         updateMicroCapsules(song = song, isClassical = work != null, classicalWork = classicalWork)
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
+        refreshMosaicBackdrop()
+        updateDynamicCoverAccent(song)
+    }
+
+    private fun refreshMosaicBackdrop() {
+        val b = binding ?: return
+        val covers =
+            musicRepository.library
+                ?.albums
+                ?.mapNotNull { it.covers.covers.firstOrNull() }
+                .orEmpty()
+        b.playbackMosaicBackdrop.submitCovers(
+            imageLoader = imageLoader,
+            covers = covers,
+            darkSurface = requireContext().isNight,
+            scope = viewLifecycleOwner.lifecycleScope,
+        )
+    }
+
+    private fun updateDynamicCoverAccent(song: Song) {
+        accentSampleJob?.cancel()
+        if (!uiSettings.enableDynamicCoverAccent) {
+            dynamicAccentController.clear()
+            return
+        }
+        val cover = song.cover
+        if (cover == null) {
+            dynamicAccentController.clear()
+            return
+        }
+        val appContext = requireContext().applicationContext
+        val dark = requireContext().isNight
+        accentSampleJob =
+            viewLifecycleOwner.lifecycleScope.launch {
+                val pixels =
+                    withContext(Dispatchers.IO) {
+                        val req =
+                            ImageRequest.Builder(appContext)
+                                .data(cover)
+                                .size(48, 48)
+                                .allowHardware(false)
+                                .build()
+                        val res = runCatching { imageLoader.execute(req) }.getOrNull()
+                        val bmp = (res as? SuccessResult)?.image?.toBitmap() ?: return@withContext null
+                        val w = bmp.width
+                        val h = bmp.height
+                        if (w <= 0 || h <= 0) return@withContext null
+                        IntArray(w * h).also { arr ->
+                            bmp.getPixels(arr, 0, w, 0, 0, w, h)
+                        }
+                    }
+                if (!isAdded) return@launch
+                if (pixels != null) {
+                    dynamicAccentController.updateFromPixels(pixels, dark)
+                } else {
+                    dynamicAccentController.clear()
+                }
+            }
+    }
+
+    private fun applyDynamicAccent(argb: Int?) {
+        val b = binding ?: return
+        val effective = if (uiSettings.enableDynamicCoverAccent) argb else null
+        b.playbackSeekBar?.setDynamicAccentColor(effective)
+        if (effective != null) {
+            val surfaceColor =
+                MaterialColors.getColor(
+                    b.playbackPlayPause,
+                    MaterialR.attr.colorSurfaceContainer,
+                    if (requireContext().isNight) Color.BLACK else Color.WHITE,
+                )
+            val pausedContainer =
+                androidx.core.graphics.ColorUtils.blendARGB(surfaceColor, effective, 0.24f)
+            val states =
+                arrayOf(
+                    intArrayOf(android.R.attr.state_checked),
+                    intArrayOf(-android.R.attr.state_checked),
+                )
+            b.playbackPlayPause.backgroundTintList =
+                ColorStateList(states, intArrayOf(effective, pausedContainer))
+            b.playbackPlayPause.iconTint =
+                ColorStateList(
+                    states,
+                    intArrayOf(ZuneColorMath.contrastingOnColor(effective), effective),
+                )
+        } else {
+            b.playbackPlayPause.backgroundTintList = defaultPlayPauseBgTint
+            b.playbackPlayPause.iconTint = defaultPlayPauseIconTint
+        }
     }
 
     private fun updateMicroCapsules(
@@ -476,7 +590,7 @@ class PlaybackPanelFragment :
             val shape =
                 GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    cornerRadius = 999f * density
+                    cornerRadius = if (uiSettings.roundMode) 999f * density else 0f
                     setColor(bgColor)
                     setStroke((1f * density).toInt().coerceAtLeast(1), strokeColor)
                 }

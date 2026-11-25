@@ -49,6 +49,7 @@ import com.shawnshi.tonewise.detail.DetailViewModel
 import com.shawnshi.tonewise.detail.Show
 import com.shawnshi.tonewise.home.HomeViewModel
 import com.shawnshi.tonewise.home.Outer
+import com.shawnshi.tonewise.home.collection.CollectionPivot
 import com.shawnshi.tonewise.list.ListViewModel
 import com.shawnshi.tonewise.music.IndexingState
 import com.shawnshi.tonewise.music.MusicType
@@ -216,7 +217,11 @@ class MainFragment :
         collect(detailModel.toShow.flow, ::handleShow)
         collectImmediately(detailModel.editedPlaylist, detailBackCallback::invalidateEnabled)
         collectImmediately(homeModel.showOuter.flow, ::handleShowOuter)
+        collect(homeModel.openSearch.flow, ::handleOpenSearch)
         collectImmediately(homeModel.currentTabType, ::updateCurrentTab)
+        collectImmediately(homeModel.panoramaPage, homeModel.collectionPivot) { _, _ ->
+            updateCurrentTab(homeModel.currentTabType.value)
+        }
         collectImmediately(homeModel.songList, homeModel.isFastScrolling, ::updateFab)
         collectImmediately(musicModel.indexingState, ::updateIndexerState)
         collectImmediately(listModel.selected, selectionBackCallback::invalidateEnabled)
@@ -324,6 +329,26 @@ class MainFragment :
         // Keep reading sheet and back-gesture progress every frame, but only apply new shapes.
         if (sheetCornerSize != lastCornerSize) {
             playbackSheetBehavior.sheetBackgroundDrawable.setCornerSize(sheetCornerSize)
+            if (uiSettings.roundMode && sheetCornerSize > 0f) {
+                binding.playbackSheet.clipToOutline = true
+                binding.playbackSheet.outlineProvider =
+                    object : android.view.ViewOutlineProvider() {
+                        override fun getOutline(
+                            view: android.view.View,
+                            outline: android.graphics.Outline,
+                        ) {
+                            outline.setRoundRect(
+                                0,
+                                0,
+                                view.width,
+                                view.height + sheetCornerSize.toInt(),
+                                sheetCornerSize,
+                            )
+                        }
+                    }
+            } else {
+                binding.playbackSheet.clipToOutline = false
+            }
             if (queueSheetBehavior == null) {
                 (binding.queueSheet.background as MaterialShapeDrawable).shapeAppearanceModel =
                     ShapeAppearanceModel.builder()
@@ -475,7 +500,10 @@ class MainFragment :
             L.d("Hiding fab: [empty: ${songs.isEmpty()} scrolling: $isFastScrolling]")
             forceHideAllFabs()
         } else {
-            if (tabType != MusicType.PLAYLISTS) {
+            val showNewPlaylistFab =
+                homeModel.panoramaPage.value == 1 &&
+                    homeModel.collectionPivot.value == CollectionPivot.PLAYLISTS
+            if (!showNewPlaylistFab) {
                 if (binding.homeShuffleFab.isOrWillBeShown) {
                     return
                 }
@@ -540,11 +568,19 @@ class MainFragment :
         binding: FragmentMainBinding,
         songs: List<Song>,
         isFastScrolling: Boolean,
-    ) =
-        binding.exploreNavHost.findNavController().currentDestination?.id != R.id.home_fragment ||
+    ): Boolean {
+        val page = homeModel.panoramaPage.value
+        val pivot = homeModel.collectionPivot.value
+        val hideForHub =
+            page == 2 ||
+                (page == 1 &&
+                    (pivot == CollectionPivot.CLASSICAL || pivot == CollectionPivot.SCENES))
+        return binding.exploreNavHost.findNavController().currentDestination?.id != R.id.home_fragment ||
             sheetRising == true ||
             songs.isEmpty() ||
-            isFastScrolling
+            isFastScrolling ||
+            hideForHub
+    }
 
     private fun forceHideAllFabs() {
         val binding = requireBinding()
@@ -591,6 +627,15 @@ class MainFragment :
             }
         findNavController().navigateSafe(directions)
         homeModel.showOuter.consume()
+    }
+
+    private fun handleOpenSearch(unit: Unit?) {
+        if (unit == null) return
+        val exploreController = requireBinding().exploreNavHost.findNavController()
+        if (exploreController.currentDestination?.id != R.id.search_fragment) {
+            exploreController.navigate(R.id.search_fragment)
+        }
+        homeModel.openSearch.consume()
     }
 
     private fun updateSong(song: Song?) {

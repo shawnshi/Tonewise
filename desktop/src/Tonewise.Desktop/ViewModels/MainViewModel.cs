@@ -57,6 +57,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public ObservableCollection<string> BreadcrumbItems { get; } = [];
     public ObservableCollection<PairedDeviceViewItem> PairedDevices { get; } = [];
     public ObservableCollection<SyncOutboxViewItem> SyncOutboxItems { get; } = [];
+    public ObservableCollection<QuickplayTileItem> QuickplayPins { get; } = [];
+    public ObservableCollection<QuickplayTileItem> QuickplayHistory { get; } = [];
+    public ObservableCollection<QuickplayTileItem> QuickplayNewAlbums { get; } = [];
+    public ObservableCollection<QuickplayTileItem> QuickplayRediscovery { get; } = [];
 
     [ObservableProperty]
     private string _lastFmAuthModeBadge = "未配置 Last.fm";
@@ -464,16 +468,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private EntityGroupItem? _selectedEntityGroup;
 
     [ObservableProperty]
-    private string _primaryNavId = "library";
+    private string _primaryNavId = "collection";
 
     [ObservableProperty]
     private string _secondarySubTab = "tracks";
 
     [ObservableProperty]
-    private string _primarySectionTitle = "曲库";
+    private string _primarySectionTitle = "collection";
 
     [ObservableProperty]
-    private string _primaryViewSummary = "曲目 · 专辑 · 流派 · 文件夹";
+    private string _primaryViewSummary = "albums · tracks · artists · classical";
 
     [ObservableProperty]
     private bool _isSidebarExpanded = true;
@@ -487,6 +491,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>"dark" (default design field) | "light" | "system".</summary>
     [ObservableProperty]
     private string _appTheme = "dark";
+
+    [ObservableProperty]
+    private bool _enableDynamicCoverAccent;
 
     [ObservableProperty]
     private bool _isMuted;
@@ -582,6 +589,60 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isFiveDimFilterStripVisible = true;
+
+    [ObservableProperty]
+    private bool _isNavQuickplay;
+
+    [ObservableProperty]
+    private bool _isNavCollection = true;
+
+    [ObservableProperty]
+    private bool _isNavStudio;
+
+    [ObservableProperty]
+    private bool _isNavNowPlaying;
+
+    [ObservableProperty]
+    private bool _isQuickplayViewVisible;
+
+    [ObservableProperty]
+    private bool _isNowPlayingViewVisible;
+
+    [ObservableProperty]
+    private bool _isCollectionOrStudioMainVisible = true;
+
+    [ObservableProperty]
+    private bool _isAlbumsGridMode;
+
+    [ObservableProperty]
+    private bool _hasQuickplayPins;
+
+    [ObservableProperty]
+    private bool _hasNoQuickplayPins = true;
+
+    [ObservableProperty]
+    private bool _hasQuickplayHistory;
+
+    [ObservableProperty]
+    private string _scenesMode = "presets";
+
+    [ObservableProperty]
+    private bool _showAllPerformers;
+
+    [ObservableProperty]
+    private bool _showClassicalEnsembles;
+
+    [ObservableProperty]
+    private bool _isNowPlayingQueueOpen = true;
+
+    [ObservableProperty]
+    private bool _isNowPlayingUpNextTab = true;
+
+    [ObservableProperty]
+    private bool _isNowPlayingBookletTab;
+
+    [ObservableProperty]
+    private bool _isNowPlayingAlternatesTab;
 
     [ObservableProperty]
     private bool _isNavLibrary = true;
@@ -789,11 +850,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private DateTime _pendingEndpointReturnDeadlineUtc = DateTime.MinValue;
     private bool _isAutoRecoveringPlayback;
     private string? _appliedEngineEndpointId;
+    private string? _pendingSavedEndpointId;
+    private CancellationTokenSource? _libraryHydrationCts;
     private readonly Queue<DateTime> _recentRecoveryTimestampsUtc = new();
 
     public event Action? WaveformUpdated;
     public event Action<TrackItem?>? TrackChanged;
     public event Action? SubTabsChanged;
+    public event Action? LibraryLoaded;
 
     public MainViewModel()
     {
@@ -865,12 +929,21 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         UpdatePlaybackModeLabels();
         UpdatePlaybackQueueSummary();
 
-        RefreshEndpoints();
+        if (_uiContext is not null)
+        {
+            _ = RefreshEndpointsAsync();
+        }
+        else
+        {
+            RefreshEndpoints();
+        }
         ReloadSessionSlots();
-        RefreshPlaylists();
         UpdateSearchSuggestions("");
         UpdateNavigationState();
     }
+
+    [RelayCommand]
+    public void ToggleNowPlayingQueue() => IsNowPlayingQueueOpen = !IsNowPlayingQueueOpen;
 
     public void RestoreSavedSettingsAndLibrary(string? settingsPath = null)
     {
@@ -893,6 +966,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             IsSidebarExpanded = saved.IsSidebarExpanded;
             IsInspectorOpen = saved.IsInspectorOpen;
             AppTheme = saved.AppTheme is "light" or "system" ? saved.AppTheme : "dark";
+            EnableDynamicCoverAccent = saved.EnableDynamicCoverAccent;
             IsShuffleEnabled = saved.IsShuffleEnabled;
             RepeatMode = saved.RepeatMode is "one" or "off" ? saved.RepeatMode : "all";
             EnableAutoWatchLibrary = saved.EnableAutoWatchLibrary;
@@ -924,6 +998,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 if (ep is not null)
                 {
                     SelectedEndpoint = ep;
+                    _pendingSavedEndpointId = null;
+                }
+                else
+                {
+                    _pendingSavedEndpointId = saved.SelectedEndpointId;
                 }
             }
 
@@ -1036,7 +1115,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             EnableMirrorPrune: IsMirrorPruneEnabled,
             MirrorPruneScope: MirrorPruneScope,
             AllowAdbForeignDeleteFallback: AllowAdbForeignDeleteFallback,
-            CustomAdbPath: _customAdbPath);
+            CustomAdbPath: _customAdbPath,
+            EnableDynamicCoverAccent: EnableDynamicCoverAccent);
 
         try
         {
@@ -1300,6 +1380,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     partial void OnAppThemeChanged(string value) => SaveUserSettings();
+    partial void OnEnableDynamicCoverAccentChanged(bool value) => SaveUserSettings();
 
     partial void OnStatusMessageChanged(string value)
     {
@@ -1437,6 +1518,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         CancelPendingPlaybackRecovery();
+        var hydrationCts = Interlocked.Exchange(ref _libraryHydrationCts, null);
+        if (hydrationCts is not null)
+        {
+            try { hydrationCts.Cancel(); } catch { }
+            hydrationCts.Dispose();
+        }
         Interlocked.Exchange(ref _endpointDebounceTimer, null)?.Dispose();
         _deviceChangeWatcher.EndpointsChanged -= ScheduleEndpointRefresh;
         _deviceChangeWatcher.Dispose();

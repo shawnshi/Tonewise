@@ -12,11 +12,14 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using SkiaSharp;
 using SkiaSharp.Views.Windows;
 using Tonewise.Desktop.Models;
+using Tonewise.Desktop.Motion;
+using Tonewise.Desktop.Rendering;
 using Tonewise.Desktop.Services;
 using Tonewise.Desktop.ViewModels;
 using Tonewise.SyncHost.Curation;
 using Tonewise.SyncHost.Ledger;
 using Tonewise.SyncHost.Playlists;
+using Tonewise.SyncHost.Workbench;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Data.Pdf;
 using Windows.Media;
@@ -46,7 +49,6 @@ public sealed partial class MainWindow : Window
     private string? _loadedBookletPath;
     private int _bookletPageIndex;
     private CancellationTokenSource? _folderLoadCts;
-    private bool _suppressSubTabSync;
 
     private readonly DispatcherTimer _notificationTimer;
     private readonly SemaphoreSlim _dialogGate = new(1, 1);
@@ -76,15 +78,29 @@ public sealed partial class MainWindow : Window
     }
     private bool _isSeekDragging;
     private bool _updatingSeekSlider;
-    private bool _syncingNavSelection;
     private double _lastWaveformProgress = -1.0;
 
-    private static readonly SKColor ActiveBarColor = new(0xD9, 0xB3, 0x72);
-    private static readonly SKColor InactiveBarColor = new(0x64, 0x74, 0x8B, 0x60);
-    private static readonly SKPaint ActiveBarPaint = new() { Color = ActiveBarColor, IsAntialias = true };
-    private static readonly SKPaint InactiveBarPaint = new() { Color = InactiveBarColor, IsAntialias = true };
+    private readonly ZuneMosaicRenderer _mosaicRenderer = new();
+    private readonly DispatcherTimer _mosaicSwapTimer;
+    private readonly DispatcherTimer _nowPlayingIdleTimer;
+    private DateTime _lastNowPlayingActivityUtc = DateTime.UtcNow;
+    private bool _isNowPlayingChromeFaded;
+    private bool _startupInitialized;
+    private CancellationTokenSource? _mosaicPrewarmCts;
+    private CancellationTokenSource? _dynamicAccentCts;
+    private (byte R, byte G, byte B) _currentAccentRgb = ZuneColorMath.DefaultDarkAccentRgb;
+
+    private static readonly SKColor InactiveBarColor = new(0x7A, 0x7A, 0x7A, 0x60);
+    private readonly SKPaint _activeBarPaint = new() { Color = new SKColor(0xFF, 0x1E, 0x7A), IsAntialias = false };
+    private static readonly SKPaint InactiveBarPaint = new() { Color = InactiveBarColor, IsAntialias = false };
 
     public Visibility VisibleWhenBoth(bool a, bool b) => a && b ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility VisibleWhenFirstAndNotSecond(bool a, bool b) => a && !b ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility NegateToVisibility(bool value) => value ? Visibility.Collapsed : Visibility.Visible;
+
+    public double PivotInkOpacity(bool isActive) => isActive ? 1.0 : 0.62;
 
     public InfoBarSeverity SeverityFromLevel(string level) => level switch
     {
@@ -124,23 +140,23 @@ public sealed partial class MainWindow : Window
 
     public SolidColorBrush HeartForeground(bool isLoved)
     {
-        if (isLoved) return new SolidColorBrush(Color.FromArgb(0xFF, 0xD9, 0x6B, 0x52));
+        if (isLoved) return new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
-        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x64, 0x74, 0x8B) : Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8));
+        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x52, 0x52, 0x52) : Color.FromArgb(0xFF, 0xA3, 0xA3, 0xA3));
     }
 
     public SolidColorBrush FreezePillBackground(bool active)
     {
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
-        if (active) return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xE0, 0xF2, 0xFE) : Color.FromArgb(0xFF, 0x1F, 0x35, 0x45));
-        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xEF, 0xF4, 0xFA) : Color.FromArgb(0xFF, 0x14, 0x1A, 0x26));
+        if (active) return new SolidColorBrush(Color.FromArgb(0x28, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
+        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xF4, 0xF4, 0xF4) : Color.FromArgb(0xFF, 0x0D, 0x0D, 0x0D));
     }
 
     public SolidColorBrush FreezePillBorder(bool active)
     {
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
-        if (active) return new SolidColorBrush(Color.FromArgb(0xFF, 0x38, 0xBD, 0xF8));
-        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xCB, 0xD5, 0xE1) : Color.FromArgb(0xFF, 0x29, 0x34, 0x48));
+        if (active) return new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
+        return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC) : Color.FromArgb(0xFF, 0x26, 0x26, 0x26));
     }
 
     public MainWindow()
@@ -154,9 +170,9 @@ public sealed partial class MainWindow : Window
         {
             AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
             AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonForegroundColor = Color.FromArgb(0xFF, 0xCB, 0xD5, 0xE1);
-            AppWindow.TitleBar.ButtonHoverBackgroundColor = Color.FromArgb(0xFF, 0x24, 0x2C, 0x3B);
-            AppWindow.TitleBar.ButtonHoverForegroundColor = Color.FromArgb(0xFF, 0xD9, 0xB3, 0x72);
+            AppWindow.TitleBar.ButtonForegroundColor = Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
+            AppWindow.TitleBar.ButtonHoverBackgroundColor = Color.FromArgb(0x28, 0xFF, 0xFF, 0xFF);
+            AppWindow.TitleBar.ButtonHoverForegroundColor = Color.FromArgb(0xFF, 0xFF, 0x1E, 0x7A);
         }
         catch
         {
@@ -169,11 +185,11 @@ public sealed partial class MainWindow : Window
             AppWindow.SetIcon(icoPath);
         }
 
-        InitializeSmtc();
-        InitializeGlobalHotkeys();
         UpdateSignalPurityDotBrush();
         SyncSubSelectorBarItems();
         SyncInlineInspectorTargets([]);
+        ApplyAppTheme();
+        ApplyInspectorState();
 
         _searchDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
         _searchDebounceTimer.Tick += (_, _) =>
@@ -192,10 +208,17 @@ public sealed partial class MainWindow : Window
             else if (args.PropertyName == nameof(MainViewModel.IsPlaying))
             {
                 SyncSmtcPlaybackState();
+                if (!ViewModel.IsPlaying) RestoreNowPlayingChrome();
             }
             else if (args.PropertyName == nameof(MainViewModel.CurrentTrack))
             {
                 UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
+                UpdateCoverArtImage(NowPlayingCoverImage, ViewModel.CurrentTrack?.CoverArtPath, decodeWidth: 360);
+                _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
+            }
+            else if (args.PropertyName == nameof(MainViewModel.EnableDynamicCoverAccent))
+            {
+                _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
             }
             else if (args.PropertyName == nameof(MainViewModel.InspectedTrack))
             {
@@ -208,16 +231,27 @@ public sealed partial class MainWindow : Window
             }
             else if (args.PropertyName is nameof(MainViewModel.PrimaryNavId) or nameof(MainViewModel.SecondarySubTab))
             {
-                SyncNavigationSelection();
-                if (ViewModel.PrimaryNavId == "playlists") SyncPlaylistsListViewSelection();
-            }
-            else if (args.PropertyName == nameof(MainViewModel.ShowClassicalSidebarSubItems))
-            {
-                SyncClassicalNavChildren();
-            }
-            else if (args.PropertyName == nameof(MainViewModel.IsSidebarExpanded))
-            {
-                ApplyPaneStateForDisplayMode();
+                if (ViewModel.PrimaryNavId == "collection" && ViewModel.SecondarySubTab == "playlists")
+                {
+                    SyncPlaylistsListViewSelection();
+                }
+                if (ViewModel.IsNowPlayingViewVisible)
+                {
+                    RefreshNowPlayingMosaic();
+                    RestoreNowPlayingChrome();
+                }
+                else
+                {
+                    RestoreNowPlayingChrome();
+                }
+                if (args.PropertyName == nameof(MainViewModel.PrimaryNavId))
+                {
+                    ZuneMotionHelper.PlayStaggeredEntrance(PivotHeaderRow, StageContainer);
+                }
+                else
+                {
+                    ZuneMotionHelper.PlayStaggeredEntrance(null, StageContainer, horizontalOffset: 18f);
+                }
             }
             else if (args.PropertyName == nameof(MainViewModel.IsMultiSelectMode) && TrackListView is not null)
             {
@@ -250,15 +284,23 @@ public sealed partial class MainWindow : Window
         ViewModel.TracksUpdatingInPlace += BeginPreserveTrackListViewportAndSelection;
         ViewModel.TracksUpdatedInPlace += EndPreserveTrackListViewportAndSelection;
         TrackListView?.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(OnTrackListPointerPressed), handledEventsToo: true);
+        RootWorkbench.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(OnNowPlayingPointerActivity), handledEventsToo: true);
+        RootWorkbench.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(OnNowPlayingPointerActivity), handledEventsToo: true);
         ViewModel.TrackChanged += async track =>
         {
             try
             {
                 UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
+                UpdateCoverArtImage(NowPlayingCoverImage, ViewModel.CurrentTrack?.CoverArtPath, decodeWidth: 360);
                 UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
                 RefreshQueuePlayingHighlights();
+                await ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
                 await UpdateSmtcMetadataAsync(ViewModel.CurrentTrack);
                 await LoadBookletForTrackAsync(track);
+                if (ViewModel.IsNowPlayingViewVisible)
+                {
+                    NowPlayingMosaicCanvas?.Invalidate();
+                }
             }
             catch (Exception ex)
             {
@@ -276,31 +318,55 @@ public sealed partial class MainWindow : Window
             }
         };
 
-        SeekSlider.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => _isSeekDragging = true), handledEventsToo: true);
-        MainNavigationView.Loaded += (_, _) =>
+        _mosaicSwapTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(12) };
+        _mosaicSwapTimer.Tick += (_, _) =>
         {
-            if (MainNavigationView.SettingsItem is NavigationViewItem settingsItem)
+            if (ViewModel.IsNowPlayingViewVisible && ViewModel.IsPlaying && ZuneMotionHelper.IsMotionEnabled() && _mosaicRenderer.HasCovers)
             {
-                settingsItem.Content = "设置";
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(settingsItem, "NavItemSettings");
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(settingsItem, "设置");
-                ToolTipService.SetToolTip(settingsItem, "设置 (Ctrl+,)：音频输出 / 存储 / 外观");
+                _mosaicRenderer.AdvanceSwapTick();
+                NowPlayingMosaicCanvas?.Invalidate();
             }
-            SyncNavigationSelection();
         };
+        _mosaicSwapTimer.Start();
+
+        _nowPlayingIdleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _nowPlayingIdleTimer.Tick += (_, _) => UpdateNowPlayingChromeAutoFade();
+        _nowPlayingIdleTimer.Start();
+
+        SeekSlider.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => _isSeekDragging = true), handledEventsToo: true);
         SeekSlider.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler((_, _) => _isSeekDragging = false), handledEventsToo: true);
         SeekSlider.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler((_, _) => _isSeekDragging = false), handledEventsToo: true);
 
-        ViewModel.RestoreSavedSettingsAndLibrary();
-        ApplyAppTheme();
-        ApplyPaneStateForDisplayMode();
-        ApplyInspectorState();
-        SyncClassicalNavChildren();
-        SyncNavigationSelection();
-        SyncSubSelectorBarItems();
-        UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
-        UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
-        SyncInlineInspectorTargets(ViewModel.InspectedTrack is null ? [] : [ViewModel.InspectedTrack]);
+        ViewModel.LibraryLoaded += () =>
+        {
+            UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
+            UpdateCoverArtImage(NowPlayingCoverImage, ViewModel.CurrentTrack?.CoverArtPath, decodeWidth: 360);
+            UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
+            SyncInlineInspectorTargets(ViewModel.InspectedTrack is null ? [] : [ViewModel.InspectedTrack]);
+            _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
+            if (ViewModel.IsNowPlayingViewVisible)
+            {
+                RefreshNowPlayingMosaic();
+            }
+            else
+            {
+                _ = PrewarmNowPlayingMosaicAsync();
+            }
+        };
+
+        Activated += (_, _) =>
+        {
+            if (_startupInitialized) return;
+            _startupInitialized = true;
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                InitializeSmtc();
+                InitializeGlobalHotkeys();
+                ViewModel.RestoreSavedSettingsAndLibrary();
+                ApplyAppTheme();
+                ApplyInspectorState();
+            });
+        };
 
         _progressTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
         _progressTimer.Tick += (_, _) =>
@@ -324,6 +390,15 @@ public sealed partial class MainWindow : Window
             _folderLoadCts?.Cancel();
             _folderLoadCts?.Dispose();
             _folderLoadCts = null;
+            _mosaicPrewarmCts?.Cancel();
+            _mosaicPrewarmCts?.Dispose();
+            _mosaicPrewarmCts = null;
+            _dynamicAccentCts?.Cancel();
+            _dynamicAccentCts?.Dispose();
+            _dynamicAccentCts = null;
+            _mosaicSwapTimer.Stop();
+            _nowPlayingIdleTimer.Stop();
+            _mosaicRenderer.Dispose();
             _progressTimer.Stop();
             _searchDebounceTimer.Stop();
             _notificationTimer.Stop();
@@ -336,21 +411,8 @@ public sealed partial class MainWindow : Window
 
     private void TrySetObsidianBackdrop()
     {
-        try
-        {
-            SystemBackdrop = new MicaBackdrop { Kind = MicaKind.BaseAlt };
-        }
-        catch
-        {
-            try
-            {
-                SystemBackdrop = new DesktopAcrylicBackdrop();
-            }
-            catch
-            {
-                // Non-Mica fallback via XAML surface fill
-            }
-        }
+        // Zune "Content, Not Chrome": pure solid #000000 / #FFFFFF canvas without Mica/Acrylic blur
+        SystemBackdrop = null;
     }
 
     private void InitializeGlobalHotkeys()
@@ -473,6 +535,7 @@ public sealed partial class MainWindow : Window
             _bookletDoc = null;
             _loadedBookletPath = null;
             BookletPageImage.Source = null;
+            if (NowPlayingBookletImage is not null) NowPlayingBookletImage.Source = null;
             return;
         }
         if (string.Equals(_loadedBookletPath, pdfPath, StringComparison.OrdinalIgnoreCase))
@@ -493,6 +556,7 @@ public sealed partial class MainWindow : Window
             _bookletDoc = null;
             _loadedBookletPath = null;
             BookletPageStatusText.Text = "Booklet PDF unavailable";
+            if (NowPlayingBookletStatusText is not null) NowPlayingBookletStatusText.Text = "Booklet PDF unavailable";
         }
     }
 
@@ -510,6 +574,8 @@ public sealed partial class MainWindow : Window
         await bmp.SetSourceAsync(stream);
         BookletPageImage.Source = bmp;
         BookletPageStatusText.Text = $"Booklet PDF · Page {_bookletPageIndex + 1} / {pageCount}";
+        if (NowPlayingBookletImage is not null) NowPlayingBookletImage.Source = bmp;
+        if (NowPlayingBookletStatusText is not null) NowPlayingBookletStatusText.Text = $"Page {_bookletPageIndex + 1} / {pageCount}";
     }
 
     private async void OnBookletPrevClick(object sender, RoutedEventArgs e)
@@ -1438,89 +1504,48 @@ public sealed partial class MainWindow : Window
 
     private void SyncSubSelectorBarItems()
     {
-        _suppressSubTabSync = true;
-        try
-        {
-            PrimarySubSelectorBar.Items.Clear();
-            SelectorBarItem? activeItem = null;
-            foreach (var opt in ViewModel.CurrentSubTabs)
-            {
-                var item = new SelectorBarItem
-                {
-                    Text = opt.Label,
-                    Tag = opt.Id,
-                };
-                PrimarySubSelectorBar.Items.Add(item);
-                if (opt.IsActive)
-                {
-                    activeItem = item;
-                }
-            }
-            PrimarySubSelectorBar.SelectedItem = activeItem ?? PrimarySubSelectorBar.Items.FirstOrDefault();
-        }
-        finally
-        {
-            _suppressSubTabSync = false;
-        }
-    }
+        if (SubPivotBar is null) return;
+        SubPivotBar.Children.Clear();
+        bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
+        var activeBrush = new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x00, 0x00, 0x00) : Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+        var inactiveBrush = new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x6E, 0x6E, 0x6E) : Color.FromArgb(0xFF, 0x7A, 0x7A, 0x7A));
+        var accentBrush = new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
 
-    private void OnSubSelectorBarSelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
-    {
-        if (_suppressSubTabSync) return;
-        if (sender.SelectedItem?.Tag is string subTabId && !string.IsNullOrWhiteSpace(subTabId))
+        foreach (var opt in ViewModel.CurrentSubTabs)
         {
-            ViewModel.SelectSubTab(subTabId);
+            var label = new TextBlock
+            {
+                Text = opt.Label,
+                FontSize = 14,
+                FontWeight = opt.IsActive ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
+                Foreground = opt.IsActive ? activeBrush : inactiveBrush,
+            };
+
+            var stack = new StackPanel { Spacing = 3 };
+            stack.Children.Add(label);
+            stack.Children.Add(new Microsoft.UI.Xaml.Shapes.Rectangle
+            {
+                Height = 2,
+                Fill = accentBrush,
+                Visibility = opt.IsActive ? Visibility.Visible : Visibility.Collapsed,
+            });
+
+            var btn = new Button
+            {
+                Tag = opt.Id,
+                Padding = new Thickness(0, 4, 0, 2),
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                BorderThickness = new Thickness(0),
+                Content = stack,
+            };
+            btn.Click += (_, _) => ViewModel.SelectSubTab(opt.Id);
+            SubPivotBar.Children.Add(btn);
         }
     }
 
     private void OnPrimaryNavClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { Tag: string navId } && !string.IsNullOrWhiteSpace(navId))
-        {
-            ViewModel.NavigateToPrimary(navId);
-        }
-    }
-
-    // ---------------- NavigationView (native shell) ----------------
-
-    /// <summary>
-    /// Persisted user preference (IsSidebarExpanded) only governs the wide (Expanded) layout.
-    /// In Compact / Minimal layouts caused by a narrow window the pane is a transient overlay,
-    /// so automatic collapse never overwrites the saved preference.
-    /// </summary>
-    private void ApplyPaneStateForDisplayMode()
-    {
-        if (MainNavigationView is null) return;
-        MainNavigationView.IsPaneOpen = MainNavigationView.DisplayMode == NavigationViewDisplayMode.Expanded
-            && ViewModel.IsSidebarExpanded;
-    }
-
-    private void OnNavigationDisplayModeChanged(NavigationView sender, NavigationViewDisplayModeChangedEventArgs args)
-    {
-        ApplyPaneStateForDisplayMode();
-    }
-
-    private void OnTogglePaneClick(object sender, RoutedEventArgs e)
-    {
-        if (MainNavigationView.DisplayMode == NavigationViewDisplayMode.Expanded)
-        {
-            ViewModel.ToggleSidebar();
-        }
-        else
-        {
-            MainNavigationView.IsPaneOpen = !MainNavigationView.IsPaneOpen;
-        }
-    }
-
-    private void OnNavigationItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
-    {
-        if (_syncingNavSelection) return;
-        if (args.IsSettingsInvoked)
-        {
-            ViewModel.NavigateToPrimary("settings");
-            return;
-        }
-        if (args.InvokedItemContainer?.Tag is string spec && !string.IsNullOrWhiteSpace(spec))
+        if (sender is FrameworkElement { Tag: string spec } && !string.IsNullOrWhiteSpace(spec))
         {
             string[] parts = spec.Split(':', 2, StringSplitOptions.TrimEntries);
             if (parts.Length == 2)
@@ -1530,59 +1555,233 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    private void OnQuickplayNavLinkClick(object sender, RoutedEventArgs e) => OnPrimaryNavClick(sender, e);
+
+    private void OnScenesModeSwitchClick(object sender, RoutedEventArgs e)
     {
-        if (_syncingNavSelection) return;
-        if (args.IsSettingsSelected)
+        if (sender is FrameworkElement { Tag: string mode } && !string.IsNullOrWhiteSpace(mode))
         {
-            ViewModel.NavigateToPrimary("settings");
-            return;
-        }
-        if (args.SelectedItemContainer?.Tag is string spec && !string.IsNullOrWhiteSpace(spec))
-        {
-            string[] parts = spec.Split(':', 2, StringSplitOptions.TrimEntries);
-            if (parts.Length == 2)
-                ViewModel.NavigateToPrimary(parts[0], parts[1]);
-            else
-                ViewModel.NavigateToPrimary(spec);
+            ViewModel.SetScenesMode(mode);
         }
     }
 
-    private void SyncNavigationSelection()
+    private void OnNowPlayingPanelTabClick(object sender, RoutedEventArgs e)
     {
-        if (MainNavigationView is null) return;
-        object? target = ViewModel.PrimaryNavId == "settings"
-            ? MainNavigationView.SettingsItem
-            : AllNavItems().FirstOrDefault(i => (i.Tag as string) == ViewModel.PrimaryNavId);
-        if (ReferenceEquals(MainNavigationView.SelectedItem, target)) return;
-        _syncingNavSelection = true;
+        if (sender is FrameworkElement { Tag: string tab } && !string.IsNullOrWhiteSpace(tab))
+        {
+            ViewModel.SetNowPlayingPanelTab(tab);
+        }
+    }
+
+    private void OnTransportCoverClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.NavigateToPrimary("now_playing");
+    }
+
+    private void OnQuickplayPointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        if (QuickplayScrollViewer is null) return;
+        int delta = e.GetCurrentPoint(QuickplayScrollViewer).Properties.MouseWheelDelta;
+        if (delta == 0) return;
+        double target = Math.Clamp(
+            QuickplayScrollViewer.HorizontalOffset - delta * 1.1,
+            0.0,
+            QuickplayScrollViewer.ScrollableWidth);
+        QuickplayScrollViewer.ChangeView(target, null, null, disableAnimation: false);
+        e.Handled = true;
+    }
+
+    private QuickplayTileItem? _rightClickedQuickplayTile;
+
+    private void OnQuickplayRepeaterElementPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not FrameworkElement root) return;
+        var img = FindLogicalOrVisualImage(root, "TileCoverImage");
+        if (img is null) return;
+        var tile = (sender.ItemsSourceView?.GetAt(args.Index) as QuickplayTileItem)
+            ?? (root.DataContext as QuickplayTileItem);
+        img.Source = CoverArtImageCache.GetQuickplayCover(tile?.CoverArtPath);
+    }
+
+    private static Image? FindLogicalOrVisualImage(DependencyObject root, string targetName)
+    {
+        if (root is FrameworkElement fe && fe.FindName(targetName) is Image named)
+        {
+            return named;
+        }
+        return FindImageInLogicalOrVisualTree(root);
+    }
+
+    private static Image? FindImageInLogicalOrVisualTree(DependencyObject node)
+    {
+        if (node is Image img) return img;
+        if (node is ContentControl { Content: DependencyObject contentObj })
+        {
+            var inner = FindImageInLogicalOrVisualTree(contentObj);
+            if (inner is not null) return inner;
+        }
+        if (node is Border { Child: DependencyObject borderChild })
+        {
+            var inner = FindImageInLogicalOrVisualTree(borderChild);
+            if (inner is not null) return inner;
+        }
+        if (node is Panel panel)
+        {
+            foreach (var child in panel.Children)
+            {
+                var inner = FindImageInLogicalOrVisualTree(child);
+                if (inner is not null) return inner;
+            }
+        }
+        return FindDescendantImage(node);
+    }
+
+    private void OnQuickplayTileClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is QuickplayTileItem tile)
+        {
+            ViewModel.PlayQuickplayTile(tile);
+        }
+    }
+
+    private void OnQuickplayTileRightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        _rightClickedQuickplayTile = (sender as FrameworkElement)?.DataContext as QuickplayTileItem
+            ?? (e.OriginalSource as FrameworkElement)?.DataContext as QuickplayTileItem;
+    }
+
+    private void OnContextPlayQuickplayTileClick(object sender, RoutedEventArgs e)
+    {
+        var tile = _rightClickedQuickplayTile ?? (sender as FrameworkElement)?.DataContext as QuickplayTileItem;
+        _rightClickedQuickplayTile = null;
+        if (tile is not null) ViewModel.PlayQuickplayTile(tile);
+    }
+
+    private void OnContextUnpinQuickplayTileClick(object sender, RoutedEventArgs e)
+    {
+        var tile = _rightClickedQuickplayTile ?? (sender as FrameworkElement)?.DataContext as QuickplayTileItem;
+        _rightClickedQuickplayTile = null;
+        if (tile is not null) ViewModel.UnpinQuickplayItem(tile.TileId);
+    }
+
+    private void OnPinSelectedEntityGroupToQuickplayClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.PinEntityGroupToQuickplay(ViewModel.SelectedEntityGroup);
+    }
+
+    private void OnContextPinEntityGroupToQuickplayClick(object sender, RoutedEventArgs e)
+    {
+        var group = _rightClickedEntityGroup ?? ViewModel.SelectedEntityGroup;
+        _rightClickedEntityGroup = null;
+        ViewModel.PinEntityGroupToQuickplay(group);
+    }
+
+    private void OnPinPlaylistToQuickplayClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.PinPlaylistToQuickplay(ViewModel.SelectedPlaylist);
+    }
+
+    private void OnContextPinPlaylistToQuickplayClick(object sender, RoutedEventArgs e)
+    {
+        var pl = _rightClickedPlaylist ?? (sender as FrameworkElement)?.DataContext as PlaylistSummary ?? ViewModel.SelectedPlaylist;
+        _rightClickedPlaylist = null;
+        ViewModel.PinPlaylistToQuickplay(pl);
+    }
+
+    private void OnEntityCoverListContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.ItemContainer?.ContentTemplateRoot is not FrameworkElement root) return;
+        var img = (root.FindName("EntityCoverImage") as Image) ?? FindDescendantImage(root);
+        if (img is null) return;
+        if (args.InRecycleQueue)
+        {
+            img.Source = null;
+            return;
+        }
+        if (args.Phase == 0)
+        {
+            img.Source = args.Item is EntityGroupItem group
+                ? GetOrCreateRowCoverBitmap(group.CoverArtPath, decodeWidth: 180)
+                : null;
+        }
+    }
+
+    // ---------------- Now Playing Mosaic & Idle Auto-Fade ----------------
+
+    private async Task PrewarmNowPlayingMosaicAsync()
+    {
+        _mosaicPrewarmCts?.Cancel();
+        _mosaicPrewarmCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _mosaicPrewarmCts = cts;
         try
         {
-            MainNavigationView.SelectedItem = target;
+            await Task.Delay(1200, cts.Token);
+            if (!cts.Token.IsCancellationRequested && !_mosaicRenderer.HasCovers)
+            {
+                RefreshNowPlayingMosaic();
+            }
         }
-        finally
+        catch (OperationCanceledException)
         {
-            _syncingNavSelection = false;
+            // Ignore cancellation on folder switch or window close
         }
     }
 
-    private IEnumerable<NavigationViewItem> AllNavItems() =>
-        MainNavigationView.MenuItems.OfType<NavigationViewItem>()
-            .Concat(MainNavigationView.FooterMenuItems.OfType<NavigationViewItem>());
-
-    private void SyncClassicalNavChildren()
+    private void RefreshNowPlayingMosaic()
     {
-        if (NavItemClassical is null) return;
-        // Keep NavItemClassical as a flat top-level item; WinUI NavigationView throws E_BOUNDS (0x8000000B)
-        // inside ItemsRepeater if SelectedItem jumps to a collapsed child container on invocation.
-        if (NavItemClassical.MenuItems.Count > 0)
+        var covers = ViewModel.GetUniqueCoverArtPaths(64);
+        _mosaicRenderer.UpdateCoversAsync(covers, () =>
         {
-            NavItemClassical.MenuItems.Clear();
-        }
-        SyncNavigationSelection();
+            DispatcherQueue.TryEnqueue(() => NowPlayingMosaicCanvas?.Invalidate());
+        });
+        NowPlayingMosaicCanvas?.Invalidate();
     }
 
-    // ---------------- Theme ----------------
+    private void OnPaintNowPlayingMosaic(object? sender, SKPaintSurfaceEventArgs e)
+    {
+        bool isDark = RootWorkbench?.ActualTheme != ElementTheme.Light;
+        _mosaicRenderer.Render(e.Surface.Canvas, e.Info.Width, e.Info.Height, isDark, _currentAccentRgb);
+    }
+
+    private void OnNowPlayingPointerActivity(object sender, PointerRoutedEventArgs e)
+    {
+        if (ViewModel.IsNowPlayingViewVisible)
+        {
+            RestoreNowPlayingChrome();
+        }
+    }
+
+    private void RestoreNowPlayingChrome()
+    {
+        _lastNowPlayingActivityUtc = DateTime.UtcNow;
+        if (_isNowPlayingChromeFaded && TopHeaderContainer is not null)
+        {
+            _isNowPlayingChromeFaded = false;
+            TopHeaderContainer.IsHitTestVisible = true;
+            ZuneMotionHelper.AnimateOpacity(TopHeaderContainer, 1.0f, durationMs: 120);
+        }
+    }
+
+    private void UpdateNowPlayingChromeAutoFade()
+    {
+        if (TopHeaderContainer is null) return;
+        if (ViewModel.IsNowPlayingViewVisible && ViewModel.IsPlaying)
+        {
+            if (!_isNowPlayingChromeFaded && (DateTime.UtcNow - _lastNowPlayingActivityUtc).TotalSeconds >= 4.0)
+            {
+                _isNowPlayingChromeFaded = true;
+                TopHeaderContainer.IsHitTestVisible = false;
+                ZuneMotionHelper.AnimateOpacity(TopHeaderContainer, 0.0f, durationMs: 320);
+            }
+        }
+        else if (_isNowPlayingChromeFaded)
+        {
+            RestoreNowPlayingChrome();
+        }
+    }
+
+    // ---------------- Theme & Dynamic Cover Accent ----------------
 
     private void ApplyAppTheme()
     {
@@ -1595,16 +1794,139 @@ public sealed partial class MainWindow : Window
         AttachFlyoutThemeSync(LexiconTagMatrixFlyout);
         AttachFlyoutThemeSync(AcousticRackFlyout);
         AttachFlyoutThemeSync(PlaybackQueueFlyout);
-        bool isDark = RootWorkbench.ActualTheme == ElementTheme.Dark;
+        _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
+        SyncSubSelectorBarItems();
+        RefreshDynamicAccentControls();
+        NowPlayingMosaicCanvas?.Invalidate();
+    }
+
+    private async Task ApplyDynamicAccentFromCoverAsync(string? coverArtPath)
+    {
+        _dynamicAccentCts?.Cancel();
+        _dynamicAccentCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _dynamicAccentCts = cts;
+
+        bool isDark = RootWorkbench?.ActualTheme != ElementTheme.Light;
+        (byte R, byte G, byte B) targetRgb = isDark
+            ? ZuneColorMath.DefaultDarkAccentRgb
+            : ZuneColorMath.DefaultLightAccentRgb;
+
+        if (ViewModel.EnableDynamicCoverAccent && !string.IsNullOrWhiteSpace(coverArtPath) && File.Exists(coverArtPath))
+        {
+            try
+            {
+                var sampled = await Task.Run(() => ExtractClampedCoverAccent(coverArtPath, isDark), cts.Token);
+                if (!cts.Token.IsCancellationRequested && sampled.HasValue)
+                {
+                    targetRgb = sampled.Value;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch
+            {
+                // Keep default Zune magenta fallback
+            }
+        }
+
+        if (cts.Token.IsCancellationRequested) return;
+        ApplyResolvedAccentRgb(targetRgb, isDark);
+    }
+
+    private static (byte R, byte G, byte B)? ExtractClampedCoverAccent(string coverArtPath, bool isDark)
+    {
+        using var raw = SKBitmap.Decode(coverArtPath);
+        if (raw is null || raw.Width <= 0 || raw.Height <= 0) return null;
+
+        const int sampleDim = 24;
+        using var small = new SKBitmap(sampleDim, sampleDim, SKColorType.Bgra8888, SKAlphaType.Premul);
+        using (var canvas = new SKCanvas(small))
+        {
+            canvas.DrawBitmap(raw, new SKRect(0, 0, raw.Width, raw.Height), new SKRect(0, 0, sampleDim, sampleDim));
+        }
+
+        var pixels = new (byte R, byte G, byte B)[sampleDim * sampleDim];
+        int k = 0;
+        for (int y = 0; y < sampleDim; y++)
+        {
+            for (int x = 0; x < sampleDim; x++)
+            {
+                var px = small.GetPixel(x, y);
+                pixels[k++] = (px.Red, px.Green, px.Blue);
+            }
+        }
+
+        var dominant = ZuneColorMath.SelectDominantVibrantRgb(pixels);
+        return dominant is { } rgb
+            ? ZuneColorMath.ClampAccentForTheme(rgb.R, rgb.G, rgb.B, isDark)
+            : null;
+    }
+
+    private void ApplyResolvedAccentRgb((byte R, byte G, byte B) rgb, bool isDark)
+    {
+        _currentAccentRgb = rgb;
+        var winColor = Color.FromArgb(0xFF, rgb.R, rgb.G, rgb.B);
+        _activeBarPaint.Color = new SKColor(rgb.R, rgb.G, rgb.B);
+
+        var subtleDarkColor = Color.FromArgb(0x26, rgb.R, rgb.G, rgb.B);
+        var subtleLightColor = Color.FromArgb(0x1C, rgb.R, rgb.G, rgb.B);
+
+        foreach (var dict in Application.Current.Resources.MergedDictionaries)
+        {
+            if (dict.ThemeDictionaries.TryGetValue("Default", out object? darkObj) && darkObj is ResourceDictionary darkDict)
+            {
+                if (darkDict.TryGetValue("ZuneAccentBrush", out object? darkBrush) && darkBrush is SolidColorBrush b)
+                    b.Color = winColor;
+                if (darkDict.TryGetValue("ZuneAccentSubtleBrush", out object? darkSub) && darkSub is SolidColorBrush sb)
+                    sb.Color = subtleDarkColor;
+            }
+            if (dict.ThemeDictionaries.TryGetValue("Light", out object? lightObj) && lightObj is ResourceDictionary lightDict)
+            {
+                if (lightDict.TryGetValue("ZuneAccentBrush", out object? lightBrush) && lightBrush is SolidColorBrush b)
+                    b.Color = winColor;
+                if (lightDict.TryGetValue("ZuneAccentSubtleBrush", out object? lightSub) && lightSub is SolidColorBrush sb)
+                    sb.Color = subtleLightColor;
+            }
+        }
+        if (Application.Current.Resources.TryGetValue("ZuneAccentBrush", out object? appRes) && appRes is SolidColorBrush appAccent)
+        {
+            appAccent.Color = winColor;
+        }
+
         try
         {
-            AppWindow.TitleBar.ButtonForegroundColor = isDark ? Color.FromArgb(0xFF, 0xCB, 0xD5, 0xE1) : Color.FromArgb(0xFF, 0x1F, 0x29, 0x37);
-            AppWindow.TitleBar.ButtonHoverBackgroundColor = isDark ? Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x1A, 0x00, 0x00, 0x00);
-            AppWindow.TitleBar.ButtonHoverForegroundColor = isDark ? Color.FromArgb(0xFF, 0xD9, 0xB3, 0x72) : Color.FromArgb(0xFF, 0x7E, 0x60, 0x29);
+            AppWindow.TitleBar.ButtonForegroundColor = isDark
+                ? Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
+            AppWindow.TitleBar.ButtonHoverBackgroundColor = isDark
+                ? Color.FromArgb(0x28, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(0x18, 0x00, 0x00, 0x00);
+            AppWindow.TitleBar.ButtonHoverForegroundColor = winColor;
         }
         catch
         {
             // Older hosts without TitleBar customization
+        }
+
+        WaveformCanvas?.Invalidate();
+        NowPlayingMosaicCanvas?.Invalidate();
+        SyncSubSelectorBarItems();
+        RefreshDynamicAccentControls();
+    }
+
+    private void RefreshDynamicAccentControls()
+    {
+        if (TransportHeartIcon is not null)
+        {
+            TransportHeartIcon.Foreground = HeartForeground(ViewModel.CurrentTrackLoved);
+        }
+        if (DjFreezeButton is not null)
+        {
+            DjFreezeButton.Background = FreezePillBackground(ViewModel.IsDjFreezeActive);
+            DjFreezeButton.BorderBrush = FreezePillBorder(ViewModel.IsDjFreezeActive);
         }
     }
 
@@ -1754,9 +2076,9 @@ public sealed partial class MainWindow : Window
         if ((e.OriginalSource as FrameworkElement)?.DataContext is EntityGroupItem rightClicked)
         {
             _rightClickedEntityGroup = rightClicked;
-            if (!ReferenceEquals(EntityBrowserListView.SelectedItem, rightClicked))
+            if (sender is ListView listView && !ReferenceEquals(listView.SelectedItem, rightClicked))
             {
-                EntityBrowserListView.SelectedItem = rightClicked;
+                listView.SelectedItem = rightClicked;
             }
         }
     }
@@ -1775,6 +2097,10 @@ public sealed partial class MainWindow : Window
 
     private void RootWorkbench_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        if (ViewModel.IsNowPlayingViewVisible)
+        {
+            RestoreNowPlayingChrome();
+        }
         bool ctrl = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
         bool shift = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
         bool alt = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
@@ -2083,19 +2409,19 @@ public sealed partial class MainWindow : Window
 
     private void OnPrimaryNavShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        string? navId = sender.Key switch
+        (string NavId, string? SubTab)? target = sender.Key switch
         {
-            VirtualKey.Number1 => "library",
-            VirtualKey.Number2 => "artists",
-            VirtualKey.Number3 => "classical",
-            VirtualKey.Number4 => "scenes",
-            VirtualKey.Number5 => "playlists",
-            VirtualKey.I => "inbox",
+            VirtualKey.Number1 => ("quickplay", null),
+            VirtualKey.Number2 => ("collection", null),
+            VirtualKey.Number3 => ("now_playing", null),
+            VirtualKey.Number4 => ("studio", null),
+            VirtualKey.Number5 => ("collection", "playlists"),
+            VirtualKey.I => ("studio", "inbox"),
             _ => null,
         };
-        if (navId is not null)
+        if (target is { } dest)
         {
-            ViewModel.NavigateToPrimary(navId);
+            ViewModel.NavigateToPrimary(dest.NavId, dest.SubTab);
             args.Handled = true;
         }
     }
@@ -2149,14 +2475,19 @@ public sealed partial class MainWindow : Window
 
     private void RefreshQueuePlayingHighlights()
     {
-        if (PlaybackQueueListView is null) return;
-        for (int i = 0; i < ViewModel.PlaybackQueue.Count; i++)
+        void HighlightList(ListView? listView)
         {
-            if (PlaybackQueueListView.ContainerFromIndex(i) is ListViewItem container)
+            if (listView is null) return;
+            for (int i = 0; i < ViewModel.PlaybackQueue.Count; i++)
             {
-                ApplyQueueRowHighlight(container, ViewModel.PlaybackQueue[i]);
+                if (listView.ContainerFromIndex(i) is ListViewItem container)
+                {
+                    ApplyQueueRowHighlight(container, ViewModel.PlaybackQueue[i]);
+                }
             }
         }
+        HighlightList(PlaybackQueueListView);
+        HighlightList(NowPlayingUpNextListView);
     }
 
     private void ApplyQueueRowHighlight(ListViewItem container, TrackItem? track)
@@ -2174,14 +2505,14 @@ public sealed partial class MainWindow : Window
         {
             if (isPlayingRow)
             {
-                titleText.Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xD9, 0xB3, 0x72));
+                titleText.Foreground = new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
             }
             else
             {
                 bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
                 titleText.Foreground = new SolidColorBrush(isLight
-                    ? Color.FromArgb(0xFF, 0x1E, 0x29, 0x3B)
-                    : Color.FromArgb(0xFF, 0xE2, 0xE8, 0xF0));
+                    ? Color.FromArgb(0xFF, 0x00, 0x00, 0x00)
+                    : Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
             }
         }
     }
@@ -2290,12 +2621,10 @@ public sealed partial class MainWindow : Window
         if (sender is not Flyout flyout) return;
 
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
-        var accentBrush = new SolidColorBrush(isLight
-            ? Color.FromArgb(0xFF, 0x8D, 0x67, 0x26)
-            : Color.FromArgb(0xFF, 0xD9, 0xB3, 0x72));
+        var accentBrush = new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
         var mutedBrush = new SolidColorBrush(isLight
-            ? Color.FromArgb(0xFF, 0x47, 0x56, 0x6B)
-            : Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8));
+            ? Color.FromArgb(0xFF, 0x52, 0x52, 0x52)
+            : Color.FromArgb(0xFF, 0xA3, 0xA3, 0xA3));
 
         var allFacets = ViewModel.GetAvailableGenreFacets();
 
@@ -2475,7 +2804,7 @@ public sealed partial class MainWindow : Window
             ? _inlineTargets
             : (ViewModel.InspectedTrack is not null ? [ViewModel.InspectedTrack] : Array.Empty<TrackItem>());
         await ViewModel.FetchMissingBasicInfoForTracksAsync(targets);
-        _coverThumbCache.Clear();
+        CoverArtImageCache.Clear();
         SyncInlineInspectorAfterEnrichment(targets);
     }
 
@@ -2505,32 +2834,8 @@ public sealed partial class MainWindow : Window
         UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
     }
 
-    private readonly Dictionary<string, BitmapImage> _coverThumbCache = new(StringComparer.OrdinalIgnoreCase);
-
-    private BitmapImage? GetOrCreateRowCoverBitmap(string? coverArtPath)
-    {
-        if (string.IsNullOrWhiteSpace(coverArtPath) || !File.Exists(coverArtPath)) return null;
-        if (_coverThumbCache.TryGetValue(coverArtPath, out var existing)) return existing;
-        try
-        {
-            if (_coverThumbCache.Count >= 600)
-            {
-                _coverThumbCache.Clear();
-            }
-            var uri = new Uri(Path.GetFullPath(coverArtPath));
-            var bmp = new BitmapImage
-            {
-                DecodePixelWidth = 80,
-                UriSource = uri,
-            };
-            _coverThumbCache[coverArtPath] = bmp;
-            return bmp;
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    private static BitmapImage? GetOrCreateRowCoverBitmap(string? coverArtPath, int decodeWidth = 80) =>
+        CoverArtImageCache.GetBitmap(coverArtPath, decodeWidth);
 
     private static Image? FindDescendantImage(DependencyObject parent)
     {
@@ -2935,7 +3240,7 @@ public sealed partial class MainWindow : Window
         focusTarget.SelectAll();
     }
 
-    private static void UpdateCoverArtImage(Image? target, string? coverArtPath)
+    private static void UpdateCoverArtImage(Image? target, string? coverArtPath, int decodeWidth = 160)
     {
         if (target is null) return;
         if (string.IsNullOrWhiteSpace(coverArtPath) || !File.Exists(coverArtPath))
@@ -2949,7 +3254,7 @@ public sealed partial class MainWindow : Window
             var uri = new Uri(Path.GetFullPath(coverArtPath));
             var bmp = new BitmapImage
             {
-                DecodePixelWidth = 160,
+                DecodePixelWidth = decodeWidth,
                 UriSource = uri,
             };
             target.Source = bmp;
@@ -3733,7 +4038,13 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(actionRow);
 
         LexiconTagMatrixFlyout.Content = panel;
-        LexiconTagMatrixFlyout.ShowAt(LexiconTagToolbarButton);
+        FrameworkElement anchor =
+            ViewModel.IsCollectionOrStudioMainVisible && ViewModel.IsTrackTableVisible && LexiconTagToolbarButton is not null
+                ? LexiconTagToolbarButton
+                : (InspectorSplitView?.IsPaneOpen == true && InspectorLexiconTagButton is not null
+                    ? InspectorLexiconTagButton
+                    : (FrameworkElement?)InspectorToggleButton ?? RootWorkbench);
+        LexiconTagMatrixFlyout.ShowAt(anchor);
     }
 
     private async void OnOpenBookletTheaterClick(object sender, RoutedEventArgs e)
@@ -3789,7 +4100,7 @@ public sealed partial class MainWindow : Window
         body.Children.Add(new Border
         {
             Background = (Brush)Application.Current.Resources["SolidBackgroundFillColorBaseBrush"],
-            CornerRadius = new CornerRadius(8),
+            CornerRadius = new CornerRadius(0),
             Padding = new Thickness(6),
             MaxHeight = 620,
             Child = img,
@@ -3873,7 +4184,7 @@ public sealed partial class MainWindow : Window
         float[]? envelope = ViewModel.CurrentWaveform;
         int count = envelope?.Length ?? 150;
         float step = w / (float)count;
-        float barW = Math.Clamp(step * 0.65f, 1.5f, 6f);
+        float barW = Math.Clamp(step * 0.58f, 1.5f, 4f);
         float centerY = h / 2f;
         float progressX = (float)(ViewModel.PlaybackProgress * w);
 
@@ -3883,7 +4194,12 @@ public sealed partial class MainWindow : Window
             float halfH = Math.Max(2f, amp * (h * 0.44f));
             float cx = (i + 0.5f) * step;
             var rect = new SKRect(cx - barW / 2f, centerY - halfH, cx + barW / 2f, centerY + halfH);
-            canvas.DrawRoundRect(rect, barW / 2f, barW / 2f, cx <= progressX ? ActiveBarPaint : InactiveBarPaint);
+            canvas.DrawRect(rect, cx <= progressX ? _activeBarPaint : InactiveBarPaint);
+        }
+
+        if (progressX > 0 && progressX < w)
+        {
+            canvas.DrawRect(new SKRect(progressX - 1f, 0, progressX + 1f, h), _activeBarPaint);
         }
     }
 }

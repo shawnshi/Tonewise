@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Tonewise.SyncHost.Workbench;
 
 namespace Tonewise.SyncHost;
 
@@ -92,6 +93,18 @@ public static class DesktopStateStore
                 PRIMARY KEY (device_id, track_uid)
             );
             CREATE INDEX IF NOT EXISTS idx_lan_sync_wm_track ON lan_sync_device_watermarks (track_uid);
+
+            CREATE TABLE IF NOT EXISTS quickplay_pins (
+                pin_id       TEXT PRIMARY KEY,
+                kind         TEXT NOT NULL,
+                target_key   TEXT NOT NULL,
+                title        TEXT NOT NULL,
+                subtitle     TEXT NOT NULL DEFAULT '',
+                cover_path   TEXT,
+                sort_order   INTEGER NOT NULL DEFAULT 0,
+                pinned_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_quickplay_pins_order ON quickplay_pins (sort_order ASC, pinned_at_ms DESC);
             """;
         cmd.ExecuteNonQuery();
     }
@@ -277,5 +290,79 @@ public static class DesktopStateStore
             }
             insCmd.ExecuteNonQuery();
         }
+    }
+
+    public static IReadOnlyList<QuickplayPinRecord> ListQuickplayPins(string stateDbPath)
+    {
+        if (string.IsNullOrWhiteSpace(stateDbPath) || !File.Exists(stateDbPath))
+            return [];
+
+        using var conn = TonewiseSqlite.OpenReadWrite(stateDbPath);
+        EnsureSchema(conn);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT pin_id, kind, target_key, title, subtitle, cover_path, sort_order, pinned_at_ms
+            FROM quickplay_pins
+            ORDER BY sort_order ASC, pinned_at_ms DESC;
+            """;
+        var list = new List<QuickplayPinRecord>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            list.Add(new QuickplayPinRecord(
+                PinId: reader.GetString(0),
+                Kind: reader.GetString(1),
+                TargetKey: reader.GetString(2),
+                Title: reader.GetString(3),
+                Subtitle: reader.IsDBNull(4) ? "" : reader.GetString(4),
+                CoverPath: reader.IsDBNull(5) ? null : reader.GetString(5),
+                SortOrder: reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                PinnedAtMs: reader.IsDBNull(7) ? 0 : reader.GetInt64(7)));
+        }
+        return list;
+    }
+
+    public static void UpsertQuickplayPin(string stateDbPath, QuickplayPinRecord pin)
+    {
+        if (string.IsNullOrWhiteSpace(stateDbPath)) return;
+        using var conn = TonewiseSqlite.OpenReadWrite(stateDbPath);
+        EnsureSchema(conn);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO quickplay_pins (
+                pin_id, kind, target_key, title, subtitle, cover_path, sort_order, pinned_at_ms
+            ) VALUES (
+                $id, $kind, $target, $title, $sub, $cover, $order, $ts
+            )
+            ON CONFLICT(pin_id) DO UPDATE SET
+                kind = excluded.kind,
+                target_key = excluded.target_key,
+                title = excluded.title,
+                subtitle = excluded.subtitle,
+                cover_path = excluded.cover_path,
+                sort_order = excluded.sort_order,
+                pinned_at_ms = excluded.pinned_at_ms;
+            """;
+        cmd.Parameters.AddWithValue("$id", pin.PinId);
+        cmd.Parameters.AddWithValue("$kind", pin.Kind);
+        cmd.Parameters.AddWithValue("$target", pin.TargetKey);
+        cmd.Parameters.AddWithValue("$title", pin.Title);
+        cmd.Parameters.AddWithValue("$sub", pin.Subtitle ?? "");
+        cmd.Parameters.AddWithValue("$cover", (object?)pin.CoverPath ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$order", pin.SortOrder);
+        cmd.Parameters.AddWithValue("$ts", pin.PinnedAtMs);
+        cmd.ExecuteNonQuery();
+    }
+
+    public static bool RemoveQuickplayPin(string stateDbPath, string pinId)
+    {
+        if (string.IsNullOrWhiteSpace(stateDbPath) || !File.Exists(stateDbPath) || string.IsNullOrWhiteSpace(pinId))
+            return false;
+        using var conn = TonewiseSqlite.OpenReadWrite(stateDbPath);
+        EnsureSchema(conn);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM quickplay_pins WHERE pin_id = $id;";
+        cmd.Parameters.AddWithValue("$id", pinId);
+        return cmd.ExecuteNonQuery() > 0;
     }
 }

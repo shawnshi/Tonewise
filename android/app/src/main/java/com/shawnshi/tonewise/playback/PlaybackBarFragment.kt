@@ -38,7 +38,9 @@ import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.state.RepeatMode
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SessionSlotStore
+import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.ui.ViewBindingFragment
+import com.shawnshi.tonewise.ui.ZuneAppBarDrawerSheet
 import com.shawnshi.tonewise.util.collectImmediately
 import com.shawnshi.tonewise.util.showToast
 import org.oxycblt.musikr.Song
@@ -54,6 +56,7 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
     @Inject lateinit var sessionSlotStore: SessionSlotStore
     @Inject lateinit var musicRepository: MusicRepository
     @Inject lateinit var lanSyncRepository: LanSyncRepository
+    @Inject lateinit var uiSettings: UISettings
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
     private var latestSong: Song? = null
@@ -93,6 +96,14 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
 
         // Set up actions
         binding.playbackPlayPause.setOnClickListener { playbackModel.togglePlaying() }
+        binding.playbackAppbarMore.setOnClickListener {
+            if (parentFragmentManager.findFragmentByTag(ZuneAppBarDrawerSheet.TAG) == null) {
+                ZuneAppBarDrawerSheet().show(parentFragmentManager, ZuneAppBarDrawerSheet.TAG)
+            }
+        }
+        if (!uiSettings.roundMode) {
+            binding.playbackProgressBar.trackCornerRadius = 0
+        }
 
         // -- VIEWMODEL SETUP ---
         collectImmediately(playbackModel.song, ::updateSong)

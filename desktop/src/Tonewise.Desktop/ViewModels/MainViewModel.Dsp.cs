@@ -18,10 +18,39 @@ namespace Tonewise.Desktop.ViewModels;
 
 public sealed partial class MainViewModel
 {
+    public async Task RefreshEndpointsAsync(bool handleLostSelection = false)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        var endpoints = await Task.Run(AudioDeviceRouter.EnumerateRenderEndpoints).ConfigureAwait(false);
+        if (Volatile.Read(ref _disposed) != 0) return;
+
+        if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
+        {
+            _uiContext.Post(_ =>
+            {
+                if (Volatile.Read(ref _disposed) == 0)
+                {
+                    ApplyEndpointsOnUiThread(endpoints, handleLostSelection);
+                }
+            }, null);
+        }
+        else
+        {
+            ApplyEndpointsOnUiThread(endpoints, handleLostSelection);
+        }
+    }
+
     public void RefreshEndpoints(bool handleLostSelection = false)
     {
-        string? previousId = SelectedEndpoint?.Id;
         var endpoints = AudioDeviceRouter.EnumerateRenderEndpoints();
+        ApplyEndpointsOnUiThread(endpoints, handleLostSelection);
+    }
+
+    private void ApplyEndpointsOnUiThread(IReadOnlyList<AudioOutputEndpoint> endpoints, bool handleLostSelection)
+    {
+        string? previousId = !string.IsNullOrWhiteSpace(SelectedEndpoint?.Id)
+            ? SelectedEndpoint.Id
+            : _pendingSavedEndpointId;
         EndpointReconcileResult reconciled;
         bool prevSup = _suppressDspSync;
         bool prevSaveSup = _suppressSettingsSave;
@@ -33,6 +62,11 @@ public sealed partial class MainViewModel
             if (!string.Equals(SelectedEndpoint?.Id, reconciled.TargetSelection?.Id, StringComparison.Ordinal))
             {
                 SelectedEndpoint = reconciled.TargetSelection;
+            }
+            if (!string.IsNullOrWhiteSpace(_pendingSavedEndpointId) && SelectedEndpoint is not null)
+            {
+                _pendingSavedEndpointId = null;
+                LoadDspConfigForCurrentEndpoint(_store.MusicRoot);
             }
         }
         finally

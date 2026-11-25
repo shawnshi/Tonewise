@@ -25,6 +25,7 @@ import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.settings.BasePreferenceFragment
 import com.shawnshi.tonewise.settings.ui.WrappedDialogPreference
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.isNight
 import com.shawnshi.tonewise.util.navigateSafe
@@ -38,6 +39,7 @@ import timber.log.Timber as L
 @AndroidEntryPoint
 class UIPreferenceFragment : BasePreferenceFragment(R.xml.preferences_ui) {
     @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
 
     override fun onOpenDialogPreference(preference: WrappedDialogPreference) {
         if (preference.key == getString(R.string.set_key_accent)) {
@@ -71,6 +73,15 @@ class UIPreferenceFragment : BasePreferenceFragment(R.xml.preferences_ui) {
                             activity.recreate()
                         }
 
+                        true
+                    }
+            }
+            getString(R.string.set_key_dynamic_cover_accent) -> {
+                preference.onPreferenceChangeListener =
+                    Preference.OnPreferenceChangeListener { _, newValue ->
+                        if (newValue == false) {
+                            dynamicAccentController.clear()
+                        }
                         true
                     }
             }

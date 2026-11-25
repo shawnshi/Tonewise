@@ -79,15 +79,15 @@ public sealed partial class MainViewModel
     {
         if (playlist is null)
         {
-            NavigateToPrimary("library", "tracks");
+            NavigateToPrimary("collection", "tracks");
             return;
         }
 
         SelectedPlaylist = playlist;
-        if (PrimaryNavId != "playlists")
+        if (PrimaryNavId != "collection" || SecondarySubTab != "playlists")
         {
-            PrimaryNavId = "playlists";
-            SecondarySubTab = "workspace";
+            PrimaryNavId = "collection";
+            SecondarySubTab = "playlists";
             UpdateNavigationState();
         }
         LoadPlaylistTracksIntoView(playlist);
@@ -357,7 +357,7 @@ public sealed partial class MainViewModel
         }
 
         RefreshPlaylists();
-        if (IsViewingPlaylist && SelectedPlaylist is not null && PrimaryNavId == "playlists")
+        if (IsViewingPlaylist && SelectedPlaylist is not null && PrimaryNavId == "collection" && SecondarySubTab == "playlists")
         {
             LoadPlaylistTracksIntoView(SelectedPlaylist);
         }

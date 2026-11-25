@@ -19,6 +19,7 @@
 package com.shawnshi.tonewise.playback.ui
 
 import android.content.Context
+import android.content.res.ColorStateList
 import android.util.AttributeSet
 import com.google.android.material.slider.Slider
 import kotlin.math.max
@@ -43,6 +44,8 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
     Slider.OnChangeListener {
     private val binding = ViewSeekBarBinding.inflate(context.inflater, this, true)
     private var displayedPositionSecs: Long? = null
+    private val defaultTrackActiveTint: ColorStateList = binding.seekBarSlider.trackActiveTintList
+    private val defaultThumbTint: ColorStateList = binding.seekBarSlider.thumbTintList
 
     init {
         binding.seekBarSlider.addOnSliderTouchListener(this)
@@ -62,6 +65,23 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
     /** Enables or disables PC-style 150-bar waveform progress bar rendering. */
     fun setWaveformStyleEnabled(enabled: Boolean) {
         binding.seekBarSlider.setWaveformStyleEnabled(enabled)
+    }
+
+    /** Switches waveform bars and track to 0dp rectilinear Zune geometry. */
+    fun setRectilinearMode(enabled: Boolean) {
+        binding.seekBarSlider.setRectilinearMode(enabled)
+    }
+
+    /** Optionally overrides active waveform/thumb tint for Dynamic Cover Accent, or restores default on null. */
+    fun setDynamicAccentColor(argb: Int?) {
+        if (argb != null) {
+            val csl = ColorStateList.valueOf(argb)
+            binding.seekBarSlider.trackActiveTintList = csl
+            binding.seekBarSlider.thumbTintList = csl
+        } else {
+            binding.seekBarSlider.trackActiveTintList = defaultTrackActiveTint
+            binding.seekBarSlider.thumbTintList = defaultThumbTint
+        }
     }
 
     /** The current [Listener] attached to this instance. */

@@ -231,6 +231,7 @@ public sealed class LibraryStore
         bool hasDiscNumber = cols.Contains("disc_number");
         bool hasTrackNumber = cols.Contains("track_number");
         bool hasAlbumArtist = cols.Contains("album_artist");
+        bool hasMtimeMs = cols.Contains("mtime_ms");
         bool hasLedgerCols = cols.Contains("legacy_play_count")
                              && cols.Contains("lastfm_pulled_count")
                              && cols.Contains("local_unsynced_expired_count");
@@ -251,7 +252,8 @@ public sealed class LibraryStore
                 {(hasReplayGainAlbum ? "replaygain_album_db" : "NULL")} AS replaygain_album_db,
                 {(hasDiscNumber ? "disc_number" : "0")} AS disc_number,
                 {(hasTrackNumber ? "track_number" : "0")} AS track_number,
-                {(hasAlbumArtist ? "album_artist" : "NULL")} AS album_artist
+                {(hasAlbumArtist ? "album_artist" : "NULL")} AS album_artist,
+                {(hasMtimeMs ? "mtime_ms" : "0")} AS mtime_ms
             FROM tracks
             {tailClause}
             """;
@@ -280,10 +282,7 @@ public sealed class LibraryStore
 
             if (!albumAssetsCache.TryGetValue(albumDir, out var assets))
             {
-                assets = (
-                    FindFirstExisting(albumDir, "cover.jpg", "cover.png", "folder.jpg"),
-                    FindBookletPdf(albumDir)
-                );
+                assets = DiscoverAlbumAssets(albumDir, musicRoot);
                 albumAssetsCache[albumDir] = assets;
             }
 
@@ -307,6 +306,7 @@ public sealed class LibraryStore
             int dbDisc = reader.IsDBNull(30) ? 0 : reader.GetInt32(30);
             int dbTrack = reader.IsDBNull(31) ? 0 : reader.GetInt32(31);
             string albumArtist = reader.IsDBNull(32) ? "" : reader.GetString(32);
+            long mtimeMs = reader.IsDBNull(33) ? 0 : reader.GetInt64(33);
             var (pathDisc, pathTrack) = ParseDiscAndTrackFromRelPath(relPath);
             int discNumber = dbDisc > 0 ? dbDisc : pathDisc;
             int trackNumber = dbTrack > 0 ? dbTrack : pathTrack;
@@ -347,7 +347,8 @@ public sealed class LibraryStore
                     ReplayGainAlbumDb: rgAlbumDb,
                     DiscNumber: discNumber,
                     TrackNumber: trackNumber,
-                    AlbumArtist: albumArtist
+                    AlbumArtist: albumArtist,
+                    MtimeMs: mtimeMs
                 )
             );
         }
@@ -856,6 +857,104 @@ public sealed class LibraryStore
         return cols;
     }
 
+    private static readonly string[] CoverPriorityNames =
+    [
+        "cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
+        "folder.jpg", "folder.jpeg", "folder.png",
+        "front.jpg", "front.jpeg", "front.png",
+        "album.jpg", "album.png",
+    ];
+
+    public static (string? Cover, string? Booklet) DiscoverAlbumAssets(string albumDir, string? musicRoot = null)
+    {
+        if (string.IsNullOrWhiteSpace(albumDir) || !LongPathHelper.DirectoryExists(albumDir))
+        {
+            return (null, null);
+        }
+
+        var (cover, booklet) = ScanDirectoryAssets(albumDir);
+
+        if (cover is null && IsDiscSubfolder(albumDir))
+        {
+            string? parentDir = Path.GetDirectoryName(albumDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (!string.IsNullOrWhiteSpace(parentDir) && IsWithinMusicRoot(parentDir, musicRoot) && LongPathHelper.DirectoryExists(parentDir))
+            {
+                var (parentCover, parentBooklet) = ScanDirectoryAssets(parentDir);
+                cover = parentCover;
+                booklet ??= parentBooklet;
+            }
+        }
+
+        return (cover, booklet);
+    }
+
+    private static (string? Cover, string? Booklet) ScanDirectoryAssets(string dir)
+    {
+        int bestCoverRank = int.MaxValue;
+        string? bestCover = null;
+        int bestBookletRank = int.MaxValue;
+        string? bestBooklet = null;
+
+        try
+        {
+            foreach (string file in LongPathHelper.SafeEnumerateFiles(dir, "*", recursive: false))
+            {
+                string name = Path.GetFileName(file);
+                if (string.IsNullOrEmpty(name)) continue;
+
+                int coverRank = Array.FindIndex(CoverPriorityNames, c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase));
+                if (coverRank >= 0 && coverRank < bestCoverRank)
+                {
+                    bestCoverRank = coverRank;
+                    bestCover = file;
+                }
+                else if (name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                {
+                    int rank = string.Equals(name, "booklet.pdf", StringComparison.OrdinalIgnoreCase) ? 0
+                        : string.Equals(name, "liner.pdf", StringComparison.OrdinalIgnoreCase) ? 1
+                        : 2;
+                    if (rank < bestBookletRank)
+                    {
+                        bestBookletRank = rank;
+                        bestBooklet = file;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore unreadable directory entries during fast asset discovery
+        }
+
+        return (bestCover, bestBooklet);
+    }
+
+    private static bool IsDiscSubfolder(string dir)
+    {
+        string folderName = Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(folderName)) return false;
+        return System.Text.RegularExpressions.Regex.IsMatch(
+            folderName,
+            @"^(?:CD|Disc|Disk)\s*\d{1,2}(?:\b|$)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+
+    private static bool IsWithinMusicRoot(string candidateDir, string? musicRoot)
+    {
+        if (string.IsNullOrWhiteSpace(musicRoot)) return true;
+        try
+        {
+            string normRoot = Path.GetFullPath(musicRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string normCandidate = Path.GetFullPath(candidateDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(normCandidate, normRoot, StringComparison.OrdinalIgnoreCase)
+                || normCandidate.StartsWith(normRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static string? FindFirstExisting(string dir, params string[] names)
     {
         if (!LongPathHelper.DirectoryExists(dir)) return null;
@@ -867,20 +966,8 @@ public sealed class LibraryStore
         return null;
     }
 
-    private static string? FindBookletPdf(string dir)
-    {
-        if (!LongPathHelper.DirectoryExists(dir)) return null;
-        string? explicitBooklet = FindFirstExisting(dir, "booklet.pdf", "liner.pdf");
-        if (explicitBooklet is not null) return explicitBooklet;
-        try
-        {
-            return LongPathHelper.SafeEnumerateFiles(dir, "*.pdf", recursive: false).FirstOrDefault();
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    private static string? FindBookletPdf(string dir) =>
+        DiscoverAlbumAssets(dir).Booklet;
 
     private static IReadOnlyList<string> ParseStringArray(string json)
     {

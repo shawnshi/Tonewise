@@ -41,6 +41,7 @@ private val accentNames =
         R.string.clr_brown,
         R.string.clr_grey,
         R.string.clr_dynamic,
+        R.string.clr_zune_magenta,
     )
 
 private val accentThemes =
@@ -62,6 +63,7 @@ private val accentThemes =
         R.style.Theme_Auxio_Brown,
         R.style.Theme_Auxio_Grey,
         R.style.Theme_Auxio_App, // Dynamic colors are on the base theme
+        R.style.Theme_Auxio_ZuneMagenta,
     )
 
 private val accentBlackThemes =
@@ -83,6 +85,7 @@ private val accentBlackThemes =
         R.style.Theme_Auxio_Brown_Black,
         R.style.Theme_Auxio_Grey_Black,
         R.style.Theme_Auxio_Black, // Dynamic colors are on the base theme
+        R.style.Theme_Auxio_ZuneMagenta_Black,
     )
 
 private val accentPrimaryColors =
@@ -104,6 +107,7 @@ private val accentPrimaryColors =
         R.color.brown_primary,
         R.color.grey_primary,
         R.color.dynamic_primary,
+        R.color.zune_magenta_primary,
     )
 
 /**
@@ -138,6 +142,27 @@ class Accent private constructor(val index: Int) {
     override fun hashCode() = index.hashCode()
 
     companion object {
+        /** Original index of Material You Dynamic Colors preserved for seamless upgrades. */
+        const val INDEX_DYNAMIC = 16
+        /** Index of the default Zune Magenta accent. */
+        const val INDEX_ZUNE_MAGENTA = 17
+
+        /** The default accent: Zune Magenta. */
+        val DEFAULT = INDEX_ZUNE_MAGENTA
+
+        /** Ordered list of selectable [Accent] choices on the current OS level. */
+        val availableAccents: List<Accent>
+            get() =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    accentThemes.indices.map(::Accent)
+                } else {
+                    accentThemes.indices.filter { it != INDEX_DYNAMIC }.map(::Accent)
+                }
+
+        /** The amount of valid accents exposed in the selector. */
+        val MAX: Int
+            get() = availableAccents.size
+
         /**
          * Create a new instance.
          *
@@ -146,30 +171,13 @@ class Accent private constructor(val index: Int) {
          *   valid accents, [index] will be [DEFAULT] instead.
          */
         fun from(index: Int): Accent {
-            if (index !in 0 until MAX) {
-                L.w("Accent is out of bounds [idx: $index]")
+            if (index !in accentThemes.indices ||
+                (index == INDEX_DYNAMIC && Build.VERSION.SDK_INT < Build.VERSION_CODES.S)
+            ) {
+                L.w("Accent is out of bounds or unsupported [idx: $index]")
                 return Accent(DEFAULT)
             }
             return Accent(index)
         }
-
-        /** The default accent. */
-        val DEFAULT =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                // Use dynamic coloring on devices that support it.
-                accentThemes.lastIndex
-            } else {
-                // Use blue everywhere else.
-                5
-            }
-
-        /** The amount of valid accents. */
-        val MAX =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                accentThemes.size
-            } else {
-                // Disable the option for a dynamic accent on unsupported devices.
-                accentThemes.size - 1
-            }
     }
 }

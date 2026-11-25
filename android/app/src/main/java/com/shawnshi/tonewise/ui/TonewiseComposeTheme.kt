@@ -8,8 +8,10 @@ package com.shawnshi.tonewise.ui
 import android.content.Context
 import androidx.annotation.AttrRes
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -22,7 +24,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 import androidx.core.graphics.ColorUtils
 import androidx.appcompat.R as AppCompatR
 import com.google.android.material.R as MaterialR
@@ -42,15 +46,38 @@ private val BaseMaterialTypography = Typography()
 private val TonewiseComposeTypography =
     Typography(
         displayLarge =
-            BaseMaterialTypography.displayLarge.copy(fontFamily = TonewiseInterFontFamily),
+            BaseMaterialTypography.displayLarge.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontSize = 46.sp,
+                lineHeight = 50.sp,
+                fontWeight = FontWeight.Light,
+                letterSpacing = (-1.5).sp,
+            ),
         displayMedium =
-            BaseMaterialTypography.displayMedium.copy(fontFamily = TonewiseInterFontFamily),
+            BaseMaterialTypography.displayMedium.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontSize = 36.sp,
+                lineHeight = 40.sp,
+                fontWeight = FontWeight.Light,
+                letterSpacing = (-1.0).sp,
+            ),
         displaySmall =
             BaseMaterialTypography.displaySmall.copy(fontFamily = TonewiseInterFontFamily),
         headlineLarge =
-            BaseMaterialTypography.headlineLarge.copy(fontFamily = TonewiseInterFontFamily),
+            BaseMaterialTypography.headlineLarge.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontSize = 30.sp,
+                lineHeight = 34.sp,
+                fontWeight = FontWeight.Light,
+                letterSpacing = (-0.5).sp,
+            ),
         headlineMedium =
-            BaseMaterialTypography.headlineMedium.copy(fontFamily = TonewiseInterFontFamily),
+            BaseMaterialTypography.headlineMedium.copy(
+                fontFamily = TonewiseInterFontFamily,
+                fontSize = 24.sp,
+                lineHeight = 28.sp,
+                fontWeight = FontWeight.Light,
+            ),
         headlineSmall =
             BaseMaterialTypography.headlineSmall.copy(fontFamily = TonewiseInterFontFamily),
         titleLarge =
@@ -273,18 +300,58 @@ private fun resolveColorSchemeFromTheme(
     }
 }
 
+private val RectilinearZuneShapes =
+    Shapes(
+        extraSmall = RoundedCornerShape(0.dp),
+        small = RoundedCornerShape(0.dp),
+        medium = RoundedCornerShape(0.dp),
+        large = RoundedCornerShape(0.dp),
+        extraLarge = RoundedCornerShape(0.dp),
+    )
+
+private val RoundedTonewiseShapes =
+    Shapes(
+        extraSmall = RoundedCornerShape(2.dp),
+        small = RoundedCornerShape(6.dp),
+        medium = RoundedCornerShape(10.dp),
+        large = RoundedCornerShape(14.dp),
+        extraLarge = RoundedCornerShape(20.dp),
+    )
+
 /**
  * Derives Material3 Compose colors directly from the active host Material3 XML theme attributes
- * so light, dark, AMOLED black, and accent choices match native views consistently.
+ * so light, dark, AMOLED black, Zune 0dp geometry, and optional dynamic cover accent match
+ * consistently across Compose and View hierarchies.
  */
 @Composable
-fun TonewiseComposeTheme(content: @Composable () -> Unit) {
+fun TonewiseComposeTheme(
+    roundMode: Boolean = false,
+    dynamicAccentArgb: Int? = null,
+    content: @Composable () -> Unit,
+) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val systemDark = isSystemInDarkTheme()
     val scheme =
-        remember(context, configuration, systemDark) {
-            resolveColorSchemeFromTheme(context, systemDark)
+        remember(context, configuration, systemDark, dynamicAccentArgb) {
+            val baseScheme = resolveColorSchemeFromTheme(context, systemDark)
+            if (dynamicAccentArgb != null) {
+                val isDark = ColorUtils.calculateLuminance(baseScheme.surface.toArgb()) < 0.5
+                val clamped = ZuneColorMath.clampAccentForContrast(dynamicAccentArgb, isDark)
+                val onClamped = ZuneColorMath.contrastingOnColor(clamped)
+                baseScheme.copy(
+                    primary = Color(clamped),
+                    onPrimary = Color(onClamped),
+                )
+            } else {
+                baseScheme
+            }
         }
-    MaterialTheme(colorScheme = scheme, typography = TonewiseComposeTypography, content = content)
+    val shapes = if (roundMode) RoundedTonewiseShapes else RectilinearZuneShapes
+    MaterialTheme(
+        colorScheme = scheme,
+        typography = TonewiseComposeTypography,
+        shapes = shapes,
+        content = content,
+    )
 }

@@ -24,7 +24,8 @@
                 android:layout_height="wrap_content"
                 app:layout_scrollFlags="scroll|enterAlways"
                 app:menu="@menu/toolbar_home"
-                app:title="@string/info_app_name" />
+                app:title="@string/info_app_name"
+                app:titleTextAppearance="?attr/textAppearanceLabelMedium" />
 
             <com.shawnshi.tonewise.ui.AuxioToolbar
                 android:id="@+id/home_selection_toolbar"
@@ -37,14 +38,10 @@
 
         </com.shawnshi.tonewise.ui.MultiToolbar>
 
-        <com.google.android.material.tabs.TabLayout
-            android:id="@+id/home_tabs"
+        <com.shawnshi.tonewise.home.ZunePanoramaHeaderView
+            android:id="@+id/home_panorama_header"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="@android:color/transparent"
-            app:tabContentStart="@dimen/spacing_medium"
-            app:tabGravity="start"
-            app:tabMode="scrollable" />
+            android:layout_height="wrap_content" />
 
     </com.shawnshi.tonewise.ui.CoordinatorAppBarLayout>
 

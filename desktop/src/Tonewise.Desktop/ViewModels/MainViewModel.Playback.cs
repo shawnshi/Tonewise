@@ -297,6 +297,8 @@ public sealed partial class MainViewModel
                     if (_playbackHistory.Count > 200) _playbackHistory.RemoveAt(0);
                 }
 
+                RefreshQuickplayCollections();
+
                 if (!startPaused)
                 {
                     StatusMessage = $"正在播放：{track.Title}";
@@ -603,6 +605,7 @@ public sealed partial class MainViewModel
         }
         WaveformUpdated?.Invoke();
         IsPlaying = _engine.IsPlaying;
+        RefreshQuickplayCollections();
         StatusMessage = $"正在播放：{nextTrack.Title}";
         SendNowPlayingInBackground(nextTrack);
         PersistPlaybackSessionSnapshot(force: true);

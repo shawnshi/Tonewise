@@ -71,9 +71,9 @@
         android:id="@+id/playback_controls_wrapper"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginEnd="@dimen/spacing_tiny"
+        android:layout_marginEnd="0dp"
         app:layout_constraintBottom_toTopOf="@+id/playback_progress_container"
-        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/playback_appbar_more"
         app:layout_constraintTop_toBottomOf="@+id/playback_scene_pill">
 
         <com.google.android.material.button.MaterialButtonGroup
@@ -106,6 +106,23 @@
 
     </com.shawnshi.tonewise.playback.ui.ForcedLTRFrameLayout>
 
+    <com.shawnshi.tonewise.ui.RippleFixMaterialButton
+        android:id="@+id/playback_appbar_more"
+        style="@style/Widget.Auxio.Button.Playback.More"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="@dimen/spacing_tiny"
+        android:contentDescription="@string/lbl_more"
+        android:insetLeft="0dp"
+        android:insetTop="0dp"
+        android:insetRight="0dp"
+        android:insetBottom="0dp"
+        app:icon="@drawable/ic_more_24"
+        app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Small"
+        app:layout_constraintBottom_toTopOf="@+id/playback_progress_container"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/playback_scene_pill" />
+
     <com.shawnshi.tonewise.playback.ui.ForcedLTRFrameLayout
         android:id="@+id/playback_progress_container"
         android:layout_width="match_parent"
@@ -119,8 +136,10 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_gravity="center_vertical"
-            android:layout_marginStart="@dimen/spacing_small"
-            android:layout_marginEnd="@dimen/spacing_small"
+            android:layout_marginStart="0dp"
+            android:layout_marginEnd="0dp"
+            app:trackCornerRadius="0dp"
+            app:trackThickness="2dp"
             tools:progress="70" />
 
     </com.shawnshi.tonewise.playback.ui.ForcedLTRFrameLayout>

@@ -97,6 +97,9 @@ interface MusicRepository {
     /** All extracted classical conductors indexed from the current library. */
     val conductors: Collection<PersonArtist>
 
+    /** All aggregated classical works (grouped with all local recordings). */
+    val classicalWorks: List<ClassicalWork>
+
     /** The current state of music loading. Null if no load has occurred yet. */
     val indexingState: IndexingState?
 
@@ -323,6 +326,7 @@ constructor(
     @Volatile private var conductorMap: Map<String, PersonArtist> = emptyMap()
     @Volatile private var personUidMap: Map<Music.UID, PersonArtist> = emptyMap()
     @Volatile private var workBySongUid: Map<Music.UID, ClassicalWork> = emptyMap()
+    @Volatile private var allClassicalWorks: List<ClassicalWork> = emptyList()
     @Volatile private var previousCompletedState: IndexingState.Completed? = null
     @Volatile private var currentIndexingState: IndexingState? = null
     override val composers: Collection<PersonArtist>
@@ -330,6 +334,9 @@ constructor(
 
     override val conductors: Collection<PersonArtist>
         get() = conductorMap.values.distinctBy { it.uid }
+
+    override val classicalWorks: List<ClassicalWork>
+        get() = allClassicalWorks
 
     override val indexingState: IndexingState?
         get() = currentIndexingState ?: previousCompletedState
@@ -678,10 +685,14 @@ constructor(
         composerMap = composers
         conductorMap = conductors
         personUidMap = byUid
-        workBySongUid = buildClassicalWorkIndex(lib)
+        val builtWorks = buildClassicalWorkIndex(lib)
+        workBySongUid = builtWorks.first
+        allClassicalWorks = builtWorks.second
     }
 
-    private fun buildClassicalWorkIndex(lib: Library): Map<Music.UID, ClassicalWork> {
+    private fun buildClassicalWorkIndex(
+        lib: Library
+    ): Pair<Map<Music.UID, ClassicalWork>, List<ClassicalWork>> {
         val songsByWorkKey = linkedMapOf<String, MutableList<Song>>()
         val titleByWorkKey = mutableMapOf<String, String>()
         val composerByWorkKey = mutableMapOf<String, String>()
@@ -702,6 +713,7 @@ constructor(
         }
 
         val index = mutableMapOf<Music.UID, ClassicalWork>()
+        val uniqueWorks = ArrayList<ClassicalWork>(songsByWorkKey.size)
         for ((workKey, workSongs) in songsByWorkKey) {
             val recordings =
                 workSongs
@@ -743,11 +755,12 @@ constructor(
                     composerName = composerByWorkKey.getValue(workKey),
                     recordings = recordings,
                 )
+            uniqueWorks.add(classicalWork)
             for (song in workSongs) {
                 index[song.uid] = classicalWork
             }
         }
-        return index
+        return index to uniqueWorks
     }
 
     private fun buildPersonArtist(

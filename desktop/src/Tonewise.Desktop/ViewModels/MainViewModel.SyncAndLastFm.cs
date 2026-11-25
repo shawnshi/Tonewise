@@ -674,12 +674,17 @@ public sealed partial class MainViewModel
         }
 
         string modeBadge;
-        if ((PrimaryNavId, SecondarySubTab) == ("library", "genres"))
+        if ((PrimaryNavId, SecondarySubTab) == ("collection", "genres"))
         {
             store.EnqueueGenre(group.Key, mode: "subscribe");
             modeBadge = "订阅流派";
         }
-        else if (PrimaryNavId == "artists" || (PrimaryNavId, SecondarySubTab) is ("classical", "composers") or ("classical", "conductors") or ("classical", "ensembles"))
+        else if (PrimaryNavId == "collection" && SecondarySubTab is "artists" or "composers" or "conductors")
+        {
+            store.EnqueueArtist(group.Key, mode: "subscribe");
+            modeBadge = "订阅艺人";
+        }
+        else if ((PrimaryNavId, SecondarySubTab) == ("collection", "classical") && ShowClassicalEnsembles)
         {
             store.EnqueueArtist(group.Key, mode: "subscribe");
             modeBadge = "订阅艺人";

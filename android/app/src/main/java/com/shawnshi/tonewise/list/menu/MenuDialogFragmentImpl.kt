@@ -23,9 +23,12 @@ import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import androidx.navigation.fragment.navArgs
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.DialogMenuBinding
 import com.shawnshi.tonewise.detail.DetailViewModel
+import com.shawnshi.tonewise.home.quickplay.QuickplayPinKind
+import com.shawnshi.tonewise.home.quickplay.QuickplayPinStore
 import com.shawnshi.tonewise.list.ListViewModel
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.music.resolve
@@ -54,6 +57,7 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
     private val musicModel: MusicViewModel by activityViewModels()
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val args: SongMenuDialogFragmentArgs by navArgs()
+    @Inject lateinit var quickplayPinStore: QuickplayPinStore
 
     override val parcel
         get() = args.parcel
@@ -64,6 +68,13 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
     override fun getHiddenItemIds(menu: Menu.ForSong): Set<Int> = buildSet {
         if (menu.song.composers.isEmpty()) add(R.id.action_composer_details)
         if (menu.song.conductors.isEmpty()) add(R.id.action_conductor_details)
+    }
+
+    override fun onPrepareMenuItems(menu: Menu.ForSong, items: List<MenuItem>) {
+        val pinned = quickplayPinStore.isPinned(QuickplayPinKind.SONG, menu.song.uid.toString())
+        items.firstOrNull { it.itemId == R.id.action_pin_quickplay }?.setTitle(
+            if (pinned) R.string.lbl_unpin_quickplay else R.string.lbl_pin_quickplay
+        )
     }
 
     override fun updateMenu(binding: DialogMenuBinding, menu: Menu.ForSong) {
@@ -101,6 +112,19 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
                 QuickTagDialog.newInstance(menu.song.uid.toString())
                     .show(parentFragmentManager, QuickTagDialog.TAG)
             }
+            R.id.action_pin_quickplay -> {
+                val context = requireContext()
+                val pinned =
+                    quickplayPinStore.togglePin(
+                        kind = QuickplayPinKind.SONG,
+                        id = menu.song.uid.toString(),
+                        title = menu.song.name.resolve(context),
+                        subtitle = menu.song.artists.resolveNames(context),
+                    )
+                context.showToast(
+                    if (pinned) R.string.lng_pinned_quickplay else R.string.lng_unpinned_quickplay
+                )
+            }
             else -> error("Unexpected menu item selected $item")
         }
     }
@@ -119,12 +143,20 @@ class AlbumMenuDialogFragment : MenuDialogFragment<Menu.ForAlbum>() {
     private val musicModel: MusicViewModel by activityViewModels()
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val args: AlbumMenuDialogFragmentArgs by navArgs()
+    @Inject lateinit var quickplayPinStore: QuickplayPinStore
 
     override val parcel
         get() = args.parcel
 
     // Nothing to disable in album menus.
     override fun getDisabledItemIds(menu: Menu.ForAlbum) = setOf<Int>()
+
+    override fun onPrepareMenuItems(menu: Menu.ForAlbum, items: List<MenuItem>) {
+        val pinned = quickplayPinStore.isPinned(QuickplayPinKind.ALBUM, menu.album.uid.toString())
+        items.firstOrNull { it.itemId == R.id.action_pin_quickplay }?.setTitle(
+            if (pinned) R.string.lbl_unpin_quickplay else R.string.lbl_pin_quickplay
+        )
+    }
 
     override fun updateMenu(binding: DialogMenuBinding, menu: Menu.ForAlbum) {
         val context = requireContext()
@@ -149,6 +181,19 @@ class AlbumMenuDialogFragment : MenuDialogFragment<Menu.ForAlbum>() {
             }
             R.id.action_artist_details -> detailModel.showArtist(menu.album)
             R.id.action_playlist_add -> musicModel.addToPlaylist(menu.album)
+            R.id.action_pin_quickplay -> {
+                val context = requireContext()
+                val pinned =
+                    quickplayPinStore.togglePin(
+                        kind = QuickplayPinKind.ALBUM,
+                        id = menu.album.uid.toString(),
+                        title = menu.album.name.resolve(context),
+                        subtitle = menu.album.artists.resolveNames(context),
+                    )
+                context.showToast(
+                    if (pinned) R.string.lng_pinned_quickplay else R.string.lng_unpinned_quickplay
+                )
+            }
             R.id.action_share -> requireContext().share(menu.album)
             else -> error("Unexpected menu item selected $item")
         }
@@ -168,6 +213,7 @@ class ArtistMenuDialogFragment : MenuDialogFragment<Menu.ForArtist>() {
     private val musicModel: MusicViewModel by activityViewModels()
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val args: ArtistMenuDialogFragmentArgs by navArgs()
+    @Inject lateinit var quickplayPinStore: QuickplayPinStore
 
     override val parcel
         get() = args.parcel
@@ -187,6 +233,13 @@ class ArtistMenuDialogFragment : MenuDialogFragment<Menu.ForArtist>() {
         } else {
             setOf()
         }
+
+    override fun onPrepareMenuItems(menu: Menu.ForArtist, items: List<MenuItem>) {
+        val pinned = quickplayPinStore.isPinned(QuickplayPinKind.ARTIST, menu.artist.uid.toString())
+        items.firstOrNull { it.itemId == R.id.action_pin_quickplay }?.setTitle(
+            if (pinned) R.string.lbl_unpin_quickplay else R.string.lbl_pin_quickplay
+        )
+    }
 
     override fun updateMenu(binding: DialogMenuBinding, menu: Menu.ForArtist) {
         val context = requireContext()
@@ -223,6 +276,19 @@ class ArtistMenuDialogFragment : MenuDialogFragment<Menu.ForArtist>() {
                 requireContext().showToast(R.string.lng_queue_added)
             }
             R.id.action_playlist_add -> musicModel.addToPlaylist(menu.artist)
+            R.id.action_pin_quickplay -> {
+                val context = requireContext()
+                val pinned =
+                    quickplayPinStore.togglePin(
+                        kind = QuickplayPinKind.ARTIST,
+                        id = menu.artist.uid.toString(),
+                        title = menu.artist.name.resolve(context),
+                        subtitle = getString(R.string.lbl_artist),
+                    )
+                context.showToast(
+                    if (pinned) R.string.lng_pinned_quickplay else R.string.lng_unpinned_quickplay
+                )
+            }
             R.id.action_share -> requireContext().share(menu.artist)
             else -> error("Unexpected menu item $item")
         }
@@ -247,6 +313,8 @@ class GenreMenuDialogFragment : MenuDialogFragment<Menu.ForGenre>() {
         get() = args.parcel
 
     override fun getDisabledItemIds(menu: Menu.ForGenre) = setOf<Int>()
+
+    override fun getHiddenItemIds(menu: Menu.ForGenre) = setOf(R.id.action_pin_quickplay)
 
     override fun updateMenu(binding: DialogMenuBinding, menu: Menu.ForGenre) {
         val context = requireContext()
@@ -294,6 +362,7 @@ class PlaylistMenuDialogFragment : MenuDialogFragment<Menu.ForPlaylist>() {
     private val musicModel: MusicViewModel by activityViewModels()
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val args: PlaylistMenuDialogFragmentArgs by navArgs()
+    @Inject lateinit var quickplayPinStore: QuickplayPinStore
 
     override val parcel
         get() = args.parcel
@@ -314,6 +383,14 @@ class PlaylistMenuDialogFragment : MenuDialogFragment<Menu.ForPlaylist>() {
         } else {
             setOf()
         }
+
+    override fun onPrepareMenuItems(menu: Menu.ForPlaylist, items: List<MenuItem>) {
+        val pinned =
+            quickplayPinStore.isPinned(QuickplayPinKind.PLAYLIST, menu.playlist.uid.toString())
+        items.firstOrNull { it.itemId == R.id.action_pin_quickplay }?.setTitle(
+            if (pinned) R.string.lbl_unpin_quickplay else R.string.lbl_pin_quickplay
+        )
+    }
 
     override fun updateMenu(binding: DialogMenuBinding, menu: Menu.ForPlaylist) {
         val context = requireContext()
@@ -345,6 +422,19 @@ class PlaylistMenuDialogFragment : MenuDialogFragment<Menu.ForPlaylist>() {
             R.id.action_import -> musicModel.importPlaylist(target = menu.playlist)
             R.id.action_export -> musicModel.exportPlaylist(menu.playlist)
             R.id.action_delete -> musicModel.deletePlaylist(menu.playlist)
+            R.id.action_pin_quickplay -> {
+                val context = requireContext()
+                val pinned =
+                    quickplayPinStore.togglePin(
+                        kind = QuickplayPinKind.PLAYLIST,
+                        id = menu.playlist.uid.toString(),
+                        title = menu.playlist.name.resolve(context),
+                        subtitle = getString(R.string.lbl_playlist),
+                    )
+                context.showToast(
+                    if (pinned) R.string.lng_pinned_quickplay else R.string.lng_unpinned_quickplay
+                )
+            }
             R.id.action_share -> requireContext().share(menu.playlist)
             else -> error("Unexpected menu item $item")
         }

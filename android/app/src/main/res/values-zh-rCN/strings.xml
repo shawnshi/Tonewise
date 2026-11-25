@@ -52,6 +52,8 @@
     <string name="set_lib_tabs_desc">更改媒体库标签页面的可见性和顺序</string>
     <string name="set_round_mode">专辑封面圆角</string>
     <string name="set_round_mode_desc">在其他 UI 元素上启用圆角（需要圆角专辑封面）</string>
+    <string name="set_dynamic_cover_accent">封面动态主题色</string>
+    <string name="set_dynamic_cover_accent_desc">按当前播放专辑封面提取高对比度 Zune 强调色（WCAG AA 约束）</string>
     <string name="set_audio">音频</string>
     <string name="set_headset_autoplay">自动播放</string>
     <string name="set_headset_autoplay_desc">连接至耳机时总是自动播放（并非在所有设备上都有用）</string>
@@ -111,6 +113,7 @@
     <string name="clr_orange">橙色</string>
     <string name="clr_brown">棕色</string>
     <string name="clr_grey">灰色</string>
+    <string name="clr_zune_magenta">Zune 洋红</string>
     <string name="fmt_lib_song_count">已加载 %d 首曲目</string>
     <plurals name="fmt_song_count">
         <item quantity="other">%d 首歌曲</item>
@@ -501,4 +504,14 @@
     <string name="lbl_autodj_action">生成 50 首</string>
     <string name="lbl_autodj_badge">按当前时间编排 · 50 首</string>
     <string name="lbl_scene_autodj_badge">Auto DJ 50首</string>
+    <string name="lbl_pin_quickplay">固定到 quickplay</string>
+    <string name="lbl_unpin_quickplay">从 quickplay 取消固定</string>
+    <string name="lng_pinned_quickplay">已固定到 quickplay</string>
+    <string name="lng_unpinned_quickplay">已从 quickplay 取消固定</string>
+    <string name="lbl_classical_empty">曲库中暂无带 WORK 标签的古典曲目</string>
+    <string name="lbl_quickplay_empty_pins">长按任意专辑、歌单或作品可固定到 quickplay</string>
+    <string name="lbl_rescan_library">重新扫描曲库</string>
+    <string name="lbl_rescan_started">已开始重新扫描曲库…</string>
+    <string name="lbl_focus_filter_drawer">五维过滤</string>
+    <string name="lbl_sync_lastfm_drawer">同步与 Last.fm</string>
 </resources>

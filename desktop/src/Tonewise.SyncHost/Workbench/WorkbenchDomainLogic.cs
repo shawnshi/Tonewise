@@ -1065,7 +1065,8 @@ public sealed record DesktopUserSettings(
     bool EnableMirrorPrune = true,
     string MirrorPruneScope = "music_folder_all",
     bool AllowAdbForeignDeleteFallback = true,
-    string? CustomAdbPath = null
+    string? CustomAdbPath = null,
+    bool EnableDynamicCoverAccent = false
 );
 
 public static class DesktopSettingsStore

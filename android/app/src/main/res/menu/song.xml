@@ -45,6 +45,10 @@
         android:icon="@drawable/ic_edit_24"
         android:title="@string/lbl_quick_tag_menu" />
     <item
+        android:id="@+id/action_pin_quickplay"
+        android:icon="@drawable/ic_playlist_add_24"
+        android:title="@string/lbl_pin_quickplay" />
+    <item
         android:id="@+id/action_share"
         android:icon="@drawable/ic_share_24"
         android:title="@string/lbl_share" />

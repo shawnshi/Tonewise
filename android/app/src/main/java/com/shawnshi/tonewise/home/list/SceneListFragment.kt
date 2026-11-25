@@ -24,8 +24,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.annotation.DrawableRes
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +38,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -69,14 +73,17 @@ import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.platform.rememberNestedScrollInteropConnection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
+import com.shawnshi.tonewise.home.focus.FocusFilterDialog
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.sync.AutoDjEngine
@@ -85,6 +92,7 @@ import com.shawnshi.tonewise.sync.FocusFilterSpec
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SceneBanner
 import com.shawnshi.tonewise.sync.SessionSlotStore
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
@@ -104,6 +112,7 @@ class SceneListFragment : Fragment() {
     @Inject lateinit var lanSyncRepository: LanSyncRepository
     @Inject lateinit var sessionSlotStore: SessionSlotStore
     @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val musicModel: MusicViewModel by activityViewModels()
 
@@ -133,6 +142,7 @@ class SceneListFragment : Fragment() {
                     AutoDjEngine.resolveTimeProfile()
                 }
                 val roundMode = remember { uiSettings.roundMode }
+                val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
 
                 val sceneCounts by
                     produceState<Map<String, Int>>(
@@ -196,7 +206,10 @@ class SceneListFragment : Fragment() {
                     }
                 }
 
-                TonewiseComposeTheme {
+                TonewiseComposeTheme(
+                    roundMode = roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     SceneTabContent(
                         scenes = scenes,
                         sceneCounts = sceneCounts,
@@ -214,7 +227,7 @@ class SceneListFragment : Fragment() {
                                     id = "rediscovery_90d",
                                     title = getString(R.string.lbl_rediscovery_90d_title),
                                     subtitle = getString(R.string.lbl_rediscovery_90d_subtitle),
-                                    accentHex = "#6366F1",
+                                    accentHex = "#FF1E7A",
                                     rawSceneJson =
                                         """{"id":"rediscovery_90d","sort_arc":"rediscovery_90d","rule":{"all":[{"predicate":{"field":"unplayed_days_gte","op":"gte","value":90}}]}}""",
                                 )
@@ -223,6 +236,12 @@ class SceneListFragment : Fragment() {
                         onMoveUp = { idx -> lanSyncRepository.moveScene(idx, idx - 1) },
                         onMoveDown = { idx -> lanSyncRepository.moveScene(idx, idx + 1) },
                         onLaunchScene = { banner -> launchAutoDj(banner) },
+                        onOpen5dTune = {
+                            if (parentFragmentManager.findFragmentByTag(FocusFilterDialog.TAG) == null) {
+                                FocusFilterDialog.newInstance()
+                                    .show(parentFragmentManager, FocusFilterDialog.TAG)
+                            }
+                        },
                     )
                 }
             }
@@ -230,6 +249,7 @@ class SceneListFragment : Fragment() {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SceneTabContent(
     scenes: List<SceneBanner>,
@@ -246,12 +266,13 @@ private fun SceneTabContent(
     onMoveUp: (Int) -> Unit,
     onMoveDown: (Int) -> Unit,
     onLaunchScene: (SceneBanner) -> Unit,
+    onOpen5dTune: () -> Unit,
 ) {
     val context = LocalContext.current
     var isReorderMode by remember { mutableStateOf(false) }
     val isBusy = generatingKey != null
     val tileShape = remember(roundMode) {
-        if (roundMode) RoundedCornerShape(12.dp) else RoundedCornerShape(0.dp)
+        if (roundMode) RoundedCornerShape(10.dp) else RoundedCornerShape(0.dp)
     }
     val nestedScrollInterop = rememberNestedScrollInteropConnection()
 
@@ -261,18 +282,18 @@ private fun SceneTabContent(
                 Modifier.fillMaxSize()
                     .nestedScroll(nestedScrollInterop)
                     .navigationBarsPadding(),
-            contentPadding = PaddingValues(bottom = 88.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 104.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item(key = "header_autodj") {
                 Box(
                     modifier =
                         Modifier.fillMaxWidth()
-                            .defaultMinSize(minHeight = 48.dp)
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                            .defaultMinSize(minHeight = 36.dp),
                     contentAlignment = Alignment.CenterStart,
                 ) {
                     Text(
-                        text = stringResource(R.string.lbl_autodj_title),
+                        text = stringResource(R.string.lbl_autodj_title).lowercase(),
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.secondary,
                     )
@@ -283,7 +304,7 @@ private fun SceneTabContent(
                 val isAutoDjActive = activeSceneLabel.startsWith("Auto DJ")
                 val autoDjBadge = stringResource(R.string.lbl_autodj_badge)
                 val autoDjSubtitle = lastAutoDjSummary ?: "$autoDjBadge • ${timeProfile.description}"
-                SceneListRow(
+                SceneZuneTile(
                     title = timeProfile.periodLabel,
                     subtitle = autoDjSubtitle,
                     iconRes = R.drawable.ic_auto_24,
@@ -291,10 +312,9 @@ private fun SceneTabContent(
                     isActive = isAutoDjActive,
                     isGenerating = generatingKey == AUTO_DJ_KEY,
                     enabled = !isBusy,
-                    idleTileColor = MaterialTheme.colorScheme.secondaryContainer,
-                    idleIconTint = MaterialTheme.colorScheme.onSecondaryContainer,
-                    actionContentDescription = stringResource(R.string.lbl_autodj_action),
+                    wide = true,
                     onClick = onLaunchAutoDj,
+                    onLongClick = onOpen5dTune,
                 )
             }
 
@@ -302,13 +322,12 @@ private fun SceneTabContent(
                 Row(
                     modifier =
                         Modifier.fillMaxWidth()
-                            .defaultMinSize(minHeight = 48.dp)
-                            .padding(start = 16.dp, end = 4.dp),
+                            .defaultMinSize(minHeight = 40.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = stringResource(R.string.lbl_scenes),
+                        text = stringResource(R.string.lbl_scenes).lowercase(),
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.secondary,
                     )
@@ -327,87 +346,129 @@ private fun SceneTabContent(
                 }
             }
 
-            itemsIndexed(
-                items = scenes,
-                key = { _, scene -> scene.id },
-            ) { index, scene ->
-                val trackCount = sceneCounts[scene.id] ?: 0
-                val countText =
-                    if (trackCount > 0) {
-                        context.resources.getQuantityString(
-                            R.plurals.fmt_song_count,
-                            trackCount,
-                            trackCount,
-                        )
-                    } else {
-                        stringResource(R.string.def_song_count)
-                    }
-                val detailLine =
-                    if (scene.subtitle.isNotEmpty()) {
-                        "$countText • ${scene.subtitle}"
-                    } else {
-                        countText
-                    }
-                val isActive = activeSceneLabel == scene.title
+            if (isReorderMode) {
+                itemsIndexed(
+                    items = scenes,
+                    key = { _, scene -> "reorder_${scene.id}" },
+                ) { index, scene ->
+                    val trackCount = sceneCounts[scene.id] ?: 0
+                    val countText =
+                        if (trackCount > 0) {
+                            context.resources.getQuantityString(
+                                R.plurals.fmt_song_count,
+                                trackCount,
+                                trackCount,
+                            )
+                        } else {
+                            stringResource(R.string.def_song_count)
+                        }
+                    val detailLine =
+                        if (scene.subtitle.isNotEmpty()) "$countText • ${scene.subtitle}" else countText
+                    val isActive = activeSceneLabel == scene.title
 
-                SceneListRow(
-                    title = scene.title,
-                    subtitle = detailLine,
-                    iconRes = resolveSceneIconRes(scene),
-                    tileShape = tileShape,
-                    isActive = isActive,
-                    isGenerating = generatingKey == scene.id,
-                    enabled = !isBusy,
-                    idleTileColor = MaterialTheme.colorScheme.surfaceContainer,
-                    idleIconTint = MaterialTheme.colorScheme.onSurface,
-                    actionContentDescription = scene.title,
-                    onClick = { onLaunchScene(scene) },
-                    trailingContent =
-                        if (isReorderMode) {
-                            {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    IconButton(
-                                        onClick = { onMoveUp(index) },
-                                        enabled = index > 0,
-                                    ) {
-                                        Icon(
-                                            painter = painterResource(R.drawable.ic_down_24),
-                                            contentDescription = stringResource(R.string.lbl_scene_move_up),
-                                            tint =
-                                                if (index > 0) {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
-                                                        alpha = 0.38f
-                                                    )
-                                                },
-                                            modifier = Modifier.rotate(180f),
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = { onMoveDown(index) },
-                                        enabled = index < scenes.lastIndex,
-                                    ) {
-                                        Icon(
-                                            painter = painterResource(R.drawable.ic_down_24),
-                                            contentDescription =
-                                                stringResource(R.string.lbl_scene_move_down),
-                                            tint =
-                                                if (index < scenes.lastIndex) {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
-                                                        alpha = 0.38f
-                                                    )
-                                                },
-                                        )
-                                    }
+                    SceneZuneTile(
+                        title = scene.title,
+                        subtitle = detailLine,
+                        iconRes = resolveSceneIconRes(scene),
+                        tileShape = tileShape,
+                        isActive = isActive,
+                        isGenerating = generatingKey == scene.id,
+                        enabled = !isBusy,
+                        wide = true,
+                        onClick = { onLaunchScene(scene) },
+                        onLongClick = onOpen5dTune,
+                        trailingContent = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { onMoveUp(index) },
+                                    enabled = index > 0,
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_down_24),
+                                        contentDescription = stringResource(R.string.lbl_scene_move_up),
+                                        tint =
+                                            if (index > 0) MaterialTheme.colorScheme.onSurfaceVariant
+                                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+                                        modifier = Modifier.rotate(180f),
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onMoveDown(index) },
+                                    enabled = index < scenes.lastIndex,
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_down_24),
+                                        contentDescription = stringResource(R.string.lbl_scene_move_down),
+                                        tint =
+                                            if (index < scenes.lastIndex) MaterialTheme.colorScheme.onSurfaceVariant
+                                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+                                    )
                                 }
                             }
-                        } else {
-                            null
                         },
-                )
+                    )
+                }
+            } else {
+                // Asymmetric Zune tile layout: every 3rd item is 2x1 wide, pairs are 1x1 tiles
+                var cursor = 0
+                val asymmetricRows = ArrayList<List<SceneBanner>>()
+                while (cursor < scenes.size) {
+                    val isWideSlot = asymmetricRows.size % 2 == 0
+                    if (isWideSlot || cursor == scenes.lastIndex) {
+                        asymmetricRows.add(listOf(scenes[cursor]))
+                        cursor += 1
+                    } else {
+                        asymmetricRows.add(listOf(scenes[cursor], scenes[cursor + 1]))
+                        cursor += 2
+                    }
+                }
+
+                itemsIndexed(
+                    items = asymmetricRows,
+                    key = { rowIdx, row -> "asym_${rowIdx}_${row.first().id}" },
+                ) { _, row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        val isWide = row.size == 1
+                        for (scene in row) {
+                            val trackCount = sceneCounts[scene.id] ?: 0
+                            val countText =
+                                if (trackCount > 0) {
+                                    context.resources.getQuantityString(
+                                        R.plurals.fmt_song_count,
+                                        trackCount,
+                                        trackCount,
+                                    )
+                                } else {
+                                    stringResource(R.string.def_song_count)
+                                }
+                            val detailLine =
+                                if (scene.subtitle.isNotEmpty() && isWide) {
+                                    "$countText • ${scene.subtitle}"
+                                } else {
+                                    countText
+                                }
+                            val isActive = activeSceneLabel == scene.title
+
+                            Box(modifier = Modifier.weight(1f)) {
+                                SceneZuneTile(
+                                    title = scene.title,
+                                    subtitle = detailLine,
+                                    iconRes = resolveSceneIconRes(scene),
+                                    tileShape = tileShape,
+                                    isActive = isActive,
+                                    isGenerating = generatingKey == scene.id,
+                                    enabled = !isBusy,
+                                    wide = isWide,
+                                    onClick = { onLaunchScene(scene) },
+                                    onLongClick = onOpen5dTune,
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             if (showStandaloneRediscovery) {
@@ -426,7 +487,7 @@ private fun SceneTabContent(
                     val detailLine =
                         "$rediscoveryCountText • ${stringResource(R.string.lbl_rediscovery_90d_subtitle)}"
 
-                    SceneListRow(
+                    SceneZuneTile(
                         title = rediscoveryTitle,
                         subtitle = detailLine,
                         iconRes = R.drawable.ic_time_24,
@@ -434,10 +495,9 @@ private fun SceneTabContent(
                         isActive = activeSceneLabel == rediscoveryTitle,
                         isGenerating = generatingKey == "rediscovery_90d",
                         enabled = !isBusy,
-                        idleTileColor = MaterialTheme.colorScheme.surfaceContainer,
-                        idleIconTint = MaterialTheme.colorScheme.onSurface,
-                        actionContentDescription = rediscoveryTitle,
+                        wide = true,
                         onClick = onLaunchRediscovery,
+                        onLongClick = onOpen5dTune,
                     )
                 }
             }
@@ -445,8 +505,9 @@ private fun SceneTabContent(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SceneListRow(
+private fun SceneZuneTile(
     title: String,
     subtitle: String,
     @DrawableRes iconRes: Int,
@@ -454,78 +515,80 @@ private fun SceneListRow(
     isActive: Boolean,
     isGenerating: Boolean,
     enabled: Boolean,
-    idleTileColor: Color,
-    idleIconTint: Color,
-    actionContentDescription: String,
+    wide: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     trailingContent: (@Composable () -> Unit)? = null,
 ) {
-    val tileBg = if (isActive) MaterialTheme.colorScheme.primaryContainer else idleTileColor
-    val tileTint = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else idleIconTint
-    val titleColor = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-    val actionTint =
-        if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+    val bgColor =
+        if (isActive) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.surfaceContainer
+    val borderColor =
+        if (isActive) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.outlineVariant
+    val fgColor =
+        if (isActive) MaterialTheme.colorScheme.onPrimary
+        else MaterialTheme.colorScheme.onSurface
+    val subColor =
+        if (isActive) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
+        else MaterialTheme.colorScheme.onSurfaceVariant
 
-    Row(
+    Box(
         modifier =
             Modifier.fillMaxWidth()
-                .clickable(enabled = enabled, onClick = onClick)
-                .padding(start = 16.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
+                .height(if (wide) 92.dp else 124.dp)
+                .clip(tileShape)
+                .background(bgColor)
+                .border(1.dp, borderColor, tileShape)
+                .combinedClickable(
+                    enabled = enabled,
+                    onClick = onClick,
+                    onLongClick = onLongClick,
+                )
+                .padding(12.dp)
     ) {
-        Box(
-            modifier =
-                Modifier.size(56.dp)
-                    .clip(tileShape)
-                    .background(tileBg),
-            contentAlignment = Alignment.Center,
-        ) {
+        Icon(
+            painter = painterResource(iconRes),
+            contentDescription = null,
+            tint = fgColor.copy(alpha = 0.9f),
+            modifier = Modifier.size(22.dp).align(Alignment.TopStart),
+        )
+
+        if (trailingContent != null) {
+            Box(modifier = Modifier.align(Alignment.TopEnd)) {
+                trailingContent()
+            }
+        } else if (isGenerating) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp).align(Alignment.TopEnd),
+                strokeWidth = 2.dp,
+                color = fgColor,
+            )
+        } else {
             Icon(
-                painter = painterResource(iconRes),
-                contentDescription = null,
-                tint = tileTint,
-                modifier = Modifier.size(28.dp),
+                painter = painterResource(R.drawable.ic_play_24),
+                contentDescription = title,
+                tint = fgColor.copy(alpha = 0.72f),
+                modifier = Modifier.size(18.dp).align(Alignment.TopEnd),
             )
         }
-        Spacer(modifier = Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
+
+        Column(modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth()) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = titleColor,
+                fontSize = if (wide) 18.sp else 16.sp,
+                fontWeight = FontWeight.Light,
+                color = fgColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+                color = subColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-        }
-        Spacer(modifier = Modifier.width(8.dp))
-        if (trailingContent != null) {
-            trailingContent()
-        } else if (isGenerating) {
-            Box(
-                modifier = Modifier.size(48.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-        } else {
-            IconButton(onClick = onClick, enabled = enabled) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_play_24),
-                    contentDescription = actionContentDescription,
-                    tint = actionTint,
-                )
-            }
         }
     }
 }

@@ -66,6 +66,12 @@ abstract class MenuDialogFragment<M : Menu> :
     protected open fun getHiddenItemIds(menu: M): Set<Int> = emptySet()
 
     /**
+     * Hook invoked after inflating and filtering menu items, allowing subclasses to customize
+     * dynamic titles or icons (e.g. Pin vs Unpin).
+     */
+    protected open fun onPrepareMenuItems(menu: M, items: List<MenuItem>) {}
+
+    /**
      * Update the displayed information about the currently shown [M].
      *
      * @param binding The [DialogMenuBinding] to bind information to.
@@ -135,6 +141,7 @@ abstract class MenuDialogFragment<M : Menu> :
                     it.isEnabled = !disabledIds.contains(it.itemId)
                     it
                 }
+        onPrepareMenuItems(casted, visible)
         menuAdapter.update(visible, UpdateInstructions.Diff)
 
         // Delegate to impl how to show music

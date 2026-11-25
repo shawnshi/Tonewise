@@ -6,32 +6,12 @@
         android:id="@+id/action_search"
         android:icon="@drawable/ic_search_24"
         android:title="@string/lbl_search"
-        app:showAsAction="ifRoom" />
+        app:showAsAction="always" />
 
     <item
-        android:id="@+id/action_focus_filter"
-        android:icon="@drawable/ic_filter_24"
-        android:title="@string/lbl_dj_filter"
-        app:showAsAction="ifRoom" />
+        android:id="@+id/action_zune_drawer"
+        android:icon="@drawable/ic_more_24"
+        android:title="@string/lbl_more"
+        app:showAsAction="always" />
 
-    <item
-        android:id="@+id/action_desk_clock"
-        android:icon="@drawable/ic_time_24"
-        android:title="@string/lbl_desk_clock"
-        app:showAsAction="ifRoom" />
-
-    <item
-        android:id="@+id/action_scenes_sync"
-        android:title="@string/lbl_scenes_and_sync"
-        app:showAsAction="never" />
-
-    <item
-        android:id="@+id/action_settings"
-        android:title="@string/set_root_title"
-        app:showAsAction="never" />
-
-    <item
-        android:id="@+id/action_about"
-        android:title="@string/lbl_about"
-        app:showAsAction="never" />
 </menu>

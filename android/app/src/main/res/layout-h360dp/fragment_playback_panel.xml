@@ -5,6 +5,15 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
+    <com.shawnshi.tonewise.playback.ui.ZuneMosaicBackdropView
+        android:id="@+id/playback_mosaic_backdrop"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
     <com.shawnshi.tonewise.ui.AuxioToolbar
         android:id="@+id/playback_toolbar"
         android:layout_width="match_parent"

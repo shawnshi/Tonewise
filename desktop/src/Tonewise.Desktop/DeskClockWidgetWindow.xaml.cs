@@ -45,13 +45,13 @@ public sealed partial class DeskClockWidgetWindow : Window
     private const uint ES_CONTINUOUS = 0x80000000u;
     private const uint ES_DISPLAY_REQUIRED = 0x00000002u;
 
-    private static readonly SKColor ChampagneGold = new(0xD9, 0xB3, 0x72);
-    private static readonly SKColor DimTrack = new(0x64, 0x74, 0x8B, 0x60);
-    private static readonly SKPaint ChampagneGoldPaint = new() { Color = ChampagneGold, IsAntialias = true };
-    private static readonly SKPaint DimTrackPaint = new() { Color = DimTrack, IsAntialias = true };
-    private static readonly SolidColorBrush ActiveAccentBrush = new(Color.FromArgb(0xFF, 0xD9, 0xB3, 0x72));
-    private static readonly SolidColorBrush MutedInkBrush = new(Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8));
-    private static readonly SolidColorBrush LovedHeartBrush = new(Color.FromArgb(0xFF, 0xFB, 0x71, 0x85));
+    private static readonly SKColor ZuneMagenta = new(0xFF, 0x1E, 0x7A);
+    private static readonly SKColor DimTrack = new(0x7A, 0x7A, 0x7A, 0x60);
+    private static readonly SKPaint ZuneMagentaPaint = new() { Color = ZuneMagenta, IsAntialias = false };
+    private static readonly SKPaint DimTrackPaint = new() { Color = DimTrack, IsAntialias = false };
+    private static readonly SolidColorBrush ActiveAccentBrush = new(Color.FromArgb(0xFF, 0xFF, 0x1E, 0x7A));
+    private static readonly SolidColorBrush MutedInkBrush = new(Color.FromArgb(0xFF, 0xA3, 0xA3, 0xA3));
+    private static readonly SolidColorBrush LovedHeartBrush = new(Color.FromArgb(0xFF, 0xFF, 0x1E, 0x7A));
 
     public DeskClockWidgetWindow(MainViewModel viewModel)
     {
@@ -566,7 +566,7 @@ public sealed partial class DeskClockWidgetWindow : Window
             float halfH = Math.Max(2f, amp * (h * 0.44f));
             float cx = (i + 0.5f) * step;
             var rect = new SKRect(cx - barW / 2f, centerY - halfH, cx + barW / 2f, centerY + halfH);
-            canvas.DrawRoundRect(rect, barW / 2f, barW / 2f, cx <= progressX ? ChampagneGoldPaint : DimTrackPaint);
+            canvas.DrawRect(rect, cx <= progressX ? ZuneMagentaPaint : DimTrackPaint);
         }
     }
 }

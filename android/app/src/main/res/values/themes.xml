@@ -783,4 +783,53 @@
         <item name="colorSurfaceContainerHigh">@color/grey_surfaceContainerHigh</item>
         <item name="colorSurfaceContainerHighest">@color/grey_surfaceContainerHighest</item>
     </style>
+
+    <style name="Theme.Auxio.ZuneMagenta" parent="Theme.Auxio.Base">
+        <item name="colorPrimary">@color/zune_magenta_primary</item>
+        <item name="colorOnPrimary">@color/zune_magenta_onPrimary</item>
+        <item name="colorPrimaryContainer">@color/zune_magenta_primaryContainer</item>
+        <item name="colorOnPrimaryContainer">@color/zune_magenta_onPrimaryContainer</item>
+        <item name="colorSecondary">@color/zune_magenta_secondary</item>
+        <item name="colorOnSecondary">@color/zune_magenta_onSecondary</item>
+        <item name="colorSecondaryContainer">@color/zune_magenta_secondaryContainer</item>
+        <item name="colorOnSecondaryContainer">@color/zune_magenta_onSecondaryContainer</item>
+        <item name="colorTertiary">@color/zune_magenta_tertiary</item>
+        <item name="colorOnTertiary">@color/zune_magenta_onTertiary</item>
+        <item name="colorTertiaryContainer">@color/zune_magenta_tertiaryContainer</item>
+        <item name="colorOnTertiaryContainer">@color/zune_magenta_onTertiaryContainer</item>
+        <item name="colorError">@color/zune_magenta_error</item>
+        <item name="colorOnError">@color/zune_magenta_onError</item>
+        <item name="colorErrorContainer">@color/zune_magenta_errorContainer</item>
+        <item name="colorOnErrorContainer">@color/zune_magenta_onErrorContainer</item>
+        <item name="android:colorBackground">@color/zune_magenta_background</item>
+        <item name="colorOnBackground">@color/zune_magenta_onBackground</item>
+        <item name="colorSurface">@color/zune_magenta_surface</item>
+        <item name="colorOnSurface">@color/zune_magenta_onSurface</item>
+        <item name="colorSurfaceVariant">@color/zune_magenta_surfaceVariant</item>
+        <item name="colorOnSurfaceVariant">@color/zune_magenta_onSurfaceVariant</item>
+        <item name="colorOutline">@color/zune_magenta_outline</item>
+        <item name="colorOutlineVariant">@color/zune_magenta_outlineVariant</item>
+        <item name="colorSurfaceInverse">@color/zune_magenta_inverseSurface</item>
+        <item name="colorOnSurfaceInverse">@color/zune_magenta_inverseOnSurface</item>
+        <item name="colorPrimaryInverse">@color/zune_magenta_inversePrimary</item>
+        <item name="colorPrimaryFixed">@color/zune_magenta_primaryFixed</item>
+        <item name="colorOnPrimaryFixed">@color/zune_magenta_onPrimaryFixed</item>
+        <item name="colorPrimaryFixedDim">@color/zune_magenta_primaryFixedDim</item>
+        <item name="colorOnPrimaryFixedVariant">@color/zune_magenta_onPrimaryFixedVariant</item>
+        <item name="colorSecondaryFixed">@color/zune_magenta_secondaryFixed</item>
+        <item name="colorOnSecondaryFixed">@color/zune_magenta_onSecondaryFixed</item>
+        <item name="colorSecondaryFixedDim">@color/zune_magenta_secondaryFixedDim</item>
+        <item name="colorOnSecondaryFixedVariant">@color/zune_magenta_onSecondaryFixedVariant</item>
+        <item name="colorTertiaryFixed">@color/zune_magenta_tertiaryFixed</item>
+        <item name="colorOnTertiaryFixed">@color/zune_magenta_onTertiaryFixed</item>
+        <item name="colorTertiaryFixedDim">@color/zune_magenta_tertiaryFixedDim</item>
+        <item name="colorOnTertiaryFixedVariant">@color/zune_magenta_onTertiaryFixedVariant</item>
+        <item name="colorSurfaceDim">@color/zune_magenta_surfaceDim</item>
+        <item name="colorSurfaceBright">@color/zune_magenta_surfaceBright</item>
+        <item name="colorSurfaceContainerLowest">@color/zune_magenta_surfaceContainerLowest</item>
+        <item name="colorSurfaceContainerLow">@color/zune_magenta_surfaceContainerLow</item>
+        <item name="colorSurfaceContainer">@color/zune_magenta_surfaceContainer</item>
+        <item name="colorSurfaceContainerHigh">@color/zune_magenta_surfaceContainerHigh</item>
+        <item name="colorSurfaceContainerHighest">@color/zune_magenta_surfaceContainerHighest</item>
+    </style>
 </resources>

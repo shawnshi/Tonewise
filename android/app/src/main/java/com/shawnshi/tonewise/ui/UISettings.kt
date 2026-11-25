@@ -43,10 +43,14 @@ interface UISettings : Settings<UISettings.Listener> {
     var accent: Accent
     /** Whether to round additional UI elements that require album covers to be rounded. */
     val roundMode: Boolean
+    /** Whether to dynamically derive a high-contrast accent tint from the playing album cover. */
+    val enableDynamicCoverAccent: Boolean
 
     interface Listener {
         /** Called when [roundMode] changes. */
         fun onRoundModeChanged()
+        /** Called when [enableDynamicCoverAccent] changes. */
+        fun onDynamicCoverAccentChanged() {}
     }
 }
 
@@ -60,7 +64,7 @@ class UISettingsImpl @Inject constructor(@ApplicationContext context: Context) :
             )
 
     override val useBlackTheme: Boolean
-        get() = sharedPreferences.getBoolean(getString(R.string.set_key_black_theme), false)
+        get() = sharedPreferences.getBoolean(getString(R.string.set_key_black_theme), true)
 
     override var accent: Accent
         get() =
@@ -75,7 +79,14 @@ class UISettingsImpl @Inject constructor(@ApplicationContext context: Context) :
         }
 
     override val roundMode: Boolean
-        get() = sharedPreferences.getBoolean(getString(R.string.set_key_round_mode), true)
+        get() = sharedPreferences.getBoolean(getString(R.string.set_key_round_mode), false)
+
+    override val enableDynamicCoverAccent: Boolean
+        get() =
+            sharedPreferences.getBoolean(
+                getString(R.string.set_key_dynamic_cover_accent),
+                false,
+            )
 
     override fun migrate() {
         if (sharedPreferences.contains(OLD_KEY_ACCENT3)) {
@@ -86,7 +97,7 @@ class UISettingsImpl @Inject constructor(@ApplicationContext context: Context) :
                 // Accents were previously frozen as soon as the OS was updated to android
                 // twelve, as dynamic colors were enabled by default. This is no longer the
                 // case, so we need to re-update the setting to dynamic colors here.
-                accent = 16
+                accent = Accent.INDEX_DYNAMIC
             }
 
             sharedPreferences.edit {
@@ -101,6 +112,9 @@ class UISettingsImpl @Inject constructor(@ApplicationContext context: Context) :
         if (key == getString(R.string.set_key_round_mode)) {
             L.d("Dispatching round mode setting change")
             listener.onRoundModeChanged()
+        } else if (key == getString(R.string.set_key_dynamic_cover_accent)) {
+            L.d("Dispatching dynamic cover accent setting change")
+            listener.onDynamicCoverAccentChanged()
         }
     }
 

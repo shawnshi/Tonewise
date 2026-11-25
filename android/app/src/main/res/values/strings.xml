@@ -247,6 +247,8 @@
     <string name="set_black_mode_desc">Use a pure black dark theme</string>
     <string name="set_round_mode">Round mode</string>
     <string name="set_round_mode_desc">Enable rounded corners on additional UI elements (requires album covers to be rounded)</string>
+    <string name="set_dynamic_cover_accent">Dynamic cover accent</string>
+    <string name="set_dynamic_cover_accent_desc">Derive high-contrast Zune accent tint from the currently playing album cover</string>
 
     <string name="set_personalize">Personalize</string>
     <string name="set_personalize_desc">Customize UI controls and behavior</string>
@@ -444,6 +446,7 @@
     <string name="clr_orange">Orange</string>
     <string name="clr_brown">Brown</string>
     <string name="clr_grey">Grey</string>
+    <string name="clr_zune_magenta">Zune Magenta</string>
     <!-- As in "Dynamic Colors"/Material You theming -->
     <string name="clr_dynamic">Dynamic</string>
 
@@ -655,4 +658,17 @@
     <string name="lbl_autodj_action">Play 50 Tracks</string>
     <string name="lbl_autodj_badge">Time-Aware · 50 Tracks</string>
     <string name="lbl_scene_autodj_badge">Auto DJ 50</string>
+    <string name="lbl_pin_quickplay">Pin to Quickplay</string>
+    <string name="lbl_unpin_quickplay">Unpin from Quickplay</string>
+    <string name="lng_pinned_quickplay">Pinned to quickplay</string>
+    <string name="lng_unpinned_quickplay">Removed from quickplay</string>
+    <string name="lbl_hub_quickplay">quickplay</string>
+    <string name="lbl_hub_collection">collection</string>
+    <string name="lbl_hub_autodj">autodj</string>
+    <string name="lbl_classical_empty">No classical work-tagged tracks indexed yet</string>
+    <string name="lbl_quickplay_empty_pins">Long-press any album, playlist, or work to pin it here</string>
+    <string name="lbl_rescan_library">Rescan library</string>
+    <string name="lbl_rescan_started">Rescanning music library…</string>
+    <string name="lbl_focus_filter_drawer">5D filter</string>
+    <string name="lbl_sync_lastfm_drawer">Sync &amp; Last.fm</string>
 </resources>

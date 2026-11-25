@@ -86,6 +86,7 @@ constructor(
     private var linearInactiveTrackSuppressed = false
     private var waveformStyleEnabled = true
     private var waveformEnvelope: FloatArray? = null
+    private var rectilinearMode = false
     private val waveformBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
     private var waveTransitionAnimation: SpringAnimation? = null
@@ -758,7 +759,11 @@ constructor(
             val isPlayed = if (isRtl) cx >= thumbX else cx <= thumbX
             waveformBarPaint.color = if (isPlayed) activeColor else inactiveColor
             patchRect.set(cx - halfBarW, centerY - halfH, cx + halfBarW, centerY + halfH)
-            canvas.drawRoundRect(patchRect, halfBarW, halfBarW, waveformBarPaint)
+            if (rectilinearMode) {
+                canvas.drawRect(patchRect, waveformBarPaint)
+            } else {
+                canvas.drawRoundRect(patchRect, halfBarW, halfBarW, waveformBarPaint)
+            }
         }
 
         // Crisp vertical playhead cursor matching Desktop's waveform scrubber
@@ -771,7 +776,19 @@ constructor(
             thumbX + playheadHalfW,
             centerY + playheadHalfH,
         )
-        canvas.drawRoundRect(patchRect, playheadHalfW, playheadHalfW, waveformBarPaint)
+        if (rectilinearMode) {
+            canvas.drawRect(patchRect, waveformBarPaint)
+        } else {
+            canvas.drawRoundRect(patchRect, playheadHalfW, playheadHalfW, waveformBarPaint)
+        }
+    }
+
+    /** Switches waveform bars and playhead to 0dp rectilinear Zune geometry when true. */
+    fun setRectilinearMode(enabled: Boolean) {
+        if (rectilinearMode == enabled) return
+        rectilinearMode = enabled
+        trackCornerSize = if (enabled) 0 else resources.getDimensionPixelSize(R.dimen.slider_track_height)
+        invalidate()
     }
 
     private fun updateActiveTrackSuppression() {
