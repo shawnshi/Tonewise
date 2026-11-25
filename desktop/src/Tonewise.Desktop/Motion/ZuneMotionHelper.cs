@@ -40,7 +40,7 @@ public static class ZuneMotionHelper
         }
     }
 
-    public static void PlayStaggeredEntrance(UIElement? headerElement, UIElement? contentElement, float horizontalOffset = 28f)
+    public static void PlayStaggeredEntrance(UIElement? headerElement, UIElement? contentElement, float horizontalOffset = 14f, int durationMs = 120)
     {
         if (headerElement is null && contentElement is null) return;
 
@@ -51,13 +51,15 @@ public static class ZuneMotionHelper
             return;
         }
 
+        int clampedDuration = Math.Clamp(durationMs, 60, 260);
         if (headerElement is not null)
         {
-            AnimateSlideIn(headerElement, MathF.Round(horizontalOffset * 0.6f), durationMs: 180, delayMs: 0);
+            AnimateSlideIn(headerElement, MathF.Round(horizontalOffset * 0.6f), durationMs: clampedDuration, delayMs: 0);
         }
         if (contentElement is not null)
         {
-            AnimateSlideIn(contentElement, MathF.Round(horizontalOffset), durationMs: 240, delayMs: 35);
+            int contentDelay = headerElement is null ? 0 : 25;
+            AnimateSlideIn(contentElement, MathF.Round(horizontalOffset), durationMs: clampedDuration, delayMs: contentDelay);
         }
     }
 

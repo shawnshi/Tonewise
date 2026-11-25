@@ -97,7 +97,8 @@ public static class FiveDimQueryBuilder
         }
         if (!string.IsNullOrWhiteSpace(query.MoodCluster) && query.MoodCluster != "all")
         {
-            predicates.Add(new { predicate = new { field = "mood_cluster", op = "in", values = new[] { query.MoodCluster } } });
+            string normalizedMood = NormalizeMoodClusterId(query.MoodCluster);
+            predicates.Add(new { predicate = new { field = "mood_cluster", op = "in", values = new[] { normalizedMood } } });
         }
 
         object ruleObj = predicates.Count > 0
@@ -114,6 +115,15 @@ public static class FiveDimQueryBuilder
             rule = ruleObj,
         });
     }
+
+    public static string NormalizeMoodClusterId(string rawMoodCluster) =>
+        (rawMoodCluster ?? "").Trim().ToLowerInvariant() switch
+        {
+            "focus_deep" => "deep_introspective",
+            "bright_energetic" => "bright_joyful",
+            "melancholic_dark" => "high_tension",
+            string other => other,
+        };
 }
 
 public sealed record GenreFacetItem(string CanonicalName, int TrackCount);
@@ -1062,9 +1072,9 @@ public sealed record DesktopUserSettings(
     int? DeskClockHeight = null,
     bool DeskClockAlwaysOnTop = true,
     bool EnableUsbAutoSync = true,
-    bool EnableMirrorPrune = true,
-    string MirrorPruneScope = "music_folder_all",
-    bool AllowAdbForeignDeleteFallback = true,
+    bool EnableMirrorPrune = false,
+    string MirrorPruneScope = "managed_only",
+    bool AllowAdbForeignDeleteFallback = false,
     string? CustomAdbPath = null,
     bool EnableDynamicCoverAccent = false
 );

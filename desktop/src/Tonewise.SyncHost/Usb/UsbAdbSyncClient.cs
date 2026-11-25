@@ -1035,19 +1035,61 @@ public sealed class UsbAdbSyncClient
         }
     }
 
+    public static bool TryValidateRemoteMusicRoot(string? rawRoot, out string normalized)
+    {
+        if (string.IsNullOrWhiteSpace(rawRoot))
+        {
+            normalized = DefaultRemoteMusicRoot;
+            return true;
+        }
+
+        string candidate = rawRoot.Trim().Replace('\\', '/').TrimEnd('/');
+        if (string.IsNullOrEmpty(candidate)
+            || candidate.IndexOf('\0') >= 0
+            || candidate.IndexOf('\r') >= 0
+            || candidate.IndexOf('\n') >= 0
+            || !candidate.StartsWith('/'))
+        {
+            normalized = DefaultRemoteMusicRoot;
+            return false;
+        }
+
+        string[] segments = candidate.Split('/', StringSplitOptions.None);
+        if (segments.Length < 2)
+        {
+            normalized = DefaultRemoteMusicRoot;
+            return false;
+        }
+
+        for (int i = 1; i < segments.Length; i++)
+        {
+            string seg = segments[i];
+            if (string.IsNullOrEmpty(seg) || seg == "." || seg == ".."
+                || seg.Any(c => char.IsControl(c) || c is ';' or '|' or '&' or '$' or '`' or '"' or '\'' or '<' or '>'))
+            {
+                normalized = DefaultRemoteMusicRoot;
+                return false;
+            }
+        }
+
+        string canonical = "/" + string.Join('/', segments.Skip(1));
+        bool allowed =
+            string.Equals(canonical, "/storage/emulated/0/Music", StringComparison.Ordinal)
+            || canonical.StartsWith("/storage/emulated/0/Music/", StringComparison.Ordinal)
+            || string.Equals(canonical, "/sdcard/Music", StringComparison.Ordinal)
+            || canonical.StartsWith("/sdcard/Music/", StringComparison.Ordinal);
+
+        normalized = allowed ? canonical : DefaultRemoteMusicRoot;
+        return allowed;
+    }
+
     private static string NormalizeRemoteMusicRoot(string? rawRoot)
     {
-        string candidate = string.IsNullOrWhiteSpace(rawRoot) ? DefaultRemoteMusicRoot : rawRoot.Trim();
-        candidate = candidate.Replace('\\', '/').TrimEnd('/');
-        if (string.IsNullOrEmpty(candidate) ||
-            candidate.IndexOf('\0') >= 0 ||
-            candidate.IndexOf('\r') >= 0 ||
-            candidate.IndexOf('\n') >= 0 ||
-            !candidate.StartsWith('/'))
+        if (!TryValidateRemoteMusicRoot(rawRoot, out string normalized))
         {
-            return DefaultRemoteMusicRoot;
+            throw new ArgumentException($"Invalid remote_music_root outside allowed Music directories: '{rawRoot}'", nameof(rawRoot));
         }
-        return candidate;
+        return normalized;
     }
 
     private static string BuildTempRelPath(string finalRelPath, string uniqueSeed, string suffix)

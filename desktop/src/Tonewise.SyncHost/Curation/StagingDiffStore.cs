@@ -411,29 +411,47 @@ public sealed class StagingDiffStore
         using var conn = OpenConnection();
         EnsureOptionalTrackColumns(conn);
 
+        var batchTargets = new List<TagDiffProposal>(targets.Count);
         var updatesByTrack = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
+        int physicalLimit = maxPhysicalFiles > 0 ? maxPhysicalFiles : int.MaxValue;
+        var tracksBeyondPhysicalLimit = new HashSet<string>(StringComparer.Ordinal);
         foreach (var item in targets)
         {
             string column = ResolveColumnName(item.FieldName);
             if (IsPhysicalTagColumn(column))
             {
+                if (tracksBeyondPhysicalLimit.Contains(item.TrackUid))
+                {
+                    continue;
+                }
                 if (!updatesByTrack.TryGetValue(item.TrackUid, out var trackUpdates))
                 {
+                    if (updatesByTrack.Count >= physicalLimit)
+                    {
+                        tracksBeyondPhysicalLimit.Add(item.TrackUid);
+                        continue;
+                    }
                     trackUpdates = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
                     updatesByTrack[item.TrackUid] = trackUpdates;
                 }
                 trackUpdates[column] = NormalizePersonColumnForWrite(column, item.SuggestedValue);
             }
+            batchTargets.Add(item);
         }
 
-        var (physicalResults, physicalFailures) = WriteBackPhysicalFilesOutsideTx(conn, updatesByTrack, maxPhysicalFiles);
+        if (batchTargets.Count == 0)
+        {
+            return new CurationCommitResult(batchId, 0);
+        }
+
+        var (physicalResults, physicalFailures) = WriteBackPhysicalFilesOutsideTx(conn, updatesByTrack, physicalLimit);
 
         int committed = 0;
-        var committedItems = new List<TagDiffProposal>(targets.Count);
+        var committedItems = new List<TagDiffProposal>(batchTargets.Count);
         var failedPhysicalItems = new List<TagDiffProposal>();
         using (var tx = TonewiseSqlite.BeginImmediateTransaction(conn))
         {
-            foreach (var item in targets)
+            foreach (var item in batchTargets)
             {
                 string column = ResolveColumnName(item.FieldName);
                 if (IsPhysicalTagColumn(column) && physicalFailures.ContainsKey(item.TrackUid))
@@ -794,10 +812,19 @@ public sealed class StagingDiffStore
         var workItems = new List<(string TrackUid, string RelPath, string FullPath, Dictionary<string, string?> Updates)>(updatesByTrack.Count);
         foreach (var (uid, updates) in updatesByTrack)
         {
-            if (workItems.Count >= maxPhysicalFiles) break;
+            if (workItems.Count >= maxPhysicalFiles)
+            {
+                failedByTrack[uid] = "超出单批物理写回上限，已顺延至下一批次";
+                continue;
+            }
             if (!relPathByUid.TryGetValue(uid, out string? relPath)) continue;
             string fullPath = Path.GetFullPath(Path.Combine(MusicRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-            if (!fullPath.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) || !File.Exists(fullPath))
+            if (!fullPath.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+            {
+                failedByTrack[uid] = $"拒绝越界路径物理写回: {relPath}";
+                continue;
+            }
+            if (!File.Exists(fullPath))
                 continue;
             workItems.Add((uid, relPath, fullPath, updates));
         }

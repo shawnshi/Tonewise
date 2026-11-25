@@ -25,25 +25,91 @@ import android.content.UriMatcher
 import android.database.Cursor
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
+import java.lang.ref.WeakReference
 import kotlinx.coroutines.runBlocking
 import com.shawnshi.tonewise.BuildConfig
 import com.shawnshi.tonewise.image.covers.SettingCovers
+import com.shawnshi.tonewise.music.MusicRepository
+import org.oxycblt.musikr.Library
 import org.oxycblt.musikr.covers.CoverResult
 
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface CoverProviderEntryPoint {
+    fun musicRepository(): MusicRepository
+}
+
 class CoverProvider : ContentProvider() {
+    private val allowListLock = Any()
+    @Volatile private var cachedLibraryRef: WeakReference<Library>? = null
+    @Volatile private var cachedAllowedIds: Set<String> = emptySet()
+
     override fun onCreate(): Boolean = true
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         if (mode != "r" || uriMatcher.match(uri) != 1) {
             return null
         }
-        val id = uri.lastPathSegment ?: return null
+        val id = uri.lastPathSegment?.takeIf { it.isNotBlank() } ?: return null
+        if (id.contains("..") || id.contains('\u0000')) {
+            return null
+        }
+        val ctx = context ?: return null
+        if (!isIndexedCoverId(ctx.applicationContext, id)) {
+            return null
+        }
         return runBlocking {
-            when (val result = SettingCovers.immutable(requireNotNull(context)).obtain(id)) {
+            when (val result = SettingCovers.immutable(ctx).obtain(id)) {
                 is CoverResult.Hit -> result.cover.fd()
                 else -> null
             }
         }
+    }
+
+    private fun isIndexedCoverId(appContext: android.content.Context, id: String): Boolean {
+        val library =
+            runCatching {
+                EntryPointAccessors.fromApplication(appContext, CoverProviderEntryPoint::class.java)
+                    .musicRepository()
+                    .library
+            }.getOrNull() ?: return false
+
+        val allowed =
+            if (cachedLibraryRef?.get() === library) {
+                cachedAllowedIds
+            } else {
+                synchronized(allowListLock) {
+                    if (cachedLibraryRef?.get() === library) {
+                        cachedAllowedIds
+                    } else {
+                        HashSet<String>(library.albums.size * 2 + 16).apply {
+                            for (song in library.songs) {
+                                song.cover?.id?.let(::add)
+                            }
+                            for (album in library.albums) {
+                                for (cover in album.covers.covers) add(cover.id)
+                            }
+                            for (artist in library.artists) {
+                                for (cover in artist.covers.covers) add(cover.id)
+                            }
+                            for (genre in library.genres) {
+                                for (cover in genre.covers.covers) add(cover.id)
+                            }
+                            for (playlist in library.playlists) {
+                                for (cover in playlist.covers.covers) add(cover.id)
+                            }
+                        }.also { built ->
+                            cachedAllowedIds = built
+                            cachedLibraryRef = WeakReference(library)
+                        }
+                    }
+                }
+            }
+        return id in allowed
     }
 
     override fun getType(uri: Uri): String {

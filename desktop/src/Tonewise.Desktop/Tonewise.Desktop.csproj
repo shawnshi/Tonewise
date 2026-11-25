@@ -50,4 +50,10 @@
       <Link>tools\AdbWinUsbApi.dll</Link>
     </None>
   </ItemGroup>
+  <Target Name="EnsureNativeCoreBinariesInRelease" BeforeTargets="BeforeBuild" Condition="'$(Configuration)' == 'Release'">
+    <Error Condition="!Exists('..\..\..\core\target\release\tonewise_core.dll')"
+           Text="Missing native core DLL: core\target\release\tonewise_core.dll. Run scripts\build-core-desktop.ps1 first." />
+    <Error Condition="!Exists('..\..\..\core\target\release\tonewise-cli.exe')"
+           Text="Missing native core CLI: core\target\release\tonewise-cli.exe. Run scripts\build-core-desktop.ps1 first." />
+  </Target>
 </Project>

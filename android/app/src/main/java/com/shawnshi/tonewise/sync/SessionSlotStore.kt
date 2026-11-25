@@ -58,7 +58,7 @@ class SessionSlotStore @Inject constructor(@ApplicationContext private val conte
     @Volatile private var activeSceneDirty = false
     @Volatile private var activeSlotDirty = false
 
-    private val _slots = MutableStateFlow<List<SessionSlotItem>>(emptyList())
+    private val _slots = MutableStateFlow(DEFAULT_PRESET_SLOTS)
     val slots: StateFlow<List<SessionSlotItem>> = _slots
 
     private val _activeSceneLabel = MutableStateFlow("Default")
@@ -83,9 +83,13 @@ class SessionSlotStore @Inject constructor(@ApplicationContext private val conte
             val kv = syncDb.syncKvDao()
             if (!slotsDirty) {
                 val raw = kv.getValue(KEY_SLOTS_JSON)
-                if (!raw.isNullOrBlank()) {
-                    _slots.value = runCatching { parseSlots(raw) }.getOrDefault(emptyList())
-                }
+                val parsed =
+                    if (!raw.isNullOrBlank()) {
+                        runCatching { parseSlots(raw) }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
+                _slots.value = withDefaultPresets(parsed)
             }
             if (!activeSceneDirty) {
                 val scene = kv.getValue(KEY_ACTIVE_SCENE)
@@ -122,10 +126,9 @@ class SessionSlotStore @Inject constructor(@ApplicationContext private val conte
     fun saveSlot(slot: SessionSlotItem, activate: Boolean = true) {
         val merged =
             synchronized(stateLock) {
-                _slots.value
-                    .filterNot { it.slotIndex == slot.slotIndex }
-                    .plus(slot)
-                    .sortedBy { it.slotIndex }
+                withDefaultPresets(
+                    _slots.value.filterNot { it.slotIndex == slot.slotIndex }.plus(slot)
+                )
             }
         persist(merged)
         if (activate) {
@@ -146,7 +149,7 @@ class SessionSlotStore @Inject constructor(@ApplicationContext private val conte
         ensureLoaded()
         val merged =
             synchronized(stateLock) {
-                val next = mergeSlotsJson(_slots.value, remoteJson)
+                val next = withDefaultPresets(mergeSlotsJson(_slots.value, remoteJson))
                 slotsDirty = true
                 _slots.value = next
                 next
@@ -185,6 +188,28 @@ class SessionSlotStore @Inject constructor(@ApplicationContext private val conte
         private const val KEY_SLOTS_JSON = "session_slots_json"
         private const val KEY_ACTIVE_SCENE = "session_active_scene_label"
         private const val KEY_ACTIVE_SLOT = "session_active_slot_index"
+
+        val DEFAULT_PRESET_SLOTS: List<SessionSlotItem> =
+            listOf(
+                SessionSlotItem(1, "Focus", "focus", 0L, emptyList(), 0, 0L),
+                SessionSlotItem(2, "Coding", "coding", 0L, emptyList(), 0, 0L),
+                SessionSlotItem(3, "Relax", "relax", 0L, emptyList(), 0, 0L),
+                SessionSlotItem(4, "Energy", "energy", 0L, emptyList(), 0, 0L),
+                SessionSlotItem(5, "Classical", "classical", 0L, emptyList(), 0, 0L),
+            )
+
+        fun withDefaultPresets(list: List<SessionSlotItem>): List<SessionSlotItem> {
+            val bySlot = LinkedHashMap<Int, SessionSlotItem>(5)
+            for (preset in DEFAULT_PRESET_SLOTS) {
+                bySlot[preset.slotIndex] = preset
+            }
+            for (slot in list) {
+                if (slot.slotIndex in 1..5) {
+                    bySlot[slot.slotIndex] = slot
+                }
+            }
+            return (1..5).mapNotNull { bySlot[it] }
+        }
 
         fun isSlotPopulated(slot: SessionSlotItem?): Boolean =
             slot != null && slot.queueTrackUids.isNotEmpty()

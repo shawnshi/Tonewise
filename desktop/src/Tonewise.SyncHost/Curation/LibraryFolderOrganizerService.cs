@@ -178,7 +178,10 @@ public static partial class LibraryFolderOrganizerService
 
     private static readonly char[] InvalidFileChars = Path.GetInvalidFileNameChars();
 
-    public static FolderOrganizeSummary OrganizeLibraryFolders(string musicRoot, string manifestDbPath)
+    public static FolderOrganizeSummary OrganizeLibraryFolders(
+        string musicRoot,
+        string manifestDbPath,
+        bool dryRun = false)
     {
         if (string.IsNullOrWhiteSpace(musicRoot) || !LongPathHelper.DirectoryExists(musicRoot))
             return new FolderOrganizeSummary(0, 0, 0, 0, 0, []);
@@ -187,7 +190,9 @@ public static partial class LibraryFolderOrganizerService
 
         string normalizedRoot = LongPathHelper.StripExtendedPrefix(Path.GetFullPath(musicRoot)).TrimEnd('\\', '/');
 
-        using var conn = TonewiseSqlite.OpenReadWrite(manifestDbPath);
+        using var conn = dryRun
+            ? TonewiseSqlite.OpenReadOnly(manifestDbPath)
+            : TonewiseSqlite.OpenReadWrite(manifestDbPath);
 
         bool hasAlbumArtistCol = HasColumn(conn, "tracks", "album_artist");
         var rows = new List<(string Uid, string RelPath, string Title, string Album, string? AlbumArtist, IReadOnlyList<string> Artists)>();
@@ -296,6 +301,20 @@ public static partial class LibraryFolderOrganizerService
                 continue;
             }
 
+            if (dryRun)
+            {
+                movedCount++;
+                if (wasAlreadyOverlong)
+                {
+                    longPathFixedCount++;
+                }
+                if (samples.Count < 12)
+                {
+                    samples.Add($"{currentRelPosix} -> {targetRelPosix}");
+                }
+                continue;
+            }
+
             try
             {
                 LongPathHelper.EnsureDirectory(targetDir);
@@ -318,7 +337,7 @@ public static partial class LibraryFolderOrganizerService
                 {
                     longPathFixedCount++;
                 }
-                if (samples.Count < 8)
+                if (samples.Count < 12)
                 {
                     samples.Add($"{currentRelPosix} -> {targetRelPosix}");
                 }
@@ -336,6 +355,11 @@ public static partial class LibraryFolderOrganizerService
             {
                 skippedCount++;
             }
+        }
+
+        if (dryRun)
+        {
+            return new FolderOrganizeSummary(totalChecked, movedCount, longPathFixedCount, staleUids.Count, skippedCount, samples);
         }
 
         string journalDir = Path.GetDirectoryName(Path.GetFullPath(manifestDbPath)) ?? Path.Combine(normalizedRoot, ".tonewise");
@@ -1105,7 +1129,7 @@ public sealed class LibraryFileWatcherService : IDisposable
 {
     private static readonly HashSet<string> WatchedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".flac", ".mp3", ".wav", ".m4a", ".alac", ".aac", ".ogg", ".opus", ".dsf", ".dff", ".m3u8"
+        ".flac", ".mp3", ".wav", ".aiff", ".aif", ".m4a", ".alac", ".aac", ".ogg", ".opus", ".dsf", ".dff", ".m3u8"
     };
 
     private static readonly HashSet<string> TempExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -1116,7 +1140,7 @@ public sealed class LibraryFileWatcherService : IDisposable
     private readonly string _musicRoot;
     private readonly Func<IReadOnlyList<string>, Task> _onChangesDetected;
     private readonly int _debounceMs;
-    private readonly FileSystemWatcher _watcher;
+    private FileSystemWatcher? _watcher;
     private readonly Lock _gate = new();
     private readonly HashSet<string> _pendingPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _suppressedPathsUntilUtcTicks = new(StringComparer.OrdinalIgnoreCase);
@@ -1127,6 +1151,7 @@ public sealed class LibraryFileWatcherService : IDisposable
     private bool _isProcessing;
     private bool _rescheduleRequested;
     private bool _fullRescanPending;
+    private bool _watcherRebuildPending;
     private bool _disposed;
 
     public LibraryFileWatcherService(
@@ -1138,19 +1163,62 @@ public sealed class LibraryFileWatcherService : IDisposable
         _onChangesDetected = onChangesDetected ?? throw new ArgumentNullException(nameof(onChangesDetected));
         _debounceMs = Math.Clamp(debounceMs, 50, 30_000);
         _debounceTimer = new Timer(_ => _ = FlushPendingAsync(), null, Timeout.Infinite, Timeout.Infinite);
+        _watcher = CreateWatcher();
+    }
 
-        _watcher = new FileSystemWatcher(_musicRoot)
+    private FileSystemWatcher CreateWatcher()
+    {
+        var watcher = new FileSystemWatcher(_musicRoot)
         {
             IncludeSubdirectories = true,
             InternalBufferSize = 65536,
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
         };
-        _watcher.Created += OnWatcherEvent;
-        _watcher.Deleted += OnWatcherEvent;
-        _watcher.Changed += OnWatcherEvent;
-        _watcher.Renamed += OnWatcherRenamed;
-        _watcher.Error += OnWatcherError;
-        _watcher.EnableRaisingEvents = true;
+        watcher.Created += OnWatcherEvent;
+        watcher.Deleted += OnWatcherEvent;
+        watcher.Changed += OnWatcherEvent;
+        watcher.Renamed += OnWatcherRenamed;
+        watcher.Error += OnWatcherError;
+        watcher.EnableRaisingEvents = true;
+        return watcher;
+    }
+
+    private void DisposeWatcher(FileSystemWatcher? watcher)
+    {
+        if (watcher is null) return;
+        try
+        {
+            watcher.EnableRaisingEvents = false;
+            watcher.Created -= OnWatcherEvent;
+            watcher.Deleted -= OnWatcherEvent;
+            watcher.Changed -= OnWatcherEvent;
+            watcher.Renamed -= OnWatcherRenamed;
+            watcher.Error -= OnWatcherError;
+            watcher.Dispose();
+        }
+        catch { }
+    }
+
+    private void TryRebuildWatcherIfNeeded()
+    {
+        FileSystemWatcher? oldWatcher = null;
+        lock (_gate)
+        {
+            if (_disposed || !_watcherRebuildPending) return;
+            if (!Directory.Exists(_musicRoot)) return;
+            oldWatcher = _watcher;
+            try
+            {
+                _watcher = CreateWatcher();
+                _watcherRebuildPending = false;
+            }
+            catch
+            {
+                // Leave _watcherRebuildPending = true so subsequent ticks retry
+                return;
+            }
+        }
+        DisposeWatcher(oldWatcher);
     }
 
     public IDisposable SuspendWatching()
@@ -1186,6 +1254,7 @@ public sealed class LibraryFileWatcherService : IDisposable
         {
             if (_disposed) return;
             _fullRescanPending = true;
+            _watcherRebuildPending = true;
             _pendingPaths.Add(_musicRoot);
             if (Volatile.Read(ref _suspendCount) == 0)
             {
@@ -1194,7 +1263,7 @@ public sealed class LibraryFileWatcherService : IDisposable
         }
     }
 
-    internal static bool ShouldProcessPath(string? fullPath, bool isChangeOnly)
+    public static bool ShouldProcessPath(string? fullPath, bool isChangeOnly)
     {
         if (string.IsNullOrWhiteSpace(fullPath)) return false;
 
@@ -1317,6 +1386,7 @@ public sealed class LibraryFileWatcherService : IDisposable
         return;
 
     RunCallback:
+        TryRebuildWatcherIfNeeded();
         try
         {
             await WaitForFilesReadableAsync(snapshot).ConfigureAwait(false);
@@ -1405,25 +1475,17 @@ public sealed class LibraryFileWatcherService : IDisposable
 
     public void Dispose()
     {
+        FileSystemWatcher? watcherToDispose;
         lock (_gate)
         {
             if (_disposed) return;
             _disposed = true;
             _pendingPaths.Clear();
+            watcherToDispose = _watcher;
+            _watcher = null;
         }
 
-        try
-        {
-            _watcher.EnableRaisingEvents = false;
-            _watcher.Created -= OnWatcherEvent;
-            _watcher.Deleted -= OnWatcherEvent;
-            _watcher.Changed -= OnWatcherEvent;
-            _watcher.Renamed -= OnWatcherRenamed;
-            _watcher.Error -= OnWatcherError;
-            _watcher.Dispose();
-        }
-        catch { }
-
+        DisposeWatcher(watcherToDispose);
         try { _debounceTimer.Dispose(); } catch { }
     }
 }

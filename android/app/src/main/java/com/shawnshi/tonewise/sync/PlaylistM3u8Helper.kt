@@ -125,6 +125,119 @@ object PlaylistM3u8Helper {
         return sb.toString()
     }
 
+    class SongRelPathIndex(
+        private val tier1ByRel: Map<String, Song>,
+        private val tier2ByRel: Map<String, Song>,
+        private val stemUniqueByRel: Map<String, Any>,
+        private val ambiguousMarker: Any,
+    ) {
+        fun match(cleanRel: String): Song? {
+            if (cleanRel.isEmpty()) return null
+            tier1ByRel[cleanRel]?.let { return it }
+            tier2ByRel[cleanRel]?.let { return it }
+            val cleanStem = cleanRel.substringBeforeLast('.')
+            if (cleanStem != cleanRel && cleanStem.isNotEmpty()) {
+                val hit = stemUniqueByRel[cleanStem]
+                if (hit != null && hit !== ambiguousMarker) {
+                    return hit as Song
+                }
+            }
+            return null
+        }
+    }
+
+    fun buildSongRelPathIndex(songs: Collection<Song>): SongRelPathIndex {
+        val tier1ByRel = HashMap<String, Song>(songs.size * 2)
+        val tier2ByRel = HashMap<String, Song>(songs.size * 3)
+        val stemUniqueByRel = HashMap<String, Any>(songs.size * 4)
+        val ambiguousMarker = Any()
+
+        for (song in songs) {
+            val rawRel = song.path.components.components.joinToString("/")
+            val nfcRel = Normalizer.normalize(rawRel, Normalizer.Form.NFC)
+            val fullRel =
+                LanSyncV2Client.sanitizeRelativePathSegments(nfcRel)
+                    .joinToString("/")
+                    .lowercase()
+            if (fullRel.isEmpty()) continue
+
+            tier1ByRel.putIfAbsent(fullRel, song)
+            if (fullRel.startsWith("music/")) {
+                tier1ByRel.putIfAbsent(fullRel.substring("music/".length), song)
+            }
+            var searchFrom = 0
+            while (true) {
+                val idx = fullRel.indexOf("/music/", searchFrom)
+                if (idx < 0) break
+                val suffix = fullRel.substring(idx + "/music/".length)
+                if (suffix.isNotEmpty()) tier1ByRel.putIfAbsent(suffix, song)
+                searchFrom = idx + 1
+            }
+
+            if (fullRel.startsWith("tonewise/")) {
+                tier2ByRel.putIfAbsent(fullRel.substring("tonewise/".length), song)
+            }
+            searchFrom = 0
+            while (true) {
+                val idx = fullRel.indexOf("/tonewise/", searchFrom)
+                if (idx < 0) break
+                val suffix = fullRel.substring(idx + "/tonewise/".length)
+                if (suffix.isNotEmpty()) tier2ByRel.putIfAbsent(suffix, song)
+                searchFrom = idx + 1
+            }
+            searchFrom = 0
+            while (true) {
+                val slashIdx = fullRel.indexOf('/', searchFrom)
+                if (slashIdx < 0) break
+                val suffix = fullRel.substring(slashIdx + 1)
+                if (suffix.isNotEmpty()) tier2ByRel.putIfAbsent(suffix, song)
+                searchFrom = slashIdx + 1
+            }
+
+            val fullStem = fullRel.substringBeforeLast('.')
+            if (fullStem.isNotEmpty()) {
+                val stemKeys = HashSet<String>(6)
+                stemKeys.add(fullStem)
+                if (fullStem.startsWith("music/")) {
+                    stemKeys.add(fullStem.substring("music/".length))
+                }
+                if (fullStem.startsWith("tonewise/")) {
+                    stemKeys.add(fullStem.substring("tonewise/".length))
+                }
+                var stemIdx = 0
+                while (true) {
+                    val slashIdx = fullStem.indexOf('/', stemIdx)
+                    if (slashIdx < 0) break
+                    val suffix = fullStem.substring(slashIdx + 1)
+                    if (suffix.isNotEmpty()) stemKeys.add(suffix)
+                    stemIdx = slashIdx + 1
+                }
+                for (key in stemKeys) {
+                    val existing = stemUniqueByRel[key]
+                    if (existing == null) {
+                        stemUniqueByRel[key] = song
+                    } else if (existing !== song && existing !== ambiguousMarker) {
+                        stemUniqueByRel[key] = ambiguousMarker
+                    }
+                }
+            }
+        }
+        return SongRelPathIndex(tier1ByRel, tier2ByRel, stemUniqueByRel, ambiguousMarker)
+    }
+
+    fun findMatchingSongByRelPath(
+        targetRelPath: String,
+        index: SongRelPathIndex,
+    ): Song? {
+        val nfcTarget = Normalizer.normalize(targetRelPath, Normalizer.Form.NFC)
+        val cleanRel =
+            LanSyncV2Client.sanitizeRelativePathSegments(nfcTarget)
+                .joinToString("/")
+                .lowercase()
+        if (cleanRel.isEmpty()) return null
+        return index.match(cleanRel)
+    }
+
     fun buildSongsByRelSuffixMap(songs: Collection<Song>): List<Pair<String, Song>> =
         songs.map { song ->
             val rawRel = song.path.components.components.joinToString("/")

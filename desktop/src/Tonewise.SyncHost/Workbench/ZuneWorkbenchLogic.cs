@@ -39,11 +39,16 @@ public sealed record QuickplayCardSeed(
 
 public static class ZuneColorMath
 {
-    public static readonly (byte R, byte G, byte B) DefaultDarkAccentRgb = (0xFF, 0x1E, 0x7A);
+    public static readonly (byte R, byte G, byte B) DefaultDarkAccentRgb = (0xE5, 0x00, 0x6B);
     public static readonly (byte R, byte G, byte B) DefaultLightAccentRgb = (0xC2, 0x00, 0x52);
 
     private static readonly (byte R, byte G, byte B) BlackRgb = (0x00, 0x00, 0x00);
     private static readonly (byte R, byte G, byte B) WhiteRgb = (0xFF, 0xFF, 0xFF);
+
+    public static (byte R, byte G, byte B) ContrastingOnColor(byte r, byte g, byte b) =>
+        ComputeContrastRatio(WhiteRgb, (r, g, b)) >= ComputeContrastRatio(BlackRgb, (r, g, b))
+            ? WhiteRgb
+            : BlackRgb;
 
     public static double ComputeRelativeLuminance(byte r, byte g, byte b)
     {
@@ -462,5 +467,137 @@ public static class QuickplayPinMatcher
         return artistsDisplay.Contains(pin.TargetKey, StringComparison.OrdinalIgnoreCase)
             || composersDisplay.Contains(pin.TargetKey, StringComparison.OrdinalIgnoreCase)
             || conductorsDisplay.Contains(pin.TargetKey, StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+public sealed record InboxAuditTrackSeed(
+    string Genre,
+    string ComposersDisplay,
+    string ConductorsDisplay,
+    string Album,
+    string Publisher,
+    int DjSceneCount,
+    string? TempoBucket,
+    double? TempoBpm,
+    string? CoverArtPath,
+    string? DjVocals,
+    long LastPlayedTsMs
+);
+
+public sealed record InboxAuditCounts(
+    int MissingGenre,
+    int MissingComposer,
+    int MissingConductor,
+    int MissingAlbum,
+    int MissingPublisher,
+    int MissingScene,
+    int MissingTempo,
+    int MissingCover,
+    int MissingVocals,
+    int Rediscovery90d
+);
+
+public static class InboxAuditEvaluator
+{
+    public const long NinetyDaysMs = 90L * 86_400_000L;
+
+    public static bool IsAuditOrRediscoveryMode(string? navMode) =>
+        !string.IsNullOrWhiteSpace(navMode)
+        && (navMode.StartsWith("audit_", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(navMode, "rediscovery_90d", StringComparison.OrdinalIgnoreCase));
+
+    public static bool MatchesMode(
+        string? navMode,
+        string? genre,
+        string? composersDisplay,
+        string? conductorsDisplay,
+        string? album,
+        string? publisher,
+        int djSceneCount,
+        string? tempoBucket,
+        double? tempoBpm,
+        string? coverArtPath,
+        string? djVocals,
+        long lastPlayedTsMs,
+        long nowMs) => (navMode ?? "").Trim().ToLowerInvariant() switch
+    {
+        "rediscovery_90d" => lastPlayedTsMs <= 0 || (nowMs - lastPlayedTsMs) >= NinetyDaysMs,
+        "audit_missing_tempo" => tempoBucket is null && tempoBpm is null,
+        "audit_missing_scene" => djSceneCount == 0,
+        "audit_missing_vocals" => string.IsNullOrWhiteSpace(djVocals) || string.Equals(djVocals, "unknown", StringComparison.OrdinalIgnoreCase),
+        "audit_missing_cover" => string.IsNullOrWhiteSpace(coverArtPath),
+        "audit_missing_genre" => string.IsNullOrWhiteSpace(genre),
+        "audit_missing_composer" => string.IsNullOrWhiteSpace(composersDisplay),
+        "audit_missing_conductor" => string.IsNullOrWhiteSpace(conductorsDisplay),
+        "audit_missing_album" => string.IsNullOrWhiteSpace(album),
+        "audit_missing_publisher" => string.IsNullOrWhiteSpace(publisher),
+        _ => true,
+    };
+
+    public static bool MatchesMode(InboxAuditTrackSeed track, string? navMode, long nowMs) =>
+        MatchesMode(
+            navMode,
+            track.Genre,
+            track.ComposersDisplay,
+            track.ConductorsDisplay,
+            track.Album,
+            track.Publisher,
+            track.DjSceneCount,
+            track.TempoBucket,
+            track.TempoBpm,
+            track.CoverArtPath,
+            track.DjVocals,
+            track.LastPlayedTsMs,
+            nowMs);
+
+    public static InboxAuditCounts ComputeCounts(IEnumerable<InboxAuditTrackSeed> tracks, long nowMs)
+    {
+        int missingGenre = 0;
+        int missingComposer = 0;
+        int missingConductor = 0;
+        int missingAlbum = 0;
+        int missingPublisher = 0;
+        int missingScene = 0;
+        int missingTempo = 0;
+        int missingCover = 0;
+        int missingVocals = 0;
+        int rediscovery90d = 0;
+
+        foreach (var t in tracks)
+        {
+            if (string.IsNullOrWhiteSpace(t.Genre)) missingGenre++;
+            if (string.IsNullOrWhiteSpace(t.ComposersDisplay)) missingComposer++;
+            if (string.IsNullOrWhiteSpace(t.ConductorsDisplay)) missingConductor++;
+            if (string.IsNullOrWhiteSpace(t.Album)) missingAlbum++;
+            if (string.IsNullOrWhiteSpace(t.Publisher)) missingPublisher++;
+            if (t.DjSceneCount == 0) missingScene++;
+            if (t.TempoBucket is null && t.TempoBpm is null) missingTempo++;
+            if (string.IsNullOrWhiteSpace(t.CoverArtPath)) missingCover++;
+            if (string.IsNullOrWhiteSpace(t.DjVocals) || string.Equals(t.DjVocals, "unknown", StringComparison.OrdinalIgnoreCase)) missingVocals++;
+            if (t.LastPlayedTsMs <= 0 || (nowMs - t.LastPlayedTsMs) >= NinetyDaysMs) rediscovery90d++;
+        }
+
+        return new InboxAuditCounts(
+            MissingGenre: missingGenre,
+            MissingComposer: missingComposer,
+            MissingConductor: missingConductor,
+            MissingAlbum: missingAlbum,
+            MissingPublisher: missingPublisher,
+            MissingScene: missingScene,
+            MissingTempo: missingTempo,
+            MissingCover: missingCover,
+            MissingVocals: missingVocals,
+            Rediscovery90d: rediscovery90d);
+    }
+
+    public static string FormatResultSummary(string? navMode, string navLabel, int matchedCount, int totalCount)
+    {
+        if (IsAuditOrRediscoveryMode(navMode))
+        {
+            return matchedCount == 0
+                ? $"当前体检筛选：{navLabel} — 0 首缺失（曲库共 {totalCount:N0} 首）"
+                : $"当前体检筛选：{navLabel} — 命中 {matchedCount:N0} 首（曲库共 {totalCount:N0} 首）";
+        }
+        return $"当前视图：{navLabel} — 共 {matchedCount:N0} / {totalCount:N0} 首（点击上方体检项筛选元数据缺口）";
     }
 }

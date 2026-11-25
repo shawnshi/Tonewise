@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 using Tonewise.SyncHost.Workbench;
 
@@ -13,6 +14,7 @@ public static class DesktopStateStore
     public const int CurrentSchemaVersion = 1;
     public const int DefaultAckRetentionDays = 90;
     public const int DefaultAckMaxRows = 50_000;
+    private static readonly ConcurrentDictionary<string, byte> SchemaInitializedPaths = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly string[] LegacyOperationalTables =
     [
@@ -40,6 +42,21 @@ public static class DesktopStateStore
     {
         using var conn = TonewiseSqlite.OpenReadWrite(stateDbPath);
         EnsureSchema(conn);
+        SchemaInitializedPaths.TryAdd(Path.GetFullPath(stateDbPath), 0);
+    }
+
+    private static void EnsureSchemaOnce(string stateDbPath)
+    {
+        string fullPath = Path.GetFullPath(stateDbPath);
+        if (!File.Exists(fullPath))
+        {
+            SchemaInitializedPaths.TryRemove(fullPath, out _);
+        }
+        else if (SchemaInitializedPaths.ContainsKey(fullPath))
+        {
+            return;
+        }
+        EnsureSchema(stateDbPath);
     }
 
     public static void EnsureSchema(SqliteConnection conn)
@@ -297,8 +314,8 @@ public static class DesktopStateStore
         if (string.IsNullOrWhiteSpace(stateDbPath) || !File.Exists(stateDbPath))
             return [];
 
-        using var conn = TonewiseSqlite.OpenReadWrite(stateDbPath);
-        EnsureSchema(conn);
+        EnsureSchemaOnce(stateDbPath);
+        using var conn = TonewiseSqlite.OpenReadOnly(stateDbPath);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT pin_id, kind, target_key, title, subtitle, cover_path, sort_order, pinned_at_ms

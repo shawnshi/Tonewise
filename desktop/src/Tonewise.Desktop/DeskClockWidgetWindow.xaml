@@ -16,7 +16,7 @@
         <Border x:Name="OledCanvasHost"
                 Margin="14"
                 Background="#000000"
-                BorderBrush="#26FF1E7A"
+                BorderBrush="#26E5006B"
                 BorderThickness="1"
                 CornerRadius="0"
                 Padding="14,10,14,12">
@@ -41,19 +41,20 @@
                     <Border x:Name="WidgetTitleDragBar" Grid.Column="0" Background="Transparent" VerticalAlignment="Stretch">
                         <TextBlock
                             Text="TONEWISE OLED CLOCK"
-                            FontSize="9"
+                            FontSize="12"
                             FontWeight="SemiBold"
                             CharacterSpacing="80"
-                            Foreground="#FF1E7A"
+                            Foreground="#E5006B"
                             VerticalAlignment="Center" />
                     </Border>
                     <Button
                         x:Name="SleepTimerButton"
                         Grid.Column="1"
-                        Padding="8,2"
-                        FontSize="10"
+                        MinHeight="28"
+                        Padding="8,4"
+                        FontSize="12"
                         Background="#0D0D0D"
-                        Foreground="#FF1E7A"
+                        Foreground="#E5006B"
                         AutomationProperties.Name="挂钟睡眠定时">
                         <Button.Flyout>
                             <MenuFlyout>
@@ -69,9 +70,9 @@
                             </MenuFlyout>
                         </Button.Flyout>
                         <StackPanel Orientation="Horizontal" Spacing="4">
-                            <TextBlock Text="🌙" FontSize="10" />
+                            <TextBlock Text="🌙" FontSize="12" />
                             <TextBlock Text="{x:Bind ViewModel.SleepTimerBadge, Mode=OneWay}"
-                                       FontSize="10"
+                                       FontSize="12"
                                        Visibility="{x:Bind ViewModel.IsSleepTimerActive, Mode=OneWay}" />
                         </StackPanel>
                     </Button>
@@ -79,18 +80,20 @@
                         x:Name="PinToggleButton"
                         Grid.Column="2"
                         Content="置顶"
-                        Padding="8,2"
-                        FontSize="10"
+                        MinHeight="28"
+                        Padding="8,4"
+                        FontSize="12"
                         Background="#0D0D0D"
-                        Foreground="#FF1E7A"
+                        Foreground="#E5006B"
                         Click="OnToggleAlwaysOnTopClick"
                         AutomationProperties.Name="切换窗口置顶" />
                     <Button
                         x:Name="FullscreenToggleButton"
                         Grid.Column="3"
                         Content="全屏挂钟"
-                        Padding="8,2"
-                        FontSize="10"
+                        MinHeight="28"
+                        Padding="8,4"
+                        FontSize="12"
                         Background="#0D0D0D"
                         Foreground="#FFFFFF"
                         Click="OnToggleFullscreenClick"
@@ -100,8 +103,9 @@
                         x:Name="PipToggleButton"
                         Grid.Column="4"
                         Content="PiP 画中画"
-                        Padding="8,2"
-                        FontSize="10"
+                        MinHeight="28"
+                        Padding="8,4"
+                        FontSize="12"
                         Background="#0D0D0D"
                         Foreground="#FFFFFF"
                         Click="OnTogglePipModeClick"
@@ -109,10 +113,12 @@
                     <Button
                         Grid.Column="5"
                         Content="×"
-                        Padding="8,1"
-                        FontSize="11"
+                        MinWidth="28"
+                        MinHeight="28"
+                        Padding="8,2"
+                        FontSize="12"
                         Background="Transparent"
-                        Foreground="#94A3B8"
+                        Foreground="#A3A3A3"
                         Click="OnCloseWidgetClick"
                         AutomationProperties.Name="关闭 OLED 挂钟" />
                 </Grid>
@@ -137,7 +143,7 @@
                                        VerticalAlignment="Bottom" />
                             <TextBlock x:Name="SecondsTextBlock"
                                        Text="00"
-                                       Foreground="#FF1E7A"
+                                       Foreground="#E5006B"
                                        FontSize="13"
                                        FontFamily="Cascadia Mono, Consolas"
                                        Margin="0,0,0,5"
@@ -145,8 +151,8 @@
                         </StackPanel>
                         <TextBlock x:Name="DateTextBlock"
                                    Text=""
-                                   Foreground="#7A7A7A"
-                                   FontSize="10"
+                                   Foreground="#8E8E8E"
+                                   FontSize="12"
                                    FontFamily="Cascadia Mono, Consolas" />
                     </StackPanel>
 
@@ -155,7 +161,7 @@
                             Width="56"
                             Height="56"
                             CornerRadius="0"
-                            BorderBrush="#26FF1E7A"
+                            BorderBrush="#26E5006B"
                             BorderThickness="1"
                             Background="#090909"
                             Visibility="Collapsed"
@@ -165,8 +171,8 @@
 
                     <StackPanel Grid.Column="2" Spacing="3" VerticalAlignment="Center">
                         <TextBlock x:Name="EyebrowTextBlock"
-                                   Foreground="#FF1E7A"
-                                   FontSize="10"
+                                   Foreground="#E5006B"
+                                   FontSize="12"
                                    FontWeight="SemiBold"
                                    TextTrimming="CharacterEllipsis" />
                         <TextBlock x:Name="TitleTextBlock"
@@ -176,18 +182,18 @@
                                    TextTrimming="CharacterEllipsis" />
                         <TextBlock x:Name="SubtitleTextBlock"
                                    Foreground="#A3A3A3"
-                                   FontSize="11"
+                                   FontSize="12"
                                    TextTrimming="CharacterEllipsis" />
                     </StackPanel>
 
                     <StackPanel Grid.Column="3" Spacing="4" HorizontalAlignment="Right" VerticalAlignment="Center">
-                        <Border Background="#18FF1E7A" BorderBrush="#44FF1E7A" BorderThickness="1"
+                        <Border Background="#18E5006B" BorderBrush="#44E5006B" BorderThickness="1"
                                 CornerRadius="0" Padding="7,2">
                             <TextBlock Text="{x:Bind ViewModel.SignalPathBadge, Mode=OneWay}"
-                                       Foreground="#FF1E7A" FontSize="10" FontFamily="Consolas" MaxWidth="160" TextTrimming="CharacterEllipsis" />
+                                       Foreground="#E5006B" FontSize="12" FontFamily="Consolas" MaxWidth="160" TextTrimming="CharacterEllipsis" />
                         </Border>
                         <TextBlock Text="{x:Bind ViewModel.TimeDisplay, Mode=OneWay}"
-                                   Foreground="#94A3B8" FontSize="10" FontFamily="Consolas" HorizontalAlignment="Right" />
+                                   Foreground="#A3A3A3" FontSize="12" FontFamily="Consolas" HorizontalAlignment="Right" />
                     </StackPanel>
                 </Grid>
 
@@ -212,43 +218,47 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="ShuffleButton" Grid.Column="0" Content="⇄" Padding="7,3" FontSize="11"
-                            Background="#1A202C" Foreground="#94A3B8"
+                    <Button x:Name="ShuffleButton" Grid.Column="0" Content="⇄" MinWidth="28" MinHeight="28" Padding="7,4" FontSize="12"
+                            Background="#141414" Foreground="#A3A3A3"
                             Command="{x:Bind ViewModel.ToggleShuffleCommand}"
                             AutomationProperties.Name="切换随机播放" />
-                    <Button Grid.Column="1" Content="⏮" Padding="7,3" FontSize="11"
-                            Background="#1A202C" Foreground="#E2E8F0"
+                    <Button Grid.Column="1" Content="⏮" MinWidth="28" MinHeight="28" Padding="7,4" FontSize="12"
+                            Background="#141414" Foreground="#FFFFFF"
                             Command="{x:Bind ViewModel.PreviousTrackCommand}"
                             AutomationProperties.Name="上一曲" />
-                    <Button x:Name="PlayPauseButton" Grid.Column="2" Content="▶" Padding="11,3" FontSize="11"
-                            Background="#FF1E7A" Foreground="#FFFFFF" FontWeight="Bold"
+                    <Button x:Name="PlayPauseButton" Grid.Column="2" Content="▶" MinWidth="32" MinHeight="28" Padding="11,4" FontSize="12"
+                            Background="#E5006B" Foreground="#FFFFFF" FontWeight="Bold"
                             Command="{x:Bind ViewModel.TogglePlayPauseCommand}"
                             AutomationProperties.Name="播放或暂停" />
-                    <Button Grid.Column="3" Content="⏭" Padding="7,3" FontSize="11"
+                    <Button Grid.Column="3" Content="⏭" MinWidth="28" MinHeight="28" Padding="7,4" FontSize="12"
                             Background="#0D0D0D" Foreground="#FFFFFF"
                             Command="{x:Bind ViewModel.NextTrackCommand}"
                             AutomationProperties.Name="下一曲" />
-                    <Button x:Name="RepeatButton" Grid.Column="4" Content="↻" Padding="7,3" FontSize="11"
+                    <Button x:Name="RepeatButton" Grid.Column="4" Content="↻" MinWidth="28" MinHeight="28" Padding="7,4" FontSize="12"
                             Background="#0D0D0D" Foreground="#A3A3A3"
                             Command="{x:Bind ViewModel.CycleRepeatModeCommand}"
                             AutomationProperties.Name="切换循环模式" />
-                    <Button x:Name="LoveButton" Grid.Column="5" Content="♡" Padding="7,3" FontSize="11"
+                    <Button x:Name="LoveButton" Grid.Column="5" Content="♡" MinWidth="28" MinHeight="28" Padding="7,4" FontSize="12"
                             Background="#0D0D0D" Foreground="#A3A3A3"
                             Command="{x:Bind ViewModel.ToggleCurrentTrackLovedCommand}"
                             AutomationProperties.Name="收藏曲目" />
 
-                    <Button Grid.Column="7" Content="专注" Padding="7,3" FontSize="10"
-                            Background="#0D0D0D" BorderBrush="#FF1E7A" BorderThickness="1" Foreground="#FF1E7A"
-                            Command="{x:Bind ViewModel.ActivateClockQuickSceneCommand}" CommandParameter="focus" />
-                    <Button Grid.Column="8" Content="编码" Padding="7,3" FontSize="10"
+                    <Button Grid.Column="7" Content="专注" MinHeight="28" Padding="8,4" FontSize="12"
+                            Background="#0D0D0D" BorderBrush="#E5006B" BorderThickness="1" Foreground="#E5006B"
+                            Command="{x:Bind ViewModel.ActivateClockQuickSceneCommand}" CommandParameter="focus"
+                            AutomationProperties.Name="快速切换至深度专注场景" />
+                    <Button Grid.Column="8" Content="编码" MinHeight="28" Padding="8,4" FontSize="12"
                             Background="#0D0D0D" Foreground="#FFFFFF"
-                            Command="{x:Bind ViewModel.ActivateClockQuickSceneCommand}" CommandParameter="coding" />
-                    <Button Grid.Column="9" Content="松弛" Padding="7,3" FontSize="10"
+                            Command="{x:Bind ViewModel.ActivateClockQuickSceneCommand}" CommandParameter="coding"
+                            AutomationProperties.Name="快速切换至心流编码场景" />
+                    <Button Grid.Column="9" Content="松弛" MinHeight="28" Padding="8,4" FontSize="12"
                             Background="#0D0D0D" Foreground="#FFFFFF"
-                            Command="{x:Bind ViewModel.ActivateClockQuickSceneCommand}" CommandParameter="relax" />
-                    <Button Grid.Column="10" Content="助眠" Padding="7,3" FontSize="10"
+                            Command="{x:Bind ViewModel.ActivateClockQuickSceneCommand}" CommandParameter="relax"
+                            AutomationProperties.Name="快速切换至午后休憩场景" />
+                    <Button Grid.Column="10" Content="助眠" MinHeight="28" Padding="8,4" FontSize="12"
                             Background="#0D0D0D" Foreground="#FFFFFF"
-                            Command="{x:Bind ViewModel.ActivateClockQuickSceneCommand}" CommandParameter="sleep" />
+                            Command="{x:Bind ViewModel.ActivateClockQuickSceneCommand}" CommandParameter="sleep"
+                            AutomationProperties.Name="快速切换至深夜助眠场景" />
                 </Grid>
             </Grid>
         </Border>

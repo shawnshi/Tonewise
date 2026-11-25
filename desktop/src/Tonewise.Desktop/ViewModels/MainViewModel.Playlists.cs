@@ -68,6 +68,7 @@ public sealed partial class MainViewModel
         {
             Playlists.Add(p);
         }
+        PlaylistsCountBadge = $"共 {Playlists.Count} 个歌单";
         if (!string.IsNullOrWhiteSpace(prevPath))
         {
             SelectedPlaylist = Playlists.FirstOrDefault(p =>
@@ -217,6 +218,7 @@ public sealed partial class MainViewModel
 
         string deletedName = actual.Name;
         PlaylistStore.DeletePlaylist(actual.FilePath);
+        BumpLibraryDataVersion();
         RefreshPlaylists();
 
         if (deletedWasSelected || SelectedPlaylist is null)
@@ -356,6 +358,7 @@ public sealed partial class MainViewModel
             summary = PlaylistStore.RematchAllPlaylists(_store.MusicRoot, index, persistIfChanged: true);
         }
 
+        BumpLibraryDataVersion();
         RefreshPlaylists();
         if (IsViewingPlaylist && SelectedPlaylist is not null && PrimaryNavId == "collection" && SecondarySubTab == "playlists")
         {

@@ -1743,6 +1743,15 @@ public sealed class LastFmWebApiClient
         return combined;
     }
 
+    private static readonly Regex SensitiveQueryParamRegex = new(
+        @"(?<=^|[?&])(api_key|sk|api_sig)=[^&\s]+",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    public static string RedactSensitiveQueryParams(string? input) =>
+        string.IsNullOrEmpty(input)
+            ? ""
+            : SensitiveQueryParamRegex.Replace(input, "$1=REDACTED");
+
     private async Task<string> GetStringWithRetryAsync(string url, CancellationToken ct)
     {
         const int maxAttempts = 3;
@@ -1780,7 +1789,7 @@ public sealed class LastFmWebApiClient
                 await Task.Delay(delayMs, ct);
             }
         }
-        throw new HttpRequestException($"Last.fm API GET failed after {maxAttempts} attempts: {url}");
+        throw new HttpRequestException($"Last.fm API GET failed after {maxAttempts} attempts: {RedactSensitiveQueryParams(url)}");
     }
 
     public async Task<IReadOnlyList<CloudRecentTrack>> FetchRecentTracksAsync(

@@ -2,7 +2,7 @@
 <!--
   Zune / Metro semantic design tokens for Tonewise.Desktop.
   "Content, Not Chrome": pure black (#000000) / pure white (#FFFFFF) canvas, zero corner radius (2px overlays),
-  crisp Segoe UI Variable Display/Text + Microsoft YaHei UI typography, and Zune Magenta accent (#FF1E7A / #C20052).
+  crisp Segoe UI Variable Display/Text + Microsoft YaHei UI typography, and Zune Magenta accent (#E5006B / #C20052).
 -->
 <ResourceDictionary
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -19,10 +19,10 @@
             <SolidColorBrush x:Key="ZuneInkSecondaryBrush" Color="#B5B5B5" />
             <SolidColorBrush x:Key="ZuneInkTertiaryBrush" Color="#888888" />
             <SolidColorBrush x:Key="ZuneInkOnAccentBrush" Color="#FFFFFF" />
-            <SolidColorBrush x:Key="ZuneAccentBrush" Color="#FF1E7A" />
-            <SolidColorBrush x:Key="ZuneAccentSubtleBrush" Color="#26FF1E7A" />
+            <SolidColorBrush x:Key="ZuneAccentBrush" Color="#E5006B" />
+            <SolidColorBrush x:Key="ZuneAccentSubtleBrush" Color="#26E5006B" />
             <SolidColorBrush x:Key="ZuneHairlineBrush" Color="#292929" />
-            <SolidColorBrush x:Key="ZuneBorderControlBrush" Color="#525252" />
+            <SolidColorBrush x:Key="ZuneBorderControlBrush" Color="#737373" />
             <SolidColorBrush x:Key="ZuneStatusSuccessBrush" Color="#34D399" />
             <SolidColorBrush x:Key="ZuneStatusInfoBrush" Color="#60A5FA" />
             <SolidColorBrush x:Key="ZuneStatusWarnBrush" Color="#F59E0B" />
@@ -84,7 +84,7 @@
     <CornerRadius x:Key="ToggleSwitchCornerRadius">0</CornerRadius>
 
     <!-- Zune Magenta Brand Accent (feeds AccentButtonStyle, ToggleSwitch, Slider, ProgressBar) -->
-    <Color x:Key="SystemAccentColor">#FF1E7A</Color>
+    <Color x:Key="SystemAccentColor">#E5006B</Color>
     <Color x:Key="SystemAccentColorLight1">#FF4D94</Color>
     <Color x:Key="SystemAccentColorLight2">#FF7AB0</Color>
     <Color x:Key="SystemAccentColorLight3">#FFA8CB</Color>
@@ -132,6 +132,18 @@
         <Setter Property="CornerRadius" Value="0" />
         <Setter Property="Padding" Value="12,6" />
         <Setter Property="FontSize" Value="12.5" />
+    </Style>
+
+    <Style x:Key="ZuneGalleryActionButtonStyle" TargetType="Button">
+        <Setter Property="FontFamily" Value="{StaticResource ZuneBodyFontFamily}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{ThemeResource ZuneInkPrimaryBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="0" />
+        <Setter Property="Padding" Value="10,6" />
+        <Setter Property="MinHeight" Value="32" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
 
     <Style x:Key="ZuneAccentActionButtonStyle" TargetType="Button">

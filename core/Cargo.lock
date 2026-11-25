@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "tonewise-cli"
-version = "0.1.0"
+version = "1.0.7"
 dependencies = [
  "lofty",
  "rayon",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "tonewise-dsp-core"
-version = "0.1.0"
+version = "1.0.7"
 dependencies = [
  "serde",
  "symphonia",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "tonewise-ffi"
-version = "0.1.0"
+version = "1.0.7"
 dependencies = [
  "jni",
  "lofty",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "tonewise-metadata"
-version = "0.1.0"
+version = "1.0.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "tonewise-rules"
-version = "0.1.0"
+version = "1.0.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "tonewise-sync"
-version = "0.1.0"
+version = "1.0.7"
 dependencies = [
  "blake3",
  "serde",

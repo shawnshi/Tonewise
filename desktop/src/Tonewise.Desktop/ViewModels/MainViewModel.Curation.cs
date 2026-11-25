@@ -505,6 +505,9 @@ public sealed partial class MainViewModel
             CurrentTrack = refreshedCurrent;
         }
         UpdateClassicalAdaptiveState();
+        RefreshInboxAuditCounts();
+        RefreshNowPlayingClassicalActions();
+        BumpLibraryDataVersion();
 
         if (IsEntityBrowserVisible)
         {
@@ -635,6 +638,7 @@ public sealed partial class MainViewModel
             await _store.ScanAndBuildManifestIfMissingAsync(root, forceRebuild: true, fastMode: true);
             _allTracks = await Task.Run(() => _store.LoadFromMusicRoot(root).ToList());
             UpdateClassicalAdaptiveState();
+            RefreshInboxAuditCounts();
             RefreshPlaylists();
             TriggerFilterRefresh();
             RefreshStagingProposals();
@@ -650,6 +654,20 @@ public sealed partial class MainViewModel
         {
             EndBusy();
         }
+    }
+
+    public async Task<FolderOrganizeSummary?> PreviewOrganizeLibraryFoldersAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_store.MusicRoot) || string.IsNullOrWhiteSpace(_store.ManifestDbPath))
+        {
+            StatusMessage = "请先打开曲库。";
+            Notify("请先打开曲库，再执行文件夹整理。", "warning");
+            return null;
+        }
+
+        string root = _store.MusicRoot;
+        string dbPath = _store.ManifestDbPath;
+        return await Task.Run(() => LibraryFolderOrganizerService.OrganizeLibraryFolders(root, dbPath, dryRun: true));
     }
 
     [RelayCommand]
@@ -770,6 +788,7 @@ public sealed partial class MainViewModel
         });
 
         _allTracks = _store.LoadFromMusicRoot(_store.MusicRoot).ToList();
+        RefreshInboxAuditCounts();
         ApplyFiveDimFilter();
         if (CurrentTrack is not null)
         {

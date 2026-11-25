@@ -76,11 +76,27 @@
       "properties": {
         "field": {
           "type": "string",
-          "enum": ["dj_scene", "dj_vocals", "dj_energy", "tempo_bucket", "mood_cluster", "genre", "min_rating", "unplayed_days_gte"]
+          "enum": [
+            "dj_scene",
+            "dj_vocals",
+            "dj_energy",
+            "tempo_bucket",
+            "mood_cluster",
+            "genre",
+            "min_rating",
+            "rating",
+            "unplayed_days_gte",
+            "unplayed_days",
+            "composer",
+            "composers",
+            "conductor",
+            "conductors",
+            "work_name"
+          ]
         },
         "op": {
           "type": "string",
-          "enum": ["in", "not_in", "eq", "gte"]
+          "enum": ["in", "not_in", "eq", "neq", "gt", "gte", "lt", "lte"]
         },
         "values": {
           "type": "array",

@@ -253,8 +253,10 @@ internal class LwwMutationStore(
         mutationEntity: PendingTagMutationEntity,
     ) {
         ioScope.launch {
-            syncDb.lwwMutationDao().upsertOverride(overrideEntity)
-            syncDb.lwwMutationDao().upsertPendingMutation(mutationEntity)
+            syncDb.runInTransaction {
+                syncDb.lwwMutationDao().upsertOverride(overrideEntity)
+                syncDb.lwwMutationDao().upsertPendingMutation(mutationEntity)
+            }
         }
     }
 
@@ -310,12 +312,15 @@ internal class LwwMutationStore(
         cachedPairedHost = info
         pairedHostLoaded = true
         ioScope.launch {
-            val kv = syncDb.syncKvDao()
-            kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_URL, info.baseUrl))
-            kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_NAME, info.hostName))
-            kv.putValue(SyncKvEntity(KEY_PAIRED_DEVICE_ID, info.deviceId))
-            kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, SecretBox.encrypt(info.token)))
-            kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_ID, info.hostId))
+            val encryptedToken = SecretBox.encrypt(info.token)
+            syncDb.runInTransaction {
+                val kv = syncDb.syncKvDao()
+                kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_URL, info.baseUrl))
+                kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_NAME, info.hostName))
+                kv.putValue(SyncKvEntity(KEY_PAIRED_DEVICE_ID, info.deviceId))
+                kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, encryptedToken))
+                kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_ID, info.hostId))
+            }
         }
     }
 
@@ -323,9 +328,11 @@ internal class LwwMutationStore(
         cachedPairedHost = null
         pairedHostLoaded = true
         ioScope.launch {
-            val kv = syncDb.syncKvDao()
-            kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, ""))
-            kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_ID, ""))
+            syncDb.runInTransaction {
+                val kv = syncDb.syncKvDao()
+                kv.putValue(SyncKvEntity(KEY_PAIRED_TOKEN, ""))
+                kv.putValue(SyncKvEntity(KEY_PAIRED_HOST_ID, ""))
+            }
         }
     }
 

@@ -531,4 +531,42 @@
         <item name="colorOnContainerChecked">?attr/colorOnPrimary</item>
         <item name="colorOnContainerUnchecked">?attr/colorOnPrimaryContainer</item>
     </style>
+
+    <style name="ShapeAppearance.Tonewise.Zero" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">0dp</item>
+    </style>
+
+    <style name="Widget.Tonewise.BottomSheet.Zero" parent="Widget.Auxio.BottomSheet">
+        <item name="shapeAppearance">@style/ShapeAppearance.Tonewise.Zero</item>
+    </style>
+
+    <style name="Widget.Tonewise.BottomSheet.Modal.Zero" parent="Widget.Auxio.BottomSheet.Modal">
+        <item name="shapeAppearance">@style/ShapeAppearance.Tonewise.Zero</item>
+    </style>
+
+    <style name="Widget.Tonewise.BottomSheet.Dialog.Zero" parent="Widget.Auxio.BottomSheet.Dialog">
+        <item name="bottomSheetStyle">@style/Widget.Tonewise.BottomSheet.Modal.Zero</item>
+    </style>
+
+    <style name="Theme.Tonewise.Dialog.Zero" parent="Theme.Auxio.Dialog">
+        <item name="shapeAppearanceCornerSmall">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceCornerMedium">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceCornerLarge">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceCornerExtraLarge">@style/ShapeAppearance.Tonewise.Zero</item>
+    </style>
+
+    <style name="ThemeOverlay.Tonewise.Rectilinear" parent="">
+        <item name="shapeAppearanceCornerExtraSmall">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceCornerSmall">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceCornerMedium">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceCornerLarge">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceCornerExtraLarge">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceSmallComponent">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="shapeAppearanceLargeComponent">@style/ShapeAppearance.Tonewise.Zero</item>
+        <item name="bottomSheetStyle">@style/Widget.Tonewise.BottomSheet.Zero</item>
+        <item name="bottomSheetDialogTheme">@style/Widget.Tonewise.BottomSheet.Dialog.Zero</item>
+        <item name="materialAlertDialogTheme">@style/Theme.Tonewise.Dialog.Zero</item>
+    </style>
 </resources>

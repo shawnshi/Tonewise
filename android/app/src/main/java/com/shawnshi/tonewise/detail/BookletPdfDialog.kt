@@ -86,7 +86,9 @@ import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.MusicSettings
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 import org.oxycblt.musikr.Song
 import org.oxycblt.musikr.fs.Path
 
@@ -97,6 +99,8 @@ import org.oxycblt.musikr.fs.Path
 class BookletPdfDialog : BackportBottomSheetDialogFragment() {
     private val playbackModel: PlaybackViewModel by activityViewModels()
     @Inject lateinit var musicSettings: MusicSettings
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -107,6 +111,7 @@ class BookletPdfDialog : BackportBottomSheetDialogFragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val song by playbackModel.song.collectAsStateWithLifecycle()
+                val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
                 val context = LocalContext.current
                 var resolved by remember { mutableStateOf<ResolvedBooklet?>(null) }
                 var loading by remember(song?.uid) { mutableStateOf(true) }
@@ -129,7 +134,10 @@ class BookletPdfDialog : BackportBottomSheetDialogFragment() {
                     loading = false
                 }
 
-                TonewiseComposeTheme {
+                TonewiseComposeTheme(
+                    roundMode = uiSettings.roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     BookletPdfSheet(
                         title = song?.album?.name?.resolve(context) ?: "",
                         subtitle = song?.workName ?: "",
@@ -480,7 +488,7 @@ private fun BookletPdfSheet(
             } else if (renderer == null || pageCount == 0 || renderedPage == null) {
                 ElevatedCard(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = MaterialTheme.shapes.medium,
                 ) {
                     Text(
                         text = stringResource(R.string.lbl_booklet_empty),
@@ -504,7 +512,7 @@ private fun BookletPdfSheet(
                     modifier =
                         Modifier.fillMaxWidth()
                             .heightIn(max = 460.dp)
-                            .clip(RoundedCornerShape(8.dp)),
+                            .clip(MaterialTheme.shapes.small),
                 )
 
                 Row(

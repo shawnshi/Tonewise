@@ -43,9 +43,9 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
     private bool _disposed;
 
     public bool AutoSyncEnabled { get; set; } = true;
-    public bool MirrorPruneEnabled { get; set; } = true;
-    public string PruneScope { get; set; } = "music_folder_all";
-    public bool AllowAdbForeignDeleteFallback { get; set; } = true;
+    public bool MirrorPruneEnabled { get; set; } = false;
+    public string PruneScope { get; set; } = "managed_only";
+    public bool AllowAdbForeignDeleteFallback { get; set; } = false;
 
     public event Action<UsbCoordinatorState>? StateChanged;
 

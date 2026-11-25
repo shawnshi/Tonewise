@@ -136,8 +136,6 @@ class PlaybackPanelFragment :
     private val queueModel: QueueViewModel by viewModels()
     private var equalizerLauncher: ActivityResultLauncher<Intent>? = null
     private var userAwarePagerCallback: UserAwarePagerCallback? = null
-    private var djFreezeBackup: Pair<List<Song>, Int>? = null
-    private var activeFreezeToken: String? = null
     private var latestSignalPath: SignalPathState? = null
     private var accentSampleJob: Job? = null
     private var defaultPlayPauseBgTint: ColorStateList? = null
@@ -245,7 +243,7 @@ class PlaybackPanelFragment :
                 lanSyncRepository.enqueueTagMutation(
                     current,
                     "rating",
-                    if (nextLoved) "5" else "3",
+                    if (nextLoved) "5" else "0",
                 )
                 updateLoveButton(current)
             }
@@ -262,8 +260,8 @@ class PlaybackPanelFragment :
             playbackModel.song.value?.let { current ->
                 updateMicroCapsules(
                     song = current,
-                    isClassical = !current.workName.isNullOrBlank(),
-                    classicalWork = musicRepository.findWorkForSong(current),
+                    isClassical = isSongClassical(current),
+                    classicalWork = if (!current.workName.isNullOrBlank()) musicRepository.findWorkForSong(current) else null,
                 )
             }
         }
@@ -275,6 +273,7 @@ class PlaybackPanelFragment :
         collectImmediately(playbackModel.isPlaying, ::updatePlaying)
         collectImmediately(playbackModel.isShuffled, ::updateShuffled)
         collectImmediately(playbackModel.pagerQueue, ::updatePager)
+        collectImmediately(playbackModel.isPlaybackSheetExpanded, ::updateSheetExpanded)
         collectImmediately(dynamicAccentController.activeAccentArgb, ::applyDynamicAccent)
     }
 
@@ -390,6 +389,12 @@ class PlaybackPanelFragment :
         L.d("Updating song display: $song")
         val work = song.workName?.trim()?.takeIf { it.isNotEmpty() }
         val classicalWork = if (work != null) musicRepository.findWorkForSong(song) else null
+        val isClassicalTrack =
+            ClassicalPlaybackActions.isClassicalTrack(
+                workName = work,
+                genreNames = song.genres.map { it.name.resolve(context) },
+                conductors = song.conductors,
+            )
         binding.playbackAlbum.isVisible = false
         binding.playbackMeta.isVisible = false
         binding.playbackSignalPill.isVisible = false
@@ -456,7 +461,7 @@ class PlaybackPanelFragment :
             }
         }
         updateLoveButton(song)
-        updateMicroCapsules(song = song, isClassical = work != null, classicalWork = classicalWork)
+        updateMicroCapsules(song = song, isClassical = isClassicalTrack, classicalWork = classicalWork)
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
         refreshMosaicBackdrop()
         updateDynamicCoverAccent(song)
@@ -567,6 +572,7 @@ class PlaybackPanelFragment :
             val hPad = (10f * density).toInt()
             val vPad = (4f * density).toInt()
             val endMargin = (6f * density).toInt()
+            val minTouchHeightPx = (48f * density).toInt()
 
             val bgColor =
                 if (highlighted) {
@@ -599,21 +605,33 @@ class PlaybackPanelFragment :
                 TextView(context).apply {
                     text = label
                     setTextColor(fgColor)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     isSingleLine = true
                     background = shape
                     setPadding(hPad, vPad, hPad, vPad)
+                    layoutParams =
+                        android.widget.FrameLayout.LayoutParams(
+                            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                            android.view.Gravity.CENTER_VERTICAL,
+                        )
+                }
+            val wrapper =
+                android.widget.FrameLayout(context).apply {
+                    minimumHeight = minTouchHeightPx
+                    contentDescription = label
+                    isClickable = true
+                    isFocusable = true
                     layoutParams =
                         LinearLayout.LayoutParams(
                                 LinearLayout.LayoutParams.WRAP_CONTENT,
                                 LinearLayout.LayoutParams.WRAP_CONTENT,
                             )
                             .apply { marginEnd = endMargin }
-                    isClickable = true
-                    isFocusable = true
                     setOnClickListener { onClick() }
+                    addView(tv)
                 }
-            row.addView(tv)
+            row.addView(wrapper)
         }
 
         // First slot in Unified Studio Strip: live audio signal path badge
@@ -631,6 +649,20 @@ class PlaybackPanelFragment :
                 ) {
                     WorkRecordingsDialog.newInstance()
                         .show(parentFragmentManager, WorkRecordingsDialog.TAG)
+                }
+            }
+            ClassicalPlaybackActions.resolvePrimaryCredit(song.composers)?.let { composer ->
+                addCapsuleView(
+                    label = context.getString(R.string.fmt_classical_view_composer, composer)
+                ) {
+                    detailModel.showComposer(composer)
+                }
+            }
+            ClassicalPlaybackActions.resolvePrimaryCredit(song.conductors)?.let { conductor ->
+                addCapsuleView(
+                    label = context.getString(R.string.fmt_classical_view_conductor, conductor)
+                ) {
+                    detailModel.showConductor(conductor)
                 }
             }
             addCapsuleView(label = context.getString(R.string.lbl_booklet_pdf)) {
@@ -676,7 +708,7 @@ class PlaybackPanelFragment :
         }
 
         for ((token, label, spec) in entries) {
-            val isActive = activeFreezeToken == token
+            val isActive = playbackModel.djFreezeBackup?.token == token
             val displayLabel = if (isActive) "❄ $label" else label
             addCapsuleView(label = displayLabel, highlighted = isActive) {
                 toggleDjFreeze(song = song, token = token, label = label, spec = spec)
@@ -743,23 +775,22 @@ class PlaybackPanelFragment :
         spec: FocusFilterSpec,
     ) {
         val context = requireContext()
-        if (activeFreezeToken == token) {
+        val existingBackup = playbackModel.djFreezeBackup
+        if (existingBackup?.token == token) {
             freezeJob?.cancel()
-            val backup = djFreezeBackup
-            activeFreezeToken = null
-            djFreezeBackup = null
-            if (backup != null && backup.first.isNotEmpty()) {
+            playbackModel.djFreezeBackup = null
+            if (existingBackup.queue.isNotEmpty()) {
                 playbackModel.restoreSessionQueue(
-                    songs = backup.first,
-                    index = backup.second.coerceIn(0, backup.first.lastIndex),
-                    positionMs = playbackModel.positionDs.value * 100L,
+                    songs = existingBackup.queue,
+                    index = existingBackup.index.coerceIn(0, existingBackup.queue.lastIndex),
+                    positionMs = existingBackup.positionMs,
                 )
             }
             context.showToast(R.string.lbl_dj_freeze_restored)
             updateMicroCapsules(
                 song = song,
-                isClassical = !song.workName.isNullOrBlank(),
-                classicalWork = musicRepository.findWorkForSong(song),
+                isClassical = isSongClassical(song),
+                classicalWork = if (!song.workName.isNullOrBlank()) musicRepository.findWorkForSong(song) else null,
             )
             return
         }
@@ -769,6 +800,7 @@ class PlaybackPanelFragment :
             viewLifecycleOwner.lifecycleScope.launch {
                 val currentSong = playbackModel.song.value ?: song
                 val pqSnapshot = playbackModel.pagerQueue.value
+                val preFreezePosMs = playbackModel.positionDs.value * 100L
                 val (tailMovements, remainingMatches) =
                     withContext(Dispatchers.Default) {
                         val curWorkKey = ReplayGainAudioProcessor.buildWorkBlockKey(currentSong)
@@ -821,13 +853,24 @@ class PlaybackPanelFragment :
                     context.showToast(R.string.lbl_scene_no_matches)
                     return@launch
                 }
-                if (activeFreezeToken == null) {
-                    val pq = playbackModel.pagerQueue.value
-                    if (pq.queue.isNotEmpty()) {
-                        djFreezeBackup = pq.queue to pq.index
+                val priorBackup = playbackModel.djFreezeBackup
+                playbackModel.djFreezeBackup =
+                    if (priorBackup == null && pqSnapshot.queue.isNotEmpty()) {
+                        PlaybackViewModel.DjFreezeBackup(
+                            token = token,
+                            queue = pqSnapshot.queue,
+                            index = pqSnapshot.index,
+                            positionMs = preFreezePosMs,
+                        )
+                    } else {
+                        priorBackup?.copy(token = token)
+                            ?: PlaybackViewModel.DjFreezeBackup(
+                                token = token,
+                                queue = listOf(currentSong),
+                                index = 0,
+                                positionMs = preFreezePosMs,
+                            )
                     }
-                }
-                activeFreezeToken = token
                 sessionSlotStore.setActiveScene("${getString(R.string.lbl_dj_freeze_active)} · $label")
                 playbackModel.restoreSessionQueue(
                     songs = freezeQueue,
@@ -842,8 +885,8 @@ class PlaybackPanelFragment :
                     .show()
                 updateMicroCapsules(
                     song = currentSong,
-                    isClassical = !currentSong.workName.isNullOrBlank(),
-                    classicalWork = musicRepository.findWorkForSong(currentSong),
+                    isClassical = isSongClassical(currentSong),
+                    classicalWork = if (!currentSong.workName.isNullOrBlank()) musicRepository.findWorkForSong(currentSong) else null,
                 )
             }
     }
@@ -874,13 +917,22 @@ class PlaybackPanelFragment :
             }
     }
 
+    private fun isSongClassical(song: Song): Boolean {
+        val ctx = context ?: return false
+        return ClassicalPlaybackActions.isClassicalTrack(
+            workName = song.workName,
+            genreNames = song.genres.map { it.name.resolve(ctx) },
+            conductors = song.conductors,
+        )
+    }
+
     private fun updateSignalPill(state: SignalPathState) {
         latestSignalPath = state
         val current = playbackModel.song.value ?: return
         updateMicroCapsules(
             song = current,
-            isClassical = !current.workName.isNullOrBlank(),
-            classicalWork = musicRepository.findWorkForSong(current),
+            isClassical = isSongClassical(current),
+            classicalWork = if (!current.workName.isNullOrBlank()) musicRepository.findWorkForSong(current) else null,
         )
     }
 
@@ -894,9 +946,20 @@ class PlaybackPanelFragment :
         repeatButton.setIconResource(repeatMode.icon)
     }
 
+    private fun updateSheetExpanded(expanded: Boolean) {
+        val b = requireBinding()
+        b.playbackMosaicBackdrop.setPlaybackSheetExpanded(expanded)
+        b.playbackSeekBar?.setWaveEnabled(playbackModel.isPlaying.value && expanded)
+    }
+
     private fun updatePlaying(isPlaying: Boolean) {
-        requireBinding().playbackPlayPause.isChecked = isPlaying
-        requireBinding().playbackSeekBar?.setWaveEnabled(isPlaying)
+        val playPause = requireBinding().playbackPlayPause
+        playPause.isChecked = isPlaying
+        playPause.contentDescription =
+            getString(if (isPlaying) R.string.desc_pause else R.string.desc_play)
+        requireBinding().playbackSeekBar?.setWaveEnabled(
+            isPlaying && playbackModel.isPlaybackSheetExpanded.value
+        )
     }
 
     private fun updateShuffled(isShuffled: Boolean) {

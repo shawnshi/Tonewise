@@ -49,6 +49,7 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
@@ -105,7 +106,7 @@ class ExoPlaybackStateHolder(
     MusicRepository.UpdateListener,
     PlaybackSettings.Listener,
     ImageSettings.Listener {
-    private val saveJob = Job()
+    private val saveJob = SupervisorJob()
     private val saveScope = CoroutineScope(Dispatchers.IO + saveJob)
     private val restoreScope = CoroutineScope(Dispatchers.IO + saveJob)
     private val mainScope = CoroutineScope(Dispatchers.Main.immediate + saveJob)

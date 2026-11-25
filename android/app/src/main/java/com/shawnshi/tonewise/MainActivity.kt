@@ -179,6 +179,9 @@ class MainActivity : AppCompatActivity() {
             L.d("Applying normal theme [accent ${uiSettings.accent}]")
             setTheme(uiSettings.accent.theme)
         }
+        if (!uiSettings.roundMode) {
+            theme.applyStyle(R.style.ThemeOverlay_Tonewise_Rectilinear, true)
+        }
     }
 
     private fun setupEdgeToEdge(contentView: View) {

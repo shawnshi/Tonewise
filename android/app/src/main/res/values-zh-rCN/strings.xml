@@ -435,6 +435,8 @@
     <string name="lbl_work_credits">作品作曲家与指挥关联检索</string>
     <string name="lbl_work_recordings">版本对比</string>
     <string name="fmt_classical_recordings_pill">共 %d 个演绎版本 ▸</string>
+    <string name="fmt_classical_view_composer">查看作曲 · %1$s</string>
+    <string name="fmt_classical_view_conductor">查看指挥 · %1$s</string>
     <string name="lbl_booklet_pdf">数码画册 Booklet</string>
     <string name="lbl_booklet_empty">当前专辑目录或 .tonewise/booklets 下未找到 PDF 画册</string>
     <string name="lbl_booklet_prev">上一页</string>
@@ -514,4 +516,22 @@
     <string name="lbl_rescan_started">已开始重新扫描曲库…</string>
     <string name="lbl_focus_filter_drawer">五维过滤</string>
     <string name="lbl_sync_lastfm_drawer">同步与 Last.fm</string>
+    <string name="desc_play">播放</string>
+    <string name="desc_pause">暂停</string>
+    <string name="desc_classical_jump_hint">打开 A–Z 作曲家索引</string>
+    <string name="desc_classical_pin_action">固定作品到 quickplay</string>
+    <string name="desc_open_work_recordings">查看 %d 个演绎版本</string>
+    <string name="lbl_hub_quickplay">速播</string>
+    <string name="lbl_hub_collection">馆藏</string>
+    <string name="lbl_hub_autodj">电台</string>
+    <string name="lbl_hub_pins">固定精选</string>
+    <string name="lbl_hub_history">最近聆听</string>
+    <string name="lbl_hub_relay_slots">跨端接力槽位</string>
+    <string name="lbl_hub_new_rediscovery">新入库与重温</string>
+    <string name="lbl_slot_empty">空槽位</string>
+    <string name="lbl_classical_collapse">收起</string>
+    <string name="lbl_classical_play_mov">播放 / 乐章</string>
+    <string name="lbl_composers_az">作曲家 A–Z</string>
+    <string name="fmt_classical_rec_badge">%d 版</string>
+    <string name="fmt_classical_mov_badge">%d 乐章</string>
 </resources>

@@ -84,14 +84,6 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
         binding.playbackSong.isSelected = true
         binding.playbackInfo.isSelected = true
         binding.playbackScenePill.isVisible = false
-        binding.playbackCover.setOnLongClickListener {
-            hotSwitchNextSlot()
-            true
-        }
-        binding.playbackSecondaryAction.setOnLongClickListener {
-            hotSwitchNextSlot()
-            true
-        }
         binding.root.doOnLayout { (binding.root.parent as? View)?.requestApplyInsets() }
 
         // Set up actions
@@ -154,33 +146,6 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
             if (!prefix.isNullOrBlank()) "$prefix · $baseArtist" else baseArtist
     }
 
-    private fun hotSwitchNextSlot() {
-        val next = sessionSlotStore.cycleNextPopulatedSlot()
-        if (next == null) {
-            requireContext().showToast(R.string.lbl_slot_empty_queue)
-            return
-        }
-        viewLifecycleOwner.lifecycleScope.launch {
-            val resolved = lanSyncRepository.resolveSlotSongs(next)
-            if (!isAdded) return@launch
-            if (resolved.isEmpty()) {
-                requireContext().showToast(R.string.lbl_scene_no_matches)
-                return@launch
-            }
-            playbackModel.restoreSessionQueue(
-                songs = resolved,
-                index = next.currentIndex.coerceIn(0, resolved.lastIndex),
-                positionMs = next.positionMs,
-            )
-            Toast.makeText(
-                    requireContext().applicationContext,
-                    getString(R.string.fmt_scene_switched_slot, next.slotIndex, next.name),
-                    Toast.LENGTH_SHORT,
-                )
-                .show()
-        }
-    }
-
     private fun updateSong(song: Song?) {
         if (song == null) {
             // Nothing to do.
@@ -197,7 +162,9 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
     }
 
     private fun updatePlaying(isPlaying: Boolean) {
-        requireBinding().playbackPlayPause.isChecked = isPlaying
+        val button = requireBinding().playbackPlayPause
+        button.isChecked = isPlaying
+        button.contentDescription = getString(if (isPlaying) R.string.desc_pause else R.string.desc_play)
     }
 
     private fun updatePosition(positionDs: Long) {

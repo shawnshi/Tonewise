@@ -45,6 +45,7 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
     private var lastSignature: String? = null
     private var loadJob: Job? = null
     private var isDarkSurface: Boolean = true
+    private var isSheetExpanded: Boolean = false
     private var panOffsetPx: Float = 0f
     private var panAnimator: ValueAnimator? = null
 
@@ -108,6 +109,16 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         maybeStartPanAnimator()
     }
 
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        maybeStartPanAnimator()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        maybeStartPanAnimator()
+    }
+
     override fun onDetachedFromWindow() {
         panAnimator?.cancel()
         panAnimator = null
@@ -116,11 +127,23 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         super.onDetachedFromWindow()
     }
 
+    fun setPlaybackSheetExpanded(expanded: Boolean) {
+        if (isSheetExpanded == expanded) return
+        isSheetExpanded = expanded
+        maybeStartPanAnimator()
+    }
+
     private fun maybeStartPanAnimator() {
-        if (!isAttachedToWindow || tiles.isEmpty() || !ValueAnimator.areAnimatorsEnabled()) {
+        if (
+            !isAttachedToWindow ||
+                !isShown ||
+                !isSheetExpanded ||
+                windowVisibility != View.VISIBLE ||
+                tiles.isEmpty() ||
+                !ValueAnimator.areAnimatorsEnabled()
+        ) {
             panAnimator?.cancel()
             panAnimator = null
-            panOffsetPx = 0f
             return
         }
         if (panAnimator != null) return

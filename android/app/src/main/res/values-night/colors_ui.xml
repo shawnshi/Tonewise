@@ -737,7 +737,7 @@
     <color name="grey_surfaceContainerHigh">#2A2A2A</color>
     <color name="grey_surfaceContainerHighest">#353434</color>
 
-    <color name="zune_magenta_primary">#FF1E7A</color>
+    <color name="zune_magenta_primary">#E5006B</color>
     <color name="zune_magenta_onPrimary">#FFFFFF</color>
     <color name="zune_magenta_primaryContainer">#4A0023</color>
     <color name="zune_magenta_onPrimaryContainer">#FFD9E3</color>
@@ -766,7 +766,7 @@
     <color name="zune_magenta_inversePrimary">#C20052</color>
     <color name="zune_magenta_primaryFixed">#FFD9E3</color>
     <color name="zune_magenta_onPrimaryFixed">#3E001A</color>
-    <color name="zune_magenta_primaryFixedDim">#FF1E7A</color>
+    <color name="zune_magenta_primaryFixedDim">#E5006B</color>
     <color name="zune_magenta_onPrimaryFixedVariant">#8E003C</color>
     <color name="zune_magenta_secondaryFixed">#EAEAEA</color>
     <color name="zune_magenta_onSecondaryFixed">#111111</color>

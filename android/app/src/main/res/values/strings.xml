@@ -589,6 +589,8 @@
     <string name="lbl_work_credits">Work composers &amp; conductors</string>
     <string name="lbl_work_recordings">Work recordings</string>
     <string name="fmt_classical_recordings_pill">%d recordings ▸</string>
+    <string name="fmt_classical_view_composer">Composer · %1$s</string>
+    <string name="fmt_classical_view_conductor">Conductor · %1$s</string>
     <string name="lbl_booklet_pdf">Digital booklet</string>
     <string name="lbl_booklet_empty">No booklet.pdf found in this album folder or .tonewise/booklets</string>
     <string name="lbl_booklet_prev">Previous page</string>
@@ -671,4 +673,19 @@
     <string name="lbl_rescan_started">Rescanning music library…</string>
     <string name="lbl_focus_filter_drawer">5D filter</string>
     <string name="lbl_sync_lastfm_drawer">Sync &amp; Last.fm</string>
+    <string name="desc_play">Play</string>
+    <string name="desc_pause">Pause</string>
+    <string name="desc_classical_jump_hint">Open A–Z composer index</string>
+    <string name="desc_classical_pin_action">Pin work to quickplay</string>
+    <string name="desc_open_work_recordings">Browse %d recordings</string>
+    <string name="lbl_hub_pins">pins</string>
+    <string name="lbl_hub_history">history</string>
+    <string name="lbl_hub_relay_slots">relay slots</string>
+    <string name="lbl_hub_new_rediscovery">new &amp; rediscovery</string>
+    <string name="lbl_slot_empty">empty</string>
+    <string name="lbl_classical_collapse">collapse</string>
+    <string name="lbl_classical_play_mov">play / mov</string>
+    <string name="lbl_composers_az">composers a–z</string>
+    <string name="fmt_classical_rec_badge">%d rec</string>
+    <string name="fmt_classical_mov_badge">%d mov</string>
 </resources>

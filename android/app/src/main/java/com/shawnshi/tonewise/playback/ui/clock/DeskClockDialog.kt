@@ -110,10 +110,12 @@ import com.shawnshi.tonewise.playback.formatDurationMs
 import com.shawnshi.tonewise.playback.sleep.SleepTimerMode
 import com.shawnshi.tonewise.playback.sleep.SleepTimerState
 import com.shawnshi.tonewise.playback.state.RepeatMode
+import com.shawnshi.tonewise.ui.UISettings
 import dagger.hilt.android.AndroidEntryPoint
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import javax.inject.Inject
 import kotlinx.coroutines.delay
 import org.oxycblt.musikr.Song
 
@@ -124,6 +126,7 @@ import org.oxycblt.musikr.Song
 @AndroidEntryPoint
 class DeskClockDialog : DialogFragment() {
     private val playbackModel: PlaybackViewModel by activityViewModels()
+    @Inject lateinit var uiSettings: UISettings
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -210,6 +213,7 @@ class DeskClockDialog : DialogFragment() {
                         isShuffled = isShuffled,
                         signalPath = signalPath,
                         sleepTimerState = sleepTimerState,
+                        roundMode = uiSettings.roundMode,
                         onSetSleepMinutes = playbackModel::setSleepTimerMinutes,
                         onSetSleepEndOfTrack = playbackModel::setSleepTimerEndOfTrack,
                         onSetSleepEndOfWork = playbackModel::setSleepTimerEndOfWork,
@@ -243,8 +247,8 @@ private enum class ClockBrightnessMode(val level: Float, val label: String) {
 }
 
 private val OledInkPrimary = Color(0xFFF2F0EC)
-private val OledInkSecondary = Color(0xFF8C929C)
-private val OledInkMuted = Color(0xFF5A606B)
+private val OledInkSecondary = Color(0xFF9BA1AC)
+private val OledInkMuted = Color(0xFF828894)
 private val OledBrass = Color(0xFFD9B372)
 private val OledDeckSurface = Color(0xFF090A0D)
 private val OledDeckBorder = Color(0xFF1A1D24)
@@ -260,6 +264,7 @@ private fun DeskClockScreen(
     isShuffled: Boolean,
     signalPath: SignalPathState,
     sleepTimerState: SleepTimerState,
+    roundMode: Boolean,
     onSetSleepMinutes: (Int) -> Unit,
     onSetSleepEndOfTrack: () -> Unit,
     onSetSleepEndOfWork: () -> Unit,
@@ -433,6 +438,7 @@ private fun DeskClockScreen(
                 ClockTopBar(
                     signalPath = signalPath,
                     accent = accent,
+                    roundMode = roundMode,
                     brightnessLabel = brightnessMode.label,
                     sleepBadgeText = sleepBadgeText,
                     onCycleBrightness = {
@@ -486,6 +492,7 @@ private fun DeskClockScreen(
                         repeatMode = repeatMode,
                         isShuffled = isShuffled,
                         accent = accent,
+                        roundMode = roundMode,
                         compact = isCompactHeight,
                         transportAlpha = transportAlpha,
                         onSeekTo = onSeekTo,
@@ -540,6 +547,7 @@ private fun DeskClockScreen(
                         repeatMode = repeatMode,
                         isShuffled = isShuffled,
                         accent = accent,
+                        roundMode = roundMode,
                         compact = isCompactPortrait,
                         transportAlpha = transportAlpha,
                         onSeekTo = onSeekTo,
@@ -563,12 +571,14 @@ private fun DeskClockScreen(
                         .clickable { showSleepMenu = false },
                 contentAlignment = Alignment.Center,
             ) {
+                val dialogCorner = if (roundMode) 18.dp else 0.dp
+                val chipCorner = if (roundMode) 10.dp else 0.dp
                 Column(
                     modifier =
                         Modifier.width(260.dp)
-                            .clip(RoundedCornerShape(18.dp))
+                            .clip(RoundedCornerShape(dialogCorner))
                             .background(OledDeckSurface)
-                            .border(1.dp, OledDeckBorder, RoundedCornerShape(18.dp))
+                            .border(1.dp, OledDeckBorder, RoundedCornerShape(dialogCorner))
                             .clickable(enabled = false) {}
                             .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -594,7 +604,7 @@ private fun DeskClockScreen(
                         Box(
                             modifier =
                                 Modifier.fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(chipCorner))
                                     .background(Color(0xFF11141B))
                                     .clickable {
                                         sleepExpiredLockReleased = false
@@ -654,12 +664,15 @@ private fun signalTierAccent(tier: SignalQualityTier): Color =
 private fun ClockTopBar(
     signalPath: SignalPathState,
     accent: Color,
+    roundMode: Boolean,
     brightnessLabel: String,
     sleepBadgeText: String?,
     onCycleBrightness: () -> Unit,
     onOpenSleepMenu: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val pillCorner = if (roundMode) 999.dp else 0.dp
+    val badgeCorner = if (roundMode) 4.dp else 0.dp
     val tierLabel =
         when (signalPath.qualityTier) {
             SignalQualityTier.BIT_PERFECT -> "BIT-PERFECT"
@@ -687,9 +700,9 @@ private fun ClockTopBar(
         Row(
             modifier =
                 Modifier.weight(1f, fill = false)
-                    .clip(RoundedCornerShape(999.dp))
+                    .clip(RoundedCornerShape(pillCorner))
                     .background(OledDeckSurface)
-                    .border(1.dp, OledDeckBorder, RoundedCornerShape(999.dp))
+                    .border(1.dp, OledDeckBorder, RoundedCornerShape(pillCorner))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -707,7 +720,7 @@ private fun ClockTopBar(
             )
             Box(
                 modifier =
-                    Modifier.clip(RoundedCornerShape(4.dp))
+                    Modifier.clip(RoundedCornerShape(badgeCorner))
                         .background(Color(0xFF14171E))
                         .padding(horizontal = 5.dp, vertical = 2.dp)
             ) {
@@ -729,12 +742,12 @@ private fun ClockTopBar(
         ) {
             Box(
                 modifier =
-                    Modifier.clip(RoundedCornerShape(999.dp))
+                    Modifier.clip(RoundedCornerShape(pillCorner))
                         .background(OledDeckSurface)
                         .border(
                             1.dp,
                             if (sleepBadgeText != null) OledBrass.copy(alpha = 0.55f) else OledDeckBorder,
-                            RoundedCornerShape(999.dp),
+                            RoundedCornerShape(pillCorner),
                         )
                         .clickable(onClick = onOpenSleepMenu)
                         .padding(horizontal = 10.dp, vertical = 7.dp)
@@ -751,9 +764,9 @@ private fun ClockTopBar(
 
             Box(
                 modifier =
-                    Modifier.clip(RoundedCornerShape(999.dp))
+                    Modifier.clip(RoundedCornerShape(pillCorner))
                         .background(OledDeckSurface)
-                        .border(1.dp, OledDeckBorder, RoundedCornerShape(999.dp))
+                        .border(1.dp, OledDeckBorder, RoundedCornerShape(pillCorner))
                         .clickable(onClick = onCycleBrightness)
                         .padding(horizontal = 10.dp, vertical = 7.dp)
             ) {
@@ -891,6 +904,7 @@ private fun ClockStudioDeckCard(
     repeatMode: RepeatMode,
     isShuffled: Boolean,
     accent: Color,
+    roundMode: Boolean,
     compact: Boolean,
     transportAlpha: Float,
     onSeekTo: (Long) -> Unit,
@@ -904,19 +918,20 @@ private fun ClockStudioDeckCard(
     val context = LocalContext.current
     val coverSize = if (compact) 76.dp else 92.dp
     val controlsEnabled = song != null
+    val deckCorner = if (roundMode) 22.dp else 0.dp
 
     Column(
         modifier =
             modifier
-                .clip(RoundedCornerShape(22.dp))
+                .clip(RoundedCornerShape(deckCorner))
                 .background(OledDeckSurface)
-                .border(1.dp, OledDeckBorder, RoundedCornerShape(22.dp))
+                .border(1.dp, OledDeckBorder, RoundedCornerShape(deckCorner))
                 .padding(horizontal = 18.dp, vertical = if (compact) 14.dp else 18.dp),
         verticalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 16.dp),
     ) {
         if (song != null) {
             val isClassical = !song.workName.isNullOrBlank()
-            val sleeveCorner = if (isClassical) 4.dp else 10.dp
+            val sleeveCorner = if (isClassical || !roundMode) 0.dp else 10.dp
 
             Row(
                 modifier = Modifier.fillMaxWidth(),

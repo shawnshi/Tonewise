@@ -19,14 +19,17 @@
 package com.shawnshi.tonewise.sync
 
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
 import java.security.KeyStoreException
 import java.security.Security
+import java.security.UnrecoverableKeyException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import timber.log.Timber as L
 
 /**
  * Hardware-backed secret box using AndroidKeyStore AES-256-GCM (`enc:v1:<hex>`).
@@ -86,10 +89,16 @@ object SecretBox {
     fun decrypt(stored: String): String {
         if (stored.isEmpty()) return ""
         if (!stored.startsWith(PREFIX)) return stored
-        val key = getOrCreateKey() ?: return ""
+        val key =
+            getOrCreateKey()
+                ?: run {
+                    L.w("SecretBox decrypt aborted: Keystore key temporarily unavailable")
+                    return ""
+                }
         return try {
             decryptWithKey(stored, key)
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            L.w(t, "SecretBox decrypt failed")
             ""
         }
     }
@@ -134,20 +143,34 @@ object SecretBox {
                     return@synchronized existing
                 }
                 generateAndroidKey()
-            } catch (_: KeyStoreException) {
+            } catch (e: KeyStoreException) {
+                L.w(e, "SecretBox KeyStoreException; preserving existing alias without deletion")
                 null
-            } catch (_: Throwable) {
-                // Corrupt or invalidated alias: wipe and regenerate once.
-                runCatching {
-                    val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-                    if (ks.containsAlias(KEY_ALIAS)) {
-                        ks.deleteEntry(KEY_ALIAS)
-                    }
-                    generateAndroidKey()
-                }.getOrNull()
+            } catch (e: KeyPermanentlyInvalidatedException) {
+                L.w(e, "SecretBox key permanently invalidated; regenerating alias")
+                deleteAndRegenerateAndroidKey()
+            } catch (e: UnrecoverableKeyException) {
+                L.w(e, "SecretBox key unrecoverable; regenerating alias")
+                deleteAndRegenerateAndroidKey()
+            } catch (t: Throwable) {
+                // Transient KeyStore / TEE failure: NEVER destroy the existing alias.
+                L.w(t, "SecretBox transient error; preserving existing key alias")
+                null
             }
         }
     }
+
+    private fun deleteAndRegenerateAndroidKey(): SecretKey? =
+        runCatching {
+            val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            if (ks.containsAlias(KEY_ALIAS)) {
+                ks.deleteEntry(KEY_ALIAS)
+            }
+            generateAndroidKey()
+        }.getOrElse { err ->
+            L.w(err, "SecretBox failed to regenerate invalidated key")
+            null
+        }
 
     private fun generateAndroidKey(): SecretKey {
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)

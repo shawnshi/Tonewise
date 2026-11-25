@@ -101,6 +101,7 @@
                 app:materialSizeOverlay="@style/SizeOverlay.Tonewise.Button.Playback.Toggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:contentDescription="@string/desc_skip_next"
                 tools:icon="@drawable/ic_skip_next_24" />
         </com.google.android.material.button.MaterialButtonGroup>
 

@@ -18,6 +18,7 @@
  
 package com.google.android.material.slider
 
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.ColorStateList
@@ -270,6 +271,16 @@ constructor(
         waveTransitionAnimation = null
 
         waveEnabled = enabled
+        if (!ValueAnimator.areAnimatorsEnabled()) {
+            waveSpeed = 0
+            currentAmplitudeFraction = if (enabled) 1f else MIN_VISIBLE_WAVE_FRACTION
+            resetPhaseClock()
+            updateActiveTrackSuppression()
+            ensurePhaseTickerState()
+            markDirty()
+            invalidate()
+            return
+        }
         if (enabled) {
             // Enabled, start moving / transition to 1f amplitude
             waveSpeed = configuredSpeedPx

@@ -57,7 +57,9 @@ import com.shawnshi.tonewise.sync.FocusFilterSpec
 import com.shawnshi.tonewise.sync.FocusPillState
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SessionSlotStore
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
 import org.oxycblt.musikr.Song
 
@@ -69,6 +71,8 @@ import org.oxycblt.musikr.Song
 class FocusFilterDialog : BackportBottomSheetDialogFragment() {
     @Inject lateinit var lanSyncRepository: LanSyncRepository
     @Inject lateinit var sessionSlotStore: SessionSlotStore
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val musicModel: MusicViewModel by activityViewModels()
 
@@ -83,6 +87,7 @@ class FocusFilterDialog : BackportBottomSheetDialogFragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val indexingState by musicModel.indexingState.collectAsStateWithLifecycle()
+                val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
                 val pendingMutations by
                     lanSyncRepository.pendingMutationCount.collectAsStateWithLifecycle()
                 var spec by remember { mutableStateOf(FocusFilterSpec()) }
@@ -101,7 +106,10 @@ class FocusFilterDialog : BackportBottomSheetDialogFragment() {
                             }
                     }
 
-                TonewiseComposeTheme {
+                TonewiseComposeTheme(
+                    roundMode = uiSettings.roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     FocusFilterSheet(
                         scopeTitle = scopeTitle,
                         spec = spec,

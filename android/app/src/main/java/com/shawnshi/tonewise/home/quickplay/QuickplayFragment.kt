@@ -31,19 +31,27 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.platform.rememberNestedScrollInteropConnection
 import androidx.compose.ui.res.stringResource
@@ -58,6 +66,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.detail.DetailViewModel
+import com.shawnshi.tonewise.home.HomeViewModel
 import com.shawnshi.tonewise.image.CoverView
 import com.shawnshi.tonewise.music.ClassicalWork
 import com.shawnshi.tonewise.music.MusicRepository
@@ -70,8 +79,6 @@ import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.sync.AutoDjEngine
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SceneBanner
-import com.shawnshi.tonewise.sync.ScenesAndSyncDialog
-import com.shawnshi.tonewise.sync.SessionSlotItem
 import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
@@ -79,6 +86,7 @@ import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -101,6 +109,7 @@ class QuickplayFragment : Fragment() {
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
     private val musicModel: MusicViewModel by activityViewModels()
+    private val homeModel: HomeViewModel by activityViewModels()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -111,43 +120,14 @@ class QuickplayFragment : Fragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val pins by quickplayPinStore.pins.collectAsStateWithLifecycle()
-                val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
-                val activeSlotIdx by sessionSlotStore.activeSlotIndex.collectAsStateWithLifecycle()
                 val indexingState by musicModel.indexingState.collectAsStateWithLifecycle()
                 val playUpdates by playCountRepository.updates.collectAsStateWithLifecycle()
                 val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
+                val sections by homeModel.quickplaySections.collectAsStateWithLifecycle()
 
-                val sections by
-                    produceState(
-                        initialValue = QuickplaySections(emptyList(), emptyList(), emptyList()),
-                        indexingState,
-                        playUpdates,
-                    ) {
-                        value =
-                            withContext(Dispatchers.Default) {
-                                val songs = musicRepository.library?.songs.orEmpty()
-                                val ctx = requireContext()
-                                val candidates =
-                                    songs.map { song ->
-                                        val snap = playCountRepository.getSnapshot(song)
-                                        QuickplayTrackCandidate(
-                                            songUid = song.uid.toString(),
-                                            title = song.name.resolve(ctx),
-                                            artist = song.artists.resolveNames(ctx),
-                                            albumUid = song.album.uid.toString(),
-                                            albumTitle = song.album.name.resolve(ctx),
-                                            addedMs = song.addedMs,
-                                            playCount = snap.playCount,
-                                            lastPlayedMs = snap.lastPlayedMs,
-                                        )
-                                    }
-                                QuickplayAggregator.computeSections(
-                                    candidates = candidates,
-                                    nowMs = System.currentTimeMillis(),
-                                    limit = 12,
-                                )
-                            }
-                    }
+                LaunchedEffect(indexingState, playUpdates) {
+                    homeModel.refreshQuickplaySections(indexingState, playUpdates)
+                }
 
                 TonewiseComposeTheme(
                     roundMode = uiSettings.roundMode,
@@ -156,8 +136,6 @@ class QuickplayFragment : Fragment() {
                     QuickplayContent(
                         pins = pins,
                         sections = sections,
-                        slots = slots,
-                        activeSlotIdx = activeSlotIdx,
                         resolveCoverAlbum = { albumUid ->
                             val uid = Music.UID.fromString(albumUid)
                             uid?.let { musicRepository.library?.findAlbum(it) }
@@ -183,14 +161,6 @@ class QuickplayFragment : Fragment() {
                             }
                         },
                         onLaunchRediscovery = { launch90dRediscovery() },
-                        onTapSlot = { slotIndex, existing -> handleSlotRestoreOrSave(slotIndex, existing) },
-                        onLongPressSlot = { slotIndex -> handleSlotSave(slotIndex) },
-                        onOpenSync = {
-                            if (parentFragmentManager.findFragmentByTag(ScenesAndSyncDialog.TAG) == null) {
-                                ScenesAndSyncDialog.newInstance()
-                                    .show(parentFragmentManager, ScenesAndSyncDialog.TAG)
-                            }
-                        },
                     )
                 }
             }
@@ -241,12 +211,11 @@ class QuickplayFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             val banner =
                 SceneBanner(
-                    id = "rediscovery_90d",
+                    id = "44444444-4444-4444-8444-444444444444",
                     title = getString(R.string.lbl_rediscovery_90d_title),
                     subtitle = getString(R.string.lbl_rediscovery_90d_subtitle),
                     accentHex = "#FF1E7A",
-                    rawSceneJson =
-                        """{"id":"rediscovery_90d","sort_arc":"rediscovery_90d","rule":{"all":[{"predicate":{"field":"unplayed_days_gte","op":"gte","value":90}}]}}""",
+                    rawSceneJson = com.shawnshi.tonewise.sync.SceneRuleEvaluator.REDISCOVERY_90D_SCENE_JSON,
                 )
             val (_, ordered) =
                 withContext(Dispatchers.Default) {
@@ -264,57 +233,6 @@ class QuickplayFragment : Fragment() {
             }
         }
     }
-
-    private fun handleSlotRestoreOrSave(slotIndex: Int, existing: SessionSlotItem?) {
-        if (existing != null && existing.queueTrackUids.isNotEmpty()) {
-            viewLifecycleOwner.lifecycleScope.launch {
-                val resolved = lanSyncRepository.resolveSlotSongs(existing)
-                if (!isAdded) return@launch
-                if (resolved.isNotEmpty()) {
-                    sessionSlotStore.setActiveScene(existing.name, slotIndex)
-                    playbackModel.restoreSessionQueue(
-                        songs = resolved,
-                        index = existing.currentIndex.coerceIn(0, resolved.lastIndex),
-                        positionMs = existing.positionMs,
-                    )
-                } else {
-                    requireContext().showToast(R.string.lbl_scene_no_matches)
-                }
-            }
-            return
-        }
-        handleSlotSave(slotIndex)
-    }
-
-    private fun handleSlotSave(slotIndex: Int) {
-        val queue = playbackModel.pagerQueue.value
-        val snapshotSongs = queue.queue.toList()
-        if (snapshotSongs.isEmpty()) {
-            requireContext().showToast(R.string.lbl_slot_empty_queue)
-            return
-        }
-        val title = playbackModel.song.value?.name?.raw ?: "Session #$slotIndex"
-        val posMs = playbackModel.positionDs.value * 100L
-        val nowMs = System.currentTimeMillis()
-        viewLifecycleOwner.lifecycleScope.launch {
-            val canonicalUids = lanSyncRepository.resolveCanonicalTrackUids(snapshotSongs)
-            sessionSlotStore.saveSlot(
-                SessionSlotItem(
-                    slotIndex = slotIndex,
-                    name = title,
-                    sceneId = null,
-                    updatedAtMs = nowMs,
-                    queueTrackUids = canonicalUids,
-                    currentIndex = queue.index,
-                    positionMs = posMs,
-                )
-            )
-            lanSyncRepository.scheduleM3u8WriteBack(title, snapshotSongs)
-            if (isAdded) {
-                requireContext().showToast(R.string.lbl_save_current_slot)
-            }
-        }
-    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -322,8 +240,6 @@ class QuickplayFragment : Fragment() {
 private fun QuickplayContent(
     pins: List<QuickplayPinRecord>,
     sections: QuickplaySections,
-    slots: List<SessionSlotItem>,
-    activeSlotIdx: Int,
     resolveCoverAlbum: (String) -> Album?,
     resolvePinCoverTarget: (QuickplayPinRecord) -> Any?,
     onTapPin: (QuickplayPinRecord) -> Unit,
@@ -331,11 +247,45 @@ private fun QuickplayContent(
     onTapAlbumSummary: (QuickplayAlbumSummary) -> Unit,
     onLongPressAlbumSummary: (QuickplayAlbumSummary) -> Unit,
     onLaunchRediscovery: () -> Unit,
-    onTapSlot: (Int, SessionSlotItem?) -> Unit,
-    onLongPressSlot: (Int) -> Unit,
-    onOpenSync: () -> Unit,
 ) {
     val nestedScroll = rememberNestedScrollInteropConnection()
+    val hostView = LocalView.current
+    val horizontalRowNestedLock =
+        remember(hostView) {
+            object : NestedScrollConnection {
+                override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                    if (abs(available.x) > abs(available.y) && abs(available.x) > 0.5f) {
+                        hostView.parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    return Offset.Zero
+                }
+            }
+        }
+    var pinPendingUnpin by remember { mutableStateOf<QuickplayPinRecord?>(null) }
+
+    if (pinPendingUnpin != null) {
+        val targetPin = pinPendingUnpin!!
+        AlertDialog(
+            onDismissRequest = { pinPendingUnpin = null },
+            title = { Text(stringResource(R.string.lng_unpinned_quickplay)) },
+            text = { Text(targetPin.title) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pinPendingUnpin = null
+                        onUnpin(targetPin)
+                    }
+                ) {
+                    Text(stringResource(android.R.string.ok))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pinPendingUnpin = null }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            },
+        )
+    }
 
     Surface(modifier = Modifier.fillMaxSize(), color = Color.Transparent) {
         LazyColumn(
@@ -348,7 +298,7 @@ private fun QuickplayContent(
         ) {
             item(key = "sec_pins") {
                 Column {
-                    ZuneSectionTitle("pins")
+                    ZuneSectionTitle(stringResource(R.string.lbl_hub_pins))
                     Spacer(modifier = Modifier.height(8.dp))
                     if (pins.isEmpty()) {
                         Box(
@@ -378,7 +328,7 @@ private fun QuickplayContent(
                                                 Modifier.weight(1f)
                                                     .combinedClickable(
                                                         onClick = { onTapPin(pin) },
-                                                        onLongClick = { onUnpin(pin) },
+                                                        onLongClick = { pinPendingUnpin = pin },
                                                     )
                                         ) {
                                             Box(
@@ -415,7 +365,7 @@ private fun QuickplayContent(
 
             item(key = "sec_history") {
                 Column {
-                    ZuneSectionTitle("history")
+                    ZuneSectionTitle(stringResource(R.string.lbl_hub_history))
                     Spacer(modifier = Modifier.height(8.dp))
                     if (sections.history.isEmpty()) {
                         Text(
@@ -424,7 +374,10 @@ private fun QuickplayContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     } else {
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        LazyRow(
+                            modifier = Modifier.nestedScroll(horizontalRowNestedLock),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
                             items(sections.history, key = { "hist_${it.albumUid}" }) { item ->
                                 QuickplayAlbumTile(
                                     summary = item,
@@ -438,78 +391,9 @@ private fun QuickplayContent(
                 }
             }
 
-            item(key = "sec_slots") {
-                val slotMap = slots.associateBy { it.slotIndex }
-                Column {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        ZuneSectionTitle("relay slots")
-                        TextButton(onClick = onOpenSync) {
-                            Text(
-                                text = "sync & last.fm",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        for (idx in 1..5) {
-                            val existing = slotMap[idx]
-                            val isActive = idx == activeSlotIdx && existing != null
-                            Box(
-                                modifier =
-                                    Modifier.weight(1f)
-                                        .height(64.dp)
-                                        .background(
-                                            if (isActive) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.surfaceContainerLow
-                                        )
-                                        .border(
-                                            1.dp,
-                                            if (isActive) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.outlineVariant,
-                                        )
-                                        .combinedClickable(
-                                            onClick = { onTapSlot(idx, existing) },
-                                            onLongClick = { onLongPressSlot(idx) },
-                                        )
-                                        .padding(6.dp),
-                                contentAlignment = Alignment.BottomStart,
-                            ) {
-                                Text(
-                                    text = "#$idx",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color =
-                                        if (isActive) MaterialTheme.colorScheme.onPrimary
-                                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.align(Alignment.TopStart),
-                                )
-                                Text(
-                                    text = existing?.name ?: "empty",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color =
-                                        if (isActive) MaterialTheme.colorScheme.onPrimary
-                                        else MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
             item(key = "sec_new") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ZuneSectionTitle("new & rediscovery")
+                    ZuneSectionTitle(stringResource(R.string.lbl_hub_new_rediscovery))
                     Box(
                         modifier =
                             Modifier.fillMaxWidth()
@@ -533,14 +417,26 @@ private fun QuickplayContent(
                     }
 
                     if (sections.newlyAdded.isNotEmpty()) {
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(sections.newlyAdded, key = { "new_${it.albumUid}" }) { item ->
-                                QuickplayAlbumTile(
-                                    summary = item,
-                                    album = resolveCoverAlbum(item.albumUid),
-                                    onClick = { onTapAlbumSummary(item) },
-                                    onLongClick = { onLongPressAlbumSummary(item) },
-                                )
+                        val newColumns =
+                            remember(sections.newlyAdded) { sections.newlyAdded.chunked(2) }
+                        LazyRow(
+                            modifier = Modifier.nestedScroll(horizontalRowNestedLock),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(
+                                newColumns,
+                                key = { col -> "newcol_${col.first().albumUid}" },
+                            ) { columnItems ->
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    for (item in columnItems) {
+                                        QuickplayAlbumTile(
+                                            summary = item,
+                                            album = resolveCoverAlbum(item.albumUid),
+                                            onClick = { onTapAlbumSummary(item) },
+                                            onLongClick = { onLongPressAlbumSummary(item) },
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

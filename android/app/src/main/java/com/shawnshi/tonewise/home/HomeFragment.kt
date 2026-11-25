@@ -18,6 +18,7 @@
  
 package com.shawnshi.tonewise.home
 
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -87,10 +88,17 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        enterTransition = MaterialSharedAxis(MaterialSharedAxis.Z, true)
-        returnTransition = MaterialSharedAxis(MaterialSharedAxis.Z, false)
-        exitTransition = MaterialSharedAxis(MaterialSharedAxis.Z, true)
-        reenterTransition = MaterialSharedAxis(MaterialSharedAxis.Z, false)
+        if (ValueAnimator.areAnimatorsEnabled()) {
+            enterTransition = MaterialSharedAxis(MaterialSharedAxis.Z, true)
+            returnTransition = MaterialSharedAxis(MaterialSharedAxis.Z, false)
+            exitTransition = MaterialSharedAxis(MaterialSharedAxis.Z, true)
+            reenterTransition = MaterialSharedAxis(MaterialSharedAxis.Z, false)
+        } else {
+            enterTransition = null
+            returnTransition = null
+            exitTransition = null
+            reenterTransition = null
+        }
     }
 
     override fun onCreateBinding(inflater: LayoutInflater) = FragmentHomeBinding.inflate(inflater)
@@ -152,7 +160,7 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
             // listener with a non-consuming listener.
             setOnApplyWindowInsetsListener { _, insets -> insets }
 
-            offscreenPageLimit = 2
+            offscreenPageLimit = 1
 
             dampen()
         }

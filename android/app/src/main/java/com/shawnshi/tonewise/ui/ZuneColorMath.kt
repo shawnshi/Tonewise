@@ -15,7 +15,7 @@ import kotlin.math.pow
  * Intentionally free of android.graphics.Color calls so JVM unit tests execute directly.
  */
 object ZuneColorMath {
-    const val DEFAULT_DARK_MAGENTA: Int = 0xFFFF1E7A.toInt()
+    const val DEFAULT_DARK_MAGENTA: Int = 0xFFE5006B.toInt()
     const val DEFAULT_LIGHT_MAGENTA: Int = 0xFFC20052.toInt()
     const val BLACK_SURFACE: Int = 0xFF000000.toInt()
     const val WHITE_SURFACE: Int = 0xFFFFFFFF.toInt()

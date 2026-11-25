@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
@@ -74,7 +75,9 @@ import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
 
 @AndroidEntryPoint
@@ -84,6 +87,8 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
     @Inject lateinit var sessionSlotStore: SessionSlotStore
     @Inject lateinit var musicRepository: MusicRepository
     @Inject lateinit var lastFmRepository: LastFmRepository
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
 
     override fun onStart() {
         super.onStart()
@@ -109,8 +114,12 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                 val syncProgress by lanSyncRepository.syncProgress.collectAsStateWithLifecycle()
                 val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
                 val lastFmState by lastFmRepository.state.collectAsStateWithLifecycle()
+                val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
 
-                TonewiseComposeTheme {
+                TonewiseComposeTheme(
+                    roundMode = uiSettings.roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     SyncHubSheet(
                         discoveredHosts = hosts,
                         pairedHost = pairedHost,
@@ -156,7 +165,6 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                                 if (!isAdded) return@launch
                                 if (resolved.isNotEmpty()) {
                                     sessionSlotStore.setActiveScene(slot.name, slot.slotIndex)
-                                    lanSyncRepository.scheduleM3u8WriteBack(slot.name, resolved)
                                     playbackModel.restoreSessionQueue(
                                         songs = resolved,
                                         index = slot.currentIndex.coerceIn(0, resolved.lastIndex),
@@ -236,6 +244,8 @@ private fun SyncHubSheet(
         }
     var pairingCode by remember { mutableStateOf("") }
     var showRepairPanel by remember(pairedHost) { mutableStateOf(pairedHost == null) }
+    var showUnpairConfirm by remember { mutableStateOf(false) }
+    var slotPendingOverwrite by remember { mutableStateOf<Pair<Int, SessionSlotItem>?>(null) }
     var apiEnabled by remember(lastFmState.apiEnabled) { mutableStateOf(lastFmState.apiEnabled) }
     var broadcastEnabled by remember(lastFmState.broadcastEnabled) {
         mutableStateOf(lastFmState.broadcastEnabled)
@@ -259,6 +269,53 @@ private fun SyncHubSheet(
         if (manualUrl.isBlank() && discoveredHosts.isNotEmpty()) {
             manualUrl = discoveredHosts.first().baseUrl
         }
+    }
+
+    if (showUnpairConfirm) {
+        AlertDialog(
+            onDismissRequest = { showUnpairConfirm = false },
+            title = { Text(stringResource(R.string.lbl_lan_sync_unpair)) },
+            text = { Text(pairedHost?.hostName ?: pairedHost?.baseUrl ?: "") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showUnpairConfirm = false
+                        onUnpairHost()
+                    }
+                ) {
+                    Text(stringResource(android.R.string.ok))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnpairConfirm = false }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            },
+        )
+    }
+
+    if (slotPendingOverwrite != null) {
+        val (slotIdx, existingSlot) = slotPendingOverwrite!!
+        AlertDialog(
+            onDismissRequest = { slotPendingOverwrite = null },
+            title = { Text(stringResource(R.string.lbl_save_current_slot)) },
+            text = { Text("#$slotIdx · ${existingSlot.name}") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        slotPendingOverwrite = null
+                        onSaveSlot(slotIdx)
+                    }
+                ) {
+                    Text(stringResource(android.R.string.ok))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { slotPendingOverwrite = null }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+            },
+        )
     }
 
     Surface(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface) {
@@ -307,13 +364,19 @@ private fun SyncHubSheet(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                val slot1 = sessionSlots.firstOrNull { it.slotIndex == 1 }
                 OutlinedButton(
                     modifier = Modifier.weight(1f),
-                    onClick = { onSaveSlot(1) },
+                    onClick = {
+                        if (slot1 != null && SessionSlotStore.isSlotPopulated(slot1)) {
+                            slotPendingOverwrite = 1 to slot1
+                        } else {
+                            onSaveSlot(1)
+                        }
+                    },
                 ) {
                     Text(text = stringResource(R.string.lbl_save_slot_1))
                 }
-                val slot1 = sessionSlots.firstOrNull { it.slotIndex == 1 }
                 if (slot1 != null) {
                     Text(
                         modifier = Modifier.weight(1.5f).align(Alignment.CenterVertically),
@@ -531,7 +594,7 @@ private fun SyncHubSheet(
                             TextButton(onClick = { showRepairPanel = !showRepairPanel }) {
                                 Text(stringResource(R.string.lbl_lan_sync_re_pair))
                             }
-                            TextButton(enabled = !syncProgress.isRunning, onClick = onUnpairHost) {
+                            TextButton(enabled = !syncProgress.isRunning, onClick = { showUnpairConfirm = true }) {
                                 Text(stringResource(R.string.lbl_lan_sync_unpair))
                             }
                         }

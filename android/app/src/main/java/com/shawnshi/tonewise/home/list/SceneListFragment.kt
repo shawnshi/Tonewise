@@ -224,12 +224,11 @@ class SceneListFragment : Fragment() {
                         onLaunchRediscovery = {
                             launchAutoDj(
                                 SceneBanner(
-                                    id = "rediscovery_90d",
+                                    id = "44444444-4444-4444-8444-444444444444",
                                     title = getString(R.string.lbl_rediscovery_90d_title),
                                     subtitle = getString(R.string.lbl_rediscovery_90d_subtitle),
                                     accentHex = "#FF1E7A",
-                                    rawSceneJson =
-                                        """{"id":"rediscovery_90d","sort_arc":"rediscovery_90d","rule":{"all":[{"predicate":{"field":"unplayed_days_gte","op":"gte","value":90}}]}}""",
+                                    rawSceneJson = com.shawnshi.tonewise.sync.SceneRuleEvaluator.REDISCOVERY_90D_SCENE_JSON,
                                 )
                             )
                         },

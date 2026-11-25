@@ -27,6 +27,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.ForegroundListener
 import com.shawnshi.tonewise.ForegroundServiceNotification
@@ -45,7 +46,7 @@ constructor(
 ) : MusicBrowser.Invalidator {
     private val indexer = indexingHolderFactory.create(context, foregroundListener)
     private val musicBrowser = musicBrowserFactory.create(context, this)
-    private val dispatchJob = Job()
+    private val dispatchJob = SupervisorJob()
     private val dispatchScope = CoroutineScope(dispatchJob + Dispatchers.Default)
 
     class Factory

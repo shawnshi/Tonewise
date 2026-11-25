@@ -45,13 +45,13 @@ public sealed partial class DeskClockWidgetWindow : Window
     private const uint ES_CONTINUOUS = 0x80000000u;
     private const uint ES_DISPLAY_REQUIRED = 0x00000002u;
 
-    private static readonly SKColor ZuneMagenta = new(0xFF, 0x1E, 0x7A);
-    private static readonly SKColor DimTrack = new(0x7A, 0x7A, 0x7A, 0x60);
+    private static readonly SKColor ZuneMagenta = new(0xE5, 0x00, 0x6B);
+    private static readonly SKColor DimTrack = new(0x7A, 0x7A, 0x7A, 0x70);
     private static readonly SKPaint ZuneMagentaPaint = new() { Color = ZuneMagenta, IsAntialias = false };
     private static readonly SKPaint DimTrackPaint = new() { Color = DimTrack, IsAntialias = false };
-    private static readonly SolidColorBrush ActiveAccentBrush = new(Color.FromArgb(0xFF, 0xFF, 0x1E, 0x7A));
+    private static readonly SolidColorBrush ActiveAccentBrush = new(Color.FromArgb(0xFF, 0xE5, 0x00, 0x6B));
     private static readonly SolidColorBrush MutedInkBrush = new(Color.FromArgb(0xFF, 0xA3, 0xA3, 0xA3));
-    private static readonly SolidColorBrush LovedHeartBrush = new(Color.FromArgb(0xFF, 0xFF, 0x1E, 0x7A));
+    private static readonly SolidColorBrush LovedHeartBrush = new(Color.FromArgb(0xFF, 0xE5, 0x00, 0x6B));
 
     public DeskClockWidgetWindow(MainViewModel viewModel)
     {
@@ -559,14 +559,24 @@ public sealed partial class DeskClockWidgetWindow : Window
         float barW = Math.Clamp(step * 0.65f, 1.5f, 5f);
         float centerY = h / 2f;
         float progressX = (float)(ViewModel.PlaybackProgress * w);
-
-        for (int i = 0; i < count; i++)
+        bool highContrast = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
+        SKPaint? hcActivePaint = highContrast ? new SKPaint { Color = SKColors.White, IsAntialias = false } : null;
+        SKPaint? hcDimPaint = highContrast ? new SKPaint { Color = new SKColor(0xA0, 0xA0, 0xA0), IsAntialias = false } : null;
+        try
         {
-            float amp = envelope is not null ? Math.Clamp(envelope[i], 0.06f, 1f) : 0.16f;
-            float halfH = Math.Max(2f, amp * (h * 0.44f));
-            float cx = (i + 0.5f) * step;
-            var rect = new SKRect(cx - barW / 2f, centerY - halfH, cx + barW / 2f, centerY + halfH);
-            canvas.DrawRect(rect, cx <= progressX ? ZuneMagentaPaint : DimTrackPaint);
+            for (int i = 0; i < count; i++)
+            {
+                float amp = envelope is not null ? Math.Clamp(envelope[i], 0.06f, 1f) : 0.16f;
+                float halfH = Math.Max(2f, amp * (h * 0.44f));
+                float cx = (i + 0.5f) * step;
+                var rect = new SKRect(cx - barW / 2f, centerY - halfH, cx + barW / 2f, centerY + halfH);
+                canvas.DrawRect(rect, cx <= progressX ? (hcActivePaint ?? ZuneMagentaPaint) : (hcDimPaint ?? DimTrackPaint));
+            }
+        }
+        finally
+        {
+            hcActivePaint?.Dispose();
+            hcDimPaint?.Dispose();
         }
     }
 }

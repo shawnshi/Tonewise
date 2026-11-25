@@ -1,4 +1,4 @@
--- Tonewise /Music/.tonewise/manifest.db SQLite Schema (v1)
+-- Tonewise /Music/.tonewise/manifest.db SQLite Schema (v2)
 -- Single-Writer Contract: PC desktop / CLI is the canonical writer of manifest.db.
 -- Mobile clients consume manifest.db read-only and emit delta mutations via mutations.<device_id>.jsonl.
 

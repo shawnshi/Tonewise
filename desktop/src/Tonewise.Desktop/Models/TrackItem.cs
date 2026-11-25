@@ -91,6 +91,11 @@ public sealed record TrackItem(
 )
 {
     public bool IsLoved => Rating >= 5;
+    public string AccessibilitySummary =>
+        string.IsNullOrWhiteSpace(ArtistsDisplay)
+            ? $"{Title} · {DurationDisplay}"
+            : $"{Title} · {ArtistsDisplay} · {DurationDisplay}";
+    public override string ToString() => AccessibilitySummary;
     public static bool IsClassicalGenre(string? genre)
     {
         if (string.IsNullOrWhiteSpace(genre)) return false;
@@ -352,7 +357,10 @@ public sealed record StagingProposalViewItem(
     string ValueTransition,
     string SourceBadge,
     string Status
-);
+)
+{
+    public override string ToString() => $"{TrackDisplay} · {FieldName}: {ValueTransition} ({Status})";
+}
 
 public sealed record EntityGroupItem(
     string Key,
@@ -361,7 +369,11 @@ public sealed record EntityGroupItem(
     string BadgeText,
     IReadOnlyList<TrackItem> Tracks,
     string? CoverArtPath = null
-);
+)
+{
+    public override string ToString() =>
+        string.IsNullOrWhiteSpace(Subtitle) ? $"{Title} {BadgeText}".Trim() : $"{Title} · {Subtitle} {BadgeText}".Trim();
+}
 
 public sealed record QuickplayTileItem(
     string TileId,
@@ -373,7 +385,11 @@ public sealed record QuickplayTileItem(
     string? CoverArtPath,
     IReadOnlyList<TrackItem> Tracks,
     bool IsPinned = false
-);
+)
+{
+    public override string ToString() =>
+        string.IsNullOrWhiteSpace(Subtitle) ? Title : $"{Title} · {Subtitle}";
+}
 
 public sealed record SubTabOption(
     string Id,
@@ -385,7 +401,10 @@ public sealed record PairedDeviceViewItem(
     string DeviceId,
     string DeviceName,
     string LastSyncDisplay
-);
+)
+{
+    public override string ToString() => $"{DeviceName} · {LastSyncDisplay}";
+}
 
 public sealed record SyncOutboxViewItem(
     string Id,
@@ -393,7 +412,10 @@ public sealed record SyncOutboxViewItem(
     string DisplayName,
     string ModeBadge,
     string DetailText
-);
+)
+{
+    public override string ToString() => $"{KindLabel}: {DisplayName} · {DetailText}";
+}
 
 public sealed record QueueSlotChipItem(
     int SlotIndex,
@@ -401,4 +423,7 @@ public sealed record QueueSlotChipItem(
     string TooltipText,
     bool IsActive,
     bool IsPopulated
-);
+)
+{
+    public override string ToString() => Label;
+}

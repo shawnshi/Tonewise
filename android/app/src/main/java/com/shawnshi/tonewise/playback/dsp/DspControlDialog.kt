@@ -73,7 +73,9 @@ import java.util.Locale
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
 import kotlin.math.roundToInt
 
@@ -81,6 +83,8 @@ import kotlin.math.roundToInt
 class DspControlDialog : BackportBottomSheetDialogFragment() {
     private val playbackModel: PlaybackViewModel by activityViewModels()
     @Inject lateinit var dspRepository: DspRepository
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
     private var equalizerLauncher: ActivityResultLauncher<Intent>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,8 +110,12 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
                 val profileLabel by dspRepository.activeProfileLabel.collectAsStateWithLifecycle()
                 val signalPath by playbackModel.signalPath.collectAsStateWithLifecycle()
                 val romHint by dspRepository.romConflictHint.collectAsStateWithLifecycle()
+                val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
 
-                TonewiseComposeTheme {
+                TonewiseComposeTheme(
+                    roundMode = uiSettings.roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     DspControlSheet(
                         config = config,
                         profileLabel = profileLabel,
@@ -184,7 +192,7 @@ private fun DspControlSheet(
             )
 
             if (isBitPerfect) {
-                ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     Text(
                         text = stringResource(R.string.lbl_dsp_usb_bypass_notice),
                         modifier = Modifier.padding(12.dp),
@@ -195,7 +203,7 @@ private fun DspControlSheet(
             }
 
             if (romHint != null && config.enabled && !config.externalBridgeMode && !isBitPerfect) {
-                ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     Text(
                         text = romHint,
                         modifier = Modifier.padding(12.dp),

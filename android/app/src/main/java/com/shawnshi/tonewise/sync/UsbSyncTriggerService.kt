@@ -28,6 +28,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
+import java.util.UUID
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.shawnshi.tonewise.MainActivity
@@ -52,6 +53,9 @@ class UsbSyncTriggerService : Service() {
     private var latestStartId: Int = 0
     private var cancelRequested: Boolean = false
     @Volatile private var lastTriggerElapsedMs: Long = 0L
+    @Volatile private var lastUsbSyncElapsedMs: Long = 0L
+    @Volatile private var lastRescanElapsedMs: Long = 0L
+    @Volatile private var activeSessionNonce: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -59,6 +63,17 @@ class UsbSyncTriggerService : Service() {
         ensureNotificationChannel()
         when (intent?.action) {
             ACTION_CANCEL_USB_SYNC -> {
+                val internalToken = intent.getStringExtra(EXTRA_INTERNAL_CANCEL_TOKEN)
+                val submittedNonce = intent.getStringExtra(EXTRA_USB_NONCE)?.trim()
+                val activeNonce = activeSessionNonce
+                val authorizedCancel =
+                    internalToken == INTERNAL_CANCEL_TOKEN ||
+                        (!activeNonce.isNullOrBlank() && submittedNonce == activeNonce)
+                if (!authorizedCancel) {
+                    L.w("Rejected unauthorized ACTION_CANCEL_USB_SYNC intent")
+                    stopIfIdle(startId)
+                    return START_NOT_STICKY
+                }
                 val shouldStopNow =
                     synchronized(jobLock) {
                         latestStartId = startId
@@ -79,8 +94,17 @@ class UsbSyncTriggerService : Service() {
                     )
                 )
                 val nonce = intent.getStringExtra(EXTRA_USB_NONCE)?.trim().orEmpty()
-                if (nonce.isNotEmpty()) {
+                val nowElapsed = SystemClock.elapsedRealtime()
+                val hasRecentUsbSession =
+                    activeSessionNonce != null ||
+                        (lastUsbSyncElapsedMs > 0L && (nowElapsed - lastUsbSyncElapsedMs) in 0L..RESCAN_SESSION_WINDOW_MS)
+                val withinRescanCooldown =
+                    lastRescanElapsedMs > 0L && (nowElapsed - lastRescanElapsedMs) in 0L until RESCAN_COOLDOWN_MS
+                if (nonce.length >= MIN_NONCE_LENGTH && hasRecentUsbSession && !withinRescanCooldown) {
+                    lastRescanElapsedMs = nowElapsed
                     lanSyncRepository.requestLibraryRescan()
+                } else {
+                    L.w("Ignored unauthenticated or throttled ACTION_RESCAN_LIBRARY intent")
                 }
                 val stopId =
                     synchronized(jobLock) {
@@ -123,6 +147,7 @@ class UsbSyncTriggerService : Service() {
                     }
                     lastTriggerElapsedMs = nowElapsed
                     cancelRequested = false
+                    activeSessionNonce = nonce
 
                     lateinit var launched: Job
                     launched =
@@ -163,6 +188,8 @@ class UsbSyncTriggerService : Service() {
                                 L.w(t, "UsbSyncTriggerService execution error")
                             } finally {
                                 progressJob.cancel()
+                                lastUsbSyncElapsedMs = SystemClock.elapsedRealtime()
+                                activeSessionNonce = null
                                 val stopId =
                                     synchronized(jobLock) {
                                         if (activeSyncJob === launched) {
@@ -266,6 +293,7 @@ class UsbSyncTriggerService : Service() {
                 2,
                 Intent(this, UsbSyncTriggerService::class.java).apply {
                     action = ACTION_CANCEL_USB_SYNC
+                    putExtra(EXTRA_INTERNAL_CANCEL_TOKEN, INTERNAL_CANCEL_TOKEN)
                 },
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
@@ -309,8 +337,13 @@ class UsbSyncTriggerService : Service() {
         const val EXTRA_USB_NONCE = "extra_usb_nonce"
         const val EXTRA_HOST_ID = "extra_host_id"
         const val EXTRA_ALLOW_AUTO_PAIR = "extra_allow_auto_pair"
+        private const val EXTRA_INTERNAL_CANCEL_TOKEN = "extra_internal_cancel_token"
+        private val INTERNAL_CANCEL_TOKEN: String = UUID.randomUUID().toString()
         private const val DEFAULT_USB_PORT = 45820
         private const val TRIGGER_COOLDOWN_MS = 3_000L
+        private const val RESCAN_COOLDOWN_MS = 10_000L
+        private const val RESCAN_SESSION_WINDOW_MS = 60_000L
+        private const val MIN_NONCE_LENGTH = 16
         private const val CHANNEL_ID = "tonewise_usb_sync"
         private const val NOTIFICATION_ID = 45822
     }

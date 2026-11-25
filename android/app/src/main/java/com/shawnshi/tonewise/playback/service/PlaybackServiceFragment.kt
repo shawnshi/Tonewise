@@ -26,6 +26,7 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.AuxioService.Companion.INTENT_KEY_START_ID
@@ -75,7 +76,7 @@ private constructor(
             )
     }
 
-    private val waitJob = Job()
+    private val waitJob = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Main + waitJob)
     private var autoStopJob: Job? = null
     private val exoHolder = exoHolderFactory.create()

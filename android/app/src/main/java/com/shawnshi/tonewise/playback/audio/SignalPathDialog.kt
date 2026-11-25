@@ -67,13 +67,17 @@ import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.dsp.DspControlDialog
 import com.shawnshi.tonewise.playback.dsp.DspRepository
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 
 @AndroidEntryPoint
 class SignalPathDialog : BackportBottomSheetDialogFragment() {
     private val playbackModel: PlaybackViewModel by activityViewModels()
     @Inject lateinit var dspRepository: DspRepository
     @Inject lateinit var audioOutputManager: AudioOutputManager
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -84,7 +88,11 @@ class SignalPathDialog : BackportBottomSheetDialogFragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val pathState by playbackModel.signalPath.collectAsStateWithLifecycle()
-                TonewiseComposeTheme {
+                val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
+                TonewiseComposeTheme(
+                    roundMode = uiSettings.roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     SignalPathSheet(
                         state = pathState,
                         onOpenDsp = {
@@ -209,7 +217,7 @@ private fun SignalPathSheet(
             )
 
             if (state.usbVolumeProtectionNeeded) {
-                ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     Column(
                         modifier = Modifier.fillMaxWidth().padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -227,7 +235,7 @@ private fun SignalPathSheet(
             }
 
             state.romConflictHint?.let { hint ->
-                ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     Text(
                         text = hint,
                         modifier = Modifier.padding(14.dp),
@@ -259,7 +267,7 @@ private fun QualityBadge(tier: SignalQualityTier) {
         }
     Box(
         modifier =
-            Modifier.clip(RoundedCornerShape(999.dp))
+            Modifier.clip(MaterialTheme.shapes.small)
                 .background(containerColor)
                 .padding(horizontal = 12.dp, vertical = 5.dp)
     ) {
@@ -282,7 +290,7 @@ private fun SignalStageCard(
 ) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        shape = MaterialTheme.shapes.medium,
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
@@ -291,7 +299,7 @@ private fun SignalStageCard(
             Box(
                 modifier =
                     Modifier.size(28.dp)
-                        .clip(CircleShape)
+                        .clip(MaterialTheme.shapes.small)
                         .background(MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center,
             ) {

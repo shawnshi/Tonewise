@@ -232,11 +232,13 @@ public sealed partial class MainViewModel
                     $"Last.fm 已同步（@{cfg.Username}）：拉取播放次数 {summary.TopPlayCountsUpdated} 首、近期记录 {summary.PulledCloudPlays} 次，更新喜爱 {summary.LovedTracksUpdated} 首，上报 {summary.PushedScrobbles} 条{lovePushNote}，归档 {summary.ExpiredArchivedCount} 条{readOnlyHint}。";
                 string musicRoot = _store.MusicRoot;
                 _allTracks = await Task.Run(() => _store.LoadFromMusicRoot(musicRoot).ToList());
+                RefreshInboxAuditCounts();
                 if (CurrentTrack is not null)
                 {
                     var curRefreshed = _allTracks.FirstOrDefault(t => string.Equals(t.TrackUid, CurrentTrack.TrackUid, StringComparison.Ordinal));
                     if (curRefreshed is not null) CurrentTrack = curRefreshed;
                 }
+                RefreshNowPlayingClassicalActions();
                 TriggerFilterRefresh();
                 if (!silentIfOffline)
                 {
@@ -449,6 +451,8 @@ public sealed partial class MainViewModel
                                 if (updatedSel is not null) InspectTrack(updatedSel);
                             }
                             UpdateClassicalAdaptiveState();
+                            RefreshInboxAuditCounts();
+                            RefreshNowPlayingClassicalActions();
                             TriggerFilterRefresh();
                             RefreshPlaylists();
                             RefreshLastFmAuthStatus();

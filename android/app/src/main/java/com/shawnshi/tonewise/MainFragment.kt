@@ -300,6 +300,7 @@ class MainFragment :
             binding.queueSheet.coordinatorLayoutBehavior as QueueBottomSheetBehavior?
 
         val playbackRatio = max(playbackSheetBehavior.calculateSlideOffset(), 0f)
+        playbackModel.setPlaybackSheetExpanded(playbackRatio > 0.05f)
         // Stupid hack to prevent you from sliding the sheet up without closing the speed
         // dial. Filtering out ACTION_MOVE events will cause back gestures to close the
         // speed dial, which is super finicky behavior.

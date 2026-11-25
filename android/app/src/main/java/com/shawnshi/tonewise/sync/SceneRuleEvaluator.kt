@@ -321,4 +321,7 @@ object SceneRuleEvaluator {
           ]
         }
     """
+
+    const val REDISCOVERY_90D_SCENE_JSON =
+        """{"id":"44444444-4444-4444-8444-444444444444","title":"沉睡馆藏唤醒","updated_at_ms":1763251200000,"sort_arc":"rediscovery_90d","tempo_null_passthrough":true,"rule":{"all":[{"predicate":{"field":"unplayed_days_gte","op":"gte","values":[90]}}]}}"""
 }

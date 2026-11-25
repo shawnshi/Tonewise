@@ -1107,13 +1107,14 @@ constructor(
             runCatching { DocumentsContract.createDocument(resolver, parentTreeUri, mime, tempName) }
                 .getOrNull()
         if (tempUri != null) {
+            var deletedOld = false
             try {
                 resolver.openOutputStream(tempUri, "wt")?.use { out ->
                     copyFileToOutputStream(partFile, out)
                     out.flush()
                 } ?: throw IOException("无法写入 SAF 临时文件: $safeRelPath")
 
-                val deletedOld =
+                deletedOld =
                     runCatching { DocumentsContract.deleteDocument(resolver, existingUri) }
                         .getOrDefault(false)
                 if (deletedOld) {
@@ -1124,10 +1125,10 @@ constructor(
                         return renamedUri
                     }
                     // Provider refused rename after deleting existing file: materialize exact target filename,
-                    // stream full payload again, and clean up the staging temp file instead of returning .twtmp_.
+                    // stream full payload again, and only clean up tempUri AFTER recreatedUri succeeds.
                     val recreatedUri =
                         DocumentsContract.createDocument(resolver, parentTreeUri, mime, fileName)
-                            ?: throw IOException("无法重建 SAF 目标文件: $safeRelPath")
+                            ?: throw IOException("无法重建 SAF 目标文件(已保留临时文件): $safeRelPath")
                     try {
                         resolver.openOutputStream(recreatedUri, "wt")?.use { out ->
                             copyFileToOutputStream(partFile, out)
@@ -1141,7 +1142,9 @@ constructor(
                     return recreatedUri
                 }
             } catch (e: Exception) {
-                runCatching { DocumentsContract.deleteDocument(resolver, tempUri) }
+                if (!deletedOld) {
+                    runCatching { DocumentsContract.deleteDocument(resolver, tempUri) }
+                }
                 throw e
             }
             // Temp copy succeeded but provider refused old document delete before rename: clean temp and fallback below
@@ -1202,6 +1205,7 @@ constructor(
             resolver.insert(collection, values)
                 ?: throw IOException("无法通过 MediaStore 创建目标音频: $safeRelPath")
 
+        var deletedOld = false
         try {
             resolver.openOutputStream(itemUri, "w")?.use { out ->
                 copyFileToOutputStream(partFile, out)
@@ -1218,6 +1222,7 @@ constructor(
                 if (deleted <= 0) {
                     throw IOException("无法覆盖现有 MediaStore 音频文件，请改用 SAF 授权音乐目录: $safeRelPath")
                 }
+                deletedOld = true
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -1236,7 +1241,19 @@ constructor(
             partFile.delete()
             return CommittedSyncFile(safeRelPath, itemUri.toString(), expectedSize)
         } catch (e: Exception) {
-            runCatching { resolver.delete(itemUri, null, null) }
+            if (!deletedOld) {
+                runCatching { resolver.delete(itemUri, null, null) }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Old copy was already deleted; best-effort unpend the complete staged item so the song isn't lost.
+                runCatching {
+                    resolver.update(
+                        itemUri,
+                        ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) },
+                        null,
+                        null,
+                    )
+                }
+            }
             throw e
         }
     }
@@ -1258,10 +1275,36 @@ constructor(
         }
         val destFile = File(targetDir, fileName)
         val expectedSize = partFile.length()
-        if (destFile.exists()) destFile.delete()
-        if (!partFile.renameTo(destFile)) {
-            destFile.outputStream().use { output -> copyFileToOutputStream(partFile, output) }
-            partFile.delete()
+        val stagedFile = File(targetDir, ".twtmp_${System.currentTimeMillis()}_$fileName")
+        val backupFile = File(targetDir, ".twbak_${System.currentTimeMillis()}_$fileName")
+        try {
+            stagedFile.outputStream().use { output ->
+                copyFileToOutputStream(partFile, output)
+                output.flush()
+                runCatching { output.fd.sync() }
+            }
+            val hadExisting = destFile.exists()
+            if (hadExisting) {
+                if (backupFile.exists()) backupFile.delete()
+                if (!destFile.renameTo(backupFile)) {
+                    throw IOException("无法备份原有音频文件: $safeRelPath")
+                }
+            }
+            if (!stagedFile.renameTo(destFile)) {
+                if (hadExisting && backupFile.exists()) {
+                    backupFile.renameTo(destFile)
+                }
+                throw IOException("无法原子替换目标音频文件: $safeRelPath")
+            }
+            if (backupFile.exists()) {
+                runCatching { backupFile.delete() }
+            }
+            runCatching { partFile.delete() }
+        } catch (e: Exception) {
+            if (stagedFile.exists() && destFile.exists()) {
+                runCatching { stagedFile.delete() }
+            }
+            throw e
         }
         runCatching {
             MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), null, null)

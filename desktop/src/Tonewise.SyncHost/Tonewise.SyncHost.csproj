@@ -14,6 +14,7 @@
     <EmbeddedResource Include="..\..\..\protocol\dictionaries\artist_whitelist.json" LogicalName="Tonewise.SyncHost.protocol.artist_whitelist.json" />
     <EmbeddedResource Include="..\..\..\protocol\dictionaries\artist_aliases.json" LogicalName="Tonewise.SyncHost.protocol.artist_aliases.json" />
     <EmbeddedResource Include="..\..\..\protocol\dictionaries\genre_aliases.json" LogicalName="Tonewise.SyncHost.protocol.genre_aliases.json" />
+    <EmbeddedResource Include="..\..\..\protocol\dictionaries\mood_clusters.json" LogicalName="Tonewise.SyncHost.protocol.mood_clusters.json" />
     <EmbeddedResource Include="..\..\..\protocol\dictionaries\hanzi_pinyin_table.txt" LogicalName="Tonewise.SyncHost.protocol.hanzi_pinyin_table.txt" />
   </ItemGroup>
 </Project>

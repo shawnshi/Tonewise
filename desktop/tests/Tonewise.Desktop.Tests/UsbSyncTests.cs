@@ -322,6 +322,9 @@ public sealed class UsbSyncTests
                 _ => Task.FromResult<SyncHostServer?>(server),
                 () => server,
                 autoTriggerDebounce: TimeSpan.FromMilliseconds(30));
+            coordinator.MirrorPruneEnabled = true;
+            coordinator.PruneScope = "music_folder_all";
+            coordinator.AllowAdbForeignDeleteFallback = true;
 
             coordinator.StartMonitoring();
             await fakeAdb.WaitForTrackerReadyAsync();

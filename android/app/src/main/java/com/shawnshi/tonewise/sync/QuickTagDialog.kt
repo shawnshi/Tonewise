@@ -49,7 +49,9 @@ import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 import org.oxycblt.musikr.Song
 
 /**
@@ -60,6 +62,8 @@ import org.oxycblt.musikr.Song
 class QuickTagDialog : BackportBottomSheetDialogFragment() {
     @Inject lateinit var lanSyncRepository: LanSyncRepository
     @Inject lateinit var musicRepository: MusicRepository
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
     private val playbackModel: PlaybackViewModel by activityViewModels()
 
     override fun onCreateView(
@@ -72,6 +76,7 @@ class QuickTagDialog : BackportBottomSheetDialogFragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val playingSong by playbackModel.song.collectAsStateWithLifecycle()
+                val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
                 val pendingCount by
                     lanSyncRepository.pendingMutationCount.collectAsStateWithLifecycle()
                 val song =
@@ -83,7 +88,10 @@ class QuickTagDialog : BackportBottomSheetDialogFragment() {
                         } ?: playingSong
                     }
 
-                TonewiseComposeTheme {
+                TonewiseComposeTheme(
+                    roundMode = uiSettings.roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     QuickTagSheet(
                         song = song,
                         pendingMutationsCount = pendingCount,
@@ -200,7 +208,7 @@ private fun QuickTagSheet(
                         checked = loved,
                         onCheckedChange = { checked ->
                             loved = checked
-                            onMutate(song, "rating", if (checked) "5" else "3")
+                            onMutate(song, "rating", if (checked) "5" else "0")
                         },
                     )
                 }

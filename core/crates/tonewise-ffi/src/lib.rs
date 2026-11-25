@@ -296,12 +296,6 @@ fn save_tagged_file_atomically(
 ) -> Result<(), String> {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    // Fast path: persist only the mutated primary tag (e.g. ID3v2 on MP3) in place without
-    // re-encoding untouched legacy ID3v1 footers (which triggers lofty 0.22.4 UTF-8 slice panics).
-    if save_primary_tag_or_file(path, tagged).is_ok() {
-        return Ok(());
-    }
-
     static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
@@ -325,6 +319,9 @@ fn save_tagged_file_atomically(
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("lofty save failed: {e}"));
     }
+    if let Ok(f) = std::fs::File::open(&tmp_path) {
+        let _ = f.sync_data();
+    }
 
     #[cfg(windows)]
     {
@@ -338,6 +335,7 @@ fn save_tagged_file_atomically(
             ) -> i32;
         }
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
 
         let src_w: Vec<u16> = OsStr::new(&tmp_path).encode_wide().chain(std::iter::once(0)).collect();
         let dst_w: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
@@ -345,7 +343,7 @@ fn save_tagged_file_atomically(
             MoveFileExW(
                 src_w.as_ptr(),
                 dst_w.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING,
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
             )
         };
         if moved != 0 {
@@ -1443,6 +1441,36 @@ mod tests {
         let final_bytes = std::fs::read(&mp3_path).unwrap();
         assert_eq!(&final_bytes[final_bytes.len() - 128..], id3v1.as_slice());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn save_tagged_file_atomically_preserves_original_when_writeback_fails() {
+        use lofty::tag::{Accessor, Tag, TagType};
+        let dir = std::env::temp_dir().join(format!("tonewise_atomic_guard_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let corrupt_flac = dir.join("corrupt.flac");
+        let original = b"NOT_A_VALID_FLAC_STREAM_SENTINEL_BYTES_123456";
+        std::fs::write(&corrupt_flac, original).unwrap();
+
+        let mut bad_tag = Tag::new(TagType::VorbisComments);
+        bad_tag.set_title("Atomic Guard Test".to_string());
+        let tagged = lofty::file::TaggedFile::new(
+            lofty::file::FileType::Flac,
+            lofty::properties::FileProperties::default(),
+            vec![bad_tag],
+        );
+        let res = save_tagged_file_atomically(&corrupt_flac, &tagged);
+        assert!(res.is_err(), "expected lofty FLAC writeback error on invalid container");
+        assert_eq!(std::fs::read(&corrupt_flac).unwrap(), original);
+
+        let leftover_temps: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".twtmp."))
+            .collect();
+        assert!(leftover_temps.is_empty(), "temp file should be cleaned on failure");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

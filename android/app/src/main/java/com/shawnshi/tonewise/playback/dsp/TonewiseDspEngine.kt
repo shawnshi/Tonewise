@@ -281,6 +281,18 @@ class BiquadFilter64(band: BiquadBand, sampleRateHz: Int, channels: Int) {
 
     fun updateCoefficients(band: BiquadBand, sampleRateHz: Int) {
         channelMask = band.channelMask
+        if (!band.enabled ||
+            (band.type != BiquadType.LOW_PASS &&
+                band.type != BiquadType.HIGH_PASS &&
+                abs(band.gainDb) <= 1e-4)
+        ) {
+            b0 = 1.0
+            b1 = 0.0
+            b2 = 0.0
+            a1 = 0.0
+            a2 = 0.0
+            return
+        }
         val fs = max(sampleRateHz, 8000).toDouble()
         val fc = band.freqHz.coerceIn(10.0, fs * 0.49)
         val w0 = 2.0 * PI * fc / fs
@@ -675,17 +687,7 @@ class TonewiseDspEngine {
         }
 
     private fun rebuildStages() {
-        val targetBands =
-            config.bands
-                .asSequence()
-                .filter {
-                    it.enabled &&
-                        (abs(it.gainDb) > 1e-4 ||
-                            it.type == BiquadType.LOW_PASS ||
-                            it.type == BiquadType.HIGH_PASS)
-                }
-                .take(64)
-                .toList()
+        val targetBands = config.bands.take(64)
         if (targetBands.size == filters.size &&
             prevFilterSampleRateHz == sampleRateHz &&
             prevFilterChannels == channels

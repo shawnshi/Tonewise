@@ -180,7 +180,15 @@ constructor(
         var mixerLabel = "AudioFlinger"
         var outputSampleRateHz: Int? = null
         val actualTrackEncoding =
-            if (activeFloatPipeline) C.ENCODING_PCM_FLOAT else C.ENCODING_PCM_16BIT
+            if (lastPcmEncoding != C.ENCODING_INVALID && lastPcmEncoding != androidx.media3.common.Format.NO_VALUE) {
+                lastPcmEncoding
+            } else if (activeFloatPipeline) {
+                C.ENCODING_PCM_FLOAT
+            } else {
+                C.ENCODING_PCM_16BIT
+            }
+        val usbEarConfirmed = dspRepository.usbBitPerfectConfirmed.value
+        var usbVolumeProtectionNeeded = false
 
         dspRepository.onDeviceRouteChanged(routeType.name, deviceName)
 
@@ -192,7 +200,13 @@ constructor(
             }
             activeUsbDevice = usbDevice
 
-            if (usbDevice != null && playbackSettings.usbBitPerfect) {
+            if (usbDevice != null && playbackSettings.usbBitPerfect && !usbEarConfirmed) {
+                clearBitPerfectMixer(usbDevice)
+                lastUsbSampleRateHz = null
+                lastUsbEncoding = null
+                usbVolumeProtectionNeeded = true
+                mixerLabel = "AudioFlinger (等待 USB 耳保确认)"
+            } else if (usbDevice != null && playbackSettings.usbBitPerfect) {
                 val desiredRate = lastSong?.sampleRateHz
                 if ((desiredRate != null && lastUsbSampleRateHz != null && lastUsbSampleRateHz != desiredRate) ||
                     (lastUsbEncoding != null &&
@@ -274,8 +288,7 @@ constructor(
                     dspRepository.romConflictHint.value?.takeIf {
                         !isBitPerfectActive && !dspCfg.externalBridgeMode
                     },
-                usbVolumeProtectionNeeded =
-                    isBitPerfectActive && !dspRepository.usbBitPerfectConfirmed.value,
+                usbVolumeProtectionNeeded = usbVolumeProtectionNeeded,
             )
 
         val listener = routeListener

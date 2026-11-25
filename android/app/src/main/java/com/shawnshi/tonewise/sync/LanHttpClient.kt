@@ -736,6 +736,9 @@ object LanHttpClient {
                     }
                 } catch (ce: CancellationException) {
                     throw ce
+                } catch (ste: SocketTimeoutException) {
+                    // Do not blindly replay non-idempotent Last.fm POST mutations after read timeout.
+                    throw ste
                 } catch (e: IOException) {
                     lastError = e
                     if (attempt == 0) {

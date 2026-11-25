@@ -53,9 +53,9 @@ public sealed record ResolvedSyncPlaylist(
 
 public sealed record SyncPolicyConfig(
     [property: JsonPropertyName("mirror_prune_enabled")] bool MirrorPruneEnabled = false,
-    [property: JsonPropertyName("prune_scope")] string PruneScope = "music_folder_all",
+    [property: JsonPropertyName("prune_scope")] string PruneScope = "managed_only",
     [property: JsonPropertyName("target_root")] string TargetRoot = "Music",
-    [property: JsonPropertyName("allow_adb_foreign_delete_fallback")] bool AllowAdbForeignDeleteFallback = true,
+    [property: JsonPropertyName("allow_adb_foreign_delete_fallback")] bool AllowAdbForeignDeleteFallback = false,
     [property: JsonPropertyName("large_prune_confirm_threshold_count")] int LargePruneConfirmThresholdCount = 20,
     [property: JsonPropertyName("large_prune_confirm_threshold_ratio")] double LargePruneConfirmThresholdRatio = 0.30
 );
@@ -151,6 +151,9 @@ public sealed partial class SyncOutboxAndPairingStore
     private int _globalFailedPairAttempts;
     private readonly Dictionary<string, (int FailedAttempts, DateTimeOffset LockedUntilUtc, DateTimeOffset LastFailedUtc)> _pairLockoutsByClient =
         new(StringComparer.OrdinalIgnoreCase);
+    private List<PairedDeviceRecord>? _cachedDevices;
+    private long _cachedDevicesWriteTicks = -1;
+    private long _cachedDevicesLength = -1;
 
     public SyncOutboxAndPairingStore(string musicRoot)
     {
@@ -361,7 +364,10 @@ public sealed partial class SyncOutboxAndPairingStore
                     _pairingCode = GenerateSixDigitCode();
                     _pairingCodeIssuedAtUtc = nowUtc;
                     _globalFailedPairAttempts = 0;
-                    _pairLockoutsByClient.Clear();
+                    // Rotate global code on brute-force threshold, but preserve all existing IP lockouts
+                    // and lock out the triggering client instead of clearing _pairLockoutsByClient.
+                    DateTimeOffset lockedUntilGlobal = nowUtc + PairLockoutDuration;
+                    _pairLockoutsByClient[bucketKey] = (0, lockedUntilGlobal, nowUtc);
                     retryAfterSeconds = (int)PairLockoutDuration.TotalSeconds;
                     return PairAttemptStatus.LockedOut;
                 }
@@ -436,7 +442,16 @@ public sealed partial class SyncOutboxAndPairingStore
             _pairingCode = GenerateSixDigitCode();
             _pairingCodeIssuedAtUtc = nowUtc;
             _globalFailedPairAttempts = 0;
-            _pairLockoutsByClient.Clear();
+            foreach (var kv in _pairLockoutsByClient.ToList())
+            {
+                bool lockoutExpired =
+                    (kv.Value.LockedUntilUtc != DateTimeOffset.MinValue && kv.Value.LockedUntilUtc <= nowUtc)
+                    || (kv.Value.LockedUntilUtc == DateTimeOffset.MinValue && nowUtc - kv.Value.LastFailedUtc >= PairLockoutDuration);
+                if (lockoutExpired)
+                {
+                    _pairLockoutsByClient.Remove(kv.Key);
+                }
+            }
         }
     }
 
@@ -777,10 +792,29 @@ public sealed partial class SyncOutboxAndPairingStore
 
     private List<PairedDeviceRecord> LoadDevicesUnlocked()
     {
-        if (!File.Exists(_devicesPath)) return [];
+        if (!File.Exists(_devicesPath))
+        {
+            _cachedDevices = null;
+            _cachedDevicesWriteTicks = -1;
+            _cachedDevicesLength = -1;
+            return [];
+        }
         try
         {
-            return JsonSerializer.Deserialize<List<PairedDeviceRecord>>(File.ReadAllText(_devicesPath, Encoding.UTF8)) ?? [];
+            var fi = new FileInfo(_devicesPath);
+            long writeTicks = fi.LastWriteTimeUtc.Ticks;
+            long len = fi.Length;
+            if (_cachedDevices is not null
+                && _cachedDevicesWriteTicks == writeTicks
+                && _cachedDevicesLength == len)
+            {
+                return new List<PairedDeviceRecord>(_cachedDevices);
+            }
+            var parsed = JsonSerializer.Deserialize<List<PairedDeviceRecord>>(File.ReadAllText(_devicesPath, Encoding.UTF8)) ?? [];
+            _cachedDevices = parsed;
+            _cachedDevicesWriteTicks = writeTicks;
+            _cachedDevicesLength = len;
+            return new List<PairedDeviceRecord>(parsed);
         }
         catch
         {
@@ -793,6 +827,19 @@ public sealed partial class SyncOutboxAndPairingStore
         Directory.CreateDirectory(_tonewiseDir);
         string json = JsonSerializer.Serialize(devices, JsonWriteOptions);
         WriteTextAtomic(_devicesPath, json + "\n");
+        try
+        {
+            var fi = new FileInfo(_devicesPath);
+            _cachedDevices = new List<PairedDeviceRecord>(devices);
+            _cachedDevicesWriteTicks = fi.LastWriteTimeUtc.Ticks;
+            _cachedDevicesLength = fi.Length;
+        }
+        catch
+        {
+            _cachedDevices = null;
+            _cachedDevicesWriteTicks = -1;
+            _cachedDevicesLength = -1;
+        }
     }
 
     private List<SyncOutboxItem> LoadOutboxUnlocked()

@@ -72,6 +72,18 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button
+                        Width="32"
+                        Height="28"
+                        Padding="0"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Visibility="{x:Bind ViewModel.CanNavigateBack, Mode=OneWay}"
+                        Command="{x:Bind ViewModel.GoBackCommand}"
+                        AutomationProperties.Name="返回上一视图"
+                        ToolTipService.ToolTip="返回上一视图 (Alt+←)">
+                        <FontIcon Glyph="&#xE72B;" FontSize="13" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                    </Button>
                     <Viewbox Width="18" Height="18" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw">
                         <Canvas Width="32" Height="32">
                             <Rectangle Canvas.Left="1.8" Canvas.Top="12.6" Width="2.2" Height="5.6" Fill="{ThemeResource ZuneInkSecondaryBrush}" />
@@ -386,7 +398,18 @@
                 Message="{x:Bind ViewModel.NotificationMessage, Mode=OneWay}"
                 Severity="{x:Bind SeverityFromLevel(ViewModel.NotificationLevel), Mode=OneWay}"
                 IsClosable="True"
-                AutomationProperties.LiveSetting="Polite" />
+                Closed="OnGlobalNotificationBarClosed"
+                AutomationProperties.LiveSetting="Polite">
+                <InfoBar.ActionButton>
+                    <Button
+                        x:Name="GlobalNotificationUndoButton"
+                        Style="{StaticResource StudioChipButtonStyle}"
+                        Content="撤销"
+                        Visibility="Collapsed"
+                        Click="OnGlobalNotificationUndoClick"
+                        AutomationProperties.Name="撤销上一步操作" />
+                </InfoBar.ActionButton>
+            </InfoBar>
             <Grid
                 ColumnSpacing="10"
                 Margin="18,4,18,4"
@@ -471,7 +494,8 @@
                                                 HorizontalContentAlignment="Stretch"
                                                 VerticalContentAlignment="Stretch"
                                                 Click="OnQuickplayTileClick"
-                                                RightTapped="OnQuickplayTileRightTapped">
+                                                RightTapped="OnQuickplayTileRightTapped"
+                                                AutomationProperties.Name="{x:Bind Title}">
                                                 <Button.ContextFlyout>
                                                     <MenuFlyout>
                                                         <MenuFlyoutItem Text="立即播放" Click="OnContextPlayQuickplayTileClick">
@@ -512,7 +536,7 @@
                                     BorderThickness="0"
                                     Command="{x:Bind ViewModel.GenerateAutoDjPlaylistCommand}">
                                     <StackPanel Spacing="6">
-                                        <TextBlock Text="SMART MIX · 50 TRACKS" FontSize="11" FontWeight="SemiBold" CharacterSpacing="80" Foreground="{ThemeResource ZuneInkOnAccentBrush}" />
+                                        <TextBlock Text="SMART MIX · 50 TRACKS" FontSize="12" FontWeight="SemiBold" CharacterSpacing="80" Foreground="{ThemeResource ZuneInkOnAccentBrush}" />
                                         <TextBlock Text="时段智能 AutoDJ" FontSize="22" FontWeight="Light" Foreground="{ThemeResource ZuneInkOnAccentBrush}" />
                                         <TextBlock Text="70% 常听 + 30% 沉睡唤醒 · 邻曲节奏平滑过渡" FontSize="12" Foreground="{ThemeResource ZuneInkOnAccentBrush}" TextWrapping="Wrap" />
                                     </StackPanel>
@@ -575,7 +599,7 @@
                                                     </Grid.ColumnDefinitions>
                                                     <TextBlock Grid.Column="0" Text="{x:Bind SlotIndex}" FontSize="12" FontWeight="Bold" Foreground="{ThemeResource ZuneAccentBrush}" VerticalAlignment="Center" />
                                                     <TextBlock Grid.Column="1" Text="{x:Bind Name}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                                                    <TextBlock Grid.Column="2" Text="接续 ▶" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" VerticalAlignment="Center" />
+                                                    <TextBlock Grid.Column="2" Text="接续 ▶" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" VerticalAlignment="Center" />
                                                 </Grid>
                                             </Button>
                                         </DataTemplate>
@@ -609,7 +633,8 @@
                                                 BorderThickness="0"
                                                 HorizontalContentAlignment="Stretch"
                                                 VerticalContentAlignment="Stretch"
-                                                Click="OnQuickplayTileClick">
+                                                Click="OnQuickplayTileClick"
+                                                AutomationProperties.Name="{x:Bind Title}">
                                                 <StackPanel Spacing="6" Width="156">
                                                     <Border Width="156" Height="156" Background="{ThemeResource ZuneSurfaceSubtleBrush}" BorderBrush="{ThemeResource ZuneHairlineBrush}" BorderThickness="1">
                                                         <Grid>
@@ -694,7 +719,7 @@
                     </ScrollViewer>
 
                     <!-- STAGE B: COLLECTION / STUDIO / SETTINGS WORKBENCH -->
-                    <Grid Visibility="{x:Bind ViewModel.IsCollectionOrStudioMainVisible, Mode=OneWay}">
+                    <Grid x:Name="CollectionAndStudioStage" Visibility="{x:Bind ViewModel.IsCollectionOrStudioMainVisible, Mode=OneWay}">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
@@ -722,6 +747,18 @@
                                             Foreground="{ThemeResource ZuneInkSecondaryBrush}"
                                             VerticalAlignment="Center"
                                             TextTrimming="CharacterEllipsis" />
+                                        <Button
+                                            Grid.Column="1"
+                                            Style="{StaticResource StudioChipButtonStyle}"
+                                            Command="{x:Bind ViewModel.CloseSelectedAlbumCommand}"
+                                            Visibility="{x:Bind VisibleWhenBoth(ViewModel.IsAlbumsGridMode, ViewModel.HasSelectedEntityGroup), Mode=OneWay}"
+                                            AutomationProperties.Name="返回全部专辑封面墙"
+                                            Padding="9,4">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE72B;" FontSize="12" />
+                                                <TextBlock Text="返回全部专辑" FontSize="12" />
+                                            </StackPanel>
+                                        </Button>
                                         <ToggleButton
                                             Grid.Column="1"
                                             Content="显示全部演职员"
@@ -759,54 +796,6 @@
                                             </StackPanel>
                                         </Button>
                                     </Grid>
-
-                                    <!-- 1A) Albums Zero-Radius Cover Art Gallery -->
-                                    <ListView
-                                        x:Name="AlbumsCoverGridView"
-                                        ItemsSource="{x:Bind ViewModel.CurrentEntityGroups, Mode=OneWay}"
-                                        SelectedItem="{x:Bind ViewModel.SelectedEntityGroup, Mode=OneWay}"
-                                        SelectionChanged="OnEntityGroupSelectionChanged"
-                                        RightTapped="OnEntityBrowserRightTapped"
-                                        ContainerContentChanging="OnEntityCoverListContainerContentChanging"
-                                        Visibility="{x:Bind ViewModel.IsAlbumsGridMode, Mode=OneWay}"
-                                        MaxHeight="240"
-                                        ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                                        <ListView.ContextFlyout>
-                                            <MenuFlyout>
-                                                <MenuFlyoutItem Text="固定到 quickplay" Click="OnContextPinEntityGroupToQuickplayClick">
-                                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE718;" /></MenuFlyoutItem.Icon>
-                                                </MenuFlyoutItem>
-                                                <MenuFlyoutItem Text="发送到手机" Click="OnContextSendEntityGroupToPhoneClick">
-                                                    <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8EA;" /></MenuFlyoutItem.Icon>
-                                                </MenuFlyoutItem>
-                                            </MenuFlyout>
-                                        </ListView.ContextFlyout>
-                                        <ListView.ItemsPanel>
-                                            <ItemsPanelTemplate>
-                                                <ItemsWrapGrid Orientation="Horizontal" />
-                                            </ItemsPanelTemplate>
-                                        </ListView.ItemsPanel>
-                                        <ListView.ItemContainerStyle>
-                                            <Style TargetType="ListViewItem">
-                                                <Setter Property="Padding" Value="2" />
-                                                <Setter Property="Margin" Value="0,0,10,10" />
-                                            </Style>
-                                        </ListView.ItemContainerStyle>
-                                        <ListView.ItemTemplate>
-                                            <DataTemplate x:DataType="models:EntityGroupItem">
-                                                <StackPanel Width="126" Spacing="4">
-                                                    <Border Width="126" Height="126" Background="{ThemeResource ZuneSurfaceElevatedBrush}" BorderBrush="{ThemeResource ZuneHairlineBrush}" BorderThickness="1">
-                                                        <Grid>
-                                                            <FontIcon Glyph="&#xE8D6;" FontSize="26" Foreground="{ThemeResource ZuneInkTertiaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                                            <Image x:Name="EntityCoverImage" Stretch="UniformToFill" />
-                                                        </Grid>
-                                                    </Border>
-                                                    <TextBlock Text="{x:Bind Title}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextTrimming="CharacterEllipsis" />
-                                                    <TextBlock Text="{x:Bind Subtitle}" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextTrimming="CharacterEllipsis" />
-                                                </StackPanel>
-                                            </DataTemplate>
-                                        </ListView.ItemTemplate>
-                                    </ListView>
 
                                     <!-- 1B) Other Entity Index (Artists / Composers / Conductors / Classical / Genres / Folders) -->
                                     <ListView
@@ -846,7 +835,8 @@
                                                     Padding="10,7"
                                                     Background="{ThemeResource ZuneSurfaceElevatedBrush}"
                                                     BorderBrush="{ThemeResource ZuneHairlineBrush}"
-                                                    BorderThickness="1">
+                                                    BorderThickness="1"
+                                                    AutomationProperties.Name="{x:Bind Title}">
                                                     <Grid ColumnSpacing="6">
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="*" />
@@ -1068,11 +1058,11 @@
                                                         <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnMoodMenuFlyoutOpening">
                                                             <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="全部情绪" Tag="all" Click="OnMoodFilterItemClick" />
                                                             <MenuFlyoutSeparator />
-                                                            <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="平静舒缓" Tag="calm_relaxed" Click="OnMoodFilterItemClick" />
+                                                            <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="静谧松弛" Tag="calm_relaxed" Click="OnMoodFilterItemClick" />
                                                             <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="温暖浪漫" Tag="warm_romantic" Click="OnMoodFilterItemClick" />
-                                                            <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="沉思专注" Tag="focus_deep" Click="OnMoodFilterItemClick" />
-                                                            <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="明快振奋" Tag="bright_energetic" Click="OnMoodFilterItemClick" />
-                                                            <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="忧郁深沉" Tag="melancholic_dark" Click="OnMoodFilterItemClick" />
+                                                            <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="深沉内省" Tag="deep_introspective" Click="OnMoodFilterItemClick" />
+                                                            <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="明快愉悦" Tag="bright_joyful" Click="OnMoodFilterItemClick" />
+                                                            <RadioMenuFlyoutItem GroupName="StudioMoodFilter" Text="高张力振奋" Tag="high_tension" Click="OnMoodFilterItemClick" />
                                                         </MenuFlyout>
                                                     </DropDownButton.Flyout>
                                                 </DropDownButton>
@@ -1103,7 +1093,7 @@
                                         </ScrollViewer>
                                         <Border Background="{ThemeResource ZuneSurfaceElevatedBrush}" BorderBrush="{ThemeResource ZuneHairlineBrush}" BorderThickness="1" Padding="10,7">
                                             <StackPanel Spacing="3">
-                                                <TextBlock Text="实时逻辑推演表达式 (Rule DSL)" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                <TextBlock Text="实时逻辑推演表达式 (Rule DSL)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
                                                 <TextBlock Text="{x:Bind ViewModel.ScenesRuleDslPreview, Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneAccentBrush}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
                                             </StackPanel>
                                         </Border>
@@ -1126,28 +1116,28 @@
                                                 <StackPanel Spacing="3">
                                                     <TextBlock Text="均衡原序 (Flat)" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
                                                     <TextBlock Text="保持曲库自然检索序" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextWrapping="Wrap" />
-                                                    <TextBlock Text="■ 当前已选" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcFlat, Mode=OneWay}" />
+                                                    <TextBlock Text="■ 当前已选" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcFlat, Mode=OneWay}" />
                                                 </StackPanel>
                                             </Button>
                                             <Button Grid.Column="1" Style="{StaticResource StudioChipButtonStyle}" HorizontalAlignment="Stretch" Padding="10,8" Tag="energy_asc" Click="OnSelectEnergyArcClick">
                                                 <StackPanel Spacing="3">
                                                     <TextBlock Text="渐强唤醒 (Ascending)" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneStatusSuccessBrush}" />
                                                     <TextBlock Text="低 → 中 → 高能递进" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextWrapping="Wrap" />
-                                                    <TextBlock Text="■ 当前已选" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcAsc, Mode=OneWay}" />
+                                                    <TextBlock Text="■ 当前已选" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcAsc, Mode=OneWay}" />
                                                 </StackPanel>
                                             </Button>
                                             <Button Grid.Column="2" Style="{StaticResource StudioChipButtonStyle}" HorizontalAlignment="Stretch" Padding="10,8" Tag="energy_desc_sleep" Click="OnSelectEnergyArcClick">
                                                 <StackPanel Spacing="3">
                                                     <TextBlock Text="深夜助眠 (Sleep Arc)" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneStatusPurpleBrush}" />
                                                     <TextBlock Text="能量与 BPM 逐级衰减" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextWrapping="Wrap" />
-                                                    <TextBlock Text="■ 当前已选" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcSleep, Mode=OneWay}" />
+                                                    <TextBlock Text="■ 当前已选" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcSleep, Mode=OneWay}" />
                                                 </StackPanel>
                                             </Button>
                                             <Button Grid.Column="3" Style="{StaticResource StudioChipButtonStyle}" HorizontalAlignment="Stretch" Padding="10,8" Tag="rediscovery_90d" Click="OnSelectEnergyArcClick">
                                                 <StackPanel Spacing="3">
                                                     <TextBlock Text="90天未听再发现" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneStatusInfoBrush}" />
                                                     <TextBlock Text="优先捞取低曝光沉睡曲目" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextWrapping="Wrap" />
-                                                    <TextBlock Text="■ 当前已选" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcRediscovery, Mode=OneWay}" />
+                                                    <TextBlock Text="■ 当前已选" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind ViewModel.IsArcRediscovery, Mode=OneWay}" />
                                                 </StackPanel>
                                             </Button>
                                         </Grid>
@@ -1280,11 +1270,11 @@
                                                     <MenuFlyout Placement="BottomEdgeAlignedLeft" Opening="OnMoodMenuFlyoutOpening">
                                                         <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="全部情绪" Tag="all" Click="OnMoodFilterItemClick" />
                                                         <MenuFlyoutSeparator />
-                                                        <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="平静舒缓" Tag="calm_relaxed" Click="OnMoodFilterItemClick" />
+                                                        <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="静谧松弛" Tag="calm_relaxed" Click="OnMoodFilterItemClick" />
                                                         <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="温暖浪漫" Tag="warm_romantic" Click="OnMoodFilterItemClick" />
-                                                        <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="沉思专注" Tag="focus_deep" Click="OnMoodFilterItemClick" />
-                                                        <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="明快振奋" Tag="bright_energetic" Click="OnMoodFilterItemClick" />
-                                                        <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="忧郁深沉" Tag="melancholic_dark" Click="OnMoodFilterItemClick" />
+                                                        <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="深沉内省" Tag="deep_introspective" Click="OnMoodFilterItemClick" />
+                                                        <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="明快愉悦" Tag="bright_joyful" Click="OnMoodFilterItemClick" />
+                                                        <RadioMenuFlyoutItem GroupName="DrawerMoodFilter" Text="高张力振奋" Tag="high_tension" Click="OnMoodFilterItemClick" />
                                                     </MenuFlyout>
                                                 </DropDownButton.Flyout>
                                             </DropDownButton>
@@ -1382,6 +1372,21 @@
                                                 <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE74D;" FontSize="14" /><TextBlock Text="删除" /></StackPanel>
                                             </Button>
                                             <Button Style="{StaticResource StudioChipButtonStyle}" Content="返回曲库" Command="{x:Bind ViewModel.ShowAllLibraryTracksCommand}" />
+                                            <TextBlock
+                                                Text="{x:Bind ViewModel.PlaylistsCountBadge, Mode=OneWay}"
+                                                FontSize="12"
+                                                Foreground="{ThemeResource ZuneInkSecondaryBrush}"
+                                                VerticalAlignment="Center"
+                                                Margin="6,0,2,0" />
+                                            <Button
+                                                x:Name="PlaylistsExpandToggleButton"
+                                                Style="{StaticResource StudioChipButtonStyle}"
+                                                Command="{x:Bind ViewModel.TogglePlaylistsExpandedCommand}">
+                                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                                    <FontIcon Glyph="{x:Bind PlaylistsExpandToggleGlyph(ViewModel.IsPlaylistsExpanded), Mode=OneWay}" FontSize="12" />
+                                                    <TextBlock Text="{x:Bind PlaylistsExpandToggleLabel(ViewModel.IsPlaylistsExpanded), Mode=OneWay}" />
+                                                </StackPanel>
+                                            </Button>
                                         </StackPanel>
                                     </ScrollViewer>
 
@@ -1391,8 +1396,11 @@
                                         SelectionMode="Single"
                                         SelectionChanged="OnPlaylistsSelectionChanged"
                                         RightTapped="OnPlaylistsRightTapped"
-                                        MaxHeight="196"
-                                        ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                        MaxHeight="{x:Bind PlaylistsDeckMaxHeight(ViewModel.IsPlaylistsExpanded), Mode=OneWay}"
+                                        ScrollViewer.VerticalScrollBarVisibility="Visible"
+                                        ScrollViewer.VerticalScrollMode="Enabled"
+                                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                        ScrollViewer.HorizontalScrollMode="Disabled">
                                         <ListView.ContextFlyout>
                                             <MenuFlyout>
                                                 <MenuFlyoutItem Text="固定到 quickplay" Click="OnContextPinPlaylistToQuickplayClick">
@@ -1423,14 +1431,16 @@
                                         <ListView.ItemTemplate>
                                             <DataTemplate x:DataType="playlists:PlaylistSummary">
                                                 <Border
-                                                    Width="196"
+                                                    Width="224"
+                                                    Height="68"
                                                     Padding="12,8"
                                                     Background="{ThemeResource ZuneSurfaceElevatedBrush}"
                                                     BorderBrush="{ThemeResource ZuneHairlineBrush}"
                                                     BorderThickness="1"
-                                                    ToolTipService.ToolTip="{x:Bind Name}">
-                                                    <StackPanel Spacing="3">
-                                                        <TextBlock Text="{x:Bind Name}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                                                    ToolTipService.ToolTip="{x:Bind Name}"
+                                                    AutomationProperties.Name="{x:Bind Name}">
+                                                    <StackPanel Spacing="3" VerticalAlignment="Center">
+                                                        <TextBlock Text="{x:Bind Name}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" />
                                                         <TextBlock Text="{x:Bind CountBadge}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                                                     </StackPanel>
                                                 </Border>
@@ -1446,17 +1456,17 @@
                                 Visibility="{x:Bind ViewModel.IsInboxAuditDeckVisible, Mode=OneWay}">
                                 <StackPanel Spacing="6">
                                     <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Padding="0,0,0,6">
-                                        <StackPanel Orientation="Horizontal" Spacing="6">
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺流派" Tag="audit_missing_genre" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺作曲" Tag="audit_missing_composer" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺指挥" Tag="audit_missing_conductor" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺专辑" Tag="audit_missing_album" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺厂牌" Tag="audit_missing_publisher" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺场景" Tag="audit_missing_scene" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺节奏" Tag="audit_missing_tempo" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺封面" Tag="audit_missing_cover" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="缺人声标签" Tag="audit_missing_vocals" Click="OnNavModeClick" />
-                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="90天未听" Tag="rediscovery_90d" Click="OnNavModeClick" />
+                                        <StackPanel x:Name="InboxAuditChipsPanel" Orientation="Horizontal" Spacing="6">
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingGenreLabel, Mode=OneWay}" Tag="audit_missing_genre" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingComposerLabel, Mode=OneWay}" Tag="audit_missing_composer" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingConductorLabel, Mode=OneWay}" Tag="audit_missing_conductor" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingAlbumLabel, Mode=OneWay}" Tag="audit_missing_album" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingPublisherLabel, Mode=OneWay}" Tag="audit_missing_publisher" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingSceneLabel, Mode=OneWay}" Tag="audit_missing_scene" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingTempoLabel, Mode=OneWay}" Tag="audit_missing_tempo" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingCoverLabel, Mode=OneWay}" Tag="audit_missing_cover" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditMissingVocalsLabel, Mode=OneWay}" Tag="audit_missing_vocals" Click="OnNavModeClick" />
+                                            <Button Style="{StaticResource StudioChipButtonStyle}" Content="{x:Bind ViewModel.AuditRediscovery90dLabel, Mode=OneWay}" Tag="rediscovery_90d" Click="OnNavModeClick" />
                                         </StackPanel>
                                     </ScrollViewer>
                                     <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Padding="0,0,0,6">
@@ -1471,6 +1481,14 @@
                                             <Button Style="{StaticResource StudioChipButtonStyle}" Content="清除待审…" Click="OnClearPendingStagingClick" />
                                         </StackPanel>
                                     </ScrollViewer>
+
+                                    <TextBlock
+                                        x:Name="InboxAuditResultSummaryBlock"
+                                        Text="{x:Bind ViewModel.InboxAuditResultSummaryText, Mode=OneWay}"
+                                        FontSize="13"
+                                        FontWeight="SemiBold"
+                                        Foreground="{ThemeResource ZuneAccentBrush}"
+                                        TextWrapping="Wrap" />
 
                                     <TextBlock Text="{x:Bind ViewModel.StagingSummaryText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
 
@@ -1510,6 +1528,53 @@
 
                         <!-- CENTER STAGE ROW 1: FRAMELESS 8-COLUMN TRACK TABLE / SYNC HUB / SETTINGS HUB -->
                         <Grid Grid.Row="1" Padding="18,0,18,8">
+                            <!-- A0) Full-Canvas Albums Zero-Radius Cover Art Gallery -->
+                            <ListView
+                                x:Name="AlbumsCoverGridView"
+                                ItemsSource="{x:Bind ViewModel.CurrentEntityGroups, Mode=OneWay}"
+                                SelectedItem="{x:Bind ViewModel.SelectedEntityGroup, Mode=OneWay}"
+                                SelectionChanged="OnEntityGroupSelectionChanged"
+                                RightTapped="OnEntityBrowserRightTapped"
+                                ContainerContentChanging="OnEntityCoverListContainerContentChanging"
+                                Visibility="{x:Bind ViewModel.IsAlbumsWallExpanded, Mode=OneWay}"
+                                ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListView.ContextFlyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Text="固定到 quickplay" Click="OnContextPinEntityGroupToQuickplayClick">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE718;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                        <MenuFlyoutItem Text="发送到手机" Click="OnContextSendEntityGroupToPhoneClick">
+                                            <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8EA;" /></MenuFlyoutItem.Icon>
+                                        </MenuFlyoutItem>
+                                    </MenuFlyout>
+                                </ListView.ContextFlyout>
+                                <ListView.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <ItemsWrapGrid Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ListView.ItemsPanel>
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="Padding" Value="2" />
+                                        <Setter Property="Margin" Value="0,0,12,14" />
+                                    </Style>
+                                </ListView.ItemContainerStyle>
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="models:EntityGroupItem">
+                                        <StackPanel Width="148" Spacing="5" AutomationProperties.Name="{x:Bind Title}">
+                                            <Border Width="148" Height="148" Background="{ThemeResource ZuneSurfaceElevatedBrush}" BorderBrush="{ThemeResource ZuneHairlineBrush}" BorderThickness="1">
+                                                <Grid>
+                                                    <FontIcon Glyph="&#xE8D6;" FontSize="28" Foreground="{ThemeResource ZuneInkTertiaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                    <Image x:Name="EntityCoverImage" Stretch="UniformToFill" />
+                                                </Grid>
+                                            </Border>
+                                            <TextBlock Text="{x:Bind Title}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{x:Bind Subtitle}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+
                             <!-- A) Frameless 8-Column Track Table -->
                             <Grid Visibility="{x:Bind ViewModel.IsTrackTableVisible, Mode=OneWay}">
                                 <Grid.RowDefinitions>
@@ -1575,7 +1640,7 @@
                                     </ListView.ContextFlyout>
                                     <ListView.ItemTemplate>
                                         <DataTemplate x:DataType="models:TrackItem">
-                                            <Grid ColumnSpacing="10" Padding="6,7">
+                                            <Grid ColumnSpacing="10" Padding="6,7" AutomationProperties.Name="{x:Bind AccessibilitySummary}">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="2.7*" />
                                                     <ColumnDefinition Width="1.3*" />
@@ -1661,7 +1726,7 @@
                                                     </Grid>
                                                     <StackPanel Orientation="Horizontal" Spacing="24">
                                                         <ToggleSwitch Header="连接手机自动 USB 同步" IsOn="{x:Bind ViewModel.IsUsbAutoSyncEnabled, Mode=TwoWay}" />
-                                                        <ToggleSwitch Header="自动删除手机 Music 中不在列表的歌曲" IsOn="{x:Bind ViewModel.IsMirrorPruneEnabled, Mode=TwoWay}" />
+                                                        <ToggleSwitch x:Name="MirrorPruneToggleSwitch" Header="自动删除手机 Music 中不在列表的歌曲" IsOn="{x:Bind ViewModel.IsMirrorPruneEnabled, Mode=TwoWay}" Toggled="OnMirrorPruneSwitchToggled" />
                                                     </StackPanel>
                                                     <ProgressBar IsIndeterminate="False" Value="{x:Bind ViewModel.UsbSyncProgressPercent, Mode=OneWay}" Maximum="100" Visibility="{x:Bind ViewModel.IsUsbSyncRunning, Mode=OneWay}" AutomationProperties.Name="USB 同步进度" />
                                                     <TextBlock Text="{x:Bind ViewModel.UsbSyncProgressText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextWrapping="Wrap" />
@@ -1692,7 +1757,7 @@
                                                         <TextBlock Text="提示：首次开启时请在 Windows 防火墙弹窗允许专用网络通信（端口 45820）" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
                                                     </StackPanel>
                                                     <StackPanel Grid.Column="1" Spacing="2" HorizontalAlignment="Right" VerticalAlignment="Center">
-                                                        <TextBlock Text="6 位配对码" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Right" />
+                                                        <TextBlock Text="6 位配对码" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Right" />
                                                         <TextBlock Text="{x:Bind ViewModel.LanPairingCode, Mode=OneWay}" FontSize="24" FontWeight="Bold" FontFamily="Cascadia Mono, Consolas, Segoe UI" CharacterSpacing="120" Foreground="{ThemeResource ZuneAccentBrush}" IsTextSelectionEnabled="True" />
                                                     </StackPanel>
                                                 </Grid>
@@ -1708,12 +1773,15 @@
                                                         <TextBlock Text="发送队列（发送到手机）" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
                                                         <TextBlock Text="{x:Bind ViewModel.LanOutboxSummaryText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
                                                     </StackPanel>
-                                                    <Button Grid.Column="1" Style="{StaticResource StudioChipButtonStyle}" Content="清空队列" Command="{x:Bind ViewModel.ClearLanOutboxCommand}" Visibility="{x:Bind ViewModel.HasLanOutboxItems, Mode=OneWay}" />
+                                                    <Button Grid.Column="1" Style="{StaticResource StudioChipButtonStyle}" Content="清空队列" Click="OnClearLanOutboxClick" Visibility="{x:Bind ViewModel.HasLanOutboxItems, Mode=OneWay}" />
                                                 </Grid>
-                                                <ItemsControl ItemsSource="{x:Bind ViewModel.SyncOutboxItems, Mode=OneWay}">
-                                                    <ItemsControl.ItemTemplate>
+                                                <ItemsRepeater ItemsSource="{x:Bind ViewModel.SyncOutboxItems, Mode=OneWay}">
+                                                    <ItemsRepeater.Layout>
+                                                        <StackLayout Spacing="4" />
+                                                    </ItemsRepeater.Layout>
+                                                    <ItemsRepeater.ItemTemplate>
                                                         <DataTemplate x:DataType="models:SyncOutboxViewItem">
-                                                            <Border Background="{ThemeResource ZuneSurfaceElevatedBrush}" BorderBrush="{ThemeResource ZuneHairlineBrush}" BorderThickness="1" Padding="10,7" Margin="0,2">
+                                                            <Border Background="{ThemeResource ZuneSurfaceElevatedBrush}" BorderBrush="{ThemeResource ZuneHairlineBrush}" BorderThickness="1" Padding="10,7">
                                                                 <Grid ColumnSpacing="8">
                                                                     <Grid.ColumnDefinitions>
                                                                         <ColumnDefinition Width="Auto" />
@@ -1721,18 +1789,18 @@
                                                                         <ColumnDefinition Width="Auto" />
                                                                         <ColumnDefinition Width="Auto" />
                                                                     </Grid.ColumnDefinitions>
-                                                                    <TextBlock Grid.Column="0" Text="{x:Bind KindLabel}" FontSize="11" Foreground="{ThemeResource ZuneAccentBrush}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                                                    <TextBlock Grid.Column="0" Text="{x:Bind KindLabel}" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" FontWeight="SemiBold" VerticalAlignment="Center" />
                                                                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                                                         <TextBlock Text="{x:Bind DisplayName}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextTrimming="CharacterEllipsis" />
-                                                                        <TextBlock Text="{x:Bind DetailText}" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                                        <TextBlock Text="{x:Bind DetailText}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
                                                                     </StackPanel>
-                                                                    <TextBlock Grid.Column="2" Text="{x:Bind ModeBadge}" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" VerticalAlignment="Center" />
-                                                                    <Button Grid.Column="3" Content="移除" Padding="8,4" FontSize="11" Tag="{x:Bind Id}" Click="OnRemoveLanOutboxItemClick" />
+                                                                    <TextBlock Grid.Column="2" Text="{x:Bind ModeBadge}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" VerticalAlignment="Center" />
+                                                                    <Button Grid.Column="3" Content="移除" MinWidth="28" MinHeight="28" Padding="8,4" FontSize="12" Tag="{x:Bind Id}" Click="OnRemoveLanOutboxItemClick" AutomationProperties.Name="移除发送队列项" />
                                                                 </Grid>
                                                             </Border>
                                                         </DataTemplate>
-                                                    </ItemsControl.ItemTemplate>
-                                                </ItemsControl>
+                                                    </ItemsRepeater.ItemTemplate>
+                                                </ItemsRepeater>
                                             </StackPanel>
 
                                             <StackPanel Spacing="6" Visibility="{x:Bind ViewModel.HasPairedDevices, Mode=OneWay}">
@@ -1748,9 +1816,9 @@
                                                                     </Grid.ColumnDefinitions>
                                                                     <StackPanel Grid.Column="0" VerticalAlignment="Center">
                                                                         <TextBlock Text="{x:Bind DeviceName}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
-                                                                        <TextBlock Text="{x:Bind LastSyncDisplay}" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                                        <TextBlock Text="{x:Bind LastSyncDisplay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
                                                                     </StackPanel>
-                                                                    <Button Grid.Column="1" Content="解除配对" Padding="8,4" FontSize="11" Tag="{x:Bind DeviceId}" Click="OnUnpairLanDeviceClick" />
+                                                                    <Button Grid.Column="1" Content="解除配对" MinWidth="28" MinHeight="28" Padding="8,4" FontSize="12" Tag="{x:Bind DeviceId}" Click="OnUnpairLanDeviceClick" AutomationProperties.Name="解除设备配对" />
                                                                 </Grid>
                                                             </Border>
                                                         </DataTemplate>
@@ -1979,7 +2047,7 @@
                                             <StackPanel Orientation="Horizontal" Spacing="8">
                                                 <Button Style="{StaticResource GoldActionButtonStyle}" Content="切换 / 打开本地音乐目录..." Click="OnOpenFolderClick" />
                                                 <Button Style="{StaticResource StudioChipButtonStyle}" Content="重建曲库索引" Command="{x:Bind ViewModel.RebuildLibraryManifestCommand}" AutomationProperties.Name="重建曲库索引" />
-                                                <Button Style="{StaticResource StudioChipButtonStyle}" Content="文件夹整理" Command="{x:Bind ViewModel.OrganizeLibraryFoldersCommand}" AutomationProperties.Name="文件夹整理" ToolTipService.ToolTip="按 &lt;Album Artist&gt;\&lt;Album&gt;\&lt;Disc-Track#&gt; &lt;Title&gt; 整理散落与超长路径文件" />
+                                                <Button Style="{StaticResource StudioChipButtonStyle}" Content="文件夹整理" Click="OnOrganizeLibraryFoldersClick" AutomationProperties.Name="文件夹整理" ToolTipService.ToolTip="按 &lt;Album Artist&gt;\&lt;Album&gt;\&lt;Disc-Track#&gt; &lt;Title&gt; 整理散落与超长路径文件" />
                                             </StackPanel>
                                             <TextBlock Text="{x:Bind ViewModel.StorageOrganizeStatus, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextWrapping="Wrap" />
                                             <Border Height="1" Background="{ThemeResource ZuneHairlineBrush}" Margin="0,2" />
@@ -2003,7 +2071,7 @@
                                                 <ComboBoxItem Content="跟随系统" Tag="system" />
                                             </ComboBox>
                                             <ToggleSwitch
-                                                Header="随当前专辑封面动态提取主题强调色（默认洋红 #FF1E7A，开启后自动按 WCAG AA 校准亮度）"
+                                                Header="随当前专辑封面动态提取主题强调色（默认洋红 #E5006B，开启后自动按 WCAG AA 校准亮度）"
                                                 IsOn="{x:Bind ViewModel.EnableDynamicCoverAccent, Mode=TwoWay}" />
                                             <TextBlock Text="Windows 对比度主题开启时自动切换为系统高对比度配色。" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextWrapping="Wrap" />
                                             <TextBlock Text="{x:Bind ViewModel.ClassicalRatioText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
@@ -2084,12 +2152,78 @@
                                     </StackPanel>
                                 </StackPanel>
 
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="固定到 quickplay" Command="{x:Bind ViewModel.PinCurrentTrackAlbumToQuickplayCommand}" />
-                                    <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="在馆藏中查看艺人" Click="OnTransportArtistClick" />
-                                    <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="检视与编辑属性 (Ctrl+I)" Click="OnTransportTrackInfoClick" />
-                                    <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="剧场数字册页" Click="OnOpenBookletTheaterClick" Visibility="{x:Bind ViewModel.HasBookletPdf, Mode=OneWay}" />
-                                </StackPanel>
+                                <Border
+                                    BorderBrush="{ThemeResource ZuneHairlineBrush}"
+                                    BorderThickness="0,1,0,0"
+                                    Padding="0,10,0,0">
+                                    <StackPanel Orientation="Horizontal" Spacing="4">
+                                        <Button
+                                            Style="{StaticResource ZuneGalleryActionButtonStyle}"
+                                            Click="OnTransportArtistClick"
+                                            AutomationProperties.Name="查看艺人"
+                                            ToolTipService.ToolTip="在馆藏中查看艺人">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE77B;" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" />
+                                                <TextBlock Text="查看艺人" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button
+                                            x:Name="NowPlayingComposerButton"
+                                            Style="{StaticResource ZuneGalleryActionButtonStyle}"
+                                            Click="OnTransportComposerClick"
+                                            Visibility="{x:Bind ViewModel.ShowNowPlayingComposerAction, Mode=OneWay}"
+                                            AutomationProperties.Name="查看作曲"
+                                            ToolTipService.ToolTip="{x:Bind ViewModel.NowPlayingComposerTooltip, Mode=OneWay}">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE8D6;" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" />
+                                                <TextBlock Text="查看作曲" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button
+                                            x:Name="NowPlayingConductorButton"
+                                            Style="{StaticResource ZuneGalleryActionButtonStyle}"
+                                            Click="OnTransportConductorClick"
+                                            Visibility="{x:Bind ViewModel.ShowNowPlayingConductorAction, Mode=OneWay}"
+                                            AutomationProperties.Name="查看指挥"
+                                            ToolTipService.ToolTip="{x:Bind ViewModel.NowPlayingConductorTooltip, Mode=OneWay}">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE7F6;" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" />
+                                                <TextBlock Text="查看指挥" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button
+                                            Style="{StaticResource ZuneGalleryActionButtonStyle}"
+                                            Click="OnTransportTrackInfoClick"
+                                            AutomationProperties.Name="编辑属性"
+                                            ToolTipService.ToolTip="检视与编辑属性 (Ctrl+I)">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE70F;" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                <TextBlock Text="编辑属性" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button
+                                            Style="{StaticResource ZuneGalleryActionButtonStyle}"
+                                            Command="{x:Bind ViewModel.PinCurrentTrackAlbumToQuickplayCommand}"
+                                            AutomationProperties.Name="固定到 quickplay"
+                                            ToolTipService.ToolTip="固定到 quickplay">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE718;" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                <TextBlock Text="固定" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Button
+                                            Style="{StaticResource ZuneGalleryActionButtonStyle}"
+                                            Click="OnOpenBookletTheaterClick"
+                                            Visibility="{x:Bind ViewModel.HasBookletPdf, Mode=OneWay}"
+                                            AutomationProperties.Name="剧场数字册页"
+                                            ToolTipService.ToolTip="剧场数字册页">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <FontIcon Glyph="&#xE82D;" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                <TextBlock Text="数字册页" />
+                                            </StackPanel>
+                                        </Button>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
 
                             <!-- Right Translucent Gallery Panel: Up Next / Booklet / Alternate Recordings (Collapsible) -->
@@ -2155,7 +2289,8 @@
                                                     Background="Transparent"
                                                     BorderThickness="0"
                                                     Padding="4,6"
-                                                    Click="OnPlayQueueTrackClick">
+                                                    Click="OnPlayQueueTrackClick"
+                                                    AutomationProperties.Name="{x:Bind AccessibilitySummary}">
                                                     <Grid ColumnSpacing="8">
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto" />
@@ -2184,21 +2319,24 @@
                                     </StackPanel>
 
                                     <ScrollViewer Grid.Row="1" Visibility="{x:Bind ViewModel.IsNowPlayingAlternatesTab, Mode=OneWay}">
-                                        <ItemsControl ItemsSource="{x:Bind ViewModel.AlternateRecordings, Mode=OneWay}">
-                                            <ItemsControl.ItemTemplate>
+                                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.AlternateRecordings, Mode=OneWay}">
+                                            <ItemsRepeater.Layout>
+                                                <StackLayout Spacing="6" />
+                                            </ItemsRepeater.Layout>
+                                            <ItemsRepeater.ItemTemplate>
                                                 <DataTemplate x:DataType="models:TrackItem">
                                                     <Button
                                                         HorizontalAlignment="Stretch"
                                                         HorizontalContentAlignment="Left"
                                                         Style="{StaticResource ZuneFlatButtonStyle}"
-                                                        Margin="0,0,0,6"
                                                         Tag="{x:Bind TrackUid}"
-                                                        Click="OnSwitchAlternateRecordingClick">
+                                                        Click="OnSwitchAlternateRecordingClick"
+                                                        AutomationProperties.Name="{x:Bind AlternateVersionLabel}">
                                                         <TextBlock Text="{x:Bind AlternateVersionLabel}" FontSize="12" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextWrapping="Wrap" />
                                                     </Button>
                                                 </DataTemplate>
-                                            </ItemsControl.ItemTemplate>
-                                        </ItemsControl>
+                                            </ItemsRepeater.ItemTemplate>
+                                        </ItemsRepeater>
                                     </ScrollViewer>
                                 </Grid>
                             </Border>
@@ -2463,22 +2601,25 @@
 
                             <StackPanel Spacing="6" Visibility="{x:Bind ViewModel.HasAlternateRecordings, Mode=OneWay}">
                                 <TextBlock Text="同乐章多录音版本 · 原位 A/B 切换" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" />
-                                <ItemsControl ItemsSource="{x:Bind ViewModel.AlternateRecordings, Mode=OneWay}">
-                                    <ItemsControl.ItemTemplate>
+                                <ItemsRepeater ItemsSource="{x:Bind ViewModel.AlternateRecordings, Mode=OneWay}">
+                                    <ItemsRepeater.Layout>
+                                        <StackLayout Spacing="4" />
+                                    </ItemsRepeater.Layout>
+                                    <ItemsRepeater.ItemTemplate>
                                         <DataTemplate x:DataType="models:TrackItem">
                                             <Button
                                                 HorizontalAlignment="Stretch"
                                                 HorizontalContentAlignment="Left"
                                                 Style="{StaticResource StudioChipButtonStyle}"
                                                 Padding="9,6"
-                                                Margin="0,2"
                                                 Tag="{x:Bind TrackUid}"
-                                                Click="OnSwitchAlternateRecordingClick">
+                                                Click="OnSwitchAlternateRecordingClick"
+                                                AutomationProperties.Name="{x:Bind AlternateVersionLabel}">
                                                 <TextBlock Text="{x:Bind AlternateVersionLabel}" FontSize="12" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextWrapping="Wrap" />
                                             </Button>
                                         </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                    </ItemsRepeater.ItemTemplate>
+                                </ItemsRepeater>
                             </StackPanel>
 
                             <Border Style="{StaticResource StudioCardStyle}" Padding="0,10,0,10">
@@ -2498,13 +2639,13 @@
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
                                         <TextBlock x:Name="BookletPageStatusText" Grid.Column="0" Text="数字册页" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" VerticalAlignment="Center" />
-                                        <Button Grid.Column="1" Padding="6,4" Click="OnBookletPrevClick" AutomationProperties.Name="上一页数字册页" ToolTipService.ToolTip="上一页">
+                                        <Button Grid.Column="1" MinWidth="28" MinHeight="28" Padding="6,4" Click="OnBookletPrevClick" AutomationProperties.Name="上一页数字册页" ToolTipService.ToolTip="上一页">
                                             <FontIcon Glyph="&#xE76B;" FontSize="12" />
                                         </Button>
-                                        <Button Grid.Column="2" Padding="6,4" Margin="4,0" Click="OnBookletNextClick" AutomationProperties.Name="下一页数字册页" ToolTipService.ToolTip="下一页">
+                                        <Button Grid.Column="2" MinWidth="28" MinHeight="28" Padding="6,4" Margin="4,0" Click="OnBookletNextClick" AutomationProperties.Name="下一页数字册页" ToolTipService.ToolTip="下一页">
                                             <FontIcon Glyph="&#xE76C;" FontSize="12" />
                                         </Button>
-                                        <Button Grid.Column="3" Content="剧场大图" Padding="8,2" FontSize="12" Click="OnOpenBookletTheaterClick" AutomationProperties.Name="打开数字册页剧场大图" />
+                                        <Button Grid.Column="3" Content="剧场大图" MinHeight="28" Padding="8,4" FontSize="12" Click="OnOpenBookletTheaterClick" AutomationProperties.Name="打开数字册页剧场大图" />
                                     </Grid>
                                     <Image x:Name="BookletPageImage" MaxHeight="240" Stretch="Uniform" />
                                 </StackPanel>
@@ -2547,6 +2688,7 @@
                         BorderBrush="{ThemeResource ZuneHairlineBrush}"
                         BorderThickness="1"
                         Click="OnTransportCoverClick"
+                        AutomationProperties.Name="打开 now playing 全屏画廊"
                         ToolTipService.ToolTip="打开 now playing 全屏画廊">
                         <Grid>
                             <FontIcon Glyph="&#xE8D6;" FontSize="18" Foreground="{ThemeResource ZuneInkTertiaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -2561,6 +2703,7 @@
                             HorizontalAlignment="Left"
                             HorizontalContentAlignment="Left"
                             Click="OnTransportTrackInfoClick"
+                            AutomationProperties.Name="检视当前曲目与所属专辑"
                             ToolTipService.ToolTip="检视当前曲目与所属专辑">
                             <TextBlock Text="{x:Bind ViewModel.CurrentTrack.Title, Mode=OneWay, FallbackValue='未在播放'}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextTrimming="CharacterEllipsis" />
                         </Button>
@@ -2571,10 +2714,11 @@
                             HorizontalAlignment="Left"
                             HorizontalContentAlignment="Left"
                             Click="OnTransportArtistClick"
+                            AutomationProperties.Name="筛选此艺人的全部曲目"
                             ToolTipService.ToolTip="筛选此艺人的全部曲目">
                             <TextBlock Text="{x:Bind ViewModel.CurrentTrack.ArtistsDisplay, Mode=OneWay, FallbackValue='双击任意曲目开始播放'}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                         </Button>
-                        <TextBlock Text="{x:Bind ViewModel.CurrentTrackSpecsSubline, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneAccentBrush}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{x:Bind ViewModel.CurrentTrackSpecsSubline, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" TextTrimming="CharacterEllipsis" />
                     </StackPanel>
                     <Button
                         Grid.Column="2"
@@ -2586,7 +2730,7 @@
                         VerticalAlignment="Center"
                         Visibility="{x:Bind ViewModel.HasCurrentTrack, Mode=OneWay}"
                         Command="{x:Bind ViewModel.ToggleCurrentTrackLovedCommand}"
-                        AutomationProperties.Name="喜爱或取消喜爱当前曲目"
+                        AutomationProperties.Name="{x:Bind HeartAutomationName(ViewModel.CurrentTrackLoved), Mode=OneWay}"
                         ToolTipService.ToolTip="喜爱 / 取消喜爱（实时推送至 Last.fm Loved tracks）">
                         <FontIcon
                             x:Name="TransportHeartIcon"
@@ -2743,7 +2887,7 @@
                                                     Click="OnQuickQueueSlotChipClick">
                                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                                         <Rectangle Width="6" Height="6" Fill="{ThemeResource ZuneAccentBrush}" Visibility="{x:Bind IsActive}" VerticalAlignment="Center" />
-                                                        <TextBlock Text="{x:Bind Label}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                        <TextBlock Text="{x:Bind Label}" FontSize="12" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
                                                     </StackPanel>
                                                 </Button>
                                             </DataTemplate>
@@ -2751,7 +2895,7 @@
                                     </ItemsControl>
                                     <StackPanel Orientation="Horizontal" Spacing="6">
                                         <Button Style="{StaticResource GoldActionButtonStyle}" Content="载入当前筛选列表" Command="{x:Bind ViewModel.LoadCurrentViewToQueueCommand}" Padding="10,5" />
-                                        <Button Style="{StaticResource StudioChipButtonStyle}" Content="清空队列" Command="{x:Bind ViewModel.ClearPlaybackQueueCommand}" Padding="10,5" />
+                                        <Button Style="{StaticResource StudioChipButtonStyle}" Content="清空队列" Click="OnClearPlaybackQueueClick" Padding="10,5" />
                                     </StackPanel>
                                     <ListView
                                         x:Name="PlaybackQueueListView"
@@ -2764,7 +2908,7 @@
                                         SelectionMode="None">
                                         <ListView.ItemTemplate>
                                             <DataTemplate x:DataType="models:TrackItem">
-                                                <Grid ColumnSpacing="8" Padding="2,4">
+                                                <Grid ColumnSpacing="8" Padding="2,4" AutomationProperties.Name="{x:Bind AccessibilitySummary}">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="Auto" />
                                                         <ColumnDefinition Width="*" />
@@ -2774,12 +2918,12 @@
                                                     <FontIcon x:Name="QueuePlayingGlyph" Grid.Column="0" Glyph="&#xE768;" FontSize="11" Foreground="{ThemeResource ZuneAccentBrush}" Visibility="Collapsed" VerticalAlignment="Center" />
                                                     <StackPanel Grid.Column="1" Spacing="1">
                                                         <TextBlock x:Name="QueueTitleText" Text="{x:Bind Title}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextTrimming="CharacterEllipsis" />
-                                                        <TextBlock Text="{x:Bind ArtistsDisplay}" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Text="{x:Bind ArtistsDisplay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                                                     </StackPanel>
-                                                    <Button Grid.Column="2" Padding="6,4" Background="Transparent" BorderThickness="0" Click="OnPlayQueueTrackClick" ToolTipService.ToolTip="立即播放" AutomationProperties.Name="从队列播放此曲目">
+                                                    <Button Grid.Column="2" MinWidth="28" MinHeight="28" Padding="6,4" Background="Transparent" BorderThickness="0" Click="OnPlayQueueTrackClick" ToolTipService.ToolTip="立即播放" AutomationProperties.Name="从队列播放此曲目">
                                                         <FontIcon Glyph="&#xE768;" FontSize="12" />
                                                     </Button>
-                                                    <Button Grid.Column="3" Padding="6,4" Background="Transparent" BorderThickness="0" Click="OnRemoveQueueTrackClick" ToolTipService.ToolTip="从队列移除" AutomationProperties.Name="从队列移除此曲目">
+                                                    <Button Grid.Column="3" MinWidth="28" MinHeight="28" Padding="6,4" Background="Transparent" BorderThickness="0" Click="OnRemoveQueueTrackClick" ToolTipService.ToolTip="从队列移除" AutomationProperties.Name="从队列移除此曲目">
                                                         <FontIcon Glyph="&#xE711;" FontSize="12" />
                                                     </Button>
                                                 </Grid>
@@ -2887,7 +3031,7 @@
                         <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
                             <FontIcon Glyph="&#xE708;" FontSize="13" />
                             <TextBlock Text="{x:Bind ViewModel.SleepTimerBadge, Mode=OneWay}"
-                                       FontSize="11"
+                                       FontSize="12"
                                        FontFamily="Cascadia Mono, Consolas, Segoe UI"
                                        Foreground="{ThemeResource ZuneAccentBrush}"
                                        Visibility="{x:Bind ViewModel.IsSleepTimerActive, Mode=OneWay}" />

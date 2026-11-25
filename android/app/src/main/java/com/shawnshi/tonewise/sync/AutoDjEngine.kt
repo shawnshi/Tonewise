@@ -444,6 +444,9 @@ object AutoDjEngine {
         if (sceneContext == null) return null
         val id = sceneContext.sceneId.trim().lowercase()
         SCENE_BIASES[id]?.let { return it }
+        BUILTIN_SCENE_UUID_TO_KEY[id]?.let { mapped ->
+            SCENE_BIASES[mapped]?.let { return it }
+        }
         return when (sceneContext.sortArc.trim().lowercase()) {
             "rediscovery_90d" -> SCENE_BIASES["rediscovery_90d"]
             "energy_desc_sleep" -> SCENE_BIASES["relax"]
@@ -452,6 +455,16 @@ object AutoDjEngine {
             else -> null
         }
     }
+
+    private val BUILTIN_SCENE_UUID_TO_KEY =
+        mapOf(
+            "11111111-1111-4111-8111-111111111111" to "focus",
+            "22222222-2222-4222-8222-222222222222" to "coding",
+            "33333333-3333-4333-8333-333333333333" to "relax",
+            "44444444-4444-4444-8444-444444444444" to "rediscovery_90d",
+            "55555555-5555-4555-8555-555555555555" to "energy",
+            "66666666-6666-4666-8666-666666666666" to "pop",
+        )
 
     private fun blendProfile(
         timeProfile: AutoDjTimeProfile,

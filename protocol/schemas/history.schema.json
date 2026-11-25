@@ -21,13 +21,15 @@
       "required": ["track_uid", "field", "value", "lww_ts_ms", "device_id"],
       "additionalProperties": false,
       "properties": {
+        "mutation_key": { "type": "string", "minLength": 1 },
         "track_uid": { "type": "string", "minLength": 1 },
         "field": {
           "type": "string",
-          "enum": ["dj_scene", "dj_vocals", "dj_energy", "tempo_bucket", "mood", "rating"]
+          "enum": ["dj_scene", "dj_vocals", "dj_energy", "tempo_bucket", "tempo_bpm", "mood", "mood_json", "rating"]
         },
         "value": {},
         "lww_ts_ms": { "type": "integer", "minimum": 0 },
+        "updated_at_ms": { "type": "integer", "minimum": 0 },
         "device_id": { "type": "string", "minLength": 1 }
       }
     },

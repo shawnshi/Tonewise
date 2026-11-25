@@ -275,13 +275,20 @@ public sealed class ZuneUiUpgradeTests
         Assert.True(QuickplayPinMatcher.MatchesTrack(genrePin, "u8", "Kind of Blue", "", "Jazz", "Miles Davis", "", "", "", ""));
     }
 
+    private static string ReadAllMainWindowSources(string desktopRoot) =>
+        string.Join(
+            Environment.NewLine,
+            Directory.EnumerateFiles(desktopRoot, "MainWindow*.cs", SearchOption.TopDirectoryOnly)
+                .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                .Select(File.ReadAllText));
+
     [Fact]
     public void MainWindowXamlAndCodeBehind_PassZuneAuditRegressionGuards()
     {
         string repoRoot = FindRepoRoot();
         string desktopRoot = Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop");
         string xaml = File.ReadAllText(Path.Combine(desktopRoot, "MainWindow.xaml"));
-        string cs = File.ReadAllText(Path.Combine(desktopRoot, "MainWindow.xaml.cs"));
+        string cs = ReadAllMainWindowSources(desktopRoot);
 
         Assert.DoesNotContain("PivotInkBrush", xaml, StringComparison.Ordinal);
         Assert.Contains("PivotInkOpacity", xaml, StringComparison.Ordinal);
@@ -321,6 +328,172 @@ public sealed class ZuneUiUpgradeTests
         Assert.Contains("UseLayoutRounding=\"True\"", xaml, StringComparison.Ordinal);
         string motionCs = File.ReadAllText(Path.Combine(desktopRoot, "Motion", "ZuneMotionHelper.cs"));
         Assert.Contains("SetIsTranslationEnabled(element, false)", motionCs, StringComparison.Ordinal);
+
+        // Playlists deck visibility, expand toggle, scrollbar, and 2-line wrap
+        Assert.Contains("PlaylistsCountBadge", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"PlaylistsExpandToggleButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ScrollViewer.VerticalScrollBarVisibility=\"Visible\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("PlaylistsDeckMaxHeight(ViewModel.IsPlaylistsExpanded)", xaml, StringComparison.Ordinal);
+
+        // Inbox audit bucket counts & summary banner
+        Assert.Contains("x:Name=\"InboxAuditChipsPanel\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.AuditMissingGenreLabel", xaml, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.AuditRediscovery90dLabel", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"InboxAuditResultSummaryBlock\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("SyncActiveInboxAuditButtons", cs, StringComparison.Ordinal);
+
+        // Now Playing classical composer & conductor navigation actions
+        Assert.Contains("x:Name=\"NowPlayingComposerButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"NowPlayingConductorButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("OnTransportComposerClick", cs, StringComparison.Ordinal);
+        Assert.Contains("OnTransportConductorClick", cs, StringComparison.Ordinal);
+
+        // SSOT 5D mood cluster alignment (zero legacy focus_deep/bright_energetic/melancholic_dark)
+        Assert.DoesNotContain("focus_deep", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("bright_energetic", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("melancholic_dark", xaml, StringComparison.Ordinal);
+        Assert.Contains("deep_introspective", xaml, StringComparison.Ordinal);
+        Assert.Contains("bright_joyful", xaml, StringComparison.Ordinal);
+        Assert.Contains("high_tension", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BatchAAndB_SecurityPairingStagingAndMoodSsot_PassRegressionGuards()
+    {
+        // 1. P0-S3: USB remote_music_root strict whitelist
+        Assert.True(Tonewise.SyncHost.Usb.UsbAdbSyncClient.TryValidateRemoteMusicRoot(null, out string defRoot));
+        Assert.Equal("/storage/emulated/0/Music", defRoot);
+        Assert.True(Tonewise.SyncHost.Usb.UsbAdbSyncClient.TryValidateRemoteMusicRoot("/sdcard/Music/Tonewise", out _));
+        Assert.False(Tonewise.SyncHost.Usb.UsbAdbSyncClient.TryValidateRemoteMusicRoot("/data/local/tmp", out _));
+        Assert.False(Tonewise.SyncHost.Usb.UsbAdbSyncClient.TryValidateRemoteMusicRoot("/storage/emulated/0/Music/../../Download", out _));
+        Assert.False(Tonewise.SyncHost.Usb.UsbAdbSyncClient.TryValidateRemoteMusicRoot("/storage/emulated/0/Music;rm -rf", out _));
+
+        // 2. P0-S4: Pairing global failure threshold preserves per-client IP lockouts
+        string root = Path.Combine(Path.GetTempPath(), $"tw_pair_lock_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var pairStore = new SyncOutboxAndPairingStore(root);
+            for (int i = 0; i < 5; i++)
+            {
+                pairStore.TryPairWithStatus("000000", "d1", "Phone 1", out _, out _, out _, "192.168.1.10");
+            }
+            Assert.Equal(PairAttemptStatus.LockedOut, pairStore.TryPairWithStatus("000000", "d1", "Phone 1", out _, out _, out _, "192.168.1.10"));
+
+            // Trigger 15 global failures from different attackers
+            for (int a = 0; a < 15; a++)
+            {
+                pairStore.TryPairWithStatus("000000", $"att_{a}", "Attacker", out _, out _, out _, $"192.168.1.{50 + a}");
+            }
+            // Original attacker IP MUST remain locked out!
+            Assert.Equal(PairAttemptStatus.LockedOut, pairStore.TryPairWithStatus("000000", "d1", "Phone 1", out _, out _, out _, "192.168.1.10"));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+
+        // 3. P0-C2: 5D mood clusters SSOT alignment + legacy normalization + Rust EvaluateScene
+        Assert.Equal("deep_introspective", FiveDimQueryBuilder.NormalizeMoodClusterId("focus_deep"));
+        Assert.Equal("bright_joyful", FiveDimQueryBuilder.NormalizeMoodClusterId("bright_energetic"));
+        Assert.Equal("high_tension", FiveDimQueryBuilder.NormalizeMoodClusterId("melancholic_dark"));
+
+        string sceneJson = FiveDimQueryBuilder.BuildSceneCardJson(new FiveDimFilterQuery(MoodCluster: "deep_introspective"));
+        string tracksJson = System.Text.Json.JsonSerializer.Serialize(new[]
+        {
+            new { track_uid = "t_deep", title = "A", dj_scene = Array.Empty<string>(), dj_vocals = "instrumental", dj_energy = "low", tempo_bucket = "Slow", moods = new[] { "Melancholic", "Contemplative" }, genre = "Classical", rating = 5, unplayed_days = 10 },
+            new { track_uid = "t_bright", title = "B", dj_scene = Array.Empty<string>(), dj_vocals = "vocal", dj_energy = "high", tempo_bucket = "Fast", moods = new[] { "Cheerful" }, genre = "Pop", rating = 3, unplayed_days = 10 },
+        });
+        var matched = Tonewise.Interop.TonewiseCoreClient.EvaluateScene(sceneJson, tracksJson);
+        Assert.Equal(["t_deep"], matched);
+
+        // 4. P0-D2: StagingDiffStore pre-bounds physical track count so deferred tracks stay Approved (not silently Committed)
+        string stageDir = Path.Combine(Path.GetTempPath(), $"tw_stage_cap_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(stageDir);
+        string stageDb = Path.Combine(stageDir, "manifest.db");
+        try
+        {
+            string schemaSql = File.ReadAllText(Path.Combine(FindRepoRoot(), "protocol", "schemas", "manifest.sql"));
+            using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={stageDb}"))
+            {
+                conn.Open();
+                using var setup = conn.CreateCommand();
+                setup.CommandText = schemaSql;
+                setup.ExecuteNonQuery();
+                for (int i = 1; i <= 3; i++)
+                {
+                    using var ins = conn.CreateCommand();
+                    ins.CommandText = $"""
+                        INSERT INTO tracks (
+                            track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                            rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms, title
+                        ) VALUES (
+                            'u{i}', X'0{i}', 128, X'0{i}', 0, '0{i}.flac', 1024, 1000, 'flac', 44100, 1000, 'T{i}'
+                        );
+                        """;
+                    ins.ExecuteNonQuery();
+                }
+            }
+            var diffStore = new Tonewise.SyncHost.Curation.StagingDiffStore(stageDb);
+            diffStore.EnqueueProposals([
+                Tonewise.SyncHost.Curation.StagingDiffStore.TryCreateProposal("u1", "genre", null, "Classical", 0.95, "Test")!,
+                Tonewise.SyncHost.Curation.StagingDiffStore.TryCreateProposal("u2", "genre", null, "Jazz", 0.95, "Test")!,
+                Tonewise.SyncHost.Curation.StagingDiffStore.TryCreateProposal("u3", "genre", null, "Rock", 0.95, "Test")!,
+            ]);
+            var batch1 = diffStore.CommitApprovedBatch("cap-1", autoApproveThreshold: 0.90, maxProposals: 100, maxPhysicalFiles: 2);
+            Assert.Equal(2, batch1.CommittedCount);
+            var (approvedLeft, pendingLeft) = diffStore.GetPendingProposalCounts();
+            Assert.Equal(0, approvedLeft);
+            Assert.Equal(1, pendingLeft);
+            var batch2 = diffStore.CommitApprovedBatch("cap-2", autoApproveThreshold: 0.90, maxProposals: 100, maxPhysicalFiles: 2);
+            Assert.Equal(1, batch2.CommittedCount);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(stageDir)) Directory.Delete(stageDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void InboxAuditEvaluator_ComputesExactBucketCounts_MatchesModes_AndFormatsSummary()
+    {
+        long nowMs = 1_760_000_000_000L;
+        long recentMs = nowMs - 5L * 86_400_000L;
+        long staleMs = nowMs - 100L * 86_400_000L;
+
+        var tracks = new[]
+        {
+            new InboxAuditTrackSeed("Classical", "Beethoven", "Karajan", "Sym 9", "DG", 2, "slow", 72.0, "c1.jpg", "instrumental", recentMs),
+            new InboxAuditTrackSeed("", "", "", "Untitled", "", 0, null, null, null, "unknown", 0),
+            new InboxAuditTrackSeed("Jazz", "", "", "", "Blue Note", 0, "medium", null, "", null, staleMs),
+        };
+
+        var counts = InboxAuditEvaluator.ComputeCounts(tracks, nowMs);
+        Assert.Equal(1, counts.MissingGenre);
+        Assert.Equal(2, counts.MissingComposer);
+        Assert.Equal(2, counts.MissingConductor);
+        Assert.Equal(1, counts.MissingAlbum);
+        Assert.Equal(1, counts.MissingPublisher);
+        Assert.Equal(2, counts.MissingScene);
+        Assert.Equal(1, counts.MissingTempo);
+        Assert.Equal(2, counts.MissingCover);
+        Assert.Equal(2, counts.MissingVocals);
+        Assert.Equal(2, counts.Rediscovery90d);
+
+        int genreMatched = tracks.Count(t => InboxAuditEvaluator.MatchesMode(t, "audit_missing_genre", nowMs));
+        Assert.Equal(counts.MissingGenre, genreMatched);
+        Assert.Contains("命中 1 首", InboxAuditEvaluator.FormatResultSummary("audit_missing_genre", "体检 · 缺失流派", genreMatched, tracks.Length));
+        Assert.Contains("0 首缺失", InboxAuditEvaluator.FormatResultSummary("audit_missing_genre", "体检 · 缺失流派", 0, tracks.Length));
+    }
+
+    [Fact]
+    public void TrackItem_ClassifyIsClassical_DistinguishesClassicalVsPop_ForComposerConductorActions()
+    {
+        Assert.True(Tonewise.Desktop.Models.TrackItem.ClassifyIsClassical("Classical", "", "Beethoven", "Karajan"));
+        Assert.True(Tonewise.Desktop.Models.TrackItem.ClassifyIsClassical("", "Symphony No. 9", "", ""));
+        Assert.True(Tonewise.Desktop.Models.TrackItem.ClassifyIsClassical("", "", "", "Abbado"));
+        Assert.False(Tonewise.Desktop.Models.TrackItem.ClassifyIsClassical("Pop", "", "Max Martin", ""));
     }
 
     [Fact]
@@ -373,8 +546,305 @@ public sealed class ZuneUiUpgradeTests
         }
         finally
         {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempRoot))
                 Directory.Delete(tempRoot, recursive: true);
         }
+    }
+
+    [Fact]
+    public void BatchCAndD_LastFmRedaction_WatcherAiff_PairingLruAndProtocolHygieneGuardsHold()
+    {
+        // C6.6: Last.fm secret redaction
+        string rawUrl = "https://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=shawn&api_key=SECRET123&sk=SESS456&api_sig=SIG789&format=json";
+        string redacted = Tonewise.SyncHost.Ledger.LastFmWebApiClient.RedactSensitiveQueryParams(rawUrl);
+        Assert.DoesNotContain("SECRET123", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("SESS456", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("SIG789", redacted, StringComparison.Ordinal);
+        Assert.Contains("api_key=REDACTED", redacted, StringComparison.Ordinal);
+        Assert.Contains("sk=REDACTED", redacted, StringComparison.Ordinal);
+        Assert.Contains("api_sig=REDACTED", redacted, StringComparison.Ordinal);
+
+        // C6.5: LibraryFileWatcherService recognizes AIFF/AIF extensions
+        Assert.True(Tonewise.SyncHost.Curation.LibraryFileWatcherService.ShouldProcessPath(@"C:\Music\Symphony.aiff", isChangeOnly: false));
+        Assert.True(Tonewise.SyncHost.Curation.LibraryFileWatcherService.ShouldProcessPath(@"C:\Music\Symphony.AIF", isChangeOnly: true));
+        Assert.False(Tonewise.SyncHost.Curation.LibraryFileWatcherService.ShouldProcessPath(@"C:\Music\.tmp.aiff", isChangeOnly: false));
+
+        // C6.3 + C6.2: Pairing device cache & DesktopStateStore read-only ListQuickplayPins
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"tonewise_batch_cd_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var store = new SyncOutboxAndPairingStore(tempRoot);
+            var rec = store.PairDeviceDirect("dev_cache_1", "Pixel 9", out string issuedToken);
+            Assert.Equal("dev_cache_1", rec.DeviceId);
+            Assert.True(store.ValidateBearerToken("Bearer " + issuedToken, out var hit1));
+            Assert.Equal("Pixel 9", hit1?.DeviceName);
+            Assert.True(store.ValidateBearerToken("Bearer " + issuedToken, out var hit2));
+            Assert.Equal("dev_cache_1", hit2?.DeviceId);
+
+            // TTL rotation source keeps active per-client lockouts (no _pairLockoutsByClient.Clear() inside RotatePairingCodeIfExpiredUnlocked)
+            string repoRoot = FindRepoRoot();
+            string pairingSrc = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.SyncHost", "SyncOutboxAndPairingStore.cs"));
+            int rotIdx = pairingSrc.IndexOf("private void RotatePairingCodeIfExpiredUnlocked", StringComparison.Ordinal);
+            Assert.True(rotIdx >= 0);
+            string rotBody = pairingSrc.Substring(rotIdx, Math.Min(700, pairingSrc.Length - rotIdx));
+            Assert.DoesNotContain("_pairLockoutsByClient.Clear()", rotBody, StringComparison.Ordinal);
+
+            // DesktopStateStore.ListQuickplayPins succeeds repeatedly via EnsureSchemaOnce + OpenReadOnly
+            string stateDbPath = DesktopStateStore.ResolveStateDbPath(Path.Combine(tempRoot, ".tonewise", "manifest.db"));
+            DesktopStateStore.UpsertQuickplayPin(stateDbPath, new QuickplayPinRecord(
+                PinId: "p1", Kind: "album", TargetKey: "Beethoven", Title: "Sym 9",
+                Subtitle: "Karajan", CoverPath: null, SortOrder: 0, PinnedAtMs: 1234L));
+            Assert.Single(DesktopStateStore.ListQuickplayPins(stateDbPath));
+            Assert.Single(DesktopStateStore.ListQuickplayPins(stateDbPath));
+
+            // C6.1: CoverArtImageCache checks Cache before File.Exists and uses LruOrder eviction
+            string cacheSrc = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "Services", "CoverArtImageCache.cs"));
+            Assert.DoesNotContain("Cache.Clear();\n                }", cacheSrc, StringComparison.Ordinal);
+            Assert.Contains("LruOrder", cacheSrc, StringComparison.Ordinal);
+            int cacheIdx = cacheSrc.IndexOf("Cache.TryGetValue(cacheKey", StringComparison.Ordinal);
+            int existsIdx = cacheSrc.IndexOf("File.Exists(coverArtPath)", StringComparison.Ordinal);
+            Assert.True(cacheIdx > 0 && (existsIdx < 0 || existsIdx > cacheIdx), "CoverArtImageCache must check memory cache before or instead of File.Exists");
+
+            // C7: Protocol SSOT schema alignment
+            string manifestSql = File.ReadAllText(Path.Combine(repoRoot, "protocol", "schemas", "manifest.sql"));
+            Assert.Contains("(v2)", manifestSql, StringComparison.Ordinal);
+            string scenesSchema = File.ReadAllText(Path.Combine(repoRoot, "protocol", "schemas", "scenes_5d.schema.json"));
+            Assert.Contains("\"composer\"", scenesSchema, StringComparison.Ordinal);
+            Assert.Contains("\"conductor\"", scenesSchema, StringComparison.Ordinal);
+            Assert.Contains("\"work_name\"", scenesSchema, StringComparison.Ordinal);
+            Assert.Contains("\"neq\"", scenesSchema, StringComparison.Ordinal);
+            string historySchema = File.ReadAllText(Path.Combine(repoRoot, "protocol", "schemas", "history.schema.json"));
+            Assert.Contains("\"tempo_bpm\"", historySchema, StringComparison.Ordinal);
+            Assert.Contains("\"mutation_key\"", historySchema, StringComparison.Ordinal);
+
+            // D2 + D3 + D4: Version alignment, fail-closed Release guard, and Core+Desktop CI workflow
+            string cargoToml = File.ReadAllText(Path.Combine(repoRoot, "core", "Cargo.toml"));
+            Assert.Contains("version = \"1.0.7\"", cargoToml, StringComparison.Ordinal);
+            string desktopCsproj = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "Tonewise.Desktop.csproj"));
+            Assert.Contains("EnsureNativeCoreBinariesInRelease", desktopCsproj, StringComparison.Ordinal);
+            Assert.Contains("tonewise-cli.exe", File.ReadAllText(Path.Combine(repoRoot, "scripts", "build-core-desktop.ps1")), StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(repoRoot, ".github", "workflows", "ci-core-desktop.yml")));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot))
+                Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Stage1_SafeSyncDefaults_DryRunOrganize_AndDestructiveActionGuardsHold()
+    {
+        // PC-UX-01: Safe USB Mirror Prune defaults
+        var settingsDefaults = new DesktopUserSettings();
+        Assert.False(settingsDefaults.EnableMirrorPrune);
+        Assert.Equal("managed_only", settingsDefaults.MirrorPruneScope);
+        Assert.False(settingsDefaults.AllowAdbForeignDeleteFallback);
+
+        var policyDefaults = new SyncPolicyConfig();
+        Assert.False(policyDefaults.MirrorPruneEnabled);
+        Assert.Equal("managed_only", policyDefaults.PruneScope);
+        Assert.False(policyDefaults.AllowAdbForeignDeleteFallback);
+
+        // PC-UX-03: OrganizeLibraryFolders(..., dryRun: true) reports changes without touching disk or DB
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"tonewise_stage1_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            string unsortedDir = Path.Combine(tempRoot, "Inbox");
+            Directory.CreateDirectory(unsortedDir);
+            string srcFile = Path.Combine(unsortedDir, "01 Symphony.flac");
+            File.WriteAllBytes(srcFile, [1, 2, 3, 4]);
+
+            string repoRoot = FindRepoRoot();
+            string dbDir = Path.Combine(tempRoot, ".tonewise");
+            Directory.CreateDirectory(dbDir);
+            string dbPath = Path.Combine(dbDir, "manifest.db");
+            string manifestSchemaSql = File.ReadAllText(Path.Combine(repoRoot, "protocol", "schemas", "manifest.sql"));
+            using (var conn = TonewiseSqlite.OpenReadWrite(dbPath))
+            {
+                using (var schemaCmd = conn.CreateCommand())
+                {
+                    schemaCmd.CommandText = manifestSchemaSql;
+                    schemaCmd.ExecuteNonQuery();
+                }
+                ManifestSchemaProvider.EnsureSchemaV2(conn);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                        title, album, album_artist, artists_json
+                    ) VALUES (
+                        'uid_dry_1', X'0102', 0, X'0304', 0,
+                        'Inbox/01 Symphony.flac', 4, 1000, 'flac', 44100, 180000,
+                        'Symphony No. 9', 'Beethoven Box', 'Karajan', '["Karajan"]'
+                    );
+                    """;
+                cmd.ExecuteNonQuery();
+            }
+
+            var preview = Tonewise.SyncHost.Curation.LibraryFolderOrganizerService.OrganizeLibraryFolders(
+                tempRoot, dbPath, dryRun: true);
+            Assert.Equal(1, preview.MovedCount);
+            Assert.Single(preview.SampleMoves);
+            Assert.True(File.Exists(srcFile), "Dry-run must never move source file");
+            Assert.False(Directory.Exists(Path.Combine(tempRoot, "Karajan")), "Dry-run must not create target folders");
+
+            using (var checkConn = TonewiseSqlite.OpenReadOnly(dbPath))
+            using (var checkCmd = checkConn.CreateCommand())
+            {
+                checkCmd.CommandText = "SELECT rel_path FROM tracks WHERE track_uid = 'uid_dry_1';";
+                Assert.Equal("Inbox/01 Symphony.flac", checkCmd.ExecuteScalar()?.ToString());
+            }
+
+            // PC-UX-02 & PC-UX-03 source contracts
+            string mainCs = ReadAllMainWindowSources(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop"));
+            Assert.Contains("ShowUndoableNotification", mainCs, StringComparison.Ordinal);
+            Assert.Contains("_inlineUnsavedDrafts", mainCs, StringComparison.Ordinal);
+            Assert.Contains("OnMirrorPruneSwitchToggled", mainCs, StringComparison.Ordinal);
+            Assert.Contains("OnOrganizeLibraryFoldersClick", mainCs, StringComparison.Ordinal);
+            Assert.Contains("ConfirmDestructiveActionAsync", mainCs, StringComparison.Ordinal);
+            string mainXaml = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "MainWindow.xaml"));
+            Assert.Contains("GlobalNotificationUndoButton", mainXaml, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot))
+                Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Stage2_AccessibilityContrastTokensAndContractsHold()
+    {
+        double darkOnBlack = ZuneColorMath.ComputeContrastRatio(ZuneColorMath.DefaultDarkAccentRgb, (0, 0, 0));
+        double whiteOnDarkAccent = ZuneColorMath.ComputeContrastRatio((255, 255, 255), ZuneColorMath.DefaultDarkAccentRgb);
+        Assert.True(darkOnBlack >= 4.5, $"Dark accent vs black must meet AA (got {darkOnBlack:F2})");
+        Assert.True(whiteOnDarkAccent >= 4.5, $"White ink on dark accent must meet AA (got {whiteOnDarkAccent:F2})");
+
+        Assert.Equal((255, 255, 255), ZuneColorMath.ContrastingOnColor(ZuneColorMath.DefaultDarkAccentRgb.R, ZuneColorMath.DefaultDarkAccentRgb.G, ZuneColorMath.DefaultDarkAccentRgb.B));
+        Assert.Equal((0, 0, 0), ZuneColorMath.ContrastingOnColor(255, 230, 80));
+
+        string repoRoot = FindRepoRoot();
+        string tokensXaml = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "Themes", "ZuneTokens.xaml"));
+        Assert.Contains("#E5006B", tokensXaml, StringComparison.Ordinal);
+        Assert.Contains("#737373", tokensXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("#FF1E7A", tokensXaml, StringComparison.Ordinal);
+
+        string clockXaml = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "DeskClockWidgetWindow.xaml"));
+        Assert.Contains("#E5006B", clockXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("#1A202C", clockXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("#FF1E7A", clockXaml, StringComparison.Ordinal);
+
+        string mainXaml = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "MainWindow.xaml"));
+        Assert.Contains("AccessibilitySummary", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("HeartAutomationName", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("MinWidth=\"28\"", mainXaml, StringComparison.Ordinal);
+
+        string mainCs = ReadAllMainWindowSources(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop"));
+        Assert.Contains("AutomationProperties.SetItemStatus", mainCs, StringComparison.Ordinal);
+        Assert.Contains("AccessibilitySettings", mainCs, StringComparison.Ordinal);
+        Assert.Contains("_accessibilitySettings.HighContrast", mainCs, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Stage3_VisualConvergence_MinSize_AlbumsWall_AndBackStackHold()
+    {
+        string repoRoot = FindRepoRoot();
+        string desktopRoot = Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop");
+
+        Assert.False(File.Exists(Path.Combine(desktopRoot, "Themes", "Tokens.xaml")), "Legacy Tokens.xaml must be removed");
+
+        foreach (string file in Directory.EnumerateFiles(desktopRoot, "*.xaml", SearchOption.AllDirectories)
+                     .Concat(Directory.EnumerateFiles(desktopRoot, "*.cs", SearchOption.AllDirectories))
+                     .Where(p => !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+                                 && !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)))
+        {
+            string text = File.ReadAllText(file);
+            Assert.DoesNotContain("#FF1E7A", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("0x1E, 0x7A", text, StringComparison.OrdinalIgnoreCase);
+        }
+
+        string mainCs = ReadAllMainWindowSources(desktopRoot);
+        Assert.Contains("PreferredMinimumWidth = 1024", mainCs, StringComparison.Ordinal);
+        Assert.Contains("PreferredMinimumHeight = 700", mainCs, StringComparison.Ordinal);
+        Assert.Contains("VirtualKey.GoBack", mainCs, StringComparison.Ordinal);
+
+        string vmLibCs = File.ReadAllText(Path.Combine(desktopRoot, "ViewModels", "MainViewModel.Library.cs"));
+        Assert.Contains("CloseSelectedAlbum", vmLibCs, StringComparison.Ordinal);
+        Assert.Contains("IsAlbumsWallExpanded", vmLibCs, StringComparison.Ordinal);
+        Assert.Contains("public void GoBack()", vmLibCs, StringComparison.Ordinal);
+
+        string mainXaml = File.ReadAllText(Path.Combine(desktopRoot, "MainWindow.xaml"));
+        Assert.Contains("IsAlbumsWallExpanded", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("GoBackCommand", mainXaml, StringComparison.Ordinal);
+        int albumsIdx = mainXaml.IndexOf("x:Name=\"AlbumsCoverGridView\"", StringComparison.Ordinal);
+        Assert.True(albumsIdx > 0);
+        string albumsTag = mainXaml.Substring(albumsIdx, Math.Min(600, mainXaml.Length - albumsIdx));
+        Assert.DoesNotContain("MaxHeight=\"240\"", albumsTag, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Stage4_PerformanceTimers_OffUiIo_SelectRange_AndModularMainWindowHold()
+    {
+        string repoRoot = FindRepoRoot();
+        string desktopRoot = Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop");
+
+        var partFiles = Directory.EnumerateFiles(desktopRoot, "MainWindow*.cs", SearchOption.TopDirectoryOnly).ToList();
+        Assert.True(partFiles.Count >= 4, $"Expected >= 4 modular MainWindow partial files, found {partFiles.Count}");
+        int coreLineCount = File.ReadAllLines(Path.Combine(desktopRoot, "MainWindow.xaml.cs")).Length;
+        Assert.True(coreLineCount < 1600, $"MainWindow.xaml.cs should stay compact (<1600 lines), was {coreLineCount}");
+
+        string allMainCs = ReadAllMainWindowSources(desktopRoot);
+        Assert.Contains("UpdateMainWindowTimers", allMainCs, StringComparison.Ordinal);
+        Assert.Contains("OverlappedPresenterState.Minimized", allMainCs, StringComparison.Ordinal);
+        Assert.Contains("SelectRange(new", allMainCs, StringComparison.Ordinal);
+
+        string cacheCs = File.ReadAllText(Path.Combine(desktopRoot, "Services", "CoverArtImageCache.cs"));
+        Assert.DoesNotContain("File.Exists", cacheCs, StringComparison.Ordinal);
+
+        string mainXaml = File.ReadAllText(Path.Combine(desktopRoot, "MainWindow.xaml"));
+        Assert.Contains("<ItemsRepeater ItemsSource=\"{x:Bind ViewModel.SyncOutboxItems", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("<ItemsRepeater ItemsSource=\"{x:Bind ViewModel.AlternateRecordings", mainXaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Stage5_PrimaryNavLatencyCache_AndNowPlayingZuneActionBarHold()
+    {
+        string repoRoot = FindRepoRoot();
+        string desktopRoot = Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop");
+
+        string vmLib = File.ReadAllText(Path.Combine(desktopRoot, "ViewModels", "MainViewModel.Library.cs"));
+        int coverIdx = vmLib.IndexOf("GetUniqueCoverArtPaths", StringComparison.Ordinal);
+        int quickplayIdx = vmLib.IndexOf("public void RefreshQuickplayCollections", StringComparison.Ordinal);
+        Assert.True(coverIdx > 0 && quickplayIdx > coverIdx);
+        string coverMethod = vmLib.Substring(coverIdx, quickplayIdx - coverIdx);
+        Assert.DoesNotContain("File.Exists", coverMethod, StringComparison.Ordinal);
+
+        Assert.Contains("_lastCollectionDataKey", vmLib, StringComparison.Ordinal);
+        Assert.Contains("_quickplayDirty", vmLib, StringComparison.Ordinal);
+        int applyNavIdx = vmLib.IndexOf("private void ApplyActiveNavigationData()", StringComparison.Ordinal);
+        int rebuildIdx = vmLib.IndexOf("private void RebuildEntityGroups()", StringComparison.Ordinal);
+        Assert.True(applyNavIdx > 0 && rebuildIdx > applyNavIdx);
+        string applyNavBlock = vmLib.Substring(applyNavIdx, rebuildIdx - applyNavIdx);
+        Assert.DoesNotContain("PrimaryNavId is \"quickplay\" or \"now_playing\"", applyNavBlock, StringComparison.Ordinal);
+
+        string mainCs = ReadAllMainWindowSources(desktopRoot);
+        Assert.Contains("NavigationSettled", mainCs, StringComparison.Ordinal);
+        Assert.DoesNotContain("PlayStaggeredEntrance(PivotHeaderRow", mainCs, StringComparison.Ordinal);
+
+        string mainXaml = File.ReadAllText(Path.Combine(desktopRoot, "MainWindow.xaml"));
+        Assert.Contains("ZuneGalleryActionButtonStyle", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"查看艺人\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"查看作曲\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"查看指挥\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"编辑属性\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"NowPlayingComposerButton\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"NowPlayingConductorButton\"", mainXaml, StringComparison.Ordinal);
     }
 }

@@ -80,6 +80,22 @@ constructor(
     val signalPath: StateFlow<SignalPathState> = audioOutputManager.signalPath
     val sleepTimerState: StateFlow<SleepTimerState> = sleepTimerController.state
 
+    val isPlaybackSheetExpanded: StateFlow<Boolean>
+        field = MutableStateFlow(false)
+
+    fun setPlaybackSheetExpanded(expanded: Boolean) {
+        isPlaybackSheetExpanded.value = expanded
+    }
+
+    data class DjFreezeBackup(
+        val token: String,
+        val queue: List<Song>,
+        val index: Int,
+        val positionMs: Long,
+    )
+
+    var djFreezeBackup: DjFreezeBackup? = null
+
     val waveformEnvelope: StateFlow<FloatArray?>
         field = MutableStateFlow<FloatArray?>(null)
 

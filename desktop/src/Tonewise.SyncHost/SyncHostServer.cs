@@ -833,6 +833,8 @@ public sealed class SyncHostServer : IAsyncDisposable
 
             if (body is null)
                 return Results.Json(new { error = "invalid_request" }, statusCode: StatusCodes.Status400BadRequest);
+            if (!UsbAdbSyncClient.TryValidateRemoteMusicRoot(body.RemoteMusicRoot, out _))
+                return Results.Json(new { error = "invalid_remote_music_root" }, statusCode: StatusCodes.Status400BadRequest);
 
             var handler = UsbDirectPushHandler;
             if (handler is null)

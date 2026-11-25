@@ -35,26 +35,34 @@ public static class TonewiseSqlite
             DefaultTimeout = Math.Max(1, (clampedMs + 999) / 1000)
         };
         var conn = new SqliteConnection(csb.ToString());
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = needsWalInit
-            ? $"""
-              PRAGMA journal_mode = WAL;
-              PRAGMA synchronous = NORMAL;
-              PRAGMA busy_timeout = {clampedMs};
-              PRAGMA foreign_keys = ON;
-              """
-            : $"""
-              PRAGMA synchronous = NORMAL;
-              PRAGMA busy_timeout = {clampedMs};
-              PRAGMA foreign_keys = ON;
-              """;
-        cmd.ExecuteNonQuery();
-        if (needsWalInit && !isMemory)
+        try
         {
-            WalInitializedPaths.TryAdd(fullPath, 0);
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = needsWalInit
+                ? $"""
+                  PRAGMA journal_mode = WAL;
+                  PRAGMA synchronous = NORMAL;
+                  PRAGMA busy_timeout = {clampedMs};
+                  PRAGMA foreign_keys = ON;
+                  """
+                : $"""
+                  PRAGMA synchronous = NORMAL;
+                  PRAGMA busy_timeout = {clampedMs};
+                  PRAGMA foreign_keys = ON;
+                  """;
+            cmd.ExecuteNonQuery();
+            if (needsWalInit && !isMemory)
+            {
+                WalInitializedPaths.TryAdd(fullPath, 0);
+            }
+            return conn;
         }
-        return conn;
+        catch
+        {
+            conn.Dispose();
+            throw;
+        }
     }
 
     public static SqliteConnection OpenReadOnly(string dbPath, int busyTimeoutMs = DefaultBusyTimeoutMs)
@@ -67,14 +75,22 @@ public static class TonewiseSqlite
             DefaultTimeout = Math.Max(1, (clampedMs + 999) / 1000)
         };
         var conn = new SqliteConnection(csb.ToString());
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""
-            PRAGMA busy_timeout = {clampedMs};
-            PRAGMA query_only = ON;
-            """;
-        cmd.ExecuteNonQuery();
-        return conn;
+        try
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                PRAGMA busy_timeout = {clampedMs};
+                PRAGMA query_only = ON;
+                """;
+            cmd.ExecuteNonQuery();
+            return conn;
+        }
+        catch
+        {
+            conn.Dispose();
+            throw;
+        }
     }
 
     public static SqliteTransaction BeginImmediateTransaction(SqliteConnection conn) =>

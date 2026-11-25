@@ -21,6 +21,7 @@ package com.shawnshi.tonewise.playback.ui
 import android.content.Context
 import android.content.res.ColorStateList
 import android.util.AttributeSet
+import androidx.core.view.ViewCompat
 import com.google.android.material.slider.Slider
 import kotlin.math.max
 import com.shawnshi.tonewise.databinding.ViewSeekBarBinding
@@ -50,6 +51,9 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
     init {
         binding.seekBarSlider.addOnSliderTouchListener(this)
         binding.seekBarSlider.addOnChangeListener(this)
+        binding.seekBarSlider.setLabelFormatter { value ->
+            value.toLong().dsToSecs().formatDurationSecs(true)
+        }
     }
 
     /** Enables/disables wavy active-track rendering to match playback state. */
@@ -146,6 +150,9 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
 
     override fun onValueChange(slider: Slider, value: Float, fromUser: Boolean) {
         updatePositionLabel(value.toLong())
+        if (fromUser && !isActivated) {
+            listener?.onSeekConfirmed(value.toLong())
+        }
     }
 
     private fun updatePositionLabel(positionDs: Long) {
@@ -155,7 +162,9 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         }
         // The slider changes every decisecond, but its label only displays whole seconds.
         // Reassigning even identical text requests layout because the label wraps its content.
-        binding.seekBarPosition.text = seconds.formatDurationSecs(true)
+        val formatted = seconds.formatDurationSecs(true)
+        binding.seekBarPosition.text = formatted
+        ViewCompat.setStateDescription(binding.seekBarSlider, formatted)
         displayedPositionSecs = seconds
     }
 

@@ -18,19 +18,34 @@
  
 package com.shawnshi.tonewise.home
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.home.collection.CollectionPivot
+import com.shawnshi.tonewise.home.quickplay.QuickplayAggregator
+import com.shawnshi.tonewise.home.quickplay.QuickplaySections
+import com.shawnshi.tonewise.home.quickplay.QuickplayTrackCandidate
 import com.shawnshi.tonewise.home.tabs.Tab
 import com.shawnshi.tonewise.list.ListSettings
 import com.shawnshi.tonewise.list.adapter.UpdateInstructions
 import com.shawnshi.tonewise.list.sort.Sort
+import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.MusicType
+import com.shawnshi.tonewise.music.resolve
+import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.PlaySong
 import com.shawnshi.tonewise.playback.PlaybackSettings
+import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.util.Event
 import com.shawnshi.tonewise.util.MutableEvent
 import org.oxycblt.musikr.Album
@@ -49,10 +64,55 @@ import timber.log.Timber as L
 class HomeViewModel
 @Inject
 constructor(
+    @ApplicationContext private val appContext: Context,
     private val listSettings: ListSettings,
     private val playbackSettings: PlaybackSettings,
+    private val musicRepository: MusicRepository,
+    private val playCountRepository: PlayCountRepository,
     homeGeneratorFactory: HomeGenerator.Factory,
 ) : ViewModel(), HomeGenerator.Invalidator {
+    private var quickplayJob: Job? = null
+    private var lastQuickplayCacheKey: Pair<Any?, Long>? = null
+    val quickplaySections: StateFlow<QuickplaySections>
+        field = MutableStateFlow(QuickplaySections(emptyList(), emptyList(), emptyList()))
+
+    fun refreshQuickplaySections(libraryRevision: Any?, playRevision: Long) {
+        val libraryRef = musicRepository.library
+        val key: Pair<Any?, Long> = (libraryRef to playRevision)
+        if (lastQuickplayCacheKey == key && (libraryRevision != null || quickplaySections.value.history.isNotEmpty() || quickplaySections.value.newlyAdded.isNotEmpty())) {
+            return
+        }
+        quickplayJob?.cancel()
+        quickplayJob =
+            viewModelScope.launch {
+                delay(180L)
+                val computed =
+                    withContext(Dispatchers.Default) {
+                        val songs = musicRepository.library?.songs.orEmpty()
+                        val candidates =
+                            songs.map { song ->
+                                val snap = playCountRepository.getSnapshot(song)
+                                QuickplayTrackCandidate(
+                                    songUid = song.uid.toString(),
+                                    title = song.name.resolve(appContext),
+                                    artist = song.artists.resolveNames(appContext),
+                                    albumUid = song.album.uid.toString(),
+                                    albumTitle = song.album.name.resolve(appContext),
+                                    addedMs = song.addedMs,
+                                    playCount = snap.playCount,
+                                    lastPlayedMs = snap.lastPlayedMs,
+                                )
+                            }
+                        QuickplayAggregator.computeSections(
+                            candidates = candidates,
+                            nowMs = System.currentTimeMillis(),
+                            limit = 12,
+                        )
+                    }
+                lastQuickplayCacheKey = key
+                quickplaySections.value = computed
+            }
+    }
     /** A list of [Song]s, sorted by the preferred [Sort], to be shown in the home view. */
     val songList: StateFlow<List<Song>>
         field = MutableStateFlow(listOf<Song>())

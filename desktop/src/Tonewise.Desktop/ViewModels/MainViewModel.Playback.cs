@@ -81,6 +81,18 @@ public sealed partial class MainViewModel
         PersistPlaybackSessionSnapshot(force: true);
     }
 
+    public void RestoreClearedQueueSnapshot(IReadOnlyList<TrackItem> items, string title)
+    {
+        if (items.Count == 0) return;
+        PlaybackQueue.ReplaceAll(items);
+        _unshuffledQueueSnapshot = [.. items];
+        PlaybackQueueTitle = title;
+        UpdatePlaybackQueueSummary();
+        PreloadNextGaplessTrack();
+        PersistPlaybackSessionSnapshot(force: true);
+        Notify($"已恢复播放队列（{items.Count} 首）。", "success");
+    }
+
     [RelayCommand]
     private void LoadCurrentViewToQueue()
     {
@@ -1216,7 +1228,7 @@ public sealed partial class MainViewModel
         Notify(nextLoved ? $"已喜爱「{target.Title}」（将同步至 Last.fm）" : $"已取消喜爱「{target.Title}」", "success");
     }
 
-    public async void ToggleLovedForTracks(IReadOnlyList<TrackItem> tracks)
+    public async Task ToggleLovedForTracksAsync(IReadOnlyList<TrackItem> tracks)
     {
         if (tracks.Count == 0) return;
         bool nextLoved = !tracks[0].IsLoved;
@@ -1238,6 +1250,59 @@ public sealed partial class MainViewModel
     {
         if (CurrentTrack is null || string.IsNullOrWhiteSpace(CurrentTrack.Album)) return;
         FilterByCreditEntity(CurrentTrack.Album);
+    }
+
+    public void RefreshNowPlayingClassicalActions()
+    {
+        var track = CurrentTrack;
+        bool isClassical = track is not null
+            && (track.IsClassical || track.IsClassicalByGenre || !string.IsNullOrWhiteSpace(track.WorkName));
+        string? primaryComposer = track is null ? null : SplitComposers(track.ComposersDisplay).FirstOrDefault();
+        string? primaryConductor = track is null ? null : SplitPerformers(track.ConductorsDisplay).FirstOrDefault();
+
+        ShowNowPlayingComposerAction = isClassical && !string.IsNullOrWhiteSpace(primaryComposer);
+        ShowNowPlayingConductorAction = isClassical && !string.IsNullOrWhiteSpace(primaryConductor);
+        HasNowPlayingClassicalCreditActions = ShowNowPlayingComposerAction || ShowNowPlayingConductorAction;
+        NowPlayingComposerTooltip = ShowNowPlayingComposerAction
+            ? $"在馆藏作曲家视图中查看：{primaryComposer}"
+            : "";
+        NowPlayingConductorTooltip = ShowNowPlayingConductorAction
+            ? $"在馆藏指挥家视图中查看：{primaryConductor}"
+            : "";
+    }
+
+    public void NavigateToCurrentTrackComposer()
+    {
+        if (CurrentTrack is null) return;
+        string? primaryComposer = SplitComposers(CurrentTrack.ComposersDisplay).FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(primaryComposer)) return;
+        NavigateToCreditCollectionGroup("composers", primaryComposer);
+    }
+
+    public void NavigateToCurrentTrackConductor()
+    {
+        if (CurrentTrack is null) return;
+        string? primaryConductor = SplitPerformers(CurrentTrack.ConductorsDisplay).FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(primaryConductor)) return;
+        NavigateToCreditCollectionGroup("conductors", primaryConductor);
+    }
+
+    private void NavigateToCreditCollectionGroup(string subTab, string creditName)
+    {
+        NavigateToPrimary("collection", subTab);
+        var match = CurrentEntityGroups.FirstOrDefault(g =>
+                string.Equals(g.Title, creditName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(g.Key, creditName, StringComparison.OrdinalIgnoreCase))
+            ?? CurrentEntityGroups.FirstOrDefault(g =>
+                g.Title.Contains(creditName, StringComparison.OrdinalIgnoreCase));
+        if (match is not null)
+        {
+            SelectEntityGroup(match);
+        }
+        else
+        {
+            FilterByCreditEntity(creditName);
+        }
     }
 
     private void RefreshCurrentFreezeCapsule()

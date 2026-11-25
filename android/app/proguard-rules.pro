@@ -30,6 +30,21 @@
     void recoverOriginalLayoutParams();
 }
 
+# Used reflectively by UI helpers to preserve FAB visibility transitions, tinting, ViewPager2
+# child RecyclerView access, and drag touch slop tuning under R8 minification.
+-keepclassmembers class com.google.android.material.floatingactionbutton.FloatingActionButton {
+    void hide(...);
+}
+-keepclassmembers class androidx.appcompat.widget.AppCompatButton {
+    *** mBackgroundTintHelper;
+}
+-keepclassmembers class androidx.viewpager2.widget.ViewPager2 {
+    *** mRecyclerView;
+}
+-keepclassmembers class androidx.recyclerview.widget.RecyclerView {
+    *** mTouchSlop;
+}
+
 # Make AGP shut up about classes that aren't even used.
 -dontwarn org.bouncycastle.jsse.BCSSLParameters
 -dontwarn org.bouncycastle.jsse.BCSSLSocket

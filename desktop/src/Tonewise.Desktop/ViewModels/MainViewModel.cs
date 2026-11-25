@@ -391,13 +391,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private bool _isUsbAutoSyncEnabled = true;
 
     [ObservableProperty]
-    private bool _isMirrorPruneEnabled = true;
+    private bool _isMirrorPruneEnabled = false;
 
     [ObservableProperty]
-    private string _mirrorPruneScope = "music_folder_all";
+    private string _mirrorPruneScope = "managed_only";
 
     [ObservableProperty]
-    private bool _allowAdbForeignDeleteFallback = true;
+    private bool _allowAdbForeignDeleteFallback = false;
 
     [ObservableProperty]
     private string _usbAdbStatusText = "正在检测 ADB 环境...";
@@ -431,6 +431,63 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private int _selectedPlaylistCount;
+
+    [ObservableProperty]
+    private bool _isPlaylistsExpanded;
+
+    [ObservableProperty]
+    private string _playlistsCountBadge = "共 0 个歌单";
+
+    [RelayCommand]
+    private void TogglePlaylistsExpanded() => IsPlaylistsExpanded = !IsPlaylistsExpanded;
+
+    [ObservableProperty]
+    private string _auditMissingGenreLabel = "缺流派 (0)";
+
+    [ObservableProperty]
+    private string _auditMissingComposerLabel = "缺作曲 (0)";
+
+    [ObservableProperty]
+    private string _auditMissingConductorLabel = "缺指挥 (0)";
+
+    [ObservableProperty]
+    private string _auditMissingAlbumLabel = "缺专辑 (0)";
+
+    [ObservableProperty]
+    private string _auditMissingPublisherLabel = "缺厂牌 (0)";
+
+    [ObservableProperty]
+    private string _auditMissingSceneLabel = "缺场景 (0)";
+
+    [ObservableProperty]
+    private string _auditMissingTempoLabel = "缺节奏 (0)";
+
+    [ObservableProperty]
+    private string _auditMissingCoverLabel = "缺封面 (0)";
+
+    [ObservableProperty]
+    private string _auditMissingVocalsLabel = "缺人声标签 (0)";
+
+    [ObservableProperty]
+    private string _auditRediscovery90dLabel = "90天未听 (0)";
+
+    [ObservableProperty]
+    private string _inboxAuditResultSummaryText = "当前体检视图：全量曲目表 — 共 0 首";
+
+    [ObservableProperty]
+    private bool _showNowPlayingComposerAction;
+
+    [ObservableProperty]
+    private bool _showNowPlayingConductorAction;
+
+    [ObservableProperty]
+    private bool _hasNowPlayingClassicalCreditActions;
+
+    [ObservableProperty]
+    private string _nowPlayingComposerTooltip = "";
+
+    [ObservableProperty]
+    private string _nowPlayingConductorTooltip = "";
 
     public string SendPlaylistToPhoneButtonLabel =>
         SelectedPlaylistCount > 1 ? $"发送到手机 ({SelectedPlaylistCount})" : "发送到手机";
@@ -613,6 +670,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isAlbumsGridMode;
+
+    [ObservableProperty]
+    private bool _isAlbumsWallExpanded;
+
+    [ObservableProperty]
+    private bool _canNavigateBack;
 
     [ObservableProperty]
     private bool _hasQuickplayPins;
@@ -1342,6 +1405,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         HasCurrentTrack = value is not null;
         CurrentTrackLoved = value?.IsLoved ?? false;
         RefreshCurrentFreezeCapsule();
+        RefreshNowPlayingClassicalActions();
     }
 
     partial void OnIsIso226EnabledChanged(bool value)

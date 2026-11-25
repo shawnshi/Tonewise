@@ -135,6 +135,7 @@ public sealed partial class MainViewModel
         IsViewingPlaylist = false;
         SelectedPlaylist = null;
         UpdateClassicalAdaptiveState();
+        RefreshInboxAuditCounts();
 
         ReplaceCollection(QuickplayHistory, history);
         ReplaceCollection(QuickplayNewAlbums, newlyAdded);
@@ -209,6 +210,7 @@ public sealed partial class MainViewModel
 
             string? prevPath = SelectedPlaylist?.FilePath;
             ReplaceCollection(Playlists, secondary.playlists);
+            PlaylistsCountBadge = $"共 {Playlists.Count} 个歌单";
             if (!string.IsNullOrWhiteSpace(prevPath))
             {
                 SelectedPlaylist = Playlists.FirstOrDefault(p =>
@@ -222,6 +224,7 @@ public sealed partial class MainViewModel
                     LoadPlaylistTracksIntoView(target);
                 }
             }
+            BumpLibraryDataVersion();
             if (hasPlaylistPins)
             {
                 RefreshQuickplayCollections();
@@ -306,12 +309,14 @@ public sealed partial class MainViewModel
         IsViewingPlaylist = false;
         SelectedPlaylist = null;
         UpdateClassicalAdaptiveState();
+        RefreshInboxAuditCounts();
         ApplyFiveDimFilter();
         RefreshStagingProposals();
         ReloadSessionSlots();
+        BumpLibraryDataVersion();
         RefreshPlaylists();
         RefreshQuickplayCollections();
-        NavigateToPrimary(PrimaryNavId, SecondarySubTab);
+        NavigateToPrimary(PrimaryNavId, SecondarySubTab, recordHistory: false, forceReload: true);
 
         if (!string.IsNullOrWhiteSpace(SelectedEndpoint?.FriendlyName))
         {
@@ -517,13 +522,13 @@ public sealed partial class MainViewModel
             : $"节奏: {FilterTempoBucket}";
         IsTempoFilterActive = !string.Equals(FilterTempoBucket, "all", StringComparison.OrdinalIgnoreCase);
 
-        MoodFilterChipLabel = FilterMoodCluster switch
+        MoodFilterChipLabel = FiveDimQueryBuilder.NormalizeMoodClusterId(FilterMoodCluster) switch
         {
-            "calm_relaxed" => "情绪: 平静舒缓",
+            "calm_relaxed" => "情绪: 静谧松弛",
             "warm_romantic" => "情绪: 温暖浪漫",
-            "focus_deep" => "情绪: 沉思专注",
-            "bright_energetic" => "情绪: 明快振奋",
-            "melancholic_dark" => "情绪: 忧郁深沉",
+            "deep_introspective" => "情绪: 深沉内省",
+            "bright_joyful" => "情绪: 明快愉悦",
+            "high_tension" => "情绪: 高张力振奋",
             _ => "情绪",
         };
         IsMoodFilterActive = !string.Equals(FilterMoodCluster, "all", StringComparison.OrdinalIgnoreCase);
@@ -650,21 +655,29 @@ public sealed partial class MainViewModel
         SearchBoxText = raw;
         var parsed = SearchQueryDslParser.Parse(raw);
 
+        void CommitSearchNavTarget()
+        {
+            if (PrimaryNavId != "collection" || SecondarySubTab is not "scenes" and not "tracks")
+            {
+                PrimaryNavId = "collection";
+                SecondarySubTab = "scenes";
+                ScenesMode = "studio";
+                RecordCurrentNavSubTab();
+                UpdateNavigationState();
+                NavigationSettled?.Invoke(PrimaryNavId, SecondarySubTab);
+            }
+            else if (SecondarySubTab == "scenes" && ScenesMode != "studio")
+            {
+                ScenesMode = "studio";
+                UpdateNavigationState();
+                NavigationSettled?.Invoke(PrimaryNavId, SecondarySubTab);
+            }
+        }
+
         switch (parsed.Kind)
         {
             case "scene":
-                if (PrimaryNavId != "collection" || SecondarySubTab is not "scenes" and not "tracks")
-                {
-                    PrimaryNavId = "collection";
-                    SecondarySubTab = "scenes";
-                    ScenesMode = "studio";
-                    UpdateNavigationState();
-                }
-                else if (SecondarySubTab == "scenes" && ScenesMode != "studio")
-                {
-                    ScenesMode = "studio";
-                    UpdateNavigationState();
-                }
+                CommitSearchNavTarget();
                 RunBatchFilterUpdate(() =>
                 {
                     LibraryNavMode = "all";
@@ -674,18 +687,7 @@ public sealed partial class MainViewModel
                 break;
 
             case "vocals":
-                if (PrimaryNavId != "collection" || SecondarySubTab is not "scenes" and not "tracks")
-                {
-                    PrimaryNavId = "collection";
-                    SecondarySubTab = "scenes";
-                    ScenesMode = "studio";
-                    UpdateNavigationState();
-                }
-                else if (SecondarySubTab == "scenes" && ScenesMode != "studio")
-                {
-                    ScenesMode = "studio";
-                    UpdateNavigationState();
-                }
+                CommitSearchNavTarget();
                 RunBatchFilterUpdate(() =>
                 {
                     LibraryNavMode = "all";
@@ -696,18 +698,7 @@ public sealed partial class MainViewModel
                 break;
 
             case "energy":
-                if (PrimaryNavId != "collection" || SecondarySubTab is not "scenes" and not "tracks")
-                {
-                    PrimaryNavId = "collection";
-                    SecondarySubTab = "scenes";
-                    ScenesMode = "studio";
-                    UpdateNavigationState();
-                }
-                else if (SecondarySubTab == "scenes" && ScenesMode != "studio")
-                {
-                    ScenesMode = "studio";
-                    UpdateNavigationState();
-                }
+                CommitSearchNavTarget();
                 RunBatchFilterUpdate(() =>
                 {
                     LibraryNavMode = "all";
@@ -740,10 +731,60 @@ public sealed partial class MainViewModel
     [RelayCommand]
     public void ToggleSidebar() => IsSidebarExpanded = !IsSidebarExpanded;
 
+    private readonly List<(string NavId, string SubTab, string? EntityKey)> _navBackStack = [];
+    private readonly Dictionary<string, string> _lastSubTabByPrimary = new(StringComparer.OrdinalIgnoreCase);
+    private long _libraryDataVersion;
+    private string _lastCollectionDataKey = "";
+    private string _cachedCollectionHeader = "";
+    private string _cachedCollectionPills = "";
+    private bool _quickplayDirty = true;
+    private bool _hasCompletedInitialNavigation;
+
+    public event Action<string, string>? NavigationSettled;
+
+    public void MarkQuickplayDirty() => _quickplayDirty = true;
+
+    private void BumpLibraryDataVersion()
+    {
+        _libraryDataVersion++;
+        _quickplayDirty = true;
+    }
+
+    private void RecordCurrentNavSubTab()
+    {
+        if (!string.IsNullOrEmpty(PrimaryNavId) && !string.IsNullOrEmpty(SecondarySubTab))
+        {
+            _lastSubTabByPrimary[PrimaryNavId] = SecondarySubTab;
+        }
+    }
+
+    private string BuildActiveCollectionDataKey() => string.Join("|",
+        _libraryDataVersion,
+        PrimaryNavId,
+        SecondarySubTab,
+        SearchQuery.Trim(),
+        ShowAllPerformers,
+        ShowClassicalEnsembles,
+        ScenesMode,
+        SelectedPlaylist?.FilePath ?? "",
+        LibraryNavMode,
+        FilterScene,
+        FilterVocals,
+        FilterEnergy,
+        FilterTempoBucket,
+        FilterMoodCluster,
+        SelectedEnergyArc,
+        ScenesTempoNullPassthrough,
+        TrackSortColumn,
+        TrackSortAscending);
+
     [RelayCommand]
     public void ToggleInspector() => IsInspectorOpen = !IsInspectorOpen;
 
-    public void NavigateToPrimary(string navId, string? subTab = null)
+    public void NavigateToPrimary(string navId, string? subTab = null) =>
+        NavigateToPrimary(navId, subTab, recordHistory: true, forceReload: false);
+
+    private void NavigateToPrimary(string navId, string? subTab, bool recordHistory, bool forceReload = false)
     {
         string rawNav = (navId ?? "collection").Trim().ToLowerInvariant();
         string rawSub = (subTab ?? "").Trim().ToLowerInvariant();
@@ -802,15 +843,52 @@ public sealed partial class MainViewModel
             targetSubTab = "folders";
         }
 
+        if (string.IsNullOrEmpty(targetSubTab)
+            && _lastSubTabByPrimary.TryGetValue(normalized, out var rememberedSubTab)
+            && IsValidSubTab(normalized, rememberedSubTab))
+        {
+            targetSubTab = rememberedSubTab;
+        }
+
         if (!IsValidSubTab(normalized, targetSubTab))
         {
             targetSubTab = GetDefaultSubTab(normalized);
         }
 
+        if (!forceReload
+            && _hasCompletedInitialNavigation
+            && normalized == PrimaryNavId
+            && targetSubTab == SecondarySubTab)
+        {
+            return;
+        }
+
+        if ((PrimaryNavId == "collection" || (PrimaryNavId == "studio" && SecondarySubTab == "inbox"))
+            && !string.IsNullOrEmpty(_lastCollectionDataKey))
+        {
+            _cachedCollectionHeader = CurrentViewHeader;
+            _cachedCollectionPills = ActiveFilterPillsSummary;
+        }
+
+        if (recordHistory
+            && !string.IsNullOrEmpty(PrimaryNavId)
+            && (normalized != PrimaryNavId || targetSubTab != SecondarySubTab))
+        {
+            if (_navBackStack.Count >= 40)
+            {
+                _navBackStack.RemoveAt(0);
+            }
+            _navBackStack.Add((PrimaryNavId, SecondarySubTab, SelectedEntityGroup?.Key));
+        }
+
         PrimaryNavId = normalized;
         SecondarySubTab = targetSubTab;
+        RecordCurrentNavSubTab();
         UpdateNavigationState();
         ApplyActiveNavigationData();
+        UpdateCanNavigateBack();
+        _hasCompletedInitialNavigation = true;
+        NavigationSettled?.Invoke(PrimaryNavId, SecondarySubTab);
         if (normalized == "studio" && targetSubTab is "sync" or "lastfm" or "usb"
             && _uiContext is not null && !_lanSyncManuallyStopped && _syncHost is not { IsRunning: true }
             && !string.IsNullOrWhiteSpace(_store.MusicRoot))
@@ -824,10 +902,54 @@ public sealed partial class MainViewModel
         NavigateToPrimary(PrimaryNavId, subTabId);
     }
 
+    [RelayCommand]
+    public void CloseSelectedAlbum()
+    {
+        SelectEntityGroup(null);
+    }
+
+    [RelayCommand]
+    public void GoBack()
+    {
+        if (IsAlbumsGridMode && SelectedEntityGroup is not null)
+        {
+            CloseSelectedAlbum();
+            return;
+        }
+
+        if (_navBackStack.Count == 0)
+        {
+            UpdateCanNavigateBack();
+            return;
+        }
+
+        var prev = _navBackStack[^1];
+        _navBackStack.RemoveAt(_navBackStack.Count - 1);
+        NavigateToPrimary(prev.NavId, prev.SubTab, recordHistory: false);
+        if (!string.IsNullOrEmpty(prev.EntityKey) && IsEntityBrowserVisible)
+        {
+            var match = CurrentEntityGroups.FirstOrDefault(
+                g => string.Equals(g.Key, prev.EntityKey, StringComparison.OrdinalIgnoreCase));
+            if (match is not null)
+            {
+                SelectEntityGroup(match);
+            }
+        }
+        UpdateCanNavigateBack();
+    }
+
+    private void UpdateCanNavigateBack()
+    {
+        CanNavigateBack = _navBackStack.Count > 0 || (IsAlbumsGridMode && SelectedEntityGroup is not null);
+    }
+
     public void SelectEntityGroup(EntityGroupItem? group)
     {
         SelectedEntityGroup = group;
         HasSelectedEntityGroup = group is not null;
+        IsAlbumsWallExpanded = IsAlbumsGridMode && group is null;
+        IsTrackTableVisible = (IsNavCollection && !IsAlbumsWallExpanded) || (IsNavStudio && SecondarySubTab == "inbox");
+        UpdateCanNavigateBack();
         if (group is not null)
         {
             FilteredTracks.ReplaceAll(group.Tracks);
@@ -837,8 +959,8 @@ public sealed partial class MainViewModel
         else
         {
             FilteredTracks.ReplaceAll([]);
-            CurrentViewHeader = $"{PrimarySectionTitle} (0)";
-            ActiveFilterPillsSummary = $"{PrimarySectionTitle} · 暂无匹配实体";
+            CurrentViewHeader = IsAlbumsGridMode ? $"{PrimarySectionTitle} · {CurrentEntityGroups.Count} 张专辑" : $"{PrimarySectionTitle} (0)";
+            ActiveFilterPillsSummary = IsAlbumsGridMode ? "albums · 点击任意专辑封面查看曲目" : $"{PrimarySectionTitle} · 暂无匹配实体";
         }
         RefreshBreadcrumbs(group?.Title);
     }
@@ -913,7 +1035,9 @@ public sealed partial class MainViewModel
             PrimaryNavId = "collection";
             SecondarySubTab = "scenes";
             ScenesMode = "autodj";
+            RecordCurrentNavSubTab();
             UpdateNavigationState();
+            NavigationSettled?.Invoke(PrimaryNavId, SecondarySubTab);
         }
 
         IsViewingPlaylist = false;
@@ -1002,6 +1126,7 @@ public sealed partial class MainViewModel
         bool entityMode = IsNavCollection && SecondarySubTab is "albums" or "artists" or "classical" or "composers" or "conductors" or "genres" or "folders";
         IsEntityBrowserVisible = entityMode;
         IsAlbumsGridMode = IsNavCollection && SecondarySubTab == "albums";
+        IsAlbumsWallExpanded = IsAlbumsGridMode && SelectedEntityGroup is null;
         IsScenesDeckVisible = IsNavCollection && SecondarySubTab == "scenes";
         IsScenesPresetSubTab = IsScenesDeckVisible && ScenesMode == "presets";
         IsScenesAutoDjSubTab = IsScenesDeckVisible && ScenesMode == "autodj";
@@ -1011,7 +1136,7 @@ public sealed partial class MainViewModel
         IsInboxAuditDeckVisible = IsNavStudio && SecondarySubTab == "inbox";
         IsSyncScrobbleViewVisible = IsNavStudio && SecondarySubTab is "sync" or "lastfm" or "usb";
         IsSettingsViewVisible = IsNavSettings;
-        IsTrackTableVisible = IsNavCollection || (IsNavStudio && SecondarySubTab == "inbox");
+        IsTrackTableVisible = (IsNavCollection && !IsAlbumsWallExpanded) || (IsNavStudio && SecondarySubTab == "inbox");
         IsFiveDimFilterStripVisible = (IsNavCollection && SecondarySubTab == "tracks")
                                       || (IsNavCollection && SecondarySubTab == "scenes" && ScenesMode == "presets");
         UpdateFilterDrawerState();
@@ -1083,9 +1208,16 @@ public sealed partial class MainViewModel
 
     private void ApplyActiveNavigationData()
     {
-        if (PrimaryNavId is "quickplay" or "now_playing")
+        if (PrimaryNavId == "quickplay")
         {
             RefreshQuickplayCollections();
+            CurrentViewHeader = "";
+            ActiveFilterPillsSummary = "";
+            return;
+        }
+
+        if (PrimaryNavId == "now_playing")
+        {
             CurrentViewHeader = "";
             ActiveFilterPillsSummary = "";
             return;
@@ -1095,6 +1227,15 @@ public sealed partial class MainViewModel
         {
             CurrentViewHeader = "";
             ActiveFilterPillsSummary = "";
+            return;
+        }
+
+        string dataKey = BuildActiveCollectionDataKey();
+        if (string.Equals(dataKey, _lastCollectionDataKey, StringComparison.Ordinal)
+            && (!IsEntityBrowserVisible || CurrentEntityGroups.Count > 0 || _allTracks.Count == 0))
+        {
+            CurrentViewHeader = _cachedCollectionHeader;
+            ActiveFilterPillsSummary = _cachedCollectionPills;
             return;
         }
 
@@ -1112,6 +1253,9 @@ public sealed partial class MainViewModel
                 CurrentViewHeader = "歌单工作区 (暂无 .m3u8 歌单，可新建或在线导入)";
                 ActiveFilterPillsSummary = "Playlists · 支持 Spotify / Apple Music / Billboard / Kworb / TXT 导入";
             }
+            _lastCollectionDataKey = BuildActiveCollectionDataKey();
+            _cachedCollectionHeader = CurrentViewHeader;
+            _cachedCollectionPills = ActiveFilterPillsSummary;
             return;
         }
 
@@ -1120,6 +1264,9 @@ public sealed partial class MainViewModel
             IsViewingPlaylist = false;
             SelectedPlaylist = null;
             RebuildEntityGroups();
+            _lastCollectionDataKey = BuildActiveCollectionDataKey();
+            _cachedCollectionHeader = CurrentViewHeader;
+            _cachedCollectionPills = ActiveFilterPillsSummary;
             return;
         }
 
@@ -1138,8 +1285,13 @@ public sealed partial class MainViewModel
 
         if (PrimaryNavId == "studio" && SecondarySubTab == "inbox")
         {
+            RefreshInboxAuditCounts();
             RefreshStagingProposals();
         }
+
+        _lastCollectionDataKey = BuildActiveCollectionDataKey();
+        _cachedCollectionHeader = CurrentViewHeader;
+        _cachedCollectionPills = ActiveFilterPillsSummary;
     }
 
     private void RebuildEntityGroups()
@@ -1320,7 +1472,8 @@ public sealed partial class MainViewModel
         var restored = prevKey is not null
             ? CurrentEntityGroups.FirstOrDefault(g => string.Equals(g.Key, prevKey, StringComparison.OrdinalIgnoreCase))
             : null;
-        SelectEntityGroup(restored ?? CurrentEntityGroups.FirstOrDefault());
+        bool landingOnAlbumsWall = IsAlbumsGridMode && restored is null;
+        SelectEntityGroup(landingOnAlbumsWall ? null : (restored ?? CurrentEntityGroups.FirstOrDefault()));
     }
 
     public static IReadOnlyList<string> SplitPerformers(string? raw) =>
@@ -1352,6 +1505,36 @@ public sealed partial class MainViewModel
         InboxAuditBadgeDisplayValue = Math.Min(999, totalBadge);
         HasInboxAuditBadge = totalBadge > 0;
         InboxAuditBadgeText = totalBadge > 999 ? "999+" : totalBadge.ToString();
+    }
+
+    public void RefreshInboxAuditCounts()
+    {
+        long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var counts = InboxAuditEvaluator.ComputeCounts(
+            _allTracks.Select(t => new InboxAuditTrackSeed(
+                Genre: t.Genre,
+                ComposersDisplay: t.ComposersDisplay,
+                ConductorsDisplay: t.ConductorsDisplay,
+                Album: t.Album,
+                Publisher: t.Publisher,
+                DjSceneCount: t.DjScene.Count,
+                TempoBucket: t.TempoBucket,
+                TempoBpm: t.TempoBpm,
+                CoverArtPath: t.CoverArtPath,
+                DjVocals: t.DjVocals,
+                LastPlayedTsMs: t.LastPlayedTsMs)),
+            nowMs);
+
+        AuditMissingGenreLabel = $"缺流派 ({counts.MissingGenre})";
+        AuditMissingComposerLabel = $"缺作曲 ({counts.MissingComposer})";
+        AuditMissingConductorLabel = $"缺指挥 ({counts.MissingConductor})";
+        AuditMissingAlbumLabel = $"缺专辑 ({counts.MissingAlbum})";
+        AuditMissingPublisherLabel = $"缺厂牌 ({counts.MissingPublisher})";
+        AuditMissingSceneLabel = $"缺场景 ({counts.MissingScene})";
+        AuditMissingTempoLabel = $"缺节奏 ({counts.MissingTempo})";
+        AuditMissingCoverLabel = $"缺封面 ({counts.MissingCover})";
+        AuditMissingVocalsLabel = $"缺人声标签 ({counts.MissingVocals})";
+        AuditRediscovery90dLabel = $"90天未听 ({counts.Rediscovery90d})";
     }
 
     [RelayCommand]
@@ -1508,7 +1691,14 @@ public sealed partial class MainViewModel
             MissingMetadataBannerText = "";
             CurrentViewHeader = "全量曲目表 (0)";
             ActiveFilterPillsSummary = "尚未加载本地曲库";
+            InboxAuditResultSummaryText = "当前体检视图：全量曲目表 — 共 0 首";
+            RefreshInboxAuditCounts();
             return;
+        }
+
+        if (IsInboxAuditDeckVisible || InboxAuditEvaluator.IsAuditOrRediscoveryMode(LibraryNavMode))
+        {
+            RefreshInboxAuditCounts();
         }
 
         int missingTempo = _allTracks.Count(t => t.TempoBucket is null && t.TempoBpm is null);
@@ -1595,21 +1785,27 @@ public sealed partial class MainViewModel
         }
 
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        working = LibraryNavMode switch
+        if (string.Equals(LibraryNavMode, "classical", StringComparison.OrdinalIgnoreCase))
         {
-            "classical" => working.Where(t => t.IsClassical),
-            "rediscovery_90d" => working.Where(t => t.LastPlayedTsMs <= 0 || (nowMs - t.LastPlayedTsMs) >= 90L * 86_400_000L),
-            "audit_missing_tempo" => working.Where(t => t.TempoBucket is null && t.TempoBpm is null),
-            "audit_missing_scene" => working.Where(t => t.DjScene.Count == 0),
-            "audit_missing_vocals" => working.Where(t => string.IsNullOrWhiteSpace(t.DjVocals) || string.Equals(t.DjVocals, "unknown", StringComparison.OrdinalIgnoreCase)),
-            "audit_missing_cover" => working.Where(t => string.IsNullOrWhiteSpace(t.CoverArtPath)),
-            "audit_missing_genre" => working.Where(t => string.IsNullOrWhiteSpace(t.Genre)),
-            "audit_missing_composer" => working.Where(t => string.IsNullOrWhiteSpace(t.ComposersDisplay)),
-            "audit_missing_conductor" => working.Where(t => string.IsNullOrWhiteSpace(t.ConductorsDisplay)),
-            "audit_missing_album" => working.Where(t => string.IsNullOrWhiteSpace(t.Album)),
-            "audit_missing_publisher" => working.Where(t => string.IsNullOrWhiteSpace(t.Publisher)),
-            _ => working,
-        };
+            working = working.Where(t => t.IsClassical);
+        }
+        else if (InboxAuditEvaluator.IsAuditOrRediscoveryMode(LibraryNavMode))
+        {
+            working = working.Where(t => InboxAuditEvaluator.MatchesMode(
+                LibraryNavMode,
+                t.Genre,
+                t.ComposersDisplay,
+                t.ConductorsDisplay,
+                t.Album,
+                t.Publisher,
+                t.DjScene.Count,
+                t.TempoBucket,
+                t.TempoBpm,
+                t.CoverArtPath,
+                t.DjVocals,
+                t.LastPlayedTsMs,
+                nowMs));
+        }
 
         if (!string.IsNullOrWhiteSpace(SearchQuery))
         {
@@ -1651,6 +1847,7 @@ public sealed partial class MainViewModel
             _ => "全量曲目表",
         };
         CurrentViewHeader = $"{navLabel} ({FilteredTracks.Count} / {_allTracks.Count})";
+        InboxAuditResultSummaryText = InboxAuditEvaluator.FormatResultSummary(LibraryNavMode, navLabel, FilteredTracks.Count, _allTracks.Count);
 
         var pills = new List<string>();
         if (_selectedGenres.Count > 0) pills.Add($"流派: {string.Join(", ", _selectedGenres)}");
@@ -1676,14 +1873,27 @@ public sealed partial class MainViewModel
     public IReadOnlyList<string> GetUniqueCoverArtPaths(int maxCount = 64) =>
         _allTracks
             .Select(t => t.CoverArtPath)
-            .Where(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p))
+            .Where(p => !string.IsNullOrWhiteSpace(p))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(maxCount)
             .Cast<string>()
             .ToList();
 
-    public void RefreshQuickplayCollections()
+    public void RefreshQuickplayCollections() => RefreshQuickplayCollections(force: false);
+
+    public void RefreshQuickplayCollections(bool force)
     {
+        if (!force && PrimaryNavId != "quickplay")
+        {
+            _quickplayDirty = true;
+            return;
+        }
+        if (!force && !_quickplayDirty)
+        {
+            return;
+        }
+        _quickplayDirty = false;
+
         var byUid = _allTracks.ToDictionary(t => t.TrackUid, StringComparer.Ordinal);
         var seeds = _allTracks.Select(ToQuickplaySeed).ToList();
 
@@ -1718,7 +1928,7 @@ public sealed partial class MainViewModel
             foreach (var pin in pins)
             {
                 IReadOnlyList<TrackItem> tracks = ResolveTracksForPin(pin);
-                string? cover = !string.IsNullOrWhiteSpace(pin.CoverPath) && File.Exists(pin.CoverPath)
+                string? cover = !string.IsNullOrWhiteSpace(pin.CoverPath)
                     ? pin.CoverPath
                     : tracks.FirstOrDefault(t => !string.IsNullOrWhiteSpace(t.CoverArtPath))?.CoverArtPath;
                 string badge = pin.Kind == "playlist" ? "歌单" : $"{tracks.Count} 首";
@@ -2160,6 +2370,7 @@ public sealed partial class MainViewModel
 
             _allTracks = loaded;
             UpdateClassicalAdaptiveState();
+            RefreshInboxAuditCounts();
             TriggerFilterRefresh();
             RefreshStagingProposals();
             RefreshPlaylists();

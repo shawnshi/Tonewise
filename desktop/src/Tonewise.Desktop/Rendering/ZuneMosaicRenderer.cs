@@ -8,8 +8,33 @@ public sealed class ZuneMosaicRenderer : IDisposable
     private const int MaxCovers = 64;
     private static readonly SKSamplingOptions HighSampling = new(SKFilterMode.Linear, SKMipmapMode.Linear);
 
+    private sealed class MosaicTileSnapshot(List<SKImage> tiles)
+    {
+        private int _refCount = 1;
+        public IReadOnlyList<SKImage> Tiles { get; } = tiles;
+
+        public bool TryAddRef()
+        {
+            while (true)
+            {
+                int current = Volatile.Read(ref _refCount);
+                if (current <= 0) return false;
+                if (Interlocked.CompareExchange(ref _refCount, current + 1, current) == current)
+                    return true;
+            }
+        }
+
+        public void Release()
+        {
+            if (Interlocked.Decrement(ref _refCount) == 0)
+            {
+                foreach (var img in Tiles) img.Dispose();
+            }
+        }
+    }
+
     private readonly object _lock = new();
-    private readonly List<SKImage> _tiles = [];
+    private MosaicTileSnapshot? _currentSnapshot;
     private string _loadedSignature = "";
     private int _swapOffset;
     private int _disposed;
@@ -21,7 +46,7 @@ public sealed class ZuneMosaicRenderer : IDisposable
         {
             lock (_lock)
             {
-                return _tiles.Count > 0;
+                return _currentSnapshot is { Tiles.Count: > 0 };
             }
         }
     }
@@ -96,12 +121,19 @@ public sealed class ZuneMosaicRenderer : IDisposable
                     return;
                 }
 
+                var newSnapshot = new MosaicTileSnapshot(decoded);
+                MosaicTileSnapshot? oldSnapshot;
                 lock (_lock)
                 {
-                    foreach (var old in _tiles) old.Dispose();
-                    _tiles.Clear();
-                    _tiles.AddRange(decoded);
+                    if (ct.IsCancellationRequested || Volatile.Read(ref _disposed) != 0)
+                    {
+                        newSnapshot.Release();
+                        return;
+                    }
+                    oldSnapshot = _currentSnapshot;
+                    _currentSnapshot = newSnapshot;
                 }
+                oldSnapshot?.Release();
 
                 onReady();
             }
@@ -116,9 +148,9 @@ public sealed class ZuneMosaicRenderer : IDisposable
     {
         lock (_lock)
         {
-            if (_tiles.Count > 1)
+            if (_currentSnapshot is { Tiles.Count: > 1 } snap)
             {
-                _swapOffset = (_swapOffset + 1) % _tiles.Count;
+                _swapOffset = (_swapOffset + 1) % snap.Tiles.Count;
             }
         }
     }
@@ -129,56 +161,67 @@ public sealed class ZuneMosaicRenderer : IDisposable
 
         canvas.Clear(isDarkTheme ? SKColors.Black : SKColors.White);
 
-        List<SKImage> snapshot;
+        MosaicTileSnapshot? snapshot = null;
         int offset;
         lock (_lock)
         {
-            snapshot = [.. _tiles];
+            if (_currentSnapshot is { Tiles.Count: > 0 } cur && cur.TryAddRef())
+            {
+                snapshot = cur;
+            }
             offset = _swapOffset;
         }
 
-        if (snapshot.Count == 0)
+        if (snapshot is null)
         {
             DrawMinimalGeometricGrid(canvas, width, height, isDarkTheme, accentRgb);
             return;
         }
 
-        int tileSize = Math.Clamp(Math.Min(width, height) / 5, 108, 176);
-        int cols = (int)Math.Ceiling(width / (double)tileSize);
-        int rows = (int)Math.Ceiling(height / (double)tileSize);
+        try
+        {
+            var tiles = snapshot.Tiles;
+            int tileSize = Math.Clamp(Math.Min(width, height) / 5, 108, 176);
+            int cols = (int)Math.Ceiling(width / (double)tileSize);
+            int rows = (int)Math.Ceiling(height / (double)tileSize);
 
-        byte baseAlpha = isDarkTheme ? (byte)128 : (byte)96;
-        using var tilePaint = new SKPaint
-        {
-            IsAntialias = false,
-        };
-        using var cellBorderPaint = new SKPaint
-        {
-            Color = isDarkTheme ? new SKColor(255, 255, 255, 18) : new SKColor(0, 0, 0, 16),
-            Style = SKPaintStyle.Stroke,
-            StrokeWidth = 1f,
-            IsAntialias = false,
-        };
-
-        int idx = 0;
-        for (int r = 0; r < rows; r++)
-        {
-            for (int c = 0; c < cols; c++)
+            byte baseAlpha = isDarkTheme ? (byte)128 : (byte)96;
+            using var tilePaint = new SKPaint
             {
-                var img = snapshot[(idx + offset) % snapshot.Count];
-                int jitter = ((r * 7 + c * 13) % 29) - 14;
-                byte cellAlpha = (byte)Math.Clamp(baseAlpha + jitter, 60, 160);
-                tilePaint.Color = new SKColor(255, 255, 255, cellAlpha);
+                IsAntialias = false,
+            };
+            using var cellBorderPaint = new SKPaint
+            {
+                Color = isDarkTheme ? new SKColor(255, 255, 255, 18) : new SKColor(0, 0, 0, 16),
+                Style = SKPaintStyle.Stroke,
+                StrokeWidth = 1f,
+                IsAntialias = false,
+            };
 
-                var dst = new SKRect(c * tileSize, r * tileSize, (c + 1) * tileSize, (r + 1) * tileSize);
-                dst.Inflate(-1f, -1f);
-                canvas.DrawImage(img, dst, HighSampling, tilePaint);
-                canvas.DrawRect(dst, cellBorderPaint);
-                idx++;
+            int idx = 0;
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    var img = tiles[(idx + offset) % tiles.Count];
+                    int jitter = ((r * 7 + c * 13) % 29) - 14;
+                    byte cellAlpha = (byte)Math.Clamp(baseAlpha + jitter, 60, 160);
+                    tilePaint.Color = new SKColor(255, 255, 255, cellAlpha);
+
+                    var dst = new SKRect(c * tileSize, r * tileSize, (c + 1) * tileSize, (r + 1) * tileSize);
+                    dst.Inflate(-1f, -1f);
+                    canvas.DrawImage(img, dst, HighSampling, tilePaint);
+                    canvas.DrawRect(dst, cellBorderPaint);
+                    idx++;
+                }
             }
-        }
 
-        DrawScrim(canvas, width, height, isDarkTheme, accentRgb);
+            DrawScrim(canvas, width, height, isDarkTheme, accentRgb);
+        }
+        finally
+        {
+            snapshot.Release();
+        }
     }
 
     private static void DrawScrim(SKCanvas canvas, int width, int height, bool isDarkTheme, (byte R, byte G, byte B) accentRgb)
@@ -198,29 +241,25 @@ public sealed class ZuneMosaicRenderer : IDisposable
                 new SKColor(255, 255, 255, 136),
               ];
 
-        using var scrimPaint = new SKPaint
-        {
-            Shader = SKShader.CreateLinearGradient(
-                new SKPoint(0, 0),
-                new SKPoint(width, height * 0.5f),
-                stops,
-                [0f, 0.36f, 0.72f, 1f],
-                SKShaderTileMode.Clamp),
-        };
+        using var linearShader = SKShader.CreateLinearGradient(
+            new SKPoint(0, 0),
+            new SKPoint(width, height * 0.5f),
+            stops,
+            [0f, 0.36f, 0.72f, 1f],
+            SKShaderTileMode.Clamp);
+        using var scrimPaint = new SKPaint { Shader = linearShader };
         canvas.DrawRect(0, 0, width, height, scrimPaint);
 
-        using var accentGlowPaint = new SKPaint
-        {
-            Shader = SKShader.CreateRadialGradient(
-                new SKPoint(width * 0.18f, height * 0.42f),
-                Math.Max(width, height) * 0.48f,
-                [
-                    new SKColor(accentRgb.R, accentRgb.G, accentRgb.B, isDarkTheme ? (byte)24 : (byte)16),
-                    new SKColor(accentRgb.R, accentRgb.G, accentRgb.B, 0),
-                ],
-                [0f, 1f],
-                SKShaderTileMode.Clamp),
-        };
+        using var radialShader = SKShader.CreateRadialGradient(
+            new SKPoint(width * 0.18f, height * 0.42f),
+            Math.Max(width, height) * 0.48f,
+            [
+                new SKColor(accentRgb.R, accentRgb.G, accentRgb.B, isDarkTheme ? (byte)24 : (byte)16),
+                new SKColor(accentRgb.R, accentRgb.G, accentRgb.B, 0),
+            ],
+            [0f, 1f],
+            SKShaderTileMode.Clamp);
+        using var accentGlowPaint = new SKPaint { Shader = radialShader };
         canvas.DrawRect(0, 0, width, height, accentGlowPaint);
     }
 
@@ -259,10 +298,12 @@ public sealed class ZuneMosaicRenderer : IDisposable
         _loadCts?.Cancel();
         _loadCts?.Dispose();
         _loadCts = null;
+        MosaicTileSnapshot? oldSnapshot;
         lock (_lock)
         {
-            foreach (var img in _tiles) img.Dispose();
-            _tiles.Clear();
+            oldSnapshot = _currentSnapshot;
+            _currentSnapshot = null;
         }
+        oldSnapshot?.Release();
     }
 }

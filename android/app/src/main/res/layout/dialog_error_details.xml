@@ -56,6 +56,7 @@
                 android:layout_height="wrap_content"
                 android:layout_gravity="bottom|end"
                 android:layout_margin="@dimen/spacing_small"
+                android:contentDescription="@android:string/copy"
                 android:src="@drawable/ic_code_24"
                 app:backgroundTint="?attr/colorPrimaryContainer"
                 app:icon="@drawable/ic_copy_24" />

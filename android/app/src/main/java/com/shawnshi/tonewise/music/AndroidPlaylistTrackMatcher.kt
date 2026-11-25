@@ -981,6 +981,17 @@ class AndroidPlaylistTrackMatcher<T>(
 
         private val ALBUM_LIVE_EXTRA_REGEX = Regex("""(?:\bin\s+concert\b|\bunplugged\b)""")
         private val SOUNDTRACK_GENRE_REGEX = Regex("""\b(?:soundtrack|score|ost|film)\b""")
+        private val QUALIFIER_REMIX_REGEX =
+            Regex("""\b(?:remix(?:es|ed)?|rework|bootleg|club\s+mix|dub\s+mix)\b""")
+        private val QUALIFIER_INSTRUMENTAL_REGEX =
+            Regex("""\b(?:instrumental|off\s+vocal|minus\s+one)\b""")
+        private val QUALIFIER_KARAOKE_REGEX = Regex("""\b(?:karaoke|ktv)\b""")
+        private val QUALIFIER_ACOUSTIC_REGEX = Regex("""\b(?:acoustic|unplugged)\b""")
+        private val QUALIFIER_ACAPELLA_REGEX = Regex("""\ba\s*capp?ell?a\b""")
+        private val QUALIFIER_DEMO_REGEX = Regex("""\bdemo\b""")
+        private val QUALIFIER_COVER_REGEX = Regex("""\bcover\b""")
+        private val QUALIFIER_SPEED_REGEX = Regex("""\b(?:sped\s+up|speed\s+up|slowed|nightcore)\b""")
+        private val QUALIFIER_LIVE_REGEX = Regex("""(?<![a-z])live(?![a-z])""")
         private val CLASSICAL_CATALOGUE_REGEX = Regex("""\b(?:op|bwv|kv|hob|rv|woo|twv|hwv|sz|wwv)\.?\s*\d+""")
         private val ENSEMBLE_CREDIT_INDICATORS =
             listOf(
@@ -1902,15 +1913,15 @@ class AndroidPlaylistTrackMatcher<T>(
         private fun extractVersionQualifiers(preNorm: String): Int {
             if (preNorm.isEmpty()) return 0
             var q = 0
-            if (preNorm.contains("混音") || Regex("""\b(?:remix(?:es|ed)?|rework|bootleg|club\s+mix|dub\s+mix)\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_REMIX
-            if (preNorm.contains("伴奏") || preNorm.contains("纯音乐") || preNorm.contains("消音") || preNorm.contains("无人声") || preNorm.contains("乐器版") || Regex("""\b(?:instrumental|off\s+vocal|minus\s+one)\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_INSTRUMENTAL
-            if (preNorm.contains("卡拉ok") || Regex("""\b(?:karaoke|ktv)\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_KARAOKE
-            if (preNorm.contains("不插电") || preNorm.contains("木吉他版") || Regex("""\b(?:acoustic|unplugged)\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_ACOUSTIC
-            if (preNorm.contains("清唱") || preNorm.contains("阿卡贝拉") || Regex("""\ba\s*capp?ell?a\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_ACAPELLA
-            if (preNorm.contains("小样") || Regex("""\bdemo\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_DEMO
-            if (preNorm.contains("翻唱") || Regex("""\bcover\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_COVER
-            if (preNorm.contains("变速") || preNorm.contains("加速版") || preNorm.contains("降调") || Regex("""\b(?:sped\s+up|speed\s+up|slowed|nightcore)\b""").containsMatchIn(preNorm)) q = q or QUALIFIER_SPEED
-            if (preNorm.contains("现场") || preNorm.contains("演唱会") || preNorm.contains("音乐会") || Regex("""(?<![a-z])live(?![a-z])""").containsMatchIn(preNorm)) q = q or QUALIFIER_LIVE
+            if (preNorm.contains("混音") || QUALIFIER_REMIX_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_REMIX
+            if (preNorm.contains("伴奏") || preNorm.contains("纯音乐") || preNorm.contains("消音") || preNorm.contains("无人声") || preNorm.contains("乐器版") || QUALIFIER_INSTRUMENTAL_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_INSTRUMENTAL
+            if (preNorm.contains("卡拉ok") || QUALIFIER_KARAOKE_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_KARAOKE
+            if (preNorm.contains("不插电") || preNorm.contains("木吉他版") || QUALIFIER_ACOUSTIC_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_ACOUSTIC
+            if (preNorm.contains("清唱") || preNorm.contains("阿卡贝拉") || QUALIFIER_ACAPELLA_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_ACAPELLA
+            if (preNorm.contains("小样") || QUALIFIER_DEMO_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_DEMO
+            if (preNorm.contains("翻唱") || QUALIFIER_COVER_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_COVER
+            if (preNorm.contains("变速") || preNorm.contains("加速版") || preNorm.contains("降调") || QUALIFIER_SPEED_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_SPEED
+            if (preNorm.contains("现场") || preNorm.contains("演唱会") || preNorm.contains("音乐会") || QUALIFIER_LIVE_REGEX.containsMatchIn(preNorm)) q = q or QUALIFIER_LIVE
             return q
         }
 

@@ -13,6 +13,9 @@ import android.view.LayoutInflater
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.view.AccessibilityDelegateCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
@@ -82,13 +85,14 @@ class CollectionHubFragment : ViewBindingFragment<FragmentCollectionHubBinding>(
         binding.collectionPivotStrip.removeAllViews()
         pivotViews.clear()
 
-        for (pivot in pivots) {
+        for ((index, pivot) in pivots.withIndex()) {
             val tv =
                 TextView(context).apply {
                     text = pivot.label
                     typeface = mediumFace
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                     gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = (48f * density).toInt()
                     setPadding(padH, 0, padH, 0)
                     layoutParams =
                         LinearLayout.LayoutParams(
@@ -99,6 +103,27 @@ class CollectionHubFragment : ViewBindingFragment<FragmentCollectionHubBinding>(
                     isFocusable = true
                     setOnClickListener { homeModel.selectCollectionPivot(pivot) }
                 }
+            ViewCompat.setAccessibilityDelegate(
+                tv,
+                object : AccessibilityDelegateCompat() {
+                    override fun onInitializeAccessibilityNodeInfo(
+                        host: View,
+                        info: AccessibilityNodeInfoCompat,
+                    ) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        info.setCollectionItemInfo(
+                            AccessibilityNodeInfoCompat.CollectionItemInfoCompat.obtain(
+                                0,
+                                1,
+                                index,
+                                1,
+                                false,
+                                host.isSelected,
+                            )
+                        )
+                    }
+                },
+            )
             pivotViews[pivot] = tv
             binding.collectionPivotStrip.addView(tv)
         }
@@ -113,7 +138,8 @@ class CollectionHubFragment : ViewBindingFragment<FragmentCollectionHubBinding>(
         for ((item, tv) in pivotViews) {
             val selected = item == pivot
             tv.setTextColor(if (selected) activeColor else mutedColor)
-            tv.alpha = if (selected) 1f else 0.58f
+            tv.alpha = if (selected) 1f else 0.85f
+            tv.isSelected = selected
         }
 
         val sortable = pivot.musicType != null && pivot.musicType != MusicType.SCENES

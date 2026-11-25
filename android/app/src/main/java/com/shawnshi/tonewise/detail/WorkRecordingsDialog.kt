@@ -68,7 +68,9 @@ import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.formatDurationMs
 import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 import kotlin.math.roundToLong
 import org.oxycblt.musikr.Song
 
@@ -77,6 +79,8 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
     @Inject lateinit var musicRepository: MusicRepository
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -87,14 +91,23 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val song by playbackModel.song.collectAsStateWithLifecycle()
-                val work = song?.let(musicRepository::findWorkForSong)
+                val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
+                val explicitWorkKey = arguments?.getString(ARG_WORK_KEY)
+                val explicitWork =
+                    explicitWorkKey?.let { key ->
+                        musicRepository.classicalWorks.firstOrNull { it.key == key }
+                    }
+                val work = explicitWork ?: song?.let(musicRepository::findWorkForSong)
 
-                TonewiseComposeTheme {
+                TonewiseComposeTheme(
+                    roundMode = uiSettings.roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     WorkRecordingsSheet(
                         currentSong = song,
                         work = work,
                         onSelectRecording = { recording ->
-                            switchRecordingPreservingMovement(song, recording)
+                            switchRecordingPreservingMovement(song, recording, explicitWork)
                         },
                         onSelectComposer = { composer ->
                             dismiss()
@@ -115,8 +128,23 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
         }
     }
 
-    private fun switchRecordingPreservingMovement(currentSong: Song?, recording: WorkRecording) {
+    private fun switchRecordingPreservingMovement(
+        currentSong: Song?,
+        recording: WorkRecording,
+        explicitWork: ClassicalWork? = null,
+    ) {
         if (recording.movements.isEmpty()) return
+        if (explicitWork != null &&
+            (currentSong == null || musicRepository.findWorkForSong(currentSong)?.key != explicitWork.key)
+        ) {
+            playbackModel.restoreSessionQueue(
+                songs = recording.movements,
+                index = 0,
+                positionMs = 0L,
+            )
+            dismiss()
+            return
+        }
         val targetIndex =
             if (currentSong == null) {
                 0
@@ -159,8 +187,14 @@ class WorkRecordingsDialog : BackportBottomSheetDialogFragment() {
 
     companion object {
         const val TAG = "WorkRecordingsDialog"
+        private const val ARG_WORK_KEY = "work_key"
 
-        fun newInstance() = WorkRecordingsDialog()
+        fun newInstance(workKey: String? = null) =
+            WorkRecordingsDialog().apply {
+                if (!workKey.isNullOrBlank()) {
+                    arguments = Bundle().apply { putString(ARG_WORK_KEY, workKey) }
+                }
+            }
 
         internal fun computeProportionalSeekMs(
             currentPosMs: Long,
@@ -285,7 +319,7 @@ private fun WorkRecordingsSheet(
                 val codecLabel = leadSong?.format?.resolve(context) ?: ""
                 ElevatedCard(
                     modifier = Modifier.fillMaxWidth().clickable { onSelectRecording(recording) },
-                    shape = RoundedCornerShape(14.dp),
+                    shape = MaterialTheme.shapes.medium,
                 ) {
                     Column(
                         modifier = Modifier.fillMaxWidth().padding(14.dp),

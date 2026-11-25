@@ -92,6 +92,26 @@ interface CoverStorage {
 private class FSCoverStorage(private val dir: File) : CoverStorage {
     private val fileMutexes = mutableMapOf<String, Mutex>()
     private val mapMutex = Mutex()
+    private val canonicalDir: File by lazy { dir.canonicalFile }
+
+    private fun resolveSafeFile(name: String): File? {
+        if (name.isBlank() ||
+            name == "." ||
+            name == ".." ||
+            name.contains('/') ||
+            name.contains('\\') ||
+            name.contains('\u0000') ||
+            name.contains("..")
+        ) {
+            return null
+        }
+        return try {
+            val target = File(dir, name).canonicalFile
+            if (target.parentFile == canonicalDir) target else null
+        } catch (_: IOException) {
+            null
+        }
+    }
 
     private suspend fun getMutexForFile(file: String): Mutex {
         return mapMutex.withLock { fileMutexes.getOrPut(file) { Mutex() } }
@@ -100,20 +120,24 @@ private class FSCoverStorage(private val dir: File) : CoverStorage {
     override suspend fun find(name: String): FDCover? =
         withContext(Dispatchers.IO) {
             try {
-                File(dir, name).takeIf { it.exists() }?.let { FSStoredCover(it) }
+                resolveSafeFile(name)?.takeIf { it.exists() }?.let { FSStoredCover(it) }
             } catch (e: IOException) {
                 null
             }
         }
 
     override suspend fun write(name: String, block: suspend (OutputStream) -> Unit): FDCover {
+        val targetFile =
+            resolveSafeFile(name)
+                ?: throw IllegalArgumentException("Unsafe cover storage filename: $name")
+        val tmpName = "$name.tmp"
+        val tempFile =
+            resolveSafeFile(tmpName)
+                ?: throw IllegalArgumentException("Unsafe cover temp filename: $tmpName")
         val fileMutex = getMutexForFile(name)
         return fileMutex.withLock {
-            val targetFile = File(dir, name)
             if (!targetFile.exists()) {
                 withContext(Dispatchers.IO) {
-                    val tempFile = File(dir, "$name.tmp")
-
                     try {
                         tempFile.outputStream().use { block(it) }
                         tempFile.renameTo(targetFile)
@@ -135,7 +159,7 @@ private class FSCoverStorage(private val dir: File) : CoverStorage {
         }
 
     override suspend fun rm(name: String) {
-        withContext(Dispatchers.IO) { File(dir, name).deleteRecursively() }
+        withContext(Dispatchers.IO) { resolveSafeFile(name)?.deleteRecursively() }
     }
 }
 

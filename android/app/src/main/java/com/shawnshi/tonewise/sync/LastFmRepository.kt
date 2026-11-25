@@ -104,6 +104,7 @@ constructor(
     private val loveFlushMutex = Mutex()
     private val syncMutex = Mutex()
     private val dbInitLock = Any()
+    private val dbPersistLock = Any()
     @Volatile private var dbLoaded = false
     private val pendingQueue = mutableListOf<ScrobbleEntry>()
     private val pendingLoveOps = mutableListOf<PendingLoveOp>()
@@ -453,7 +454,8 @@ constructor(
         if (queued) {
             ioScope.launch {
                 ensureDbLoaded()
-                synchronized(this@LastFmRepository) { savePendingQueue() }
+                val queueSnapshot = synchronized(this@LastFmRepository) { pendingQueue.toList() }
+                persistPendingQueueSnapshot(queueSnapshot)
                 flushPendingLoveOps()
                 flushPendingScrobbles()
             }
@@ -480,14 +482,16 @@ constructor(
             )
         ioScope.launch {
             ensureDbLoaded()
-            synchronized(this@LastFmRepository) {
-                upsertPendingLoveOp(pendingLoveOps, op)
-                savePendingLoveOps()
-                _state.value =
-                    snapshotState(
-                        if (loved) "Queued love: ${op.track}" else "Queued unlove: ${op.track}"
-                    )
-            }
+            val loveSnapshot =
+                synchronized(this@LastFmRepository) {
+                    upsertPendingLoveOp(pendingLoveOps, op)
+                    _state.value =
+                        snapshotState(
+                            if (loved) "Queued love: ${op.track}" else "Queued unlove: ${op.track}"
+                        )
+                    pendingLoveOps.toList()
+                }
+            persistPendingLoveOpsSnapshot(loveSnapshot)
             flushPendingLoveOps()
         }
     }
@@ -531,6 +535,7 @@ constructor(
                         songs.isNotEmpty()
                 ) {
                     var backfilledLoves = 0
+                    var loveSnapshot: List<PendingLoveOp>? = null
                     synchronized(this@LastFmRepository) {
                         val pendingKeys =
                             pendingLoveOps
@@ -556,9 +561,10 @@ constructor(
                             }
                         }
                         if (backfilledLoves > 0) {
-                            savePendingLoveOps()
+                            loveSnapshot = pendingLoveOps.toList()
                         }
                     }
+                    loveSnapshot?.let { persistPendingLoveOpsSnapshot(it) }
                     if (backfilledLoves > 0) {
                         totalPushedLoves += flushPendingLoveOps()
                     }
@@ -600,10 +606,13 @@ constructor(
                                 )
                             if (filtered.eligible.isNotEmpty()) {
                                 pendingQueue.addAll(filtered.eligible)
-                                savePendingQueue()
                             }
                         }
                     }
+                }
+                if (newlyQueued.isNotEmpty() && (afterLoved.apiEnabled || afterLoved.hasValidApiSession)) {
+                    val queueSnapshot = synchronized(this@LastFmRepository) { pendingQueue.toList() }
+                    persistPendingQueueSnapshot(queueSnapshot)
                 }
 
                 if (afterLoved.apiEnabled || afterLoved.hasValidApiSession) {
@@ -692,6 +701,9 @@ constructor(
             }
 
             var pulledMatched = 0
+            var pulledUpdates: List<Pair<String, Int>> = emptyList()
+            var stampsSnapshot: List<String>? = null
+            var nextCursorToSave: Long? = null
             synchronized(this@LastFmRepository) {
                 val deltaByUid = HashMap<String, Int>()
                 for (ct in recentList) {
@@ -708,17 +720,32 @@ constructor(
                     }
                 }
                 if (deltaByUid.isNotEmpty()) {
+                    val updates = ArrayList<Pair<String, Int>>(deltaByUid.size)
                     for ((uid, delta) in deltaByUid) {
                         val updatedPulled = (pulledCloudCounts[uid] ?: 0) + delta
                         pulledCloudCounts[uid] = updatedPulled
-                        playCountRepository.mergeHighWaterMarkCount(uid, updatedPulled)
+                        updates.add(uid to updatedPulled)
                     }
-                    savePulledCloudCounts()
-                    saveSeenCloudStamps()
+                    pulledUpdates = updates
+                    stampsSnapshot = seenCloudStamps.toList().takeLast(2000)
                 }
                 val maxPulledTs = recentList.maxOfOrNull { it.timestampSec } ?: 0L
                 if (maxPulledTs > 0L) {
                     val nextFrom = maxOf(fromCursor, maxPulledTs + 1L)
+                    if (nextFrom > fromCursor) {
+                        nextCursorToSave = nextFrom
+                    }
+                }
+            }
+            if (pulledUpdates.isNotEmpty()) {
+                for ((uid, updatedPulled) in pulledUpdates) {
+                    playCountRepository.mergeHighWaterMarkCount(uid, updatedPulled)
+                }
+                savePulledCloudCounts()
+                stampsSnapshot?.let { persistSeenCloudStampsSnapshot(it) }
+            }
+            nextCursorToSave?.let { nextFrom ->
+                synchronized(dbPersistLock) {
                     syncDb.syncKvDao().putValue(SyncKvEntity(KEY_LAST_PULL_FROM_SEC, nextFrom.toString()))
                 }
             }
@@ -792,6 +819,7 @@ constructor(
                     val outcome = postLoveOp(cfg, op)
                     if (outcome == SubmitOutcome.RETRY_LATER) break
 
+                    var loveSnapshot: List<PendingLoveOp>? = null
                     synchronized(this@LastFmRepository) {
                         val key = normalizeTrackKey(op.artist, op.track)
                         val idx =
@@ -801,9 +829,10 @@ constructor(
                             }
                         if (idx >= 0) {
                             pendingLoveOps.removeAt(idx)
-                            savePendingLoveOps()
+                            loveSnapshot = pendingLoveOps.toList()
                         }
                     }
+                    loveSnapshot?.let { persistPendingLoveOpsSnapshot(it) }
                     if (outcome == SubmitOutcome.SUCCEEDED) {
                         totalSent++
                     } else {
@@ -835,6 +864,7 @@ constructor(
                 var expiredDropped = 0
                 var dedupDropped = 0
                 var poisonDropped = 0
+                var filteredQueueSnapshot: List<ScrobbleEntry>? = null
                 synchronized(this@LastFmRepository) {
                     val res =
                         filterAndDedupPendingScrobbles(pendingQueue, recentCloudPlaysCache, nowSec)
@@ -843,9 +873,10 @@ constructor(
                     if (expiredDropped > 0 || dedupDropped > 0) {
                         pendingQueue.clear()
                         pendingQueue.addAll(res.eligible)
-                        savePendingQueue()
+                        filteredQueueSnapshot = pendingQueue.toList()
                     }
                 }
+                filteredQueueSnapshot?.let { persistPendingQueueSnapshot(it) }
 
                 var totalSent = 0
                 while (true) {
@@ -859,22 +890,26 @@ constructor(
                     val outcome = postScrobbleBatch(cfg, batch)
                     when (outcome) {
                         SubmitOutcome.SUCCEEDED -> {
-                            synchronized(this@LastFmRepository) {
-                                val removeCount = minOf(batch.size, pendingQueue.size)
-                                repeat(removeCount) { pendingQueue.removeAt(0) }
-                                savePendingQueue()
-                            }
+                            val queueSnapshot =
+                                synchronized(this@LastFmRepository) {
+                                    val removeCount = minOf(batch.size, pendingQueue.size)
+                                    repeat(removeCount) { pendingQueue.removeAt(0) }
+                                    pendingQueue.toList()
+                                }
+                            persistPendingQueueSnapshot(queueSnapshot)
                             totalSent += batch.size
                         }
                         SubmitOutcome.DROP_PERMANENT -> {
                             if (batch.size == 1) {
                                 L.w("Dropping poisoned Last.fm scrobble item: ${batch[0].artist} - ${batch[0].track}")
+                                var queueSnapshot: List<ScrobbleEntry>? = null
                                 synchronized(this@LastFmRepository) {
                                     if (pendingQueue.isNotEmpty()) {
                                         pendingQueue.removeAt(0)
-                                        savePendingQueue()
+                                        queueSnapshot = pendingQueue.toList()
                                     }
                                 }
+                                queueSnapshot?.let { persistPendingQueueSnapshot(it) }
                                 poisonDropped++
                             } else {
                                 // Isolate invalid entry inside batch so valid siblings still upload.
@@ -898,11 +933,13 @@ constructor(
                                     }
                                 }
                                 if (handledCount > 0) {
-                                    synchronized(this@LastFmRepository) {
-                                        val removeCount = minOf(handledCount, pendingQueue.size)
-                                        repeat(removeCount) { pendingQueue.removeAt(0) }
-                                        savePendingQueue()
-                                    }
+                                    val queueSnapshot =
+                                        synchronized(this@LastFmRepository) {
+                                            val removeCount = minOf(handledCount, pendingQueue.size)
+                                            repeat(removeCount) { pendingQueue.removeAt(0) }
+                                            pendingQueue.toList()
+                                        }
+                                    persistPendingQueueSnapshot(queueSnapshot)
                                 }
                                 if (pausedMidBatch) break
                             }
@@ -1140,8 +1177,15 @@ constructor(
     }
 
     private fun savePendingLoveOps() {
-        syncDb.syncKvDao()
-            .putValue(SyncKvEntity(KEY_PENDING_LOVE_JSON, serializePendingLoveOps(pendingLoveOps)))
+        val snapshot = synchronized(this@LastFmRepository) { pendingLoveOps.toList() }
+        persistPendingLoveOpsSnapshot(snapshot)
+    }
+
+    private fun persistPendingLoveOpsSnapshot(snapshot: List<PendingLoveOp>) {
+        synchronized(dbPersistLock) {
+            syncDb.syncKvDao()
+                .putValue(SyncKvEntity(KEY_PENDING_LOVE_JSON, serializePendingLoveOps(snapshot)))
+        }
     }
 
     private fun loadPendingLoveOps(): List<PendingLoveOp> =
@@ -1151,9 +1195,14 @@ constructor(
             .getOrDefault(emptyList())
 
     private fun savePendingQueue() {
+        val snapshot = synchronized(this@LastFmRepository) { pendingQueue.toList() }
+        persistPendingQueueSnapshot(snapshot)
+    }
+
+    private fun persistPendingQueueSnapshot(snapshot: List<ScrobbleEntry>) {
         val dao = syncDb.lastFmLedgerDao()
         val entities =
-            pendingQueue.map { e ->
+            snapshot.map { e ->
                 PendingScrobbleEntity(
                     songUid = e.songUid,
                     artist = e.artist,
@@ -1163,10 +1212,12 @@ constructor(
                     timestampSec = e.timestampSec,
                 )
             }
-        syncDb.runInTransaction {
-            dao.clearPendingScrobbles()
-            if (entities.isNotEmpty()) {
-                dao.insertScrobbles(entities)
+        synchronized(dbPersistLock) {
+            syncDb.runInTransaction {
+                dao.clearPendingScrobbles()
+                if (entities.isNotEmpty()) {
+                    dao.insertScrobbles(entities)
+                }
             }
         }
     }
@@ -1184,7 +1235,10 @@ constructor(
         }
 
     private fun savePulledCloudCounts() {
-        playCountRepository.setLastFmPulledCounts(pulledCloudCounts)
+        val countsSnapshot = synchronized(this@LastFmRepository) { pulledCloudCounts.toMap() }
+        synchronized(dbPersistLock) {
+            playCountRepository.setLastFmPulledCounts(countsSnapshot)
+        }
     }
 
     private fun loadPulledCloudCounts(): Map<String, Int> =
@@ -1194,17 +1248,24 @@ constructor(
             .associate { it.trackUid to it.pulledCloudCount }
 
     private fun saveSeenCloudStamps() {
+        val stampsSnapshot = synchronized(this@LastFmRepository) { seenCloudStamps.toList().takeLast(2000) }
+        persistSeenCloudStampsSnapshot(stampsSnapshot)
+    }
+
+    private fun persistSeenCloudStampsSnapshot(stampsSnapshot: List<String>) {
         val dao = syncDb.lastFmLedgerDao()
         val now = System.currentTimeMillis()
         val entities =
-            seenCloudStamps.toList().takeLast(2000).mapIndexed { idx, stamp ->
+            stampsSnapshot.mapIndexed { idx, stamp ->
                 SeenCloudStampEntity(stamp = stamp, createdAtMs = now + idx)
             }
-        syncDb.runInTransaction {
-            if (entities.isNotEmpty()) {
-                dao.insertSeenStamps(entities)
+        synchronized(dbPersistLock) {
+            syncDb.runInTransaction {
+                if (entities.isNotEmpty()) {
+                    dao.insertSeenStamps(entities)
+                }
+                dao.pruneOldSeenStamps()
             }
-            dao.pruneOldSeenStamps()
         }
     }
 

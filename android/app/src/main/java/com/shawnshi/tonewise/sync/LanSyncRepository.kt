@@ -546,6 +546,12 @@ constructor(
         _syncStatus.value = "同步已取消（已下载曲目与断点缓存已保留，可随时续传）"
     }
 
+    @Volatile private var localLargePruneConfirmedOnce: Boolean = false
+
+    fun confirmLargePruneLocally() {
+        localLargePruneConfirmedOnce = true
+    }
+
     suspend fun syncWithHost(baseUrl: String) {
         syncWithHost(baseUrl = baseUrl, transport = SyncTransportMode.LAN)
     }
@@ -665,6 +671,13 @@ constructor(
                     var paired =
                         _pairedHost.value ?: lwwStore.loadPairedHost()?.also { _pairedHost.value = it }
                     val verifiedHostId = pingInfo.hostId.takeIf { pingInfo.ok && it.isNotBlank() }
+                    if (paired != null &&
+                        paired.hostId.isNotBlank() &&
+                        verifiedHostId != null &&
+                        !paired.hostId.equals(verifiedHostId, ignoreCase = true)
+                    ) {
+                        throw IOException("目标电脑身份 (${pingInfo.hostName}) 与已配对主机不匹配，已拒绝自动重配对")
+                    }
                     var token = resolveTokenForHost(paired, cleanBase, verifiedHostId = verifiedHostId)
 
                     if (paired != null && token != null && paired.hostId.isBlank() && verifiedHostId != null) {
@@ -705,7 +718,8 @@ constructor(
                     }
 
                     if (paired == null || token == null) {
-                        if (transport == SyncTransportMode.USB &&
+                        if (paired == null &&
+                            transport == SyncTransportMode.USB &&
                             allowUsbAutoPair &&
                             !usbNonce.isNullOrBlank() &&
                             LanHttpClient.isLoopbackUrl(cleanBase)
@@ -714,7 +728,7 @@ constructor(
                             paired = newPaired
                             token = newToken
                         } else {
-                            _syncStatus.value = "该电脑尚未配对：请先输入电脑端显示的 6 位配对码"
+                            _syncStatus.value = "该电脑尚未配对或身份未验证：请先在同步面板重新配对 6 位配对码"
                             return@withCoroutineCancelToken
                         }
                     }
@@ -728,20 +742,8 @@ constructor(
                         try {
                             LanSyncV2Client.fetchOutbox(cleanBase, token, cancelToken)
                         } catch (authErr: LanSyncAuthException) {
-                            if (transport == SyncTransportMode.USB &&
-                                allowUsbAutoPair &&
-                                !usbNonce.isNullOrBlank() &&
-                                LanHttpClient.isLoopbackUrl(cleanBase)
-                            ) {
-                                val (rePaired, reToken) = performUsbAutoPair()
-                                paired = rePaired
-                                token = reToken
-                                activePaired = rePaired
-                                activeToken = reToken
-                                LanSyncV2Client.fetchOutbox(cleanBase, token, cancelToken)
-                            } else {
-                                throw authErr
-                            }
+                            // Security guard: never silently overwrite an existing paired host token on 401.
+                            throw IOException("电脑端鉴权已失效（401），已拒绝静默重配；请手动解除配对后重新输入配对码", authErr)
                         }
                     val (uniqueOutboxTracks, clientDuplicates) =
                         LanSyncV2Client.deduplicateOutboxTracks(outbox.tracks)
@@ -759,7 +761,7 @@ constructor(
                         }.toMap()
 
                     val songsSnapshot = musicRepository.library?.songs.orEmpty()
-                    val songsByRelSuffix = PlaylistM3u8Helper.buildSongsByRelSuffixMap(songsSnapshot)
+                    val songRelIndex = PlaylistM3u8Helper.buildSongRelPathIndex(songsSnapshot)
                     val cachedFpByUid =
                         syncDb.audioFingerprintDao().getAll().associateBy { it.trackUid }.toMutableMap()
 
@@ -784,7 +786,7 @@ constructor(
                         val recordedFile = recorded?.let { managedSyncStorage.inspectExistingManagedFile(it) }
                         val existingLocalSong =
                             if (recordedFile == null) {
-                                PlaylistM3u8Helper.findMatchingSongByRelPath(track.targetRelPath, songsByRelSuffix)
+                                PlaylistM3u8Helper.findMatchingSongByRelPath(track.targetRelPath, songRelIndex)
                             } else {
                                 null
                             }
@@ -1548,9 +1550,12 @@ constructor(
                         val desiredRelPaths = uniqueOutboxTracks.map { it.targetRelPath }
                         val managedRelPaths = syncDb.syncedTrackDao().getAll().map { it.relativePath }.toSet()
                         val syncCompletedCleanly = failedTrackUids.isEmpty() && !cancelToken.isCancelled
+                        // Never trust remote HTTP prune_confirmed_for_session blindly; require explicit Android-side confirmation.
+                        val effectivePolicy =
+                            syncPolicy.copy(pruneConfirmedForSession = localLargePruneConfirmedOnce)
                         val prunePlan =
                             SyncMirrorPrunePlanner.planPrune(
-                                policy = syncPolicy,
+                                policy = effectivePolicy,
                                 desiredTargetRelPaths = desiredRelPaths,
                                 localMusicFiles = localMusicFiles,
                                 managedRelPaths = managedRelPaths,
@@ -1560,6 +1565,7 @@ constructor(
                         localAudioCount = prunePlan.localAudioCount
                         when (prunePlan.decision) {
                             PruneDecision.PROCEED -> {
+                                localLargePruneConfirmedOnce = false
                                 val playingUris = HashSet<String>()
                                 val playingNormRels = HashSet<String>()
                                 playbackStateManager.currentSong?.let { cur ->
@@ -1605,7 +1611,7 @@ constructor(
                                 pendingLargePruneCount = prunePlan.filesToDelete.size
                                 pendingLargePruneRatio = prunePlan.pruneRatio
                                 pruneStatusNote =
-                                    "拟清理 ${pendingLargePruneCount}/${localAudioCount} 首（超阈值，请在电脑端确认后继续）"
+                                    "拟清理 ${pendingLargePruneCount}/${localAudioCount} 首（超阈值，需在手机端确认后执行）"
                             }
                             PruneDecision.SKIP_EMPTY_OR_UNAUTHORITATIVE -> {
                                 pruneStatusNote = "同步列表为空或源目录异常，已熔断跳过清理"
@@ -2166,9 +2172,9 @@ constructor(
                 songByPcUid[hex] = s
             }
         }
-        val songsByRel = PlaylistM3u8Helper.buildSongsByRelSuffixMap(songs)
+        val songRelIndex = PlaylistM3u8Helper.buildSongRelPathIndex(songs)
         for (synced in syncedAll) {
-            val match = PlaylistM3u8Helper.findMatchingSongByRelPath(synced.relativePath, songsByRel) ?: continue
+            val match = PlaylistM3u8Helper.findMatchingSongByRelPath(synced.relativePath, songRelIndex) ?: continue
             val pcKey = synced.trackUid.trim().lowercase()
             if (pcKey.isNotEmpty()) {
                 songByPcUid.putIfAbsent(pcKey, match)
@@ -2484,10 +2490,13 @@ constructor(
         playlistReconcileMutex.withLock {
             if (pendingOutboxPlaylists.isEmpty()) return
             val lib = musicRepository.library ?: return
-            val songsByRel = PlaylistM3u8Helper.buildSongsByRelSuffixMap(lib.songs)
+            val songRelIndex = PlaylistM3u8Helper.buildSongRelPathIndex(lib.songs)
+            val metadataFallback = lazy {
+                com.shawnshi.tonewise.music.AndroidPlaylistTrackMatcher.fromSongs(lib.songs)
+            }
             for ((key, pending) in pendingOutboxPlaylists.entries.toList()) {
                 val (matchedCount, totalRelCount) =
-                    applySingleOutboxPlaylist(pending.playlist, songsByRel)
+                    applySingleOutboxPlaylist(pending.playlist, songRelIndex, metadataFallback)
                 val allMatched = totalRelCount == 0 || matchedCount >= totalRelCount
                 if (allMatched) {
                     pendingOutboxPlaylists.remove(key)
@@ -2503,7 +2512,8 @@ constructor(
 
     private suspend fun applySingleOutboxPlaylist(
         pl: OutboxPlaylistDto,
-        songsByRel: List<Pair<String, Song>>,
+        songRelIndex: PlaylistM3u8Helper.SongRelPathIndex,
+        metadataFallback: Lazy<com.shawnshi.tonewise.music.AndroidPlaylistTrackMatcher<Song>>,
     ): Pair<Int, Int> {
         val totalExpected = pl.relPaths.size
         var matchedCount = 0
@@ -2516,13 +2526,10 @@ constructor(
                 }
                 return 0 to 0
             }
-            val metadataFallback by lazy {
-                com.shawnshi.tonewise.music.AndroidPlaylistTrackMatcher.fromSongs(lib.songs)
-            }
             val matchedSongs =
                 pl.relPaths.mapNotNull { rel ->
-                    PlaylistM3u8Helper.findMatchingSongByRelPath(rel, songsByRel)
-                        ?: metadataFallback.matchByFilenameHint(rel.substringAfterLast('/').substringAfterLast('\\'))
+                    PlaylistM3u8Helper.findMatchingSongByRelPath(rel, songRelIndex)
+                        ?: metadataFallback.value.matchByFilenameHint(rel.substringAfterLast('/').substringAfterLast('\\'))
                 }
             matchedCount = matchedSongs.size
             if (matchedSongs.isEmpty()) return 0 to totalExpected
