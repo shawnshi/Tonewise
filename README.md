@@ -63,7 +63,7 @@
 
 | 平台 | 安装包 / 发行归档 | 版本与运行环境 | 文件大小 | SHA-256 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v1.0.7`（`versionCode 107`） | `16,809,042` bytes（~16.03 MiB） | `a1d7eaa0ce56580a0f9f475c3cff0b600fb078f590098c17dff46d9912fc04ec` |
+| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v1.0.7`（`versionCode 107`） | `16,813,006` bytes（~16.03 MiB） | `cfc505e07fff80995dd156556940624c550cd18cb9309f5333b9fb10b253ff58` |
 | **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | `v1.0.7` · WinUI 3（`net9.0-windows10.0.26100.0`） | `48,995,125` bytes（~46.73 MiB） | `b734eb434fb30b3b1b85652929cc6462075acb6682597a0d419a328167f7ad63` |
 
 * **Android 签名与升级说明**：已通过 R8 优化、`zipalign` 4 字节对齐与 `apksigner` 校验（覆盖 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`）；当前仓库发行包使用调试签名密钥封装以保持本地覆盖升级一致，正式构建可通过 `TONEWISE_RELEASE_*` 环境变量与 `-PrequireReleaseSigning` 启用独立发布签名。

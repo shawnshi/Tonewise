@@ -244,6 +244,20 @@ class ZuneMobileUiUpgradeTest {
                 .readText(Charsets.UTF_8)
         assertFalse(personalizeXml.contains("set_key_home_tabs"))
 
+        val migratedSettingsClasses =
+            listOf(
+                com.shawnshi.tonewise.image.ImageSettingsImpl::class.java,
+                com.shawnshi.tonewise.playback.PlaybackSettingsImpl::class.java,
+                com.shawnshi.tonewise.ui.UISettingsImpl::class.java,
+                com.shawnshi.tonewise.home.HomeSettingsImpl::class.java,
+            )
+        for (settingsClass in migratedSettingsClasses) {
+            assertNotNull(
+                "${settingsClass.simpleName} must override migrate() to avoid Settings.migrate() NotImplementedError in Auxio.onCreate()",
+                settingsClass.getDeclaredMethod("migrate"),
+            )
+        }
+
         val toolbarPlaybackXml =
             File(repoRoot, "android/app/src/main/res/menu/toolbar_playback.xml")
                 .readText(Charsets.UTF_8)

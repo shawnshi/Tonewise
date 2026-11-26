@@ -19,6 +19,7 @@
 package com.shawnshi.tonewise.home
 
 import android.content.Context
+import androidx.core.content.edit
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
@@ -45,10 +46,28 @@ class HomeSettingsImpl @Inject constructor(@ApplicationContext context: Context)
     override val shouldHideCollaborators: Boolean
         get() = sharedPreferences.getBoolean(getString(R.string.set_key_hide_collaborators), false)
 
+    override fun migrate() {
+        val currentTabsKey = getString(R.string.set_key_home_tabs)
+        if (
+            sharedPreferences.contains(OLD_KEY_LIB_TABS) ||
+                sharedPreferences.contains(currentTabsKey)
+        ) {
+            L.d("Removing obsolete library tab preferences")
+            sharedPreferences.edit {
+                remove(OLD_KEY_LIB_TABS)
+                remove(currentTabsKey)
+            }
+        }
+    }
+
     override fun onSettingChanged(key: String, listener: HomeSettings.Listener) {
         if (key == getString(R.string.set_key_hide_collaborators)) {
             L.d("Dispatching collaborator setting change")
             listener.onHideCollaboratorsChanged()
         }
+    }
+
+    companion object {
+        const val OLD_KEY_LIB_TABS = "auxio_lib_tabs"
     }
 }
