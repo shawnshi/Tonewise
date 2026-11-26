@@ -12,12 +12,14 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.RadialGradient
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.LinearInterpolator
+import androidx.core.graphics.ColorUtils
 import coil3.ImageLoader
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
@@ -25,6 +27,7 @@ import coil3.request.allowHardware
 import coil3.toBitmap
 import com.google.android.material.R as MaterialR
 import com.google.android.material.color.MaterialColors
+import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,11 +51,15 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
     private var isSheetExpanded: Boolean = false
     private var panOffsetPx: Float = 0f
     private var panAnimator: ValueAnimator? = null
+    private var ambientEnabled: Boolean = false
+    private var ambientSeedArgb: Int? = null
 
     private val tilePaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val scrimPaint = Paint()
+    private val ambientPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private var lastScrimHeight = -1
     private var lastScrimBaseColor = 0
+    private var lastAmbientKey = ""
     private val dstRect = RectF()
     private val srcRect = Rect()
 
@@ -133,9 +140,23 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         maybeStartPanAnimator()
     }
 
+    /**
+     * Switches between a soft cover-derived radial glow ([enabled] = true) and the classic
+     * 36-cover scrolling Zune mosaic ([enabled] = false).
+     */
+    fun setAmbientBackdrop(enabled: Boolean, seedArgb: Int?) {
+        if (ambientEnabled == enabled && ambientSeedArgb == seedArgb) return
+        ambientEnabled = enabled
+        ambientSeedArgb = seedArgb
+        lastAmbientKey = ""
+        maybeStartPanAnimator()
+        invalidate()
+    }
+
     private fun maybeStartPanAnimator() {
         if (
-            !isAttachedToWindow ||
+            ambientEnabled ||
+                !isAttachedToWindow ||
                 !isShown ||
                 !isSheetExpanded ||
                 windowVisibility != View.VISIBLE ||
@@ -171,6 +192,31 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         val fallbackColor = if (isDarkSurface) Color.BLACK else Color.WHITE
         val baseColor = MaterialColors.getColor(this, MaterialR.attr.colorSurface, fallbackColor)
         canvas.drawColor(baseColor)
+
+        if (ambientEnabled) {
+            val seed =
+                ambientSeedArgb
+                    ?: if (isDarkSurface) Color.parseColor("#8A6D3B") else Color.parseColor("#3B6E8C")
+            val glowAlpha = if (isDarkSurface) 0.28f else 0.18f
+            val midAlpha = if (isDarkSurface) 0.12f else 0.08f
+            val key = "$w:$h:$baseColor:$seed:$isDarkSurface"
+            if (key != lastAmbientKey) {
+                lastAmbientKey = key
+                val glowColor = ColorUtils.blendARGB(baseColor, seed or 0xFF000000.toInt(), glowAlpha)
+                val midColor = ColorUtils.blendARGB(baseColor, seed or 0xFF000000.toInt(), midAlpha)
+                ambientPaint.shader =
+                    RadialGradient(
+                        w * 0.5f,
+                        h * 0.34f,
+                        max(w, h) * 0.68f,
+                        intArrayOf(glowColor, midColor, baseColor),
+                        floatArrayOf(0f, 0.55f, 1f),
+                        Shader.TileMode.CLAMP,
+                    )
+            }
+            canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), ambientPaint)
+            return
+        }
 
         if (tiles.isNotEmpty()) {
             val cols = if (w > h) 8 else 5

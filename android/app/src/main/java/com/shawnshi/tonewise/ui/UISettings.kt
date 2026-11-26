@@ -45,12 +45,18 @@ interface UISettings : Settings<UISettings.Listener> {
     val roundMode: Boolean
     /** Whether to dynamically derive a high-contrast accent tint from the playing album cover. */
     val enableDynamicCoverAccent: Boolean
+    /** Whether Now Playing displays the vinyl turntable stage instead of the cover pager. */
+    var playbackVinylMode: Boolean
+    /** Whether Now Playing uses a soft cover-derived radial glow instead of the album mosaic. */
+    val useAmbientPlaybackBackdrop: Boolean
 
     interface Listener {
         /** Called when [roundMode] changes. */
         fun onRoundModeChanged()
         /** Called when [enableDynamicCoverAccent] changes. */
         fun onDynamicCoverAccentChanged() {}
+        /** Called when [useAmbientPlaybackBackdrop] changes. */
+        fun onPlaybackBackdropChanged() {}
     }
 }
 
@@ -88,6 +94,26 @@ class UISettingsImpl @Inject constructor(@ApplicationContext context: Context) :
                 false,
             )
 
+    override var playbackVinylMode: Boolean
+        get() =
+            sharedPreferences.getBoolean(
+                getString(R.string.set_key_playback_vinyl_mode),
+                true,
+            )
+        set(value) {
+            sharedPreferences.edit {
+                putBoolean(getString(R.string.set_key_playback_vinyl_mode), value)
+                apply()
+            }
+        }
+
+    override val useAmbientPlaybackBackdrop: Boolean
+        get() =
+            sharedPreferences.getBoolean(
+                getString(R.string.set_key_playback_ambient_backdrop),
+                true,
+            )
+
     override fun migrate() {
         if (sharedPreferences.contains(OLD_KEY_ACCENT3)) {
             L.d("Migrating $OLD_KEY_ACCENT3")
@@ -115,6 +141,9 @@ class UISettingsImpl @Inject constructor(@ApplicationContext context: Context) :
         } else if (key == getString(R.string.set_key_dynamic_cover_accent)) {
             L.d("Dispatching dynamic cover accent setting change")
             listener.onDynamicCoverAccentChanged()
+        } else if (key == getString(R.string.set_key_playback_ambient_backdrop)) {
+            L.d("Dispatching playback ambient backdrop setting change")
+            listener.onPlaybackBackdropChanged()
         }
     }
 

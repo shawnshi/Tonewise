@@ -10,6 +10,8 @@
     <string name="set_key_black_theme" translatable="false">KEY_BLACK_THEME</string>
     <string name="set_key_accent" translatable="false">auxio_accent2</string>
     <string name="set_key_dynamic_cover_accent" translatable="false">tonewise_dynamic_cover_accent</string>
+    <string name="set_key_playback_vinyl_mode" translatable="false">tonewise_playback_vinyl_mode</string>
+    <string name="set_key_playback_ambient_backdrop" translatable="false">tonewise_playback_ambient_backdrop</string>
 
     <string name="set_key_reindex" translatable="false">auxio_reindex</string>
     <string name="set_key_rescan" translatable="false">auxio_rescan</string>

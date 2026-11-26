@@ -28,7 +28,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -56,13 +55,11 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.shawnshi.tonewise.R
-import com.shawnshi.tonewise.home.focus.FocusFilterDialog
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.sync.AutoDjEngine
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SceneBanner
-import com.shawnshi.tonewise.sync.ScenesAndSyncDialog
 import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
@@ -208,51 +205,13 @@ class AutoDjHubFragment : Fragment() {
                                                 }
                                         )
                                     }
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    ) {
-                                        OutlinedButton(
-                                            onClick = {
-                                                if (parentFragmentManager.findFragmentByTag(FocusFilterDialog.TAG) == null) {
-                                                    FocusFilterDialog.newInstance()
-                                                        .show(parentFragmentManager, FocusFilterDialog.TAG)
-                                                }
-                                            },
-                                            shape = RectangleShape,
-                                            modifier = Modifier.weight(1f),
-                                        ) {
-                                            Text(
-                                                text = stringResource(R.string.lbl_focus_filter_drawer),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
-                                        OutlinedButton(
-                                            onClick = {
-                                                if (parentFragmentManager.findFragmentByTag(ScenesAndSyncDialog.TAG) == null) {
-                                                    ScenesAndSyncDialog.newInstance()
-                                                        .show(parentFragmentManager, ScenesAndSyncDialog.TAG)
-                                                }
-                                            },
-                                            shape = RectangleShape,
-                                            modifier = Modifier.weight(1f),
-                                        ) {
-                                            Text(
-                                                text = stringResource(R.string.lbl_sync_lastfm_drawer),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
-                                    }
                                 }
                             }
 
                             item(key = "presets_grid") {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Text(
-                                        text = "5d presets",
+                                        text = "scenes",
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         letterSpacing = 0.6.sp,

@@ -174,7 +174,6 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
         setupPager(binding)
 
         // --- VIEWMODEL SETUP ---
-        collect(homeModel.recreateTabs.flow, ::handleRecreate)
         collect(homeModel.chooseMusicLocations.flow, ::handleChooseFolders)
         collect(homeModel.requestSortDialog.flow, ::handleSortDialog)
         collectImmediately(homeModel.currentTabType, ::updateCurrentTab)
@@ -275,12 +274,6 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
             findNavController().navigateSafe(directions)
         }
         homeModel.requestSortDialog.consume()
-    }
-
-    private fun handleRecreate(recreate: Unit?) {
-        if (recreate == null) return
-        L.d("Tabs configuration updated; CollectionHubFragment refreshes pivots in place")
-        homeModel.recreateTabs.consume()
     }
 
     private fun handleChooseFolders(unit: Unit?) {

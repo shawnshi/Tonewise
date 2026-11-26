@@ -18,12 +18,9 @@
  
 package com.shawnshi.tonewise.settings.categories
 
-import androidx.navigation.fragment.findNavController
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.settings.BasePreferenceFragment
 import com.shawnshi.tonewise.settings.ui.WrappedDialogPreference
-import com.shawnshi.tonewise.util.navigateSafe
-import timber.log.Timber as L
 
 /**
  * Personalization settings interface.
@@ -31,10 +28,5 @@ import timber.log.Timber as L
  * @author Alexander Capehart (OxygenCobalt)
  */
 class PersonalizePreferenceFragment : BasePreferenceFragment(R.xml.preferences_personalize) {
-    override fun onOpenDialogPreference(preference: WrappedDialogPreference) {
-        if (preference.key == getString(R.string.set_key_home_tabs)) {
-            L.d("Navigating to home tab dialog")
-            findNavController().navigateSafe(PersonalizePreferenceFragmentDirections.tabSettings())
-        }
-    }
+    override fun onOpenDialogPreference(preference: WrappedDialogPreference) {}
 }

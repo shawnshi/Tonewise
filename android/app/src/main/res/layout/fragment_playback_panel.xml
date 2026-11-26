@@ -24,7 +24,7 @@
         app:navigationIcon="@drawable/ic_down_24"
         app:subtitleCentered="true"
         app:subtitleTextAppearance="?attr/textAppearanceBodySmall"
-        app:title="@string/lbl_playback"
+        app:title=""
         app:titleCentered="true"
         app:titleTextAppearance="?attr/textAppearanceLabelLargeEmphasized"
         tools:subtitle="@string/lbl_all_songs" />
@@ -41,6 +41,31 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/playback_toolbar" />
+
+    <com.shawnshi.tonewise.playback.ui.VinylTurntableView
+        android:id="@+id/playback_vinyl_view"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@+id/playback_pager"
+        app:layout_constraintEnd_toEndOf="@+id/playback_pager"
+        app:layout_constraintStart_toStartOf="@+id/playback_pager"
+        app:layout_constraintTop_toTopOf="@+id/playback_pager" />
+
+    <com.shawnshi.tonewise.ui.RippleFixMaterialButton
+        android:id="@+id/playback_stage_toggle"
+        style="@style/Widget.Auxio.Button.Playback.More"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="4dp"
+        android:alpha="0.72"
+        android:contentDescription="@string/desc_toggle_vinyl_mode"
+        app:backgroundTint="#66000000"
+        app:icon="@drawable/ic_album_24"
+        app:iconTint="@android:color/white"
+        app:layout_constraintBottom_toBottomOf="@+id/playback_pager"
+        app:layout_constraintEnd_toEndOf="@+id/playback_pager"
+        app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Small" />
 
     <LinearLayout
         android:id="@+id/playback_info_container"
@@ -104,37 +129,6 @@
             android:textSize="11sp"
             android:visibility="gone"
             tools:text="2024 • Genre • 3 plays" />
-
-        <TextView
-            android:id="@+id/playback_signal_pill"
-            style="@style/Widget.Auxio.TextView.Secondary.Compact"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="3dp"
-            android:background="@drawable/bg_signal_pill"
-            android:clickable="true"
-            android:focusable="true"
-            android:paddingHorizontal="10dp"
-            android:paddingVertical="3dp"
-            android:textSize="11sp"
-            android:visibility="gone"
-            tools:text="● 64-bit DSP · 48kHz" />
-
-        <HorizontalScrollView
-            android:id="@+id/playback_capsule_scroll"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:overScrollMode="never"
-            android:scrollbars="none">
-
-            <LinearLayout
-                android:id="@+id/playback_capsule_row"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal" />
-
-        </HorizontalScrollView>
 
     </LinearLayout>
     <com.shawnshi.tonewise.playback.ui.ForcedLTRFrameLayout

@@ -12,7 +12,8 @@
         android:title="@string/lbl_equalizer"
         app:showAsAction="always" />
     <item
-        android:id="@+id/action_sleep_timer"
-        android:title="@string/lbl_sleep_timer"
-        app:showAsAction="never" />
+        android:id="@+id/action_song_more"
+        android:icon="@drawable/ic_more_24"
+        android:title="@string/lbl_more"
+        app:showAsAction="always" />
 </menu>

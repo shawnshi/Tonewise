@@ -26,14 +26,19 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.DialogMenuBinding
+import com.shawnshi.tonewise.detail.BookletPdfDialog
 import com.shawnshi.tonewise.detail.DetailViewModel
+import com.shawnshi.tonewise.detail.WorkRecordingsDialog
 import com.shawnshi.tonewise.home.quickplay.QuickplayPinKind
 import com.shawnshi.tonewise.home.quickplay.QuickplayPinStore
 import com.shawnshi.tonewise.list.ListViewModel
+import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
+import com.shawnshi.tonewise.playback.ClassicalPlaybackActions
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.playback.audio.SignalPathDialog
 import com.shawnshi.tonewise.sync.QuickTagDialog
 import com.shawnshi.tonewise.playback.formatDurationMs
 import com.shawnshi.tonewise.util.getPlural
@@ -58,6 +63,7 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val args: SongMenuDialogFragmentArgs by navArgs()
     @Inject lateinit var quickplayPinStore: QuickplayPinStore
+    @Inject lateinit var musicRepository: MusicRepository
 
     override val parcel
         get() = args.parcel
@@ -68,6 +74,20 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
     override fun getHiddenItemIds(menu: Menu.ForSong): Set<Int> = buildSet {
         if (menu.song.composers.isEmpty()) add(R.id.action_composer_details)
         if (menu.song.conductors.isEmpty()) add(R.id.action_conductor_details)
+        val work =
+            if (!menu.song.workName.isNullOrBlank()) {
+                musicRepository.findWorkForSong(menu.song)
+            } else {
+                null
+            }
+        if (work == null || work.recordings.isEmpty()) add(R.id.action_work_recordings)
+        val isClassical =
+            ClassicalPlaybackActions.isClassicalTrack(
+                workName = menu.song.workName,
+                genreNames = menu.song.genres.map { it.name.resolve(requireContext()) },
+                conductors = menu.song.conductors,
+            )
+        if (!isClassical) add(R.id.action_booklet_pdf)
     }
 
     override fun onPrepareMenuItems(menu: Menu.ForSong, items: List<MenuItem>) {
@@ -108,6 +128,17 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
             }
             R.id.action_share -> requireContext().share(menu.song)
             R.id.action_detail -> detailModel.showSong(menu.song)
+            R.id.action_signal_path -> {
+                SignalPathDialog.newInstance().show(parentFragmentManager, SignalPathDialog.TAG)
+            }
+            R.id.action_work_recordings -> {
+                val workKey = musicRepository.findWorkForSong(menu.song)?.key
+                WorkRecordingsDialog.newInstance(workKey)
+                    .show(parentFragmentManager, WorkRecordingsDialog.TAG)
+            }
+            R.id.action_booklet_pdf -> {
+                BookletPdfDialog.newInstance().show(parentFragmentManager, BookletPdfDialog.TAG)
+            }
             R.id.action_quick_tag -> {
                 QuickTagDialog.newInstance(menu.song.uid.toString())
                     .show(parentFragmentManager, QuickTagDialog.TAG)

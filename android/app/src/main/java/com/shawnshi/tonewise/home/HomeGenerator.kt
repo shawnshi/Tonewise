@@ -28,7 +28,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
-import com.shawnshi.tonewise.home.tabs.Tab
 import com.shawnshi.tonewise.list.ListSettings
 import com.shawnshi.tonewise.list.adapter.UpdateInstructions
 import com.shawnshi.tonewise.list.sort.Sort
@@ -76,14 +75,10 @@ interface HomeGenerator {
 
     fun playlists(): List<Playlist>
 
-    fun tabs(): List<MusicType>
-
     interface Invalidator {
         fun invalidateEmpty() {}
 
         fun invalidateMusic(type: MusicType, instructions: UpdateInstructions)
-
-        fun invalidateTabs()
     }
 
     interface Factory {
@@ -215,10 +210,6 @@ private class HomeGeneratorImpl(
             val handler = mainHandler
             if (handler != null) handler.post(notify) else notify.run()
         }
-    }
-
-    override fun onTabsChanged() {
-        invalidator.invalidateTabs()
     }
 
     override fun onHideCollaboratorsChanged() {
@@ -411,6 +402,4 @@ private class HomeGeneratorImpl(
     override fun playlists() =
         musicRepository.library?.let { listSettings.playlistSort.playlists(it.playlists) }
             ?: emptyList()
-
-    override fun tabs() = homeSettings.homeTabs.filterIsInstance<Tab.Visible>().map { it.type }
 }

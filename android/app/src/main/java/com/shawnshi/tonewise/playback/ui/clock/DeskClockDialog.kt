@@ -42,6 +42,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -473,6 +474,15 @@ private fun DeskClockScreen(
                             digitSize = wideDigitSp,
                             compact = isCompactHeight,
                         )
+                        if (sleepBadgeText != null) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            PersistentSleepBadge(
+                                sleepBadgeText = sleepBadgeText,
+                                roundMode = roundMode,
+                                chromeVisible = chromeVisible,
+                                onClick = { showSleepMenu = true },
+                            )
+                        }
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
                             text = stringResource(R.string.lbl_clock_keep_screen_on),
@@ -525,6 +535,15 @@ private fun DeskClockScreen(
                         centered = true,
                         compact = isCompactPortrait,
                     )
+                    if (sleepBadgeText != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        PersistentSleepBadge(
+                            sleepBadgeText = sleepBadgeText,
+                            roundMode = roundMode,
+                            chromeVisible = chromeVisible,
+                            onClick = { showSleepMenu = true },
+                        )
+                    }
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
                         text = stringResource(R.string.lbl_clock_keep_screen_on),
@@ -583,41 +602,85 @@ private fun DeskClockScreen(
                             .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(
-                        text = stringResource(R.string.lbl_sleep_timer),
-                        color = OledBrass,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    val entries =
-                        listOf<Pair<String, () -> Unit>>(
-                            stringResource(R.string.lbl_sleep_off) to onCancelSleepTimer,
-                            stringResource(R.string.lbl_sleep_15m) to { onSetSleepMinutes(15) },
-                            stringResource(R.string.lbl_sleep_30m) to { onSetSleepMinutes(30) },
-                            stringResource(R.string.lbl_sleep_45m) to { onSetSleepMinutes(45) },
-                            stringResource(R.string.lbl_sleep_60m) to { onSetSleepMinutes(60) },
-                            stringResource(R.string.lbl_sleep_end_track) to onSetSleepEndOfTrack,
-                            stringResource(R.string.lbl_sleep_end_work) to onSetSleepEndOfWork,
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = stringResource(R.string.lbl_sleep_timer),
+                            color = OledBrass,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
                         )
-                    for ((label, action) in entries) {
-                        Box(
+                        if (sleepBadgeText != null) {
+                            Text(
+                                text = sleepBadgeText,
+                                color = OledBrass,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
+                    val entries =
+                        listOf<Triple<String, Boolean, () -> Unit>>(
+                            Triple(
+                                stringResource(R.string.lbl_sleep_off),
+                                sleepTimerState.mode == SleepTimerMode.OFF,
+                                onCancelSleepTimer,
+                            ),
+                            Triple(stringResource(R.string.lbl_sleep_15m), false) { onSetSleepMinutes(15) },
+                            Triple(stringResource(R.string.lbl_sleep_30m), false) { onSetSleepMinutes(30) },
+                            Triple(stringResource(R.string.lbl_sleep_45m), false) { onSetSleepMinutes(45) },
+                            Triple(stringResource(R.string.lbl_sleep_60m), false) { onSetSleepMinutes(60) },
+                            Triple(
+                                stringResource(R.string.lbl_sleep_end_track),
+                                sleepTimerState.mode == SleepTimerMode.END_OF_TRACK,
+                                onSetSleepEndOfTrack,
+                            ),
+                            Triple(
+                                stringResource(R.string.lbl_sleep_end_work),
+                                sleepTimerState.mode == SleepTimerMode.END_OF_WORK,
+                                onSetSleepEndOfWork,
+                            ),
+                        )
+                    for ((label, isSelected, action) in entries) {
+                        Row(
                             modifier =
                                 Modifier.fillMaxWidth()
+                                    .defaultMinSize(minHeight = 44.dp)
                                     .clip(RoundedCornerShape(chipCorner))
-                                    .background(Color(0xFF11141B))
+                                    .background(
+                                        if (isSelected) OledBrass.copy(alpha = 0.14f) else Color(0xFF11141B)
+                                    )
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) OledBrass.copy(alpha = 0.55f) else Color.Transparent,
+                                        RoundedCornerShape(chipCorner),
+                                    )
                                     .clickable {
                                         sleepExpiredLockReleased = false
                                         action()
                                         showSleepMenu = false
                                     }
-                                    .padding(horizontal = 12.dp, vertical = 9.dp)
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
                                 text = label,
-                                color = OledInkPrimary,
+                                color = if (isSelected) OledBrass else OledInkPrimary,
                                 fontSize = 13.sp,
                             )
+                            if (isSelected) {
+                                Text(
+                                    text = "✓",
+                                    color = OledBrass,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
                         }
                     }
                 }
@@ -740,9 +803,10 @@ private fun ClockTopBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(
+            Row(
                 modifier =
-                    Modifier.clip(RoundedCornerShape(pillCorner))
+                    Modifier.defaultMinSize(minHeight = 44.dp)
+                        .clip(RoundedCornerShape(pillCorner))
                         .background(OledDeckSurface)
                         .border(
                             1.dp,
@@ -750,8 +814,16 @@ private fun ClockTopBar(
                             RoundedCornerShape(pillCorner),
                         )
                         .clickable(onClick = onOpenSleepMenu)
-                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_time_24),
+                    contentDescription = null,
+                    tint = if (sleepBadgeText != null) OledBrass else OledInkSecondary,
+                    modifier = Modifier.size(13.dp),
+                )
                 Text(
                     text = sleepBadgeText ?: "SLEEP",
                     color = if (sleepBadgeText != null) OledBrass else OledInkSecondary,
@@ -796,6 +868,38 @@ private fun ClockTopBar(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun PersistentSleepBadge(
+    sleepBadgeText: String,
+    roundMode: Boolean,
+    chromeVisible: Boolean,
+    onClick: () -> Unit,
+) {
+    val corner = if (roundMode) 999.dp else 0.dp
+    Row(
+        modifier =
+            Modifier.defaultMinSize(minHeight = 36.dp)
+                .graphicsLayer { alpha = if (chromeVisible) 1f else 0.72f }
+                .clip(RoundedCornerShape(corner))
+                .background(Color(0xFF12100B))
+                .border(1.dp, OledBrass.copy(alpha = 0.45f), RoundedCornerShape(corner))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(OledBrass))
+        Text(
+            text = "SLEEP · $sleepBadgeText",
+            color = OledBrass,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.7.sp,
+        )
     }
 }
 

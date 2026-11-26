@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -29,9 +28,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
@@ -48,16 +44,14 @@ import com.shawnshi.tonewise.home.HomeViewModel
 import com.shawnshi.tonewise.home.focus.FocusFilterDialog
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.playback.PlaybackViewModel
-import com.shawnshi.tonewise.playback.ui.clock.DeskClockDialog
 import com.shawnshi.tonewise.sync.ScenesAndSyncDialog
 import com.shawnshi.tonewise.util.showToast
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
 /**
- * Zune Metro bottom `···` AppBar Drawer housing global utilities, LAN Sync/Last.fm,
- * 5D Focus filter, Desk Clock, Sleep Timer, Rescan, Settings, and About without cluttering
- * the Panorama top chrome.
+ * Zune Metro `···` AppBar Drawer housing global utilities, LAN Sync/Last.fm,
+ * 5D Focus filter, Rescan, Settings, and About without cluttering the Panorama top chrome.
  */
 @AndroidEntryPoint
 class ZuneAppBarDrawerSheet : BackportBottomSheetDialogFragment() {
@@ -90,11 +84,6 @@ class ZuneAppBarDrawerSheet : BackportBottomSheetDialogFragment() {
                             playbackModel.openPlayback()
                             dismissAllowingStateLoss()
                         },
-                        onOpenSearch = {
-                            playbackModel.openMain()
-                            homeModel.showSearch()
-                            dismissAllowingStateLoss()
-                        },
                         onOpenFocusFilter = {
                             val fm = parentFragmentManager
                             dismissAllowingStateLoss()
@@ -108,26 +97,6 @@ class ZuneAppBarDrawerSheet : BackportBottomSheetDialogFragment() {
                             if (fm.findFragmentByTag(ScenesAndSyncDialog.TAG) == null) {
                                 ScenesAndSyncDialog.newInstance().show(fm, ScenesAndSyncDialog.TAG)
                             }
-                        },
-                        onOpenDeskClock = {
-                            val fm = parentFragmentManager
-                            dismissAllowingStateLoss()
-                            if (fm.findFragmentByTag(DeskClockDialog.TAG) == null) {
-                                DeskClockDialog.newInstance().show(fm, DeskClockDialog.TAG)
-                            }
-                        },
-                        onSelectSleepOption = { choice ->
-                            when (choice) {
-                                SleepOption.OFF -> playbackModel.cancelSleepTimer()
-                                SleepOption.MIN_15 -> playbackModel.setSleepTimerMinutes(15)
-                                SleepOption.MIN_30 -> playbackModel.setSleepTimerMinutes(30)
-                                SleepOption.MIN_45 -> playbackModel.setSleepTimerMinutes(45)
-                                SleepOption.MIN_60 -> playbackModel.setSleepTimerMinutes(60)
-                                SleepOption.END_OF_TRACK -> playbackModel.setSleepTimerEndOfTrack()
-                                SleepOption.END_OF_WORK -> playbackModel.setSleepTimerEndOfWork()
-                            }
-                            requireContext().showToast(choice.labelRes)
-                            dismissAllowingStateLoss()
                         },
                         onRescanLibrary = {
                             musicModel.rescan()
@@ -154,31 +123,16 @@ class ZuneAppBarDrawerSheet : BackportBottomSheetDialogFragment() {
     }
 }
 
-private enum class SleepOption(val labelRes: Int) {
-    OFF(R.string.lbl_sleep_off),
-    MIN_15(R.string.lbl_sleep_15m),
-    MIN_30(R.string.lbl_sleep_30m),
-    MIN_45(R.string.lbl_sleep_45m),
-    MIN_60(R.string.lbl_sleep_60m),
-    END_OF_TRACK(R.string.lbl_sleep_end_track),
-    END_OF_WORK(R.string.lbl_sleep_end_work),
-}
-
 @Composable
 private fun ZuneDrawerContent(
     hasActiveSong: Boolean,
     onOpenNowPlaying: () -> Unit,
-    onOpenSearch: () -> Unit,
     onOpenFocusFilter: () -> Unit,
     onOpenSyncAndLastFm: () -> Unit,
-    onOpenDeskClock: () -> Unit,
-    onSelectSleepOption: (SleepOption) -> Unit,
     onRescanLibrary: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit,
 ) {
-    var showSleepOptions by remember { mutableStateOf(false) }
-
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
@@ -207,11 +161,6 @@ private fun ZuneDrawerContent(
                 onClick = onOpenNowPlaying,
             )
             ZuneDrawerItem(
-                label = "search",
-                subtitle = stringResource(R.string.lbl_search),
-                onClick = onOpenSearch,
-            )
-            ZuneDrawerItem(
                 label = "5d filter",
                 subtitle = stringResource(R.string.lbl_focus_filter_drawer),
                 onClick = onOpenFocusFilter,
@@ -221,42 +170,6 @@ private fun ZuneDrawerContent(
                 subtitle = stringResource(R.string.lbl_sync_lastfm_drawer),
                 onClick = onOpenSyncAndLastFm,
             )
-            ZuneDrawerItem(
-                label = "desk clock",
-                subtitle = stringResource(R.string.lbl_desk_clock),
-                onClick = onOpenDeskClock,
-            )
-            ZuneDrawerItem(
-                label = "sleep timer",
-                subtitle = stringResource(R.string.lbl_sleep_timer),
-                onClick = { showSleepOptions = !showSleepOptions },
-            )
-
-            if (showSleepOptions) {
-                Column(
-                    modifier =
-                        Modifier.fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                            .padding(horizontal = 24.dp, vertical = 8.dp)
-                ) {
-                    for (option in SleepOption.entries) {
-                        Box(
-                            modifier =
-                                Modifier.fillMaxWidth()
-                                    .defaultMinSize(minHeight = 48.dp)
-                                    .clickable { onSelectSleepOption(option) }
-                                    .padding(vertical = 12.dp),
-                            contentAlignment = Alignment.CenterStart,
-                        ) {
-                            Text(
-                                text = stringResource(option.labelRes),
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                        }
-                    }
-                }
-            }
 
             HorizontalDivider(
                 modifier = Modifier.padding(vertical = 6.dp),

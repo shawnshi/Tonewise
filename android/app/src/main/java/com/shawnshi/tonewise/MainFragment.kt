@@ -217,7 +217,6 @@ class MainFragment :
         collect(detailModel.toShow.flow, ::handleShow)
         collectImmediately(detailModel.editedPlaylist, detailBackCallback::invalidateEnabled)
         collectImmediately(homeModel.showOuter.flow, ::handleShowOuter)
-        collect(homeModel.openSearch.flow, ::handleOpenSearch)
         collectImmediately(homeModel.currentTabType, ::updateCurrentTab)
         collectImmediately(homeModel.panoramaPage, homeModel.collectionPivot) { _, _ ->
             updateCurrentTab(homeModel.currentTabType.value)
@@ -574,8 +573,7 @@ class MainFragment :
         val pivot = homeModel.collectionPivot.value
         val hideForHub =
             page == 2 ||
-                (page == 1 &&
-                    (pivot == CollectionPivot.CLASSICAL || pivot == CollectionPivot.SCENES))
+                (page == 1 && pivot == CollectionPivot.CLASSICAL)
         return binding.exploreNavHost.findNavController().currentDestination?.id != R.id.home_fragment ||
             sheetRising == true ||
             songs.isEmpty() ||
@@ -628,15 +626,6 @@ class MainFragment :
             }
         findNavController().navigateSafe(directions)
         homeModel.showOuter.consume()
-    }
-
-    private fun handleOpenSearch(unit: Unit?) {
-        if (unit == null) return
-        val exploreController = requireBinding().exploreNavHost.findNavController()
-        if (exploreController.currentDestination?.id != R.id.search_fragment) {
-            exploreController.navigate(R.id.search_fragment)
-        }
-        homeModel.openSearch.consume()
     }
 
     private fun updateSong(song: Song?) {

@@ -26,6 +26,7 @@ import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.detail.DetailGenerator
 import com.shawnshi.tonewise.detail.DetailSection
 import com.shawnshi.tonewise.home.HomeGenerator
+import com.shawnshi.tonewise.home.collection.CollectionPivot
 import com.shawnshi.tonewise.list.adapter.UpdateInstructions
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.MusicType
@@ -87,12 +88,6 @@ private constructor(
     override fun invalidateMusic(type: MusicType, instructions: UpdateInstructions) {
         val id = MediaSessionUID.Tab(TabNode.Home(type)).toString()
         invalidator.invalidateMusic(setOf(id))
-    }
-
-    override fun invalidateTabs() {
-        val rootId = MediaSessionUID.Tab(TabNode.Root).toString()
-        val moreId = MediaSessionUID.Tab(TabNode.More).toString()
-        invalidator.invalidateMusic(setOf(rootId, moreId))
     }
 
     override fun invalidate(type: MusicType, replace: Int?) {
@@ -190,10 +185,10 @@ private constructor(
         }
     }
 
-    private fun getCategoryMediaItems(node: TabNode, maxTabs: Int) =
-        when (node) {
+    private fun getCategoryMediaItems(node: TabNode, maxTabs: Int): List<MediaItem> {
+        val tabs = CollectionPivot.DEFAULT_PIVOTS.mapNotNull { it.musicType }
+        return when (node) {
             is TabNode.Root -> {
-                val tabs = homeGenerator.tabs()
                 if (maxTabs < tabs.size) {
                     tabs.take(maxTabs - 1).map { TabNode.Home(it).toMediaItem(context) } +
                         TabNode.More.toMediaItem(context)
@@ -202,7 +197,7 @@ private constructor(
                 }
             }
             is TabNode.More -> {
-                homeGenerator.tabs().drop(maxTabs - 1).map { TabNode.Home(it).toMediaItem(context) }
+                tabs.drop(maxTabs - 1).map { TabNode.Home(it).toMediaItem(context) }
             }
             is TabNode.Home ->
                 // homeGenerator returns emptyLists
@@ -217,6 +212,7 @@ private constructor(
                     MusicType.SCENES -> emptyList()
                 }
         }
+    }
 
     private fun getChildMediaItems(uid: Music.UID): List<MediaItem>? {
         val detail = detailGenerator.any(uid) ?: return null

@@ -45,6 +45,7 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
     Slider.OnChangeListener {
     private val binding = ViewSeekBarBinding.inflate(context.inflater, this, true)
     private var displayedPositionSecs: Long? = null
+    private var showRemainingTime: Boolean = false
     private val defaultTrackActiveTint: ColorStateList = binding.seekBarSlider.trackActiveTintList
     private val defaultThumbTint: ColorStateList = binding.seekBarSlider.thumbTintList
 
@@ -53,6 +54,10 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         binding.seekBarSlider.addOnChangeListener(this)
         binding.seekBarSlider.setLabelFormatter { value ->
             value.toLong().dsToSecs().formatDurationSecs(true)
+        }
+        binding.seekBarDuration.setOnClickListener {
+            showRemainingTime = !showRemainingTime
+            updateDurationLabel(positionDs)
         }
     }
 
@@ -131,7 +136,7 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
                 binding.seekBarSlider.value = to.toFloat()
             }
             binding.seekBarSlider.valueTo = to.toFloat()
-            binding.seekBarDuration.text = value.formatDurationDs(false)
+            updateDurationLabel(positionDs)
         }
 
     override fun onStartTrackingTouch(slider: Slider) {
@@ -166,6 +171,20 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         binding.seekBarPosition.text = formatted
         ViewCompat.setStateDescription(binding.seekBarSlider, formatted)
         displayedPositionSecs = seconds
+        if (showRemainingTime) {
+            updateDurationLabel(positionDs)
+        }
+    }
+
+    private fun updateDurationLabel(curPositionDs: Long) {
+        val totalDs = durationDs
+        binding.seekBarDuration.text =
+            if (showRemainingTime) {
+                val remDs = (totalDs - curPositionDs).coerceAtLeast(0L)
+                "-${remDs.formatDurationDs(false)}"
+            } else {
+                totalDs.formatDurationDs(false)
+            }
     }
 
     /** A listener for SeekBar interactions. */

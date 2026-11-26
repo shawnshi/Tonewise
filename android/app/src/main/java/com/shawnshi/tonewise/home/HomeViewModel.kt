@@ -35,7 +35,6 @@ import com.shawnshi.tonewise.home.collection.CollectionPivot
 import com.shawnshi.tonewise.home.quickplay.QuickplayAggregator
 import com.shawnshi.tonewise.home.quickplay.QuickplaySections
 import com.shawnshi.tonewise.home.quickplay.QuickplayTrackCandidate
-import com.shawnshi.tonewise.home.tabs.Tab
 import com.shawnshi.tonewise.list.ListSettings
 import com.shawnshi.tonewise.list.adapter.UpdateInstructions
 import com.shawnshi.tonewise.list.sort.Sort
@@ -220,35 +219,17 @@ constructor(
 
     private val homeGenerator = homeGeneratorFactory.create(this)
 
-    /**
-     * A list of [MusicType] corresponding to the current [Tab] configuration, excluding invisible
-     * [Tab]s.
-     */
-    var currentTabTypes = homeGenerator.tabs()
-        private set
-
-    private val _visibleCollectionPivots =
-        MutableStateFlow(CollectionPivot.resolveVisiblePivots(currentTabTypes))
+    private val _visibleCollectionPivots = MutableStateFlow(CollectionPivot.DEFAULT_PIVOTS)
     /** Ordered list of visible level-2 Zune pivots inside `collection`. */
     val visibleCollectionPivots: StateFlow<List<CollectionPivot>> = _visibleCollectionPivots
 
-    private val _collectionPivot =
-        MutableStateFlow(_visibleCollectionPivots.value.firstOrNull() ?: CollectionPivot.ALBUMS)
+    private val _collectionPivot = MutableStateFlow(CollectionPivot.ALBUMS)
     /** Active Zune Level-2 sub-pivot inside `collection`. */
     val collectionPivot: StateFlow<CollectionPivot> = _collectionPivot
 
-    private val _currentTabType =
-        MutableStateFlow(_collectionPivot.value.musicType ?: currentTabTypes[0])
+    private val _currentTabType = MutableStateFlow(MusicType.ALBUMS)
     /** The [MusicType] of the currently shown [Tab]. */
     val currentTabType: StateFlow<MusicType> = _currentTabType
-
-    /**
-     * A marker to re-create all library tabs, usually initiated by a settings change. When this
-     * flag is true, all tabs (and their respective ViewPager2 fragments) will be re-created from
-     * scratch.
-     */
-    val recreateTabs: Event<Unit>
-        field = MutableEvent<Unit>()
 
     private val _isFastScrolling = MutableStateFlow(false)
     /** A marker for whether the user is fast-scrolling in the home view or not. */
@@ -266,9 +247,6 @@ constructor(
 
     val requestSortDialog: Event<MusicType>
         field = MutableEvent<MusicType>()
-
-    val openSearch: Event<Unit>
-        field = MutableEvent<Unit>()
 
     init {
         homeGenerator.attach()
@@ -314,18 +292,6 @@ constructor(
             }
             MusicType.SCENES -> {}
         }
-    }
-
-    override fun invalidateTabs() {
-        currentTabTypes = homeGenerator.tabs()
-        val nextPivots = CollectionPivot.resolveVisiblePivots(currentTabTypes)
-        _visibleCollectionPivots.value = nextPivots
-        if (_collectionPivot.value !in nextPivots) {
-            val fallback = nextPivots.firstOrNull() ?: CollectionPivot.ALBUMS
-            _collectionPivot.value = fallback
-            fallback.musicType?.let { _currentTabType.value = it }
-        }
-        recreateTabs.put(Unit)
     }
 
     /**
@@ -413,16 +379,6 @@ constructor(
         listSettings.playlistSort = sort
     }
 
-    /**
-     * Update [currentTabType] to reflect a new ViewPager2 position
-     *
-     * @param pagerPos The new position of the ViewPager2 instance.
-     */
-    fun synchronizeTabPosition(pagerPos: Int) {
-        L.d("Updating current tab to ${currentTabTypes[pagerPos]}")
-        _currentTabType.value = currentTabTypes[pagerPos]
-    }
-
     fun setPanoramaPage(page: Int) {
         _panoramaPage.value = page.coerceIn(0, 2)
     }
@@ -434,13 +390,7 @@ constructor(
 
     fun openSortForCurrentPivot() {
         val type = _collectionPivot.value.musicType ?: return
-        if (type != MusicType.SCENES) {
-            requestSortDialog.put(type)
-        }
-    }
-
-    fun showSearch() {
-        openSearch.put(Unit)
+        requestSortDialog.put(type)
     }
 
     /**

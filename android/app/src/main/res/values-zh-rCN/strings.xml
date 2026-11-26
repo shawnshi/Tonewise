@@ -540,4 +540,7 @@
     <string name="lbl_composers_az">作曲家 A–Z</string>
     <string name="fmt_classical_rec_badge">%d 版</string>
     <string name="fmt_classical_mov_badge">%d 乐章</string>
+    <string name="set_playback_ambient_backdrop">氛围封面光晕背景</string>
+    <string name="set_playback_ambient_backdrop_desc">播放页背景使用当前封面氛围光晕替代马赛克墙</string>
+    <string name="desc_toggle_vinyl_mode">切换黑胶唱盘与专辑封套</string>
 </resources>

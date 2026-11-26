@@ -694,4 +694,7 @@
     <string name="lbl_composers_az">composers a–z</string>
     <string name="fmt_classical_rec_badge">%d rec</string>
     <string name="fmt_classical_mov_badge">%d mov</string>
+    <string name="set_playback_ambient_backdrop">Ambient cover backdrop</string>
+    <string name="set_playback_ambient_backdrop_desc">Use soft cover-colored glow behind Now Playing instead of album mosaic</string>
+    <string name="desc_toggle_vinyl_mode">Switch between vinyl turntable and cover sleeve</string>
 </resources>

@@ -30,9 +30,7 @@ import com.shawnshi.tonewise.home.list.ComposerListFragment
 import com.shawnshi.tonewise.home.list.ConductorListFragment
 import com.shawnshi.tonewise.home.list.GenreListFragment
 import com.shawnshi.tonewise.home.list.PlaylistListFragment
-import com.shawnshi.tonewise.home.list.SceneListFragment
 import com.shawnshi.tonewise.home.list.SongListFragment
-import com.shawnshi.tonewise.music.MusicType
 import com.shawnshi.tonewise.ui.ViewBindingFragment
 import com.shawnshi.tonewise.util.collectImmediately
 import com.shawnshi.tonewise.util.getAttrColorCompat
@@ -40,7 +38,7 @@ import dagger.hilt.android.AndroidEntryPoint
 
 /**
  * Zune Level-1 `collection` hub containing the tap-switched Level-2 lowercase sub-pivot strip
- * (`albums · tracks · artists · classical · composers · conductors · genres · playlists · scenes`)
+ * (`albums · tracks · artists · genres · classical · composers · conductors · playlists`)
  * and child fragment host.
  */
 @AndroidEntryPoint
@@ -142,7 +140,7 @@ class CollectionHubFragment : ViewBindingFragment<FragmentCollectionHubBinding>(
             tv.isSelected = selected
         }
 
-        val sortable = pivot.musicType != null && pivot.musicType != MusicType.SCENES
+        val sortable = pivot.musicType != null
         binding.collectionSortButton.isVisible = sortable
 
         val selectedView = pivotViews[pivot]
@@ -163,12 +161,11 @@ class CollectionHubFragment : ViewBindingFragment<FragmentCollectionHubBinding>(
                 CollectionPivot.ALBUMS -> AlbumListFragment()
                 CollectionPivot.TRACKS -> SongListFragment()
                 CollectionPivot.ARTISTS -> ArtistListFragment()
+                CollectionPivot.GENRES -> GenreListFragment()
                 CollectionPivot.CLASSICAL -> ClassicalHierarchyFragment()
                 CollectionPivot.COMPOSERS -> ComposerListFragment()
                 CollectionPivot.CONDUCTORS -> ConductorListFragment()
-                CollectionPivot.GENRES -> GenreListFragment()
                 CollectionPivot.PLAYLISTS -> PlaylistListFragment()
-                CollectionPivot.SCENES -> SceneListFragment()
             }
         childFragmentManager
             .beginTransaction()

@@ -144,32 +144,13 @@ class ZuneMobileUiUpgradeTest {
     }
 
     @Test
-    fun collectionPivot_preservesAllNineZuneSubPivots() {
+    fun collectionPivot_preservesFixedEightZuneSubPivotsWithoutScenes() {
         assertEquals(
-            listOf("albums", "tracks", "artists", "classical", "composers", "conductors", "genres", "playlists", "scenes"),
+            listOf("albums", "tracks", "artists", "genres", "classical", "composers", "conductors", "playlists"),
             CollectionPivot.entries.map { it.label },
         )
-    }
-
-    @Test
-    fun collectionPivot_respectsUserTabOrderAndVisibility_whilePreservingClassical() {
-        val customOrder = listOf(MusicType.PLAYLISTS, MusicType.ARTISTS, MusicType.ALBUMS)
-        val resolved = CollectionPivot.resolveVisiblePivots(customOrder)
-        assertEquals(
-            listOf(
-                CollectionPivot.PLAYLISTS,
-                CollectionPivot.ARTISTS,
-                CollectionPivot.CLASSICAL,
-                CollectionPivot.ALBUMS,
-            ),
-            resolved,
-        )
-
-        val noArtists = listOf(MusicType.SCENES, MusicType.COMPOSERS)
-        assertEquals(
-            listOf(CollectionPivot.SCENES, CollectionPivot.CLASSICAL, CollectionPivot.COMPOSERS),
-            CollectionPivot.resolveVisiblePivots(noArtists),
-        )
+        assertEquals(CollectionPivot.entries, CollectionPivot.DEFAULT_PIVOTS)
+        assertFalse(CollectionPivot.entries.any { it.musicType == MusicType.SCENES })
     }
 
     @Test
@@ -224,6 +205,12 @@ class ZuneMobileUiUpgradeTest {
                 )
                 .readText(Charsets.UTF_8)
         assertTrue(menuImplSrc.contains("lbl_unpin_quickplay"))
+        assertTrue(menuImplSrc.contains("action_signal_path"))
+        assertTrue(menuImplSrc.contains("action_work_recordings"))
+        assertTrue(menuImplSrc.contains("action_booklet_pdf"))
+        assertTrue(menuImplSrc.contains("SignalPathDialog"))
+        assertTrue(menuImplSrc.contains("WorkRecordingsDialog"))
+        assertTrue(menuImplSrc.contains("BookletPdfDialog"))
 
         val quickplaySrc =
             File(
@@ -239,8 +226,29 @@ class ZuneMobileUiUpgradeTest {
                 .readText(Charsets.UTF_8)
         assertTrue(drawerSrc.contains("ScenesAndSyncDialog"))
         assertTrue(drawerSrc.contains("FocusFilterDialog"))
-        assertTrue(drawerSrc.contains("DeskClockDialog"))
         assertTrue(drawerSrc.contains("lbl_rescan_started"))
+        assertFalse(drawerSrc.contains("DeskClockDialog"))
+        assertFalse(drawerSrc.contains("\"search\""))
+        assertFalse(drawerSrc.contains("\"sleep timer\""))
+
+        val autoDjHubSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/home/autodj/AutoDjHubFragment.kt")
+                .readText(Charsets.UTF_8)
+        assertTrue(autoDjHubSrc.contains("\"scenes\""))
+        assertFalse(autoDjHubSrc.contains("\"5d presets\""))
+        assertFalse(autoDjHubSrc.contains("FocusFilterDialog"))
+        assertFalse(autoDjHubSrc.contains("ScenesAndSyncDialog"))
+
+        val personalizeXml =
+            File(repoRoot, "android/app/src/main/res/xml/preferences_personalize.xml")
+                .readText(Charsets.UTF_8)
+        assertFalse(personalizeXml.contains("set_key_home_tabs"))
+
+        val toolbarPlaybackXml =
+            File(repoRoot, "android/app/src/main/res/menu/toolbar_playback.xml")
+                .readText(Charsets.UTF_8)
+        assertTrue(toolbarPlaybackXml.contains("action_song_more"))
+        assertFalse(toolbarPlaybackXml.contains("action_sleep_timer"))
 
         val panelVariants =
             listOf(
@@ -252,13 +260,16 @@ class ZuneMobileUiUpgradeTest {
             val xml = File(repoRoot, rel).readText(Charsets.UTF_8)
             assertNotNull(xml)
             assertTrue("$rel must contain ZuneMosaicBackdropView", xml.contains("ZuneMosaicBackdropView"))
+            assertTrue("$rel must contain VinylTurntableView", xml.contains("VinylTurntableView"))
+            assertTrue("$rel must contain playback_stage_toggle", xml.contains("playback_stage_toggle"))
+            assertFalse("$rel must not contain playback_capsule_scroll", xml.contains("playback_capsule_scroll"))
+            assertFalse("$rel must not contain playback_more", xml.contains("playback_more"))
             assertFalse("panel variant missing id", !xml.contains("playback_mosaic_backdrop"))
         }
 
-        assertTrue(panelSrc.contains("fmt_classical_view_composer"))
-        assertTrue(panelSrc.contains("fmt_classical_view_conductor"))
-        assertTrue(panelSrc.contains("detailModel.showComposer"))
-        assertTrue(panelSrc.contains("detailModel.showConductor"))
+        assertTrue(panelSrc.contains("action_song_more"))
+        assertTrue(panelSrc.contains("playbackVinylView"))
+        assertTrue(panelSrc.contains("sleepTimerState"))
     }
 
     @Test
@@ -478,8 +489,7 @@ class ZuneMobileUiUpgradeTest {
         val panelSrc =
             File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/playback/PlaybackPanelFragment.kt")
                 .readText(Charsets.UTF_8)
-        assertTrue(panelSrc.contains("playbackModel.djFreezeBackup"))
-        assertTrue(panelSrc.contains("positionMs = existingBackup.positionMs"))
+        assertFalse("PlaybackPanelFragment must not render removed 5D capsules", panelSrc.contains("playbackCapsuleRow"))
 
         val quickplaySrc =
             File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/home/quickplay/QuickplayFragment.kt")
@@ -514,9 +524,12 @@ class ZuneMobileUiUpgradeTest {
         assertTrue(propXml.contains("android:minHeight=\"48dp\""))
         assertTrue(propXml.contains("android:contentDescription="))
 
+        val toolbarPlaybackXml = File(repoRoot, "android/app/src/main/res/menu/toolbar_playback.xml").readText(Charsets.UTF_8)
+        assertTrue(toolbarPlaybackXml.contains("android:title=\"@string/lbl_more\""))
         for (dir in listOf("layout-h520dp", "layout-h360dp")) {
             val panelXml = File(repoRoot, "android/app/src/main/res/$dir/fragment_playback_panel.xml").readText(Charsets.UTF_8)
-            assertTrue(panelXml.contains("android:contentDescription=\"@string/lbl_more\""))
+            assertTrue(panelXml.contains("android:contentDescription=\"@string/lbl_love_track\""))
+            assertTrue(panelXml.contains("android:contentDescription=\"@string/desc_toggle_vinyl_mode\""))
         }
 
         val barXml = File(repoRoot, "android/app/src/main/res/layout/fragment_playback_bar.xml").readText(Charsets.UTF_8)
