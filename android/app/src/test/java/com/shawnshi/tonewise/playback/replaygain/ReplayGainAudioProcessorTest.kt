@@ -533,8 +533,8 @@ class ReplayGainAudioProcessorTest {
         override val uid: Music.UID
             get() = error("unused")
 
-        override val name: Name.Known
-            get() = error("unused")
+        override val name: Name.Known =
+            org.oxycblt.musikr.tag.interpret.Naming.simple().name("Track", null)
 
         override val track: Int? = null
         override val disc: Disc? = null

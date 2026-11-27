@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+pub mod classical;
+pub use classical::{
+    ParsedWorkMovement, SeparatedPerformers, abbreviate_ensemble, build_classical_credit_tiers,
+    classify_composer_era, classify_work_form, format_roman_numeral, is_classical_track,
+    parse_movement_prefix, parse_roman_numeral, separate_performers, split_work_and_movement,
+};
+
 const ARTIST_WHITELIST_JSON: &str =
     include_str!("../../../../protocol/dictionaries/artist_whitelist.json");
 const ARTIST_ALIASES_JSON: &str =

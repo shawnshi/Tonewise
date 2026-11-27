@@ -24,11 +24,17 @@
 #include "JObjectRef.h"
 #include "util.h"
 
+#include "taglib/aifffile.h"
+#include "taglib/dsdiffdiintag.h"
+#include "taglib/dsdifffile.h"
+#include "taglib/dsffile.h"
 #include "taglib/fileref.h"
 #include "taglib/flacfile.h"
+#include "taglib/infotag.h"
 #include "taglib/mp4file.h"
 #include "taglib/mp4properties.h"
 #include "taglib/mpegfile.h"
+#include "taglib/oggflacfile.h"
 #include "taglib/opusfile.h"
 #include "taglib/vorbisfile.h"
 #include "taglib/wavfile.h"
@@ -128,12 +134,83 @@ bool parseVorbis(const std::string &name, TagLib::Ogg::Vorbis::File *vorbisFile,
 
 bool parseWav(const std::string &name, TagLib::RIFF::WAV::File *wavFile,
         JMetadataBuilder &jBuilder) {
-    auto tag = wavFile->ID3v2Tag();
-    if (tag != nullptr) {
+    if (wavFile->hasInfoTag()) {
+        if (auto infoTag = wavFile->InfoTag()) {
+            try {
+                jBuilder.setGenericTag(*infoTag);
+            } catch (std::exception &e) {
+                LOGE("Unable to parse RIFF INFO tag in %s: %s", name.c_str(), e.what());
+            }
+        }
+    }
+    if (wavFile->hasID3v2Tag()) {
+        if (auto tag = wavFile->ID3v2Tag()) {
+            try {
+                jBuilder.setId3v2(*tag);
+            } catch (std::exception &e) {
+                LOGE("Unable to parse ID3v2 tag in %s: %s", name.c_str(), e.what());
+            }
+        }
+    }
+    return true;
+}
+
+bool parseAiff(const std::string &name, TagLib::RIFF::AIFF::File *aiffFile,
+        JMetadataBuilder &jBuilder) {
+    if (aiffFile->hasID3v2Tag()) {
+        if (auto tag = aiffFile->tag()) {
+            try {
+                jBuilder.setId3v2(*tag);
+            } catch (std::exception &e) {
+                LOGE("Unable to parse AIFF ID3v2 tag in %s: %s", name.c_str(), e.what());
+            }
+        }
+    }
+    return true;
+}
+
+bool parseDsf(const std::string &name, TagLib::DSF::File *dsfFile,
+        JMetadataBuilder &jBuilder) {
+    if (auto tag = dsfFile->tag()) {
         try {
             jBuilder.setId3v2(*tag);
         } catch (std::exception &e) {
-            LOGE("Unable to parse ID3v2 tag in %s: %s", name.c_str(), e.what());
+            LOGE("Unable to parse DSF ID3v2 tag in %s: %s", name.c_str(), e.what());
+        }
+    }
+    return true;
+}
+
+bool parseDsdiff(const std::string &name, TagLib::DSDIFF::File *dsdiffFile,
+        JMetadataBuilder &jBuilder) {
+    if (dsdiffFile->hasDIINTag()) {
+        if (auto diinTag = dsdiffFile->DIINTag()) {
+            try {
+                jBuilder.setGenericTag(*diinTag);
+            } catch (std::exception &e) {
+                LOGE("Unable to parse DSDIFF DIIN tag in %s: %s", name.c_str(), e.what());
+            }
+        }
+    }
+    if (dsdiffFile->hasID3v2Tag()) {
+        if (auto id3Tag = dsdiffFile->ID3v2Tag()) {
+            try {
+                jBuilder.setId3v2(*id3Tag);
+            } catch (std::exception &e) {
+                LOGE("Unable to parse DSDIFF ID3v2 tag in %s: %s", name.c_str(), e.what());
+            }
+        }
+    }
+    return true;
+}
+
+bool parseOggFlac(const std::string &name, TagLib::Ogg::FLAC::File *oggFlacFile,
+        JMetadataBuilder &jBuilder) {
+    if (auto tag = oggFlacFile->tag()) {
+        try {
+            jBuilder.setXiph(*tag);
+        } catch (std::exception &e) {
+            LOGE("Unable to parse Ogg FLAC Xiph comment in %s: %s", name.c_str(), e.what());
         }
     }
     return true;
@@ -168,6 +245,18 @@ TagLib::File* createFileFromContent(TagLib::IOStream *stream,
                 audioPropertiesStyle);
     else if (TagLib::RIFF::WAV::File::isSupported(stream))
         file = new TagLib::RIFF::WAV::File(stream, readAudioProperties,
+                audioPropertiesStyle);
+    else if (TagLib::RIFF::AIFF::File::isSupported(stream))
+        file = new TagLib::RIFF::AIFF::File(stream, readAudioProperties,
+                audioPropertiesStyle);
+    else if (TagLib::DSF::File::isSupported(stream))
+        file = new TagLib::DSF::File(stream, readAudioProperties,
+                audioPropertiesStyle);
+    else if (TagLib::DSDIFF::File::isSupported(stream))
+        file = new TagLib::DSDIFF::File(stream, readAudioProperties,
+                audioPropertiesStyle);
+    else if (TagLib::Ogg::FLAC::File::isSupported(stream))
+        file = new TagLib::Ogg::FLAC::File(stream, readAudioProperties,
                 audioPropertiesStyle);
 
     // double-check that the potentially created file actually valid.
@@ -210,6 +299,22 @@ bool dispatchAndParse(const std::string &name, TagLib::File *file,
     if (auto *wavFile = dynamic_cast<TagLib::RIFF::WAV::File*>(file)) {
         jBuilder.setMimeType("audio/wav");
         return parseWav(name, wavFile, jBuilder);
+    }
+    if (auto *aiffFile = dynamic_cast<TagLib::RIFF::AIFF::File*>(file)) {
+        jBuilder.setMimeType("audio/aiff");
+        return parseAiff(name, aiffFile, jBuilder);
+    }
+    if (auto *dsfFile = dynamic_cast<TagLib::DSF::File*>(file)) {
+        jBuilder.setMimeType("audio/dsf");
+        return parseDsf(name, dsfFile, jBuilder);
+    }
+    if (auto *dsdiffFile = dynamic_cast<TagLib::DSDIFF::File*>(file)) {
+        jBuilder.setMimeType("audio/dff");
+        return parseDsdiff(name, dsdiffFile, jBuilder);
+    }
+    if (auto *oggFlacFile = dynamic_cast<TagLib::Ogg::FLAC::File*>(file)) {
+        jBuilder.setMimeType("audio/flac");
+        return parseOggFlac(name, oggFlacFile, jBuilder);
     }
     if (auto *mp4File = dynamic_cast<TagLib::MP4::File*>(file)) {
         // Why are we setting this as default?
@@ -277,16 +382,17 @@ Java_org_oxycblt_musikr_metadata_TagLibJNI_openNative(JNIEnv *env,
         name = jStream.name();
         TagLib::FileRef fileRef {&jStream, true, TagLib::AudioProperties::Average};
         TagLib::File *fileToUse = fileRef.file();
-        bool needsOverride = (fileToUse != nullptr &&
-                fileToUse->audioProperties() != nullptr &&
+        bool needsOverride = (fileToUse == nullptr ||
+                fileToUse->audioProperties() == nullptr ||
                 fileToUse->audioProperties()->lengthInSeconds() == 0);
         if (needsOverride) {
-            LOGD("FileRef result for %s is suspicious (duration=0). Forcing content scan.", name.c_str());
+            LOGD("FileRef result for %s is null or suspicious (duration=0). Forcing content scan.", name.c_str());
             jStream.seek(0, TagLib::IOStream::Beginning);
             overriddenFile = createFileFromContent(&jStream, true, TagLib::AudioProperties::Average);
             if (overriddenFile != nullptr &&
                     overriddenFile->audioProperties() != nullptr &&
-                    overriddenFile->audioProperties()->lengthInSeconds() > 0)
+                    (fileToUse == nullptr ||
+                        overriddenFile->audioProperties()->lengthInSeconds() > 0))
             {
                 LOGD("Content scan successful. Overriding FileRef result for %s.", name.c_str());
                 fileToUse = overriddenFile;

@@ -103,16 +103,22 @@ public sealed class StagingDiffStore
             ["rating"] = "rating_ts",
         };
 
+    private static readonly ConcurrentDictionary<string, byte> InitializedStoreKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _schemaInitGate = new();
+
     public string DbPath { get; }
     public string StateDbPath { get; }
     public string? MusicRoot { get; }
 
-    public StagingDiffStore(string manifestDbPath, string? musicRoot = null)
+    public StagingDiffStore(string manifestDbPath, string? musicRoot = null, bool ensureSchemaImmediately = true)
     {
         DbPath = manifestDbPath;
         StateDbPath = DesktopStateStore.ResolveStateDbPath(manifestDbPath);
         MusicRoot = musicRoot ?? InferMusicRootFromDbPath(manifestDbPath);
-        EnsureSchema();
+        if (ensureSchemaImmediately)
+        {
+            EnsureSchema();
+        }
     }
 
     private static string? InferMusicRootFromDbPath(string dbPath)
@@ -163,22 +169,43 @@ public sealed class StagingDiffStore
 
     public void EnsureSchema()
     {
-        string? dbDir = Path.GetDirectoryName(Path.GetFullPath(DbPath));
-        if (!string.IsNullOrWhiteSpace(dbDir))
+        EnsureSchemaIfNeeded(force: true);
+    }
+
+    private void EnsureSchemaIfNeeded(bool force = false)
+    {
+        string key = $"{Path.GetFullPath(DbPath)}|{Path.GetFullPath(StateDbPath)}";
+        if (!force && InitializedStoreKeys.ContainsKey(key) && File.Exists(StateDbPath))
         {
-            Directory.CreateDirectory(dbDir);
+            return;
         }
-        DesktopStateStore.EnsureSchema(StateDbPath);
-        if (File.Exists(DbPath))
+
+        lock (_schemaInitGate)
         {
-            using var conn = OpenConnection();
-            EnsureOptionalTrackColumns(conn);
-            DesktopStateStore.MigrateLegacyOperationalTablesIfPresent(DbPath, StateDbPath);
+            if (!force && InitializedStoreKeys.ContainsKey(key) && File.Exists(StateDbPath))
+            {
+                return;
+            }
+
+            string? dbDir = Path.GetDirectoryName(Path.GetFullPath(DbPath));
+            if (!string.IsNullOrWhiteSpace(dbDir))
+            {
+                Directory.CreateDirectory(dbDir);
+            }
+            DesktopStateStore.EnsureSchemaOnce(StateDbPath);
+            if (File.Exists(DbPath))
+            {
+                using var conn = OpenConnection();
+                EnsureOptionalTrackColumns(conn);
+                DesktopStateStore.MigrateLegacyOperationalTablesIfPresent(DbPath, StateDbPath);
+            }
+            InitializedStoreKeys.TryAdd(key, 0);
         }
     }
 
     public int EnqueueProposals(IEnumerable<TagDiffProposal> proposals, bool forceOverwriteUnlocked = false)
     {
+        EnsureSchemaIfNeeded();
         using var conn = OpenStateConnection();
         using var tx = TonewiseSqlite.BeginImmediateTransaction(conn);
         int inserted = 0;
@@ -227,6 +254,7 @@ public sealed class StagingDiffStore
 
     public IReadOnlyList<TagDiffProposal> GetPendingProposals(int limit = 0)
     {
+        EnsureSchemaIfNeeded();
         using var conn = OpenStateReadOnlyConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = limit > 0
@@ -272,6 +300,7 @@ public sealed class StagingDiffStore
 
     public (int ApprovedCount, int PendingCount) GetPendingProposalCounts()
     {
+        EnsureSchemaIfNeeded();
         using var conn = OpenStateReadOnlyConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
@@ -292,6 +321,7 @@ public sealed class StagingDiffStore
         double autoApproveThreshold = 0.80,
         int maxProposals = 500)
     {
+        EnsureSchemaIfNeeded();
         using var conn = OpenStateReadOnlyConnection();
         using var cmd = conn.CreateCommand();
         int limit = maxProposals > 0 ? maxProposals : 100_000;
@@ -318,6 +348,7 @@ public sealed class StagingDiffStore
 
     public void SetProposalApproval(string proposalId, bool approved)
     {
+        EnsureSchemaIfNeeded();
         using var conn = OpenStateConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "UPDATE staging_diff_queue SET status = $st WHERE proposal_id = $id;";
@@ -328,6 +359,7 @@ public sealed class StagingDiffStore
 
     public int ApproveAllHighConfidence(double minConfidence = 0.80)
     {
+        EnsureSchemaIfNeeded();
         using var conn = OpenStateConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
@@ -344,6 +376,7 @@ public sealed class StagingDiffStore
     /// </summary>
     public int ClearPendingProposals()
     {
+        EnsureSchemaIfNeeded();
         using var conn = OpenStateConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "DELETE FROM staging_diff_queue WHERE status IN ('Pending', 'Rejected');";
@@ -352,6 +385,7 @@ public sealed class StagingDiffStore
 
     public int CountPendingAtOrAbove(double minConfidence)
     {
+        EnsureSchemaIfNeeded();
         using var conn = OpenStateReadOnlyConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM staging_diff_queue WHERE status = 'Pending' AND confidence >= $thresh;";
@@ -370,6 +404,7 @@ public sealed class StagingDiffStore
             : customBatchId;
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+        EnsureSchemaIfNeeded();
         using var stateConn = OpenStateConnection();
         var targets = new List<TagDiffProposal>();
         using (var selectCmd = stateConn.CreateCommand())
@@ -542,8 +577,8 @@ public sealed class StagingDiffStore
         }
 
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        EnsureSchemaIfNeeded();
         using var conn = OpenConnection();
-        EnsureOptionalTrackColumns(conn);
 
         var fileUpdatesByTrack = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
         foreach (string uid in uids)
@@ -656,6 +691,7 @@ public sealed class StagingDiffStore
 
     public RollbackBatchResult RollbackBatchDetailed(string batchId)
     {
+        EnsureSchemaIfNeeded();
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         using var stateConn = OpenStateConnection();
 
@@ -824,9 +860,10 @@ public sealed class StagingDiffStore
                 failedByTrack[uid] = $"拒绝越界路径物理写回: {relPath}";
                 continue;
             }
-            if (!File.Exists(fullPath))
+            if (!LongPathHelper.FileExists(fullPath))
                 continue;
-            workItems.Add((uid, relPath, fullPath, updates));
+            string ioPath = LongPathHelper.ToExtendedIfLong(fullPath);
+            workItems.Add((uid, relPath, ioPath, updates));
         }
 
         if (workItems.Count == 1)

@@ -25,9 +25,10 @@ enum class CollectionPivot(
     PLAYLISTS("playlists", MusicType.PLAYLISTS);
 
     companion object {
-        val DEFAULT_PIVOTS: List<CollectionPivot> = entries
+        val DEFAULT_PIVOTS: List<CollectionPivot> =
+            listOf(ALBUMS, TRACKS, ARTISTS, GENRES, CLASSICAL, CONDUCTORS, PLAYLISTS)
 
         fun fromOrdinal(index: Int): CollectionPivot =
-            entries.getOrElse(index) { ALBUMS }
+            DEFAULT_PIVOTS.getOrElse(index) { ALBUMS }
     }
 }

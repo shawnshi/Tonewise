@@ -236,13 +236,23 @@ public static class Acoustic5DInferenceService
         bool forceOverwriteUnlocked = false)
     {
         var inferred = InferTrack5D(features);
+        return GenerateMissing5DProposalsFromResult(existing, inferred, forceOverwriteUnlocked);
+    }
+
+    public static IReadOnlyList<TagDiffProposal> GenerateMissing5DProposalsFromResult(
+        TrackCurationSnapshot existing,
+        Acoustic5DResult inferred,
+        bool forceOverwriteUnlocked = false,
+        double? confidenceCap = null)
+    {
         var list = new List<TagDiffProposal>();
 
         void AddIfProposed(string field, string? orig, string? suggested, double conf, string src)
         {
             if (string.IsNullOrWhiteSpace(suggested)) return;
+            double effectiveConf = confidenceCap.HasValue ? Math.Min(conf, confidenceCap.Value) : conf;
             var p = StagingDiffStore.TryCreateProposal(
-                existing.TrackUid, field, orig, suggested, conf, src, forceOverwriteUnlocked
+                existing.TrackUid, field, orig, suggested, effectiveConf, src, forceOverwriteUnlocked
             );
             if (p is not null) list.Add(p);
         }

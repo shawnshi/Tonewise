@@ -51,6 +51,27 @@ void JMetadataBuilder::setId3v1(TagLib::ID3v1::Tag &tag) {
     }
 }
 
+void JMetadataBuilder::setGenericTag(const TagLib::Tag &tag) {
+    if (!tag.title().isEmpty()) {
+        id3v2.add_id("TIT2", tag.title());
+    }
+    if (!tag.artist().isEmpty()) {
+        id3v2.add_id("TPE1", tag.artist());
+    }
+    if (!tag.album().isEmpty()) {
+        id3v2.add_id("TALB", tag.album());
+    }
+    if (!tag.genre().isEmpty()) {
+        id3v2.add_id("TCON", tag.genre());
+    }
+    if (tag.track() > 0) {
+        id3v2.add_id("TRCK", std::to_string(tag.track()));
+    }
+    if (tag.year() > 0) {
+        id3v2.add_id("TYER", std::to_string(tag.year()));
+    }
+}
+
 void JMetadataBuilder::setId3v2(TagLib::ID3v2::Tag &tag) {
     // We want to ideally find the front cover, fall back to the first picture otherwise.
     std::optional<TagLib::ID3v2::AttachedPictureFrame*> firstPic;
@@ -153,6 +174,12 @@ void JMetadataBuilder::setMp4(TagLib::MP4::Tag &tag) {
             mp4AddImpl(mp4, itemName, itemValue.toStringList());
             break;
             // Weird MP4 items I'm 90% sure I'll encounter.
+        case TagLib::MP4::Item::Type::Bool:
+            serializedValue = itemValue.toBool() ? "1" : "0";
+            break;
+        case TagLib::MP4::Item::Type::Byte:
+            serializedValue = std::to_string(itemValue.toByte());
+            break;
         case TagLib::MP4::Item::Type::Int:
             serializedValue = std::to_string(itemValue.toInt());
             break;

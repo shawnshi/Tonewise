@@ -179,7 +179,7 @@ public sealed partial class MainWindow : Window
 
         if (ctrl && !alt && !shift && e.Key == VirtualKey.A)
         {
-            if (IsTrackListActiveAndPopulated())
+            if (IsTrackListActiveAndPopulated() || IsClassicalComposerDetailSelectionActive())
             {
                 SelectAllTracksPreservingFocus();
                 e.Handled = true;
@@ -321,6 +321,11 @@ public sealed partial class MainWindow : Window
         return false;
     }
 
+    private bool IsClassicalComposerDetailSelectionActive() =>
+        ViewModel.IsNavClassicalWorks
+        && ViewModel.IsClassicalComposerDetailOpen
+        && ViewModel.ClassicalVisibleWorks.Count > 0;
+
     private bool IsTrackListActiveAndPopulated() =>
         TrackListView is not null
         && TrackListView.Visibility == Visibility.Visible
@@ -329,6 +334,13 @@ public sealed partial class MainWindow : Window
 
     private void SelectAllTracksPreservingFocus()
     {
+        if (IsClassicalComposerDetailSelectionActive())
+        {
+            SetInspectorOpen(true);
+            var all = ViewModel.SelectAllVisibleClassicalTracks();
+            SyncInlineInspectorTargets(all);
+            return;
+        }
         if (TrackListView is null || ViewModel.FilteredTracks.Count == 0) return;
         _suppressInspectorFocusSteal = true;
         try
@@ -849,6 +861,7 @@ public sealed partial class MainWindow : Window
 
     private void OnMultiSelectToggleClick(object sender, RoutedEventArgs e)
     {
+        ViewModel.SyncClassicalMultiSelectMode();
         if (TrackListView is null) return;
         TrackListView.SelectionMode = MultiSelectToggleButton.IsChecked == true
             ? ListViewSelectionMode.Multiple
@@ -916,11 +929,51 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private TrackItem? ResolveContextTrack(object sender) =>
-        (sender as FrameworkElement)?.DataContext as TrackItem ?? TrackListView.SelectedItem as TrackItem;
+    private TrackItem? ResolveContextTrack(object sender)
+    {
+        object? ctx = (sender as FrameworkElement)?.Tag ?? (sender as FrameworkElement)?.DataContext;
+        if (ctx is TrackItem item) return item;
+        if (ctx is ClassicalMovementViewItem mov) return mov.Track;
+        if (ctx is ClassicalWorkViewItem work) return work.SelectedRecordingTracks.FirstOrDefault();
+        if (ViewModel.IsNavClassicalWorks && ViewModel.IsClassicalComposerDetailOpen)
+        {
+            return ViewModel.GetSelectedClassicalTracks().FirstOrDefault() ?? ViewModel.InspectedTrack;
+        }
+        return TrackListView.SelectedItem as TrackItem;
+    }
 
     private IReadOnlyList<TrackItem> ResolveTargetTracksForAction(object sender)
     {
+        object? ctx = (sender as FrameworkElement)?.Tag ?? (sender as FrameworkElement)?.DataContext;
+        if (ctx is ClassicalWorkViewItem work)
+        {
+            var workTracks = work.SelectedRecordingTracks;
+            var classicalSelected = ViewModel.GetSelectedClassicalTracks();
+            if (classicalSelected.Count > 1
+                && workTracks.Any(wt => classicalSelected.Any(sel => sel.TrackUid == wt.TrackUid)))
+            {
+                return classicalSelected;
+            }
+            return workTracks;
+        }
+        if (ctx is ClassicalMovementViewItem mov)
+        {
+            var classicalSelected = ViewModel.GetSelectedClassicalTracks();
+            if (classicalSelected.Count > 1 && classicalSelected.Any(s => s.TrackUid == mov.TrackUid))
+            {
+                return classicalSelected;
+            }
+            return [mov.Track];
+        }
+        if (ViewModel.IsNavClassicalWorks && ViewModel.IsClassicalComposerDetailOpen)
+        {
+            var classicalSelected = ViewModel.GetSelectedClassicalTracks();
+            if (classicalSelected.Count > 0) return classicalSelected;
+            if (ViewModel.InspectedTrack is not null) return [ViewModel.InspectedTrack];
+            if (ViewModel.CurrentTrack is not null) return [ViewModel.CurrentTrack];
+            return [];
+        }
+
         var clicked = ResolveContextTrack(sender);
         var selected = TrackListView.SelectedItems.OfType<TrackItem>().ToList();
         if (selected.Count > 1 && (clicked is null || selected.Any(s => s.TrackUid == clicked.TrackUid)))
@@ -1053,7 +1106,11 @@ public sealed partial class MainWindow : Window
 
     private void FocusInlineInspectorEditor(IReadOnlyList<TrackItem> targets)
     {
-        if (targets.Count == 0 && ViewModel.FilteredTracks.Count > 0 && TrackListView is not null)
+        if (targets.Count == 0 && IsClassicalComposerDetailSelectionActive())
+        {
+            targets = ViewModel.SelectClassicalWorkTracks(ViewModel.ClassicalVisibleWorks[0], false, false);
+        }
+        else if (targets.Count == 0 && ViewModel.FilteredTracks.Count > 0 && TrackListView is not null)
         {
             var fallback = ViewModel.FilteredTracks[0];
             TrackListView.SelectedItem = fallback;

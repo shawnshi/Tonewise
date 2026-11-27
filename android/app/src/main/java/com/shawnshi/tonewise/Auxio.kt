@@ -26,8 +26,10 @@ import androidx.core.graphics.drawable.IconCompat
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 import com.shawnshi.tonewise.home.HomeSettings
+import com.shawnshi.tonewise.home.quickplay.QuickplayPinStore
 import com.shawnshi.tonewise.image.ImageSettings
 import com.shawnshi.tonewise.playback.PlaybackSettings
+import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.CopyleftNoticeTree
 import timber.log.Timber
@@ -43,9 +45,14 @@ class Auxio : Application() {
     @Inject lateinit var playbackSettings: PlaybackSettings
     @Inject lateinit var uiSettings: UISettings
     @Inject lateinit var homeSettings: HomeSettings
+    @Inject lateinit var quickplayPinStore: QuickplayPinStore
+    @Inject lateinit var playCountRepository: PlayCountRepository
 
     override fun onCreate() {
         super.onCreate()
+        // Pre-warm Room-backed Quickplay stores off the main thread before UI inflates.
+        quickplayPinStore.ensureLoaded()
+        playCountRepository.ensureLoaded()
         @Suppress("KotlinConstantConditions")
         if (
             BuildConfig.APPLICATION_ID != "com.shawnshi.tonewise" &&

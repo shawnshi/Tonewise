@@ -26,6 +26,9 @@ import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import com.shawnshi.tonewise.AuxioService
@@ -86,11 +89,16 @@ data class ClassicalWork(
     val workTitle: String,
     val composerName: String,
     val recordings: List<WorkRecording>,
+    val form: String = "other",
+    val era: String? = null,
 )
 
 interface MusicRepository {
     /** The current library */
     val library: Library?
+
+    /** Monotonically incremented whenever [library] or its derived indices are updated. */
+    val libraryRevision: StateFlow<Long>
 
     /** All extracted classical composers indexed from the current library. */
     val composers: Collection<PersonArtist>
@@ -323,6 +331,8 @@ constructor(
     private val pendingIndex = PendingIndexCoordinator()
 
     @Volatile override var library: MutableLibrary? = null
+    private val _libraryRevision = MutableStateFlow(0L)
+    override val libraryRevision: StateFlow<Long> = _libraryRevision.asStateFlow()
     @Volatile private var composerMap: Map<String, PersonArtist> = emptyMap()
     @Volatile private var conductorMap: Map<String, PersonArtist> = emptyMap()
     @Volatile private var personUidMap: Map<Music.UID, PersonArtist> = emptyMap()
@@ -427,7 +437,10 @@ constructor(
         val library = synchronized(this) { library ?: return }
         L.d("Creating playlist $name with ${songs.size} songs")
         val newLibrary = library.createPlaylist(name, songs)
-        synchronized(this) { this.library = newLibrary }
+        synchronized(this) {
+            this.library = newLibrary
+            _libraryRevision.value += 1L
+        }
         withContext(Dispatchers.Main) { dispatchLibraryChange(device = false, user = true) }
     }
 
@@ -435,7 +448,10 @@ constructor(
         val library = synchronized(this) { library ?: return }
         L.d("Renaming $playlist to $name")
         val newLibrary = library.renamePlaylist(playlist, name)
-        synchronized(this) { this.library = newLibrary }
+        synchronized(this) {
+            this.library = newLibrary
+            _libraryRevision.value += 1L
+        }
         withContext(Dispatchers.Main) { dispatchLibraryChange(device = false, user = true) }
     }
 
@@ -443,7 +459,10 @@ constructor(
         val library = synchronized(this) { library ?: return }
         L.d("Deleting $playlist")
         val newLibrary = library.deletePlaylist(playlist)
-        synchronized(this) { this.library = newLibrary }
+        synchronized(this) {
+            this.library = newLibrary
+            _libraryRevision.value += 1L
+        }
         withContext(Dispatchers.Main) { dispatchLibraryChange(device = false, user = true) }
     }
 
@@ -451,7 +470,10 @@ constructor(
         val library = synchronized(this) { library ?: return }
         L.d("Adding ${songs.size} songs to $playlist")
         val newLibrary = library.addToPlaylist(playlist, songs)
-        synchronized(this) { this.library = newLibrary }
+        synchronized(this) {
+            this.library = newLibrary
+            _libraryRevision.value += 1L
+        }
         withContext(Dispatchers.Main) { dispatchLibraryChange(device = false, user = true) }
     }
 
@@ -459,7 +481,10 @@ constructor(
         val library = synchronized(this) { library ?: return }
         L.d("Rewriting $playlist with ${songs.size} songs")
         val newLibrary = library.rewritePlaylist(playlist, songs)
-        synchronized(this) { this.library = newLibrary }
+        synchronized(this) {
+            this.library = newLibrary
+            _libraryRevision.value += 1L
+        }
         withContext(Dispatchers.Main) { dispatchLibraryChange(device = false, user = true) }
     }
 
@@ -613,6 +638,7 @@ constructor(
             if (deviceLibraryChanged) {
                 rebuildPersonIndices(newLibrary)
             }
+            _libraryRevision.value += 1L
         }
 
         // Consumers expect their updates to be on the main thread (notably PlaybackService),
@@ -697,25 +723,68 @@ constructor(
         val songsByWorkKey = linkedMapOf<String, MutableList<Song>>()
         val titleByWorkKey = mutableMapOf<String, String>()
         val composerByWorkKey = mutableMapOf<String, String>()
+        val genreByWorkKey = mutableMapOf<String, String?>()
+        val fallbackMovementNumByUid = mutableMapOf<Music.UID, Int?>()
 
         for (song in lib.songs) {
-            val rawWork = song.workName?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            val rawTitle = (song.name as? Name.Known)?.raw.orEmpty()
+            val genreNames = song.genres.mapNotNull { (it.name as? Name.Known)?.raw }
+            val primaryGenre =
+                genreNames.firstOrNull { ClassicalMetadataEngine.isClassicalGenre(it) }
+                    ?: genreNames.firstOrNull { ClassicalMetadataEngine.isExplicitNonClassicalGenre(it) }
+                    ?: genreNames.firstOrNull()
+            val explicitComposer = song.composers.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            val explicitConductor = song.conductors.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            if (!ClassicalMetadataEngine.isClassicalTrack(
+                    genre = primaryGenre,
+                    work = song.workName,
+                    composer = explicitComposer,
+                    conductor = explicitConductor,
+                    title = rawTitle,
+                )
+            ) {
+                continue
+            }
+
+            val parsed =
+                ClassicalMetadataEngine.splitWorkAndMovement(
+                    rawTitle = rawTitle,
+                    explicitWork = song.workName,
+                    explicitMovement = song.movementName,
+                    explicitMovementNumber = song.movementNumber,
+                )
+            val rawWork =
+                parsed.work
+                    .ifBlank { rawTitle }
+                    .ifBlank { (song.album.name as? Name.Known)?.raw.orEmpty() }
+                    .trim()
+            if (rawWork.isEmpty()) continue
+
             val composer =
-                song.composers.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+                explicitComposer
                     ?: (song.album.artists.firstOrNull()?.name as? Name.Known)?.raw
                     ?: (song.artists.firstOrNull()?.name as? Name.Known)?.raw
                     ?: "Unknown"
+            val normalizedComposer = ClassicalMetadataEngine.normalizeComposerName(composer).ifBlank { composer }
             val workKey =
                 song.musicBrainzWorkId?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
-                    ?: "${composer.lowercase()}::${rawWork.lowercase()}"
+                    ?: "${normalizedComposer.lowercase()}::${rawWork.lowercase()}"
             titleByWorkKey.putIfAbsent(workKey, rawWork)
             composerByWorkKey.putIfAbsent(workKey, composer)
+            genreByWorkKey.putIfAbsent(workKey, primaryGenre)
+            fallbackMovementNumByUid[song.uid] = parsed.movementNumber
             songsByWorkKey.getOrPut(workKey) { mutableListOf() }.add(song)
         }
 
         val index = mutableMapOf<Music.UID, ClassicalWork>()
         val uniqueWorks = ArrayList<ClassicalWork>(songsByWorkKey.size)
-        val movementCmp = ClassicalWorkKey.movementComparator()
+        val movementCmp =
+            compareBy<Song>(
+                { it.disc?.number ?: 0 },
+                { it.movementNumber ?: fallbackMovementNumByUid[it.uid] ?: Int.MAX_VALUE },
+                { it.track ?: Int.MAX_VALUE },
+                { (it.name as? Name.Known)?.raw?.lowercase().orEmpty() },
+            )
         for ((workKey, workSongs) in songsByWorkKey) {
             val recordings =
                 workSongs
@@ -744,12 +813,17 @@ constructor(
                     }
                     .sortedWith(compareBy<WorkRecording>({ it.year ?: Int.MAX_VALUE }, { it.album.name }, { it.conductorLabel }))
 
+            val resolvedWorkTitle = titleByWorkKey.getValue(workKey)
+            val resolvedComposer = composerByWorkKey.getValue(workKey)
+            val resolvedGenre = genreByWorkKey[workKey]
             val classicalWork =
                 ClassicalWork(
                     key = workKey,
-                    workTitle = titleByWorkKey.getValue(workKey),
-                    composerName = composerByWorkKey.getValue(workKey),
+                    workTitle = resolvedWorkTitle,
+                    composerName = resolvedComposer,
                     recordings = recordings,
+                    form = ClassicalMetadataEngine.classifyWorkForm(resolvedWorkTitle, resolvedGenre),
+                    era = ClassicalMetadataEngine.classifyComposerEra(resolvedComposer, resolvedGenre),
                 )
             uniqueWorks.add(classicalWork)
             for (song in workSongs) {

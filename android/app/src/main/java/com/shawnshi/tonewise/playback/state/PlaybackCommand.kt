@@ -49,6 +49,12 @@ interface PlaybackCommand {
     val queue: List<Song>
     /** Whether to shuffle or not. * */
     val shuffled: Boolean
+    /** Session-scoped shuffle lock for sequential classical work/movement playback. */
+    val suppressGlobalShuffle: Boolean
+        get() = false
+    /** Restore previously locked global shuffle if [ShuffleMode.IMPLICIT] started non-classical playback. */
+    val restoreGlobalShuffleOnUnlock: Boolean
+        get() = false
 
     interface Factory {
         fun song(song: Song, shuffle: ShuffleMode): PlaybackCommand?
@@ -74,6 +80,49 @@ interface PlaybackCommand {
         fun genre(genre: Genre, shuffle: ShuffleMode): PlaybackCommand?
 
         fun playlist(playlist: Playlist, shuffle: ShuffleMode): PlaybackCommand?
+
+        fun classicalRecording(movements: List<Song>, startIndex: Int = 0): PlaybackCommand?
+    }
+}
+
+/**
+ * Pure session-scoped shuffle lock state machine for classical work/movement playback.
+ * Never mutates persisted user global shuffle settings.
+ */
+class ClassicalSessionShuffleLock {
+    private var lockActive: Boolean = false
+    private var savedGlobalShuffle: Boolean? = null
+
+    val isLocked: Boolean
+        get() = lockActive
+
+    fun resolveForNewPlayback(
+        currentShuffleEnabled: Boolean,
+        commandShuffled: Boolean,
+        suppressGlobalShuffle: Boolean,
+        restoreGlobalShuffleOnUnlock: Boolean,
+    ): Boolean {
+        if (suppressGlobalShuffle) {
+            if (!lockActive) {
+                savedGlobalShuffle = currentShuffleEnabled
+                lockActive = true
+            }
+            return false
+        }
+        val wasLocked = lockActive
+        val priorGlobal = savedGlobalShuffle
+        lockActive = false
+        savedGlobalShuffle = null
+        return if (wasLocked && restoreGlobalShuffleOnUnlock && priorGlobal == true) {
+            true
+        } else {
+            commandShuffled
+        }
+    }
+
+    fun clearOnUserToggle() {
+        lockActive = false
+        savedGlobalShuffle = null
     }
 }
 
@@ -96,10 +145,12 @@ constructor(
         override val parent: MusicParent?,
         override val queue: List<Song>,
         override val shuffled: Boolean,
+        override val suppressGlobalShuffle: Boolean = false,
+        override val restoreGlobalShuffleOnUnlock: Boolean = false,
     ) : PlaybackCommand {
         // Only show queue count to reduce memory use
         override fun toString() =
-            "PlaybackCommand(song=$song, parent=$parent, queue=${queue.size} songs, shuffled=$shuffled)"
+            "PlaybackCommand(song=$song, parent=$parent, queue=${queue.size} songs, shuffled=$shuffled, lock=$suppressGlobalShuffle)"
     }
 
     override fun song(song: Song, shuffle: ShuffleMode) =
@@ -135,6 +186,20 @@ constructor(
 
     override fun playlist(playlist: Playlist, shuffle: ShuffleMode) =
         newCommand(null, playlist, playlist.songs, shuffle)
+
+    override fun classicalRecording(movements: List<Song>, startIndex: Int): PlaybackCommand? {
+        if (movements.isEmpty()) return null
+        val safeStart = startIndex.coerceIn(0, movements.lastIndex)
+        val slice = movements.subList(safeStart, movements.size)
+        return PlaybackCommandImpl(
+            song = slice.first(),
+            parent = null,
+            queue = slice,
+            shuffled = false,
+            suppressGlobalShuffle = true,
+            restoreGlobalShuffleOnUnlock = false,
+        )
+    }
 
     private fun <T : MusicParent> newCommand(
         song: Song,
@@ -187,7 +252,14 @@ constructor(
         queue: List<Song>,
         shuffle: ShuffleMode,
     ): PlaybackCommand {
-        return PlaybackCommandImpl(song, parent, queue, isShuffled(shuffle))
+        return PlaybackCommandImpl(
+            song = song,
+            parent = parent,
+            queue = queue,
+            shuffled = isShuffled(shuffle),
+            suppressGlobalShuffle = false,
+            restoreGlobalShuffleOnUnlock = shuffle == ShuffleMode.IMPLICIT,
+        )
     }
 
     private fun isShuffled(shuffle: ShuffleMode) =

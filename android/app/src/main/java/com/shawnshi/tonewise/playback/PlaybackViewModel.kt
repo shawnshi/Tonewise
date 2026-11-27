@@ -466,6 +466,11 @@ constructor(
         playImpl(commandFactory.songs(songs, ShuffleMode.OFF))
     }
 
+    fun playClassicalRecording(movements: List<Song>, startIndex: Int = 0) {
+        L.d("Playing classical recording [movements=${movements.size}, startIndex=$startIndex]")
+        playImpl(commandFactory.classicalRecording(movements, startIndex))
+    }
+
     fun restoreSessionQueue(songs: List<Song>, index: Int, positionMs: Long) {
         if (songs.isEmpty()) return
         val safeIndex = index.coerceIn(0, songs.lastIndex)

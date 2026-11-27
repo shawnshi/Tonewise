@@ -484,6 +484,11 @@
     <string name="lbl_lastfm_complete_auth">完成瀏覽器驗證</string>
     <string name="lbl_lastfm_save">儲存設定</string>
     <string name="lbl_lastfm_sync_now">立即同步播放次數與紅心收藏</string>
+    <string name="lbl_lastfm_connect">瀏覽器一鍵連接 Last.fm</string>
+    <string name="lbl_lastfm_sync_from_pc">從已配對電腦匯入 Last.fm 工作階段</string>
+    <string name="lbl_lastfm_disconnect">中斷連線</string>
+    <string name="lbl_lastfm_advanced">進階 / 自訂 API Key</string>
+    <string name="lbl_lastfm_connected_toast">Last.fm 已連線</string>
     <string name="fmt_lastfm_stats">待上傳：%1$d · 累計已同步：%2$d</string>
     <string name="fmt_lastfm_stats_with_loved">待上傳：%1$d 次播放 · %2$d 紅心 · 累計已同步：%3$d</string>
     <string name="lbl_dj_exclude_vocal">非人聲（排除人聲）</string>
@@ -543,4 +548,20 @@
     <string name="set_playback_ambient_backdrop">氛圍封面光暈背景</string>
     <string name="set_playback_ambient_backdrop_desc">播放頁背景使用當前封面氛圍光暈替代馬賽克牆</string>
     <string name="desc_toggle_vinyl_mode">切換黑膠唱盤與專輯封套</string>
+    <string name="lbl_classical_all_forms">all</string>
+    <string name="lbl_classical_form_symphonies">symphonies</string>
+    <string name="lbl_classical_form_concertos">concertos</string>
+    <string name="lbl_classical_form_chamber">chamber</string>
+    <string name="lbl_classical_form_solo">solo</string>
+    <string name="lbl_classical_era_baroque">baroque</string>
+    <string name="lbl_classical_era_classical">classical</string>
+    <string name="lbl_classical_era_romantic">romantic</string>
+    <string name="lbl_classical_era_modern">modern</string>
+    <string name="lbl_classical_all_eras">all eras</string>
+    <string name="fmt_classical_version_count">%d versions</string>
+    <string name="fmt_classical_single_version">1 version</string>
+    <string name="fmt_classical_composer_stats_with_era">%1$s · %2$d works · %3$d recordings</string>
+    <string name="fmt_classical_composer_stats">%1$d works · %2$d recordings</string>
+    <string name="desc_classical_back_composers">返回作曲家列表</string>
+    <string name="desc_classical_play_whole_work">按順序連播整部作品</string>
 </resources>

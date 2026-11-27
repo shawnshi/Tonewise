@@ -37,7 +37,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,7 +69,6 @@ import com.shawnshi.tonewise.home.HomeViewModel
 import com.shawnshi.tonewise.image.CoverView
 import com.shawnshi.tonewise.music.ClassicalWork
 import com.shawnshi.tonewise.music.MusicRepository
-import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.PlaySong
@@ -108,7 +106,6 @@ class QuickplayFragment : Fragment() {
 
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val detailModel: DetailViewModel by activityViewModels()
-    private val musicModel: MusicViewModel by activityViewModels()
     private val homeModel: HomeViewModel by activityViewModels()
 
     override fun onCreateView(
@@ -120,14 +117,9 @@ class QuickplayFragment : Fragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val pins by quickplayPinStore.pins.collectAsStateWithLifecycle()
-                val indexingState by musicModel.indexingState.collectAsStateWithLifecycle()
-                val playUpdates by playCountRepository.updates.collectAsStateWithLifecycle()
+                val libraryRevision by musicRepository.libraryRevision.collectAsStateWithLifecycle()
                 val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
                 val sections by homeModel.quickplaySections.collectAsStateWithLifecycle()
-
-                LaunchedEffect(indexingState, playUpdates) {
-                    homeModel.refreshQuickplaySections(indexingState, playUpdates)
-                }
 
                 TonewiseComposeTheme(
                     roundMode = uiSettings.roundMode,
@@ -136,6 +128,7 @@ class QuickplayFragment : Fragment() {
                     QuickplayContent(
                         pins = pins,
                         sections = sections,
+                        libraryRevision = libraryRevision,
                         resolveCoverAlbum = { albumUid ->
                             val uid = Music.UID.fromString(albumUid)
                             uid?.let { musicRepository.library?.findAlbum(it) }
@@ -147,10 +140,15 @@ class QuickplayFragment : Fragment() {
                             requireContext().showToast(R.string.lng_unpinned_quickplay)
                         },
                         onTapAlbumSummary = { summary ->
-                            val uid = Music.UID.fromString(summary.albumUid)
-                            val album = uid?.let { musicRepository.library?.findAlbum(it) }
-                            if (album != null) {
-                                playbackModel.play(album)
+                            val lib = musicRepository.library
+                            if (lib == null) {
+                                requireContext().showToast(R.string.lbl_indexer)
+                            } else {
+                                val uid = Music.UID.fromString(summary.albumUid)
+                                val album = uid?.let { lib.findAlbum(it) }
+                                if (album != null) {
+                                    playbackModel.play(album)
+                                }
                             }
                         },
                         onLongPressAlbumSummary = { summary ->
@@ -179,7 +177,11 @@ class QuickplayFragment : Fragment() {
     }
 
     private fun handleTapPin(pin: QuickplayPinRecord) {
-        val lib = musicRepository.library ?: return
+        val lib = musicRepository.library
+        if (lib == null) {
+            requireContext().showToast(R.string.lbl_indexer)
+            return
+        }
         when (pin.kind) {
             QuickplayPinKind.ALBUM -> {
                 val album = Music.UID.fromString(pin.id)?.let(lib::findAlbum)
@@ -201,7 +203,7 @@ class QuickplayFragment : Fragment() {
                 val work = musicRepository.classicalWorks.firstOrNull { it.key == pin.id }
                 val rec = work?.recordings?.firstOrNull()
                 if (rec != null && rec.movements.isNotEmpty()) {
-                    playbackModel.play(rec.movements)
+                    playbackModel.playClassicalRecording(rec.movements, 0)
                 }
             }
         }
@@ -240,6 +242,7 @@ class QuickplayFragment : Fragment() {
 private fun QuickplayContent(
     pins: List<QuickplayPinRecord>,
     sections: QuickplaySections,
+    libraryRevision: Long,
     resolveCoverAlbum: (String) -> Album?,
     resolvePinCoverTarget: (QuickplayPinRecord) -> Any?,
     onTapPin: (QuickplayPinRecord) -> Unit,
@@ -322,7 +325,10 @@ private fun QuickplayContent(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
                                     for (pin in row) {
-                                        val target = resolvePinCoverTarget(pin)
+                                        val target =
+                                            remember(libraryRevision, pin.kind, pin.id) {
+                                                resolvePinCoverTarget(pin)
+                                            }
                                         Column(
                                             modifier =
                                                 Modifier.weight(1f)
@@ -341,6 +347,7 @@ private fun QuickplayContent(
                                             ) {
                                                 ZuneBoundCoverTile(
                                                     target = target,
+                                                    cachedCoverId = pin.coverId,
                                                     fallbackLabel = pin.title,
                                                 )
                                             }
@@ -379,9 +386,13 @@ private fun QuickplayContent(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             items(sections.history, key = { "hist_${it.albumUid}" }) { item ->
+                                val album =
+                                    remember(libraryRevision, item.albumUid) {
+                                        resolveCoverAlbum(item.albumUid)
+                                    }
                                 QuickplayAlbumTile(
                                     summary = item,
-                                    album = resolveCoverAlbum(item.albumUid),
+                                    album = album,
                                     onClick = { onTapAlbumSummary(item) },
                                     onLongClick = { onLongPressAlbumSummary(item) },
                                 )
@@ -429,9 +440,13 @@ private fun QuickplayContent(
                             ) { columnItems ->
                                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     for (item in columnItems) {
+                                        val album =
+                                            remember(libraryRevision, item.albumUid) {
+                                                resolveCoverAlbum(item.albumUid)
+                                            }
                                         QuickplayAlbumTile(
                                             summary = item,
-                                            album = resolveCoverAlbum(item.albumUid),
+                                            album = album,
                                             onClick = { onTapAlbumSummary(item) },
                                             onLongClick = { onLongPressAlbumSummary(item) },
                                         )
@@ -475,7 +490,11 @@ private fun QuickplayAlbumTile(
                 Modifier.size(116.dp)
                     .background(MaterialTheme.colorScheme.surfaceContainer)
         ) {
-            ZuneBoundCoverTile(target = album, fallbackLabel = summary.albumTitle)
+            ZuneBoundCoverTile(
+                target = album,
+                cachedCoverId = summary.coverId,
+                fallbackLabel = summary.albumTitle,
+            )
         }
         Spacer(modifier = Modifier.height(4.dp))
         Text(
@@ -495,9 +514,15 @@ private fun QuickplayAlbumTile(
 }
 
 @Composable
-private fun ZuneBoundCoverTile(target: Any?, fallbackLabel: String) {
+private fun ZuneBoundCoverTile(
+    target: Any?,
+    cachedCoverId: String = "",
+    fallbackLabel: String,
+) {
     val context = LocalContext.current
-    if (target == null) {
+    val cachedCover =
+        remember(cachedCoverId) { QuickplayCoverResolver.fromId(context, cachedCoverId) }
+    if (target == null && cachedCover == null) {
         Box(
             modifier =
                 Modifier.fillMaxSize()
@@ -518,11 +543,31 @@ private fun ZuneBoundCoverTile(target: Any?, fallbackLabel: String) {
             (LayoutInflater.from(context).inflate(R.layout.view_zune_cover_tile, null) as CoverView)
         },
         update = { coverView ->
+            val bindKey =
+                when (target) {
+                    is Album ->
+                        prominentAlbumCoverId(target)
+                            .takeIf { it.isNotEmpty() }
+                            ?.let { "cover:$it" } ?: "album:${target.uid}"
+                    is Song ->
+                        target.cover
+                            ?.id
+                            ?.takeIf { it.isNotEmpty() }
+                            ?.let { "cover:$it" } ?: "song:${target.uid}"
+                    is Artist -> "artist:${target.uid}"
+                    is Playlist -> "playlist:${target.uid}"
+                    else -> cachedCover?.let { "cover:${it.id}" }
+                }
+            if (bindKey != null && coverView.tag == bindKey) {
+                return@AndroidView
+            }
+            coverView.tag = bindKey
             when (target) {
                 is Album -> coverView.bind(target)
                 is Artist -> coverView.bind(target)
                 is Playlist -> coverView.bind(target)
                 is Song -> coverView.bind(target)
+                else -> cachedCover?.let { coverView.bind(it, fallbackLabel) }
             }
         },
     )

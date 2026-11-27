@@ -81,7 +81,8 @@ public sealed partial class MainWindow : Window
     private double _lastWaveformProgress = -1.0;
 
     private readonly ZuneMosaicRenderer _mosaicRenderer = new();
-    private readonly DispatcherTimer _mosaicSwapTimer;
+    private readonly DispatcherTimer _mosaicAnimTimer;
+    private long _lastMosaicTickTimestamp;
     private readonly DispatcherTimer _nowPlayingIdleTimer;
     private DateTime _lastNowPlayingActivityUtc = DateTime.UtcNow;
     private bool _isNowPlayingChromeFaded;
@@ -107,7 +108,7 @@ public sealed partial class MainWindow : Window
 
     public double PivotInkOpacity(bool isActive) => isActive ? 1.0 : 0.62;
 
-    public double PlaylistsDeckMaxHeight(bool expanded) => expanded ? 520 : 256;
+    public double PlaylistsDeckMaxHeight(bool expanded) => expanded ? 420 : 152;
 
     public string PlaylistsExpandToggleLabel(bool expanded) => expanded ? "收起歌单" : "展开全部";
 
@@ -186,6 +187,7 @@ public sealed partial class MainWindow : Window
 
     public MainWindow()
     {
+        ViewModel.PreloadInitialAppTheme(App.InitialAppTheme);
         InitializeComponent();
 
         TrySetObsidianBackdrop();
@@ -200,9 +202,6 @@ public sealed partial class MainWindow : Window
         {
             AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
             AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            AppWindow.TitleBar.ButtonForegroundColor = Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
-            AppWindow.TitleBar.ButtonHoverBackgroundColor = Color.FromArgb(0x28, 0xFF, 0xFF, 0xFF);
-            AppWindow.TitleBar.ButtonHoverForegroundColor = Color.FromArgb(0xFF, 0xE5, 0x00, 0x6B);
         }
         catch
         {
@@ -255,7 +254,10 @@ public sealed partial class MainWindow : Window
             else if (args.PropertyName == nameof(MainViewModel.InspectedTrack))
             {
                 UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
-                var selected = TrackListView.SelectedItems.OfType<TrackItem>().ToList();
+                var selected =
+                    ViewModel.IsNavClassicalWorks && ViewModel.IsClassicalComposerDetailOpen
+                        ? ViewModel.GetSelectedClassicalTracks()
+                        : TrackListView.SelectedItems.OfType<TrackItem>().ToList();
                 if (selected.Count <= 1)
                 {
                     SyncInlineInspectorTargets(ViewModel.InspectedTrack is null ? [] : [ViewModel.InspectedTrack]);
@@ -265,11 +267,15 @@ public sealed partial class MainWindow : Window
             {
                 SyncActiveInboxAuditButtons();
             }
-            else if (args.PropertyName == nameof(MainViewModel.IsMultiSelectMode) && TrackListView is not null)
+            else if (args.PropertyName == nameof(MainViewModel.IsMultiSelectMode))
             {
-                TrackListView.SelectionMode = ViewModel.IsMultiSelectMode
-                    ? ListViewSelectionMode.Multiple
-                    : ListViewSelectionMode.Extended;
+                ViewModel.SyncClassicalMultiSelectMode();
+                if (TrackListView is not null)
+                {
+                    TrackListView.SelectionMode = ViewModel.IsMultiSelectMode
+                        ? ListViewSelectionMode.Multiple
+                        : ListViewSelectionMode.Extended;
+                }
             }
             else if (args.PropertyName == nameof(MainViewModel.SelectedPlaylist) && PlaylistsListView is not null)
             {
@@ -339,13 +345,25 @@ public sealed partial class MainWindow : Window
             }
         };
 
-        _mosaicSwapTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(12) };
-        _mosaicSwapTimer.Tick += (_, _) =>
+        _mosaicAnimTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(36) };
+        _mosaicAnimTimer.Tick += (_, _) =>
         {
-            if (ViewModel.IsNowPlayingViewVisible && ViewModel.IsPlaying && ZuneMotionHelper.IsMotionEnabled() && _mosaicRenderer.HasCovers)
+            if (ViewModel.IsNowPlayingViewVisible
+                && ViewModel.IsPlaying
+                && ZuneMotionHelper.IsMotionEnabled()
+                && !_accessibilitySettings.HighContrast
+                && _mosaicRenderer.HasCovers)
             {
-                _mosaicRenderer.AdvanceSwapTick();
-                NowPlayingMosaicCanvas?.Invalidate();
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                long prev = _lastMosaicTickTimestamp;
+                _lastMosaicTickTimestamp = now;
+                double dt = prev > 0
+                    ? (double)(now - prev) / System.Diagnostics.Stopwatch.Frequency
+                    : 0.036;
+                if (_mosaicRenderer.AdvanceFrame(dt))
+                {
+                    NowPlayingMosaicCanvas?.Invalidate();
+                }
             }
         };
 
@@ -418,7 +436,7 @@ public sealed partial class MainWindow : Window
             _dynamicAccentCts?.Cancel();
             _dynamicAccentCts?.Dispose();
             _dynamicAccentCts = null;
-            _mosaicSwapTimer.Stop();
+            _mosaicAnimTimer.Stop();
             _nowPlayingIdleTimer.Stop();
             _mosaicRenderer.Dispose();
             _progressTimer.Stop();
@@ -462,14 +480,26 @@ public sealed partial class MainWindow : Window
         }
 
         bool activeNowPlaying = activePlaying && ViewModel.IsNowPlayingViewVisible;
+        bool animateMosaic = activeNowPlaying && ZuneMotionHelper.IsMotionEnabled() && !_accessibilitySettings.HighContrast;
+        if (animateMosaic)
+        {
+            if (!_mosaicAnimTimer.IsEnabled)
+            {
+                _lastMosaicTickTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                _mosaicAnimTimer.Start();
+            }
+        }
+        else if (_mosaicAnimTimer.IsEnabled)
+        {
+            _mosaicAnimTimer.Stop();
+        }
+
         if (activeNowPlaying)
         {
-            if (!_mosaicSwapTimer.IsEnabled) _mosaicSwapTimer.Start();
             if (!_nowPlayingIdleTimer.IsEnabled) _nowPlayingIdleTimer.Start();
         }
         else
         {
-            if (_mosaicSwapTimer.IsEnabled) _mosaicSwapTimer.Stop();
             if (_nowPlayingIdleTimer.IsEnabled) _nowPlayingIdleTimer.Stop();
         }
     }
@@ -501,14 +531,50 @@ public sealed partial class MainWindow : Window
 
     // ---------------- Theme & Dynamic Cover Accent ----------------
 
+    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    private bool ResolveEffectiveIsDarkTheme() => ViewModel.AppTheme switch
+    {
+        "light" => false,
+        "dark" => true,
+        _ => Application.Current.RequestedTheme == ApplicationTheme.Dark,
+    };
+
     private void ApplyAppTheme()
     {
+        bool isDark = ResolveEffectiveIsDarkTheme();
         RootWorkbench.RequestedTheme = ViewModel.AppTheme switch
         {
             "light" => ElementTheme.Light,
             "system" => ElementTheme.Default,
             _ => ElementTheme.Dark,
         };
+        try
+        {
+            IntPtr hwnd = WindowNative.GetWindowHandle(this);
+            if (hwnd != IntPtr.Zero)
+            {
+                int useDark = isDark ? 1 : 0;
+                _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDark, sizeof(int));
+            }
+            var accentRgb = isDark ? ZuneColorMath.DefaultDarkAccentRgb : ZuneColorMath.DefaultLightAccentRgb;
+            AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+            AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+            AppWindow.TitleBar.ButtonForegroundColor = isDark
+                ? Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
+            AppWindow.TitleBar.ButtonHoverBackgroundColor = isDark
+                ? Color.FromArgb(0x28, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(0x18, 0x00, 0x00, 0x00);
+            AppWindow.TitleBar.ButtonHoverForegroundColor = Color.FromArgb(0xFF, accentRgb.R, accentRgb.G, accentRgb.B);
+        }
+        catch
+        {
+            // Older hosts without DWM/TitleBar customization
+        }
         AttachFlyoutThemeSync(LexiconTagMatrixFlyout);
         AttachFlyoutThemeSync(AcousticRackFlyout);
         AttachFlyoutThemeSync(PlaybackQueueFlyout);
@@ -520,12 +586,17 @@ public sealed partial class MainWindow : Window
 
     private async Task ApplyDynamicAccentFromCoverAsync(string? coverArtPath)
     {
-        _dynamicAccentCts?.Cancel();
-        _dynamicAccentCts?.Dispose();
+        var prev = _dynamicAccentCts;
         var cts = new CancellationTokenSource();
         _dynamicAccentCts = cts;
+        CancellationToken token = cts.Token;
+        if (prev is not null)
+        {
+            try { prev.Cancel(); } catch (ObjectDisposedException) { }
+            prev.Dispose();
+        }
 
-        bool isDark = RootWorkbench?.ActualTheme != ElementTheme.Light;
+        bool isDark = ResolveEffectiveIsDarkTheme();
         (byte R, byte G, byte B) targetRgb = isDark
             ? ZuneColorMath.DefaultDarkAccentRgb
             : ZuneColorMath.DefaultLightAccentRgb;
@@ -534,13 +605,21 @@ public sealed partial class MainWindow : Window
         {
             try
             {
-                var sampled = await Task.Run(() => ExtractClampedCoverAccent(coverArtPath, isDark), cts.Token);
-                if (!cts.Token.IsCancellationRequested && sampled.HasValue)
+                var sampled = await Task.Run(() => ExtractClampedCoverAccent(coverArtPath, isDark), token);
+                if (token.IsCancellationRequested || !ReferenceEquals(_dynamicAccentCts, cts))
+                {
+                    return;
+                }
+                if (sampled.HasValue)
                 {
                     targetRgb = sampled.Value;
                 }
             }
             catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (ObjectDisposedException)
             {
                 return;
             }
@@ -550,7 +629,7 @@ public sealed partial class MainWindow : Window
             }
         }
 
-        if (cts.Token.IsCancellationRequested) return;
+        if (token.IsCancellationRequested || !ReferenceEquals(_dynamicAccentCts, cts)) return;
         ApplyResolvedAccentRgb(targetRgb, isDark);
     }
 
@@ -699,11 +778,24 @@ public sealed partial class MainWindow : Window
             };
             if (activeStage is not null)
             {
-                ZuneMotionHelper.PlayStaggeredEntrance(
-                    null,
-                    activeStage,
-                    horizontalOffset: samePrimaryStage ? 8f : 12f,
-                    durationMs: samePrimaryStage ? 90 : 110);
+                float offset = samePrimaryStage ? 8f : 12f;
+                int duration = samePrimaryStage ? 90 : 110;
+                if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+                {
+                    if (RootWorkbench?.IsLoaded != true) return;
+                    ZuneMotionHelper.PlayStaggeredEntrance(
+                        null,
+                        activeStage,
+                        horizontalOffset: offset,
+                        durationMs: duration);
+                }))
+                {
+                    ZuneMotionHelper.PlayStaggeredEntrance(
+                        null,
+                        activeStage,
+                        horizontalOffset: offset,
+                        durationMs: duration);
+                }
             }
         }
     }
@@ -798,6 +890,249 @@ public sealed partial class MainWindow : Window
         if (ViewModel.PlaybackDurationSeconds <= 0) return;
         if (Math.Abs(e.NewValue - ViewModel.PlaybackPositionSeconds) < 0.75) return;
         ViewModel.SeekToSeconds(e.NewValue);
+    }
+
+    // ---------------- Two-Stage Classical Collection Hierarchy ----------------
+
+    private void OnClassicalEraFilterClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe)
+        {
+            ViewModel.SetClassicalEraFilter(fe.Tag as string ?? "");
+        }
+    }
+
+    private void OnOpenClassicalJumpMatrixClick(object sender, RoutedEventArgs e) =>
+        ViewModel.OpenClassicalJumpMatrix();
+
+    private void OnOpenClassicalJumpMatrixTapped(object sender, TappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        ViewModel.OpenClassicalJumpMatrix();
+    }
+
+    private void OnCloseClassicalJumpMatrixClick(object sender, RoutedEventArgs e) =>
+        ViewModel.CloseClassicalJumpMatrix();
+
+    private void OnClassicalComposerItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is ClassicalComposerViewItem composer)
+        {
+            ViewModel.OpenClassicalComposer(composer);
+        }
+    }
+
+    private void OnCloseClassicalComposerDetailClick(object sender, RoutedEventArgs e) =>
+        ViewModel.CloseClassicalComposerDetail();
+
+    private void OnClassicalFormFilterClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string form })
+        {
+            ViewModel.SetClassicalFormFilter(form);
+        }
+    }
+
+    private static bool IsClassicalModifierDown(VirtualKey key) =>
+        (InputKeyboardSource.GetKeyStateForCurrentThread(key) & CoreVirtualKeyStates.Down) == CoreVirtualKeyStates.Down;
+
+    private static bool IsDescendantOfButtonOrCheckBox(DependencyObject? source, DependencyObject? stopAt)
+    {
+        var cur = source;
+        while (cur is not null && !ReferenceEquals(cur, stopAt))
+        {
+            if (cur is ButtonBase)
+            {
+                return true;
+            }
+            cur = VisualTreeHelper.GetParent(cur);
+        }
+        return false;
+    }
+
+    private static T? ResolveClassicalBoundItem<T>(object sender) where T : class =>
+        (sender as FrameworkElement)?.Tag as T
+        ?? (sender as FrameworkElement)?.DataContext as T;
+
+    private void SyncClassicalInspectorSelection(IReadOnlyList<TrackItem> selected)
+    {
+        if (selected.Count > 0)
+        {
+            UpdateCoverArtImage(InspectedCoverImage, selected[0].CoverArtPath);
+            if (selected.Count > 1 && InspectorSplitView is not null && !InspectorSplitView.IsPaneOpen)
+            {
+                SetInspectorOpen(true);
+            }
+        }
+        SyncInlineInspectorTargets(selected);
+    }
+
+    private void OnClassicalWorkHeaderClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalWorkViewItem>(sender) is { } work)
+        {
+            bool ctrl = IsClassicalModifierDown(VirtualKey.Control);
+            bool shift = IsClassicalModifierDown(VirtualKey.Shift);
+            if (ctrl || shift || ViewModel.IsMultiSelectMode)
+            {
+                var selected = ViewModel.SelectClassicalWorkTracks(work, additiveToggle: ctrl || ViewModel.IsMultiSelectMode, rangeSelect: shift);
+                SyncClassicalInspectorSelection(selected);
+            }
+            else
+            {
+                ViewModel.ToggleClassicalWorkExpanded(work);
+                var selected = ViewModel.SelectClassicalWorkTracks(work, additiveToggle: false, rangeSelect: false);
+                SyncClassicalInspectorSelection(selected);
+            }
+        }
+    }
+
+    private void OnClassicalWorkCheckboxClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalWorkViewItem>(sender) is { } work)
+        {
+            bool shift = IsClassicalModifierDown(VirtualKey.Shift);
+            var selected = ViewModel.SelectClassicalWorkTracks(work, additiveToggle: true, rangeSelect: shift);
+            if (sender is CheckBox cb)
+            {
+                cb.IsChecked = work.IsSelected;
+            }
+            SyncClassicalInspectorSelection(selected);
+        }
+    }
+
+    private void OnEditClassicalWorkClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalWorkViewItem>(sender) is { } work)
+        {
+            var workTracks = work.SelectedRecordingTracks;
+            var currentSelected = ViewModel.GetSelectedClassicalTracks();
+            IReadOnlyList<TrackItem> targets;
+            if (currentSelected.Count > 1
+                && workTracks.Any(wt => currentSelected.Any(sel => sel.TrackUid == wt.TrackUid)))
+            {
+                targets = currentSelected;
+            }
+            else
+            {
+                targets = ViewModel.SelectClassicalWorkTracks(work, additiveToggle: false, rangeSelect: false);
+            }
+            FocusInlineInspectorEditor(targets);
+        }
+    }
+
+    private void OnClassicalWorkRightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalWorkViewItem>(sender) is { } work)
+        {
+            var workTracks = work.SelectedRecordingTracks;
+            var currentSelected = ViewModel.GetSelectedClassicalTracks();
+            bool alreadySelected = workTracks.Any(wt => currentSelected.Any(sel => sel.TrackUid == wt.TrackUid));
+            if (!alreadySelected)
+            {
+                var selected = ViewModel.SelectClassicalWorkTracks(work, additiveToggle: false, rangeSelect: false);
+                SyncClassicalInspectorSelection(selected);
+            }
+        }
+    }
+
+    private void OnPlayClassicalWorkClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalWorkViewItem>(sender) is { } work)
+        {
+            ViewModel.PlayClassicalWork(work);
+        }
+    }
+
+    private void OnSelectClassicalRecordingClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalRecordingViewItem>(sender) is { } rec)
+        {
+            ViewModel.SelectClassicalRecording(rec);
+        }
+    }
+
+    private void OnClassicalMovementTapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (IsDescendantOfButtonOrCheckBox(e.OriginalSource as DependencyObject, sender as DependencyObject))
+        {
+            return;
+        }
+        if (ResolveClassicalBoundItem<ClassicalMovementViewItem>(sender) is { } mov)
+        {
+            bool ctrl = IsClassicalModifierDown(VirtualKey.Control);
+            bool shift = IsClassicalModifierDown(VirtualKey.Shift);
+            var selected = ViewModel.SelectClassicalMovementTrack(mov, additiveToggle: ctrl || ViewModel.IsMultiSelectMode, rangeSelect: shift);
+            SyncClassicalInspectorSelection(selected);
+        }
+    }
+
+    private void OnClassicalMovementCheckboxClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalMovementViewItem>(sender) is { } mov)
+        {
+            bool shift = IsClassicalModifierDown(VirtualKey.Shift);
+            var selected = ViewModel.SelectClassicalMovementTrack(mov, additiveToggle: true, rangeSelect: shift);
+            if (sender is CheckBox cb)
+            {
+                cb.IsChecked = mov.IsSelected;
+            }
+            SyncClassicalInspectorSelection(selected);
+        }
+    }
+
+    private void OnClassicalMovementDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (IsDescendantOfButtonOrCheckBox(e.OriginalSource as DependencyObject, sender as DependencyObject))
+        {
+            return;
+        }
+        if (ResolveClassicalBoundItem<ClassicalMovementViewItem>(sender) is { } mov)
+        {
+            ViewModel.PlayClassicalMovement(mov);
+        }
+    }
+
+    private void OnClassicalMovementRightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalMovementViewItem>(sender) is { } mov)
+        {
+            var currentSelected = ViewModel.GetSelectedClassicalTracks();
+            if (!currentSelected.Any(t => t.TrackUid == mov.TrackUid))
+            {
+                var selected = ViewModel.SelectClassicalMovementTrack(mov, additiveToggle: false, rangeSelect: false);
+                SyncClassicalInspectorSelection(selected);
+            }
+        }
+    }
+
+    private void OnPlayClassicalMovementClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalMovementViewItem>(sender) is { } mov)
+        {
+            ViewModel.PlayClassicalMovement(mov);
+        }
+    }
+
+    private void OnClassicalJumpEraTileClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalJumpTileItem>(sender) is { } tile)
+        {
+            ViewModel.SetClassicalEraFilter(tile.Key);
+            ViewModel.CloseClassicalJumpMatrix();
+        }
+    }
+
+    private void OnClassicalJumpInitialTileClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveClassicalBoundItem<ClassicalJumpTileItem>(sender) is { } tile)
+        {
+            var target = ViewModel.ResolveJumpTargetForInitial(tile.Key);
+            if (target is not null)
+            {
+                ClassicalComposerListView?.ScrollIntoView(target, ScrollIntoViewAlignment.Leading);
+            }
+        }
     }
 
 }

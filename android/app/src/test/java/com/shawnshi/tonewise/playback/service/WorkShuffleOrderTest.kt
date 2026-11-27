@@ -74,6 +74,35 @@ class WorkShuffleOrderTest {
         assertEquals(b1.uid, songs[order[2]].uid)
     }
 
+    @Test
+    fun workBlockKey_fallsBackToTitleParsingWhenWorkNameMissing() {
+        val album = FakeAlbum("Beethoven Symphonies")
+        val m1 =
+            FakeSong(
+                album = album,
+                workName = null,
+                movementName = null,
+                movementNumber = null,
+                track = 1,
+                rawTitleOverride = "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio",
+                composersList = listOf("Ludwig van Beethoven"),
+            )
+        val m2 =
+            FakeSong(
+                album = album,
+                workName = null,
+                movementName = null,
+                movementNumber = null,
+                track = 2,
+                rawTitleOverride = "Symphony No. 5 in C minor, Op. 67: II. Andante con moto",
+                composersList = listOf("Ludwig van Beethoven"),
+            )
+        val key1 = com.shawnshi.tonewise.music.ClassicalWorkKey.workBlockKey(m1)
+        val key2 = com.shawnshi.tonewise.music.ClassicalWorkKey.workBlockKey(m2)
+        assertEquals(true, key1 != null && key1.endsWith("::symphony no. 5 in c minor, op. 67"))
+        assertEquals(key1, key2)
+    }
+
     private class FakeAlbum(title: String) : Album {
         override val uid: Music.UID =
             requireNotNull(Music.UID.fromString("uaa${UUID.nameUUIDFromBytes(title.toByteArray())}"))
@@ -95,15 +124,17 @@ class WorkShuffleOrderTest {
         override val track: Int?,
         discNum: Int? = null,
         private val conductorsList: List<String> = emptyList(),
+        rawTitleOverride: String? = null,
+        private val composersList: List<String> = emptyList(),
     ) : Song {
         override val uid: Music.UID =
             requireNotNull(
                 Music.UID.fromString(
-                    "uas${UUID.nameUUIDFromBytes("${album.uid}:$workName:$movementName:$track:$discNum:${conductorsList.joinToString()}".toByteArray())}"
+                    "uas${UUID.nameUUIDFromBytes("${album.uid}:$workName:$movementName:$track:$discNum:${conductorsList.joinToString()}:$rawTitleOverride".toByteArray())}"
                 )
             )
         override val name: Name.Known =
-            Naming.simple().name(movementName ?: workName ?: "Track", null)
+            Naming.simple().name(rawTitleOverride ?: movementName ?: workName ?: "Track", null)
         override val disc: Disc? = discNum?.let { Disc(it, null) }
         override val date: Date? = null
         override val uri: Uri get() = error("unused")
@@ -119,7 +150,7 @@ class WorkShuffleOrderTest {
         override val cover: Cover? = null
         override val artists: List<Artist> = emptyList()
         override val genres: List<Genre> = emptyList()
-        override val composers: List<String> = emptyList()
+        override val composers: List<String> = composersList
         override val conductors: List<String> = conductorsList
     }
 }

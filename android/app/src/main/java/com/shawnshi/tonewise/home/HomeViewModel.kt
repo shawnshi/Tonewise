@@ -29,12 +29,21 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.home.collection.CollectionPivot
 import com.shawnshi.tonewise.home.quickplay.QuickplayAggregator
+import com.shawnshi.tonewise.home.quickplay.QuickplayPinKind
+import com.shawnshi.tonewise.home.quickplay.QuickplayPinStore
 import com.shawnshi.tonewise.home.quickplay.QuickplaySections
+import com.shawnshi.tonewise.home.quickplay.QuickplaySectionsCodec
 import com.shawnshi.tonewise.home.quickplay.QuickplayTrackCandidate
+import com.shawnshi.tonewise.home.quickplay.primaryCoverIdForTarget
+import com.shawnshi.tonewise.home.quickplay.prominentAlbumCoverId
+import com.shawnshi.tonewise.sync.SyncKvEntity
+import com.shawnshi.tonewise.sync.TonewiseSyncDatabase
 import com.shawnshi.tonewise.list.ListSettings
 import com.shawnshi.tonewise.list.adapter.UpdateInstructions
 import com.shawnshi.tonewise.list.sort.Sort
@@ -50,6 +59,7 @@ import com.shawnshi.tonewise.util.MutableEvent
 import org.oxycblt.musikr.Album
 import org.oxycblt.musikr.Artist
 import org.oxycblt.musikr.Genre
+import org.oxycblt.musikr.Music
 import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.Song
 import timber.log.Timber as L
@@ -68,49 +78,148 @@ constructor(
     private val playbackSettings: PlaybackSettings,
     private val musicRepository: MusicRepository,
     private val playCountRepository: PlayCountRepository,
+    private val quickplayPinStore: QuickplayPinStore,
     homeGeneratorFactory: HomeGenerator.Factory,
 ) : ViewModel(), HomeGenerator.Invalidator {
     private var quickplayJob: Job? = null
-    private var lastQuickplayCacheKey: Pair<Any?, Long>? = null
+    @Volatile private var hasComputedFromLibrary = false
+    private var lastComputedLibraryRevision = 0L
+    private var lastComputedRevision: Pair<Long, Long>? = null
     val quickplaySections: StateFlow<QuickplaySections>
         field = MutableStateFlow(QuickplaySections(emptyList(), emptyList(), emptyList()))
 
-    fun refreshQuickplaySections(libraryRevision: Any?, playRevision: Long) {
-        val libraryRef = musicRepository.library
-        val key: Pair<Any?, Long> = (libraryRef to playRevision)
-        if (lastQuickplayCacheKey == key && (libraryRevision != null || quickplaySections.value.history.isNotEmpty() || quickplaySections.value.newlyAdded.isNotEmpty())) {
+    private fun startQuickplayObserver() {
+        viewModelScope.launch {
+            val cached =
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                            val raw =
+                                TonewiseSyncDatabase.getInstance(appContext)
+                                    .syncKvDao()
+                                    .getValue(KEY_QUICKPLAY_SECTIONS_SNAPSHOT)
+                            QuickplaySectionsCodec.deserializeSections(raw)
+                        }
+                        .getOrNull()
+                }
+            if (cached != null && !cached.isEmpty && !hasComputedFromLibrary && quickplaySections.value.isEmpty) {
+                quickplaySections.value = cached
+            }
+        }
+
+        viewModelScope.launch {
+            combine(musicRepository.libraryRevision, playCountRepository.updates) { libRev, playRev ->
+                    libRev to playRev
+                }
+                .distinctUntilChanged()
+                .collect { (libRev, playRev) ->
+                    scheduleQuickplayCompute(libRev, playRev)
+                }
+        }
+    }
+
+    private fun scheduleQuickplayCompute(libRev: Long, playRev: Long) {
+        if (libRev <= 0L) return
+        val key = libRev to playRev
+        if (hasComputedFromLibrary && lastComputedRevision == key) {
             return
         }
+        val shouldDebounce = hasComputedFromLibrary && lastComputedLibraryRevision == libRev
         quickplayJob?.cancel()
         quickplayJob =
             viewModelScope.launch {
-                delay(180L)
-                val computed =
+                // First hydration computes immediately (0ms); subsequent play-count ticks coalesce.
+                if (shouldDebounce) {
+                    delay(180L)
+                }
+                val (computed, resolvedPinCovers) =
                     withContext(Dispatchers.Default) {
-                        val songs = musicRepository.library?.songs.orEmpty()
+                        val library = musicRepository.library
+                        val songs = library?.songs.orEmpty()
+                        val albumCoverCache = HashMap<String, String>()
                         val candidates =
                             songs.map { song ->
                                 val snap = playCountRepository.getSnapshot(song)
+                                val albumUid = song.album.uid.toString()
+                                val coverId =
+                                    albumCoverCache
+                                        .getOrPut(albumUid) { prominentAlbumCoverId(song.album) }
+                                        .ifEmpty { song.cover?.id.orEmpty() }
                                 QuickplayTrackCandidate(
                                     songUid = song.uid.toString(),
                                     title = song.name.resolve(appContext),
                                     artist = song.artists.resolveNames(appContext),
-                                    albumUid = song.album.uid.toString(),
+                                    albumUid = albumUid,
                                     albumTitle = song.album.name.resolve(appContext),
                                     addedMs = song.addedMs,
                                     playCount = snap.playCount,
                                     lastPlayedMs = snap.lastPlayedMs,
+                                    coverId = coverId,
                                 )
                             }
-                        QuickplayAggregator.computeSections(
-                            candidates = candidates,
-                            nowMs = System.currentTimeMillis(),
-                            limit = 12,
-                        )
+                        val sections =
+                            QuickplayAggregator.computeSections(
+                                candidates = candidates,
+                                nowMs = System.currentTimeMillis(),
+                                limit = 12,
+                            )
+                        val pinCovers =
+                            if (library != null) {
+                                val pins = quickplayPinStore.pins.value
+                                buildMap(pins.size) {
+                                    for (pin in pins) {
+                                        val target: Any? =
+                                            when (pin.kind) {
+                                                QuickplayPinKind.ALBUM ->
+                                                    Music.UID.fromString(pin.id)
+                                                        ?.let(library::findAlbum)
+                                                QuickplayPinKind.ARTIST ->
+                                                    Music.UID.fromString(pin.id)
+                                                        ?.let(musicRepository::findArtist)
+                                                QuickplayPinKind.PLAYLIST ->
+                                                    Music.UID.fromString(pin.id)
+                                                        ?.let(library::findPlaylist)
+                                                QuickplayPinKind.SONG ->
+                                                    Music.UID.fromString(pin.id)
+                                                        ?.let(library::findSong)
+                                                QuickplayPinKind.WORK ->
+                                                    musicRepository.classicalWorks
+                                                        .firstOrNull { it.key == pin.id }
+                                                        ?.recordings
+                                                        ?.firstOrNull()
+                                                        ?.album
+                                            }
+                                        val coverId = primaryCoverIdForTarget(target)
+                                        if (coverId.isNotEmpty()) {
+                                            put(pin.kind to pin.id, coverId)
+                                        }
+                                    }
+                                }
+                            } else {
+                                emptyMap()
+                            }
+                        sections to pinCovers
                     }
-                lastQuickplayCacheKey = key
+                hasComputedFromLibrary = true
+                lastComputedLibraryRevision = libRev
+                lastComputedRevision = key
                 quickplaySections.value = computed
+                quickplayPinStore.backfillCoverIds(resolvedPinCovers)
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val json = QuickplaySectionsCodec.serializeSections(computed)
+                        TonewiseSyncDatabase.getInstance(appContext)
+                            .syncKvDao()
+                            .putValue(SyncKvEntity(KEY_QUICKPLAY_SECTIONS_SNAPSHOT, json))
+                    }
+                }
             }
+    }
+
+    fun refreshQuickplaySections(libraryRevision: Any?, playRevision: Long) {
+        val libRev = musicRepository.libraryRevision.value
+        if (libRev > 0L) {
+            scheduleQuickplayCompute(libRev, playRevision)
+        }
     }
     /** A list of [Song]s, sorted by the preferred [Sort], to be shown in the home view. */
     val songList: StateFlow<List<Song>>
@@ -250,6 +359,7 @@ constructor(
 
     init {
         homeGenerator.attach()
+        startQuickplayObserver()
     }
 
     override fun onCleared() {
@@ -384,8 +494,9 @@ constructor(
     }
 
     fun selectCollectionPivot(pivot: CollectionPivot) {
-        _collectionPivot.value = pivot
-        pivot.musicType?.let { _currentTabType.value = it }
+        val normalized = if (pivot == CollectionPivot.COMPOSERS) CollectionPivot.CLASSICAL else pivot
+        _collectionPivot.value = normalized
+        normalized.musicType?.let { _currentTabType.value = it }
     }
 
     fun openSortForCurrentPivot() {
@@ -413,6 +524,10 @@ constructor(
 
     fun showAbout() {
         showOuter.put(Outer.About)
+    }
+
+    private companion object {
+        const val KEY_QUICKPLAY_SECTIONS_SNAPSHOT = "quickplay_sections_snapshot_v1"
     }
 }
 

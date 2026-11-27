@@ -87,6 +87,9 @@ private object ArtistWhitelistRegistry {
             )
             .sortedByDescending { it.length }
 
+    private val suffixProtectionRegex =
+        Regex(",\\s*(?:Jr\\.?|Sr\\.?|II|III)(?=$|[\\s,;/+&])", RegexOption.IGNORE_CASE)
+
     fun splitPreservingWhitelist(input: String, splitUnmasked: (String) -> List<String>): List<String> {
         var working = input
         val replacements = ArrayList<Pair<String, String>>()
@@ -103,6 +106,12 @@ private object ArtistWhitelistRegistry {
                 searchFrom = matchIdx + token.length
             }
         }
+        working =
+            suffixProtectionRegex.replace(working) { m ->
+                val token = "__TW_SFX_${seq++}__"
+                replacements.add(token to m.value)
+                token
+            }
         val chunks = splitUnmasked(working)
         if (replacements.isEmpty()) return chunks
         return chunks

@@ -633,6 +633,11 @@
     <string name="lbl_lastfm_complete_auth">Complete Browser Auth</string>
     <string name="lbl_lastfm_save">Save Config</string>
     <string name="lbl_lastfm_sync_now">Sync Play History &amp; Loved</string>
+    <string name="lbl_lastfm_connect">Connect with Last.fm</string>
+    <string name="lbl_lastfm_sync_from_pc">Import Session from Paired PC</string>
+    <string name="lbl_lastfm_disconnect">Disconnect</string>
+    <string name="lbl_lastfm_advanced">Advanced / Custom API Key</string>
+    <string name="lbl_lastfm_connected_toast">Last.fm connected</string>
     <string name="fmt_lastfm_stats">Pending: %1$d · Synced total: %2$d</string>
     <string name="fmt_lastfm_stats_with_loved">Pending: %1$d plays · %2$d loved · Synced total: %3$d</string>
     <string name="lbl_dj_exclude_vocal">NOT vocal (exclude vocals)</string>
@@ -697,4 +702,20 @@
     <string name="set_playback_ambient_backdrop">Ambient cover backdrop</string>
     <string name="set_playback_ambient_backdrop_desc">Use soft cover-colored glow behind Now Playing instead of album mosaic</string>
     <string name="desc_toggle_vinyl_mode">Switch between vinyl turntable and cover sleeve</string>
+    <string name="lbl_classical_all_forms">all</string>
+    <string name="lbl_classical_form_symphonies">symphonies</string>
+    <string name="lbl_classical_form_concertos">concertos</string>
+    <string name="lbl_classical_form_chamber">chamber</string>
+    <string name="lbl_classical_form_solo">solo</string>
+    <string name="lbl_classical_era_baroque">baroque</string>
+    <string name="lbl_classical_era_classical">classical</string>
+    <string name="lbl_classical_era_romantic">romantic</string>
+    <string name="lbl_classical_era_modern">modern</string>
+    <string name="lbl_classical_all_eras">all eras</string>
+    <string name="fmt_classical_version_count">%d versions</string>
+    <string name="fmt_classical_single_version">1 version</string>
+    <string name="fmt_classical_composer_stats_with_era">%1$s · %2$d works · %3$d recordings</string>
+    <string name="fmt_classical_composer_stats">%1$d works · %2$d recordings</string>
+    <string name="desc_classical_back_composers">Back to composers</string>
+    <string name="desc_classical_play_whole_work">Play whole work in order</string>
 </resources>

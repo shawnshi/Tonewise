@@ -61,9 +61,53 @@ data class LastFmState(
     val syncedPlayCountTotal: Int = 0,
     val statusMessage: String = "Last.fm ready (system scrobble broadcast enabled)",
     val pendingLoveCount: Int = 0,
+    val hasBuiltInCredentials: Boolean = false,
+    val hasCustomCredentials: Boolean = false,
 ) {
     val hasValidApiSession: Boolean
         get() = apiKey.isNotBlank() && sharedSecret.isNotBlank() && sessionKey.isNotBlank()
+}
+
+enum class LastFmAuthExchangeOutcome {
+    SUCCESS,
+    PENDING_UNCONFIRMED,
+    INVALID_OR_EXPIRED,
+    TRANSIENT_ERROR,
+}
+
+object LastFmAuthCallbackParser {
+    private const val CALLBACK_HOST = "lastfm-auth"
+
+    fun isLastFmCallback(scheme: String?, host: String?, expectedScheme: String): Boolean =
+        !scheme.isNullOrBlank() &&
+            scheme.equals(expectedScheme, ignoreCase = true) &&
+            host.equals(CALLBACK_HOST, ignoreCase = true)
+
+    fun extractCallbackToken(rawQuery: String?): String? {
+        if (rawQuery.isNullOrBlank()) return null
+        for (pair in rawQuery.split('&')) {
+            val eqIdx = pair.indexOf('=')
+            if (eqIdx <= 0) continue
+            val key = pair.substring(0, eqIdx).trim()
+            if (key == "token") {
+                val value =
+                    runCatching {
+                            java.net.URLDecoder.decode(pair.substring(eqIdx + 1), "UTF-8")
+                        }
+                        .getOrElse { pair.substring(eqIdx + 1) }
+                        .trim()
+                if (value.isNotEmpty()) return value
+            }
+        }
+        return null
+    }
+
+    fun classifyAuthSessionErrorCode(errorCode: Int): LastFmAuthExchangeOutcome =
+        when (errorCode) {
+            14 -> LastFmAuthExchangeOutcome.PENDING_UNCONFIRMED
+            4, 15 -> LastFmAuthExchangeOutcome.INVALID_OR_EXPIRED
+            else -> LastFmAuthExchangeOutcome.TRANSIENT_ERROR
+        }
 }
 
 data class ScrobbleEntry(
@@ -103,6 +147,8 @@ constructor(
     private val scrobbleFlushMutex = Mutex()
     private val loveFlushMutex = Mutex()
     private val syncMutex = Mutex()
+    private val authExchangeMutex = Mutex()
+    @Volatile private var lastConsumedAuthToken: String? = null
     private val dbInitLock = Any()
     private val dbPersistLock = Any()
     @Volatile private var dbLoaded = false
@@ -300,10 +346,240 @@ constructor(
             }
         }
 
+    private fun resolveEffectiveCredentials(
+        overrideApiKey: String = "",
+        overrideSharedSecret: String = "",
+    ): Pair<String, String> {
+        val savedKey = prefs.getString(KEY_API_KEY, "").orEmpty().trim()
+        val savedSecret = SecretBox.decrypt(prefs.getString(KEY_SHARED_SECRET, "").orEmpty()).trim()
+        val key =
+            overrideApiKey.trim().ifBlank { savedKey }.ifBlank { BuildConfig.LASTFM_API_KEY.trim() }
+        val secret =
+            overrideSharedSecret
+                .trim()
+                .ifBlank { savedSecret }
+                .ifBlank { BuildConfig.LASTFM_SHARED_SECRET.trim() }
+        return key to secret
+    }
+
+    suspend fun beginOneTapBrowserAuth(
+        overrideApiKey: String = "",
+        overrideSharedSecret: String = "",
+    ): String? =
+        withContext(Dispatchers.IO) {
+            val (cleanKey, cleanSecret) =
+                resolveEffectiveCredentials(overrideApiKey, overrideSharedSecret)
+            if (cleanKey.isEmpty() || cleanSecret.isEmpty()) {
+                _state.value =
+                    snapshotState(
+                        "No Last.fm API Key configured — expand Advanced to enter keys or import from paired PC"
+                    )
+                return@withContext null
+            }
+            validateCredentialsFormat(cleanKey, cleanSecret)?.let { err ->
+                _state.value = snapshotState(err)
+                return@withContext null
+            }
+
+            // Persist any custom key override so callback exchange uses the same credentials,
+            // while never writing built-in BuildConfig secrets into SharedPreferences.
+            val userKey = overrideApiKey.trim()
+            val userSecret = overrideSharedSecret.trim()
+            prefs.edit {
+                if (userKey.isNotEmpty() && userKey != BuildConfig.LASTFM_API_KEY.trim()) {
+                    putString(KEY_API_KEY, userKey)
+                }
+                if (userSecret.isNotEmpty() && userSecret != BuildConfig.LASTFM_SHARED_SECRET.trim()) {
+                    putString(KEY_SHARED_SECRET, SecretBox.encrypt(userSecret))
+                }
+                remove(KEY_PENDING_AUTH_TOKEN)
+                putLong(KEY_PENDING_AUTH_STARTED_MS, System.currentTimeMillis())
+            }
+            _state.value =
+                snapshotState("Approve access in browser — Tonewise will connect automatically")
+            val cb = URLEncoder.encode("${BuildConfig.APPLICATION_ID}://lastfm-auth", "UTF-8")
+            "https://www.last.fm/api/auth/?api_key=${URLEncoder.encode(cleanKey, "UTF-8")}&cb=$cb"
+        }
+
+    suspend fun handleBrowserAuthCallback(callbackToken: String?): Boolean =
+        withContext(Dispatchers.IO) {
+            val token = callbackToken?.trim().orEmpty()
+            if (token.isEmpty()) {
+                _state.value = snapshotState("Last.fm callback missing authorization token")
+                return@withContext false
+            }
+            authExchangeMutex.withLock {
+                if (_state.value.hasValidApiSession && lastConsumedAuthToken == token) {
+                    return@withLock true
+                }
+                val (cleanKey, cleanSecret) = resolveEffectiveCredentials()
+                if (cleanKey.isEmpty() || cleanSecret.isEmpty()) {
+                    _state.value = snapshotState("Missing Last.fm API Key / Shared Secret")
+                    return@withLock false
+                }
+                when (val result = exchangeTokenForSession(cleanKey, cleanSecret, token)) {
+                    LastFmAuthExchangeOutcome.SUCCESS -> {
+                        lastConsumedAuthToken = token
+                        true
+                    }
+                    LastFmAuthExchangeOutcome.PENDING_UNCONFIRMED -> {
+                        _state.value = snapshotState("Waiting for Last.fm browser authorization")
+                        false
+                    }
+                    LastFmAuthExchangeOutcome.INVALID_OR_EXPIRED,
+                    LastFmAuthExchangeOutcome.TRANSIENT_ERROR -> {
+                        false
+                    }
+                }
+            }
+        }
+
+    suspend fun tryAutoCompletePendingAuthOnResume(): Boolean =
+        withContext(Dispatchers.IO) {
+            authExchangeMutex.withLock {
+                val token = prefs.getString(KEY_PENDING_AUTH_TOKEN, null)?.trim().orEmpty()
+                if (token.isEmpty()) return@withLock false
+                val startedMs = prefs.getLong(KEY_PENDING_AUTH_STARTED_MS, 0L)
+                if (startedMs > 0L && System.currentTimeMillis() - startedMs > AUTH_FLOW_TTL_MS) {
+                    prefs.edit {
+                        remove(KEY_PENDING_AUTH_TOKEN)
+                        remove(KEY_PENDING_AUTH_STARTED_MS)
+                    }
+                    _state.value = snapshotState("Last.fm browser auth timed out — please tap Connect again")
+                    return@withLock false
+                }
+                val (cleanKey, cleanSecret) = resolveEffectiveCredentials()
+                if (cleanKey.isEmpty() || cleanSecret.isEmpty()) return@withLock false
+                when (exchangeTokenForSession(cleanKey, cleanSecret, token)) {
+                    LastFmAuthExchangeOutcome.SUCCESS -> {
+                        lastConsumedAuthToken = token
+                        true
+                    }
+                    LastFmAuthExchangeOutcome.PENDING_UNCONFIRMED -> {
+                        _state.value = snapshotState("Waiting for browser approval...")
+                        false
+                    }
+                    LastFmAuthExchangeOutcome.INVALID_OR_EXPIRED -> {
+                        prefs.edit {
+                            remove(KEY_PENDING_AUTH_TOKEN)
+                            remove(KEY_PENDING_AUTH_STARTED_MS)
+                        }
+                        false
+                    }
+                    LastFmAuthExchangeOutcome.TRANSIENT_ERROR -> false
+                }
+            }
+        }
+
+    private suspend fun exchangeTokenForSession(
+        cleanKey: String,
+        cleanSecret: String,
+        token: String,
+    ): LastFmAuthExchangeOutcome {
+        validateCredentialsFormat(cleanKey, cleanSecret)?.let { err ->
+            _state.value = snapshotState(err)
+            return LastFmAuthExchangeOutcome.INVALID_OR_EXPIRED
+        }
+        return try {
+            val signed =
+                sortedMapOf(
+                    "api_key" to cleanKey,
+                    "method" to "auth.getSession",
+                    "token" to token,
+                )
+            val sig = buildApiSignature(signed, cleanSecret)
+            val url =
+                "$LASTFM_API_URL?method=auth.getSession&api_key=${URLEncoder.encode(cleanKey, "UTF-8")}&token=${URLEncoder.encode(token, "UTF-8")}&api_sig=$sig&format=json"
+            val json = JSONObject(httpGetString(url))
+            val sessionObj = json.optJSONObject("session")
+            val sk = sessionObj?.optString("key")?.takeIf { it.isNotBlank() }
+            if (sk == null) {
+                val code = json.optInt("error", -1)
+                val msg = json.optString("message").ifBlank { "Session not authorized yet" }
+                val outcome = LastFmAuthCallbackParser.classifyAuthSessionErrorCode(code)
+                if (outcome != LastFmAuthExchangeOutcome.PENDING_UNCONFIRMED) {
+                    _state.value =
+                        snapshotState("Last.fm error${if (code > 0) " $code" else ""}: $msg")
+                }
+                return outcome
+            }
+            val resolvedUser = sessionObj.optString("name").ifBlank { _state.value.username }
+            prefs.edit {
+                remove(KEY_PENDING_AUTH_TOKEN)
+                remove(KEY_PENDING_AUTH_STARTED_MS)
+            }
+            val persistKey =
+                if (cleanKey == BuildConfig.LASTFM_API_KEY.trim()) "" else cleanKey
+            val persistSecret =
+                if (cleanSecret == BuildConfig.LASTFM_SHARED_SECRET.trim()) "" else cleanSecret
+            updateConfig(
+                apiEnabled = true,
+                broadcastEnabled = _state.value.broadcastEnabled,
+                apiKey = persistKey,
+                sharedSecret = persistSecret,
+                username = resolvedUser,
+                sessionKey = sk,
+            )
+            LastFmAuthExchangeOutcome.SUCCESS
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            L.w(e, "Last.fm getSession failed")
+            _state.value = snapshotState("Last.fm getSession failed: ${e.message}")
+            LastFmAuthExchangeOutcome.TRANSIENT_ERROR
+        }
+    }
+
+    @Synchronized
+    fun disconnectAccount() {
+        lastConsumedAuthToken = null
+        prefs.edit {
+            putBoolean(KEY_API_ENABLED, false)
+            remove(KEY_USERNAME)
+            remove(KEY_SESSION_KEY)
+            remove(KEY_PENDING_AUTH_TOKEN)
+            remove(KEY_PENDING_AUTH_STARTED_MS)
+        }
+        _state.value = snapshotState("Last.fm disconnected")
+    }
+
+    @Synchronized
+    fun importPairedDesktopSession(
+        username: String,
+        apiKey: String,
+        sharedSecret: String,
+        sessionKey: String,
+    ): Boolean {
+        val cleanKey = apiKey.trim()
+        val cleanSecret = sharedSecret.trim()
+        val cleanUser = username.trim()
+        val cleanSk = sessionKey.trim()
+        if (cleanKey.isEmpty() || cleanSecret.isEmpty() || cleanSk.isEmpty()) {
+            _state.value = snapshotState("Paired PC has no active Last.fm session")
+            return false
+        }
+        validateCredentialsFormat(cleanKey, cleanSecret)?.let { err ->
+            _state.value = snapshotState(err)
+            return false
+        }
+        prefs.edit {
+            remove(KEY_PENDING_AUTH_TOKEN)
+            remove(KEY_PENDING_AUTH_STARTED_MS)
+        }
+        updateConfig(
+            apiEnabled = true,
+            broadcastEnabled = _state.value.broadcastEnabled,
+            apiKey = cleanKey,
+            sharedSecret = cleanSecret,
+            username = cleanUser,
+            sessionKey = cleanSk,
+        )
+        return true
+    }
+
     suspend fun startBrowserAuth(apiKey: String, sharedSecret: String): String? =
         withContext(Dispatchers.IO) {
-            val cleanKey = apiKey.trim()
-            val cleanSecret = sharedSecret.trim()
+            val (cleanKey, cleanSecret) = resolveEffectiveCredentials(apiKey, sharedSecret)
             if (cleanKey.isEmpty() || cleanSecret.isEmpty()) {
                 _state.value = snapshotState("Enter API Key & Shared Secret first")
                 return@withContext null
@@ -336,9 +612,12 @@ constructor(
                         )
                     return@withContext null
                 }
-                prefs.edit { putString(KEY_PENDING_AUTH_TOKEN, token) }
+                prefs.edit {
+                    putString(KEY_PENDING_AUTH_TOKEN, token)
+                    putLong(KEY_PENDING_AUTH_STARTED_MS, System.currentTimeMillis())
+                }
                 _state.value =
-                    snapshotState("Approve access in browser, then tap Complete Browser Auth")
+                    snapshotState("Approve access in browser, then return to Tonewise")
                 "https://www.last.fm/api/auth/?api_key=${URLEncoder.encode(cleanKey, "UTF-8")}&token=${URLEncoder.encode(token, "UTF-8")}"
             } catch (ce: CancellationException) {
                 throw ce
@@ -351,54 +630,20 @@ constructor(
 
     suspend fun completeBrowserAuth(apiKey: String, sharedSecret: String): Boolean =
         withContext(Dispatchers.IO) {
-            val cleanKey = apiKey.trim()
-            val cleanSecret = sharedSecret.trim()
-            val token = prefs.getString(KEY_PENDING_AUTH_TOKEN, null)?.trim().orEmpty()
-            if (token.isEmpty()) {
-                _state.value = snapshotState("Tap Browser Auth first to request a token")
-                return@withContext false
-            }
-            validateCredentialsFormat(cleanKey, cleanSecret)?.let { err ->
-                _state.value = snapshotState(err)
-                return@withContext false
-            }
-            try {
-                val signed =
-                    sortedMapOf(
-                        "api_key" to cleanKey,
-                        "method" to "auth.getSession",
-                        "token" to token,
-                    )
-                val sig = buildApiSignature(signed, cleanSecret)
-                val url =
-                    "$LASTFM_API_URL?method=auth.getSession&api_key=${URLEncoder.encode(cleanKey, "UTF-8")}&token=${URLEncoder.encode(token, "UTF-8")}&api_sig=$sig&format=json"
-                val json = JSONObject(httpGetString(url))
-                val sessionObj = json.optJSONObject("session")
-                val sk = sessionObj?.optString("key")?.takeIf { it.isNotBlank() }
-                if (sk == null) {
-                    val code = json.optInt("error", -1)
-                    val msg = json.optString("message").ifBlank { "Session not authorized yet" }
-                    _state.value =
-                        snapshotState("Last.fm error${if (code > 0) " $code" else ""}: $msg")
-                    return@withContext false
+            authExchangeMutex.withLock {
+                val (cleanKey, cleanSecret) = resolveEffectiveCredentials(apiKey, sharedSecret)
+                val token = prefs.getString(KEY_PENDING_AUTH_TOKEN, null)?.trim().orEmpty()
+                if (token.isEmpty()) {
+                    _state.value = snapshotState("Tap Browser Auth first to request a token")
+                    return@withLock false
                 }
-                val resolvedUser = sessionObj.optString("name").ifBlank { _state.value.username }
-                prefs.edit { remove(KEY_PENDING_AUTH_TOKEN) }
-                updateConfig(
-                    apiEnabled = true,
-                    broadcastEnabled = _state.value.broadcastEnabled,
-                    apiKey = cleanKey,
-                    sharedSecret = cleanSecret,
-                    username = resolvedUser,
-                    sessionKey = sk,
-                )
-                true
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (e: Exception) {
-                L.w(e, "Last.fm getSession failed")
-                _state.value = snapshotState("Last.fm getSession failed: ${e.message}")
-                false
+                val outcome = exchangeTokenForSession(cleanKey, cleanSecret, token)
+                if (outcome == LastFmAuthExchangeOutcome.SUCCESS) {
+                    lastConsumedAuthToken = token
+                    true
+                } else {
+                    false
+                }
             }
         }
 
@@ -1133,20 +1378,20 @@ constructor(
     private fun Song.durationSecCompat(): Long = (durationMs / 1000L).coerceAtLeast(30L)
 
     private fun snapshotState(statusMessage: String): LastFmState {
-        val apiKey = prefs.getString(KEY_API_KEY, "") ?: ""
+        val savedApiKey = (prefs.getString(KEY_API_KEY, "") ?: "").trim()
         val storedSecret = prefs.getString(KEY_SHARED_SECRET, "") ?: ""
         val username = prefs.getString(KEY_USERNAME, "") ?: ""
         val storedSessionKey = prefs.getString(KEY_SESSION_KEY, "") ?: ""
-        val sharedSecret = SecretBox.decrypt(storedSecret)
-        val sessionKey = SecretBox.decrypt(storedSessionKey)
+        val savedSecret = SecretBox.decrypt(storedSecret).trim()
+        val sessionKey = SecretBox.decrypt(storedSessionKey).trim()
         val needsSecretUpgrade =
-            (storedSecret.isNotEmpty() && !SecretBox.isEncrypted(storedSecret) && sharedSecret.isNotEmpty()) ||
+            (storedSecret.isNotEmpty() && !SecretBox.isEncrypted(storedSecret) && savedSecret.isNotEmpty()) ||
                 (storedSessionKey.isNotEmpty() && !SecretBox.isEncrypted(storedSessionKey) && sessionKey.isNotEmpty())
         if (needsSecretUpgrade) {
             runCatching {
                 prefs.edit {
                     if (storedSecret.isNotEmpty() && !SecretBox.isEncrypted(storedSecret)) {
-                        putString(KEY_SHARED_SECRET, SecretBox.encrypt(sharedSecret))
+                        putString(KEY_SHARED_SECRET, SecretBox.encrypt(savedSecret))
                     }
                     if (storedSessionKey.isNotEmpty() && !SecretBox.isEncrypted(storedSessionKey)) {
                         putString(KEY_SESSION_KEY, SecretBox.encrypt(sessionKey))
@@ -1154,8 +1399,14 @@ constructor(
                 }
             }
         }
+        val builtInKey = BuildConfig.LASTFM_API_KEY.trim()
+        val builtInSecret = BuildConfig.LASTFM_SHARED_SECRET.trim()
+        val hasBuiltIn = builtInKey.isNotEmpty() && builtInSecret.isNotEmpty()
+        val hasCustom = savedApiKey.isNotEmpty() && savedSecret.isNotEmpty()
+        val effectiveApiKey = savedApiKey.ifBlank { builtInKey }
+        val effectiveSecret = savedSecret.ifBlank { builtInSecret }
         val hasValidSession =
-            apiKey.isNotBlank() && sharedSecret.isNotBlank() && sessionKey.isNotBlank()
+            effectiveApiKey.isNotBlank() && effectiveSecret.isNotBlank() && sessionKey.isNotBlank()
         val apiEnabled =
             if (!prefs.contains(KEY_API_ENABLED) && hasValidSession) {
                 true
@@ -1165,14 +1416,16 @@ constructor(
         return LastFmState(
             apiEnabled = apiEnabled,
             broadcastEnabled = prefs.getBoolean(KEY_BROADCAST_ENABLED, true),
-            apiKey = apiKey,
-            sharedSecret = sharedSecret,
+            apiKey = effectiveApiKey,
+            sharedSecret = effectiveSecret,
             username = username,
             sessionKey = sessionKey,
             pendingCount = pendingQueue.size,
             syncedPlayCountTotal = playCountRepository.getTotalLastFmSyncedCount(),
             statusMessage = statusMessage,
             pendingLoveCount = pendingLoveOps.size,
+            hasBuiltInCredentials = hasBuiltIn,
+            hasCustomCredentials = hasCustom,
         )
     }
 
@@ -1302,6 +1555,8 @@ constructor(
         private const val KEY_SEEN_CLOUD_STAMPS_JSON = "seen_cloud_stamps_json"
         private const val KEY_LAST_PULL_FROM_SEC = "last_pull_from_sec"
         private const val KEY_PENDING_AUTH_TOKEN = "pending_auth_token"
+        private const val KEY_PENDING_AUTH_STARTED_MS = "pending_auth_started_ms"
+        private const val AUTH_FLOW_TTL_MS = 15L * 60L * 1000L
         private const val KEY_PENDING_LOVE_JSON = "lastfm_pending_love_ops_v1"
         private const val MIN_SCROBBLE_DURATION_MS = 30_000L
 

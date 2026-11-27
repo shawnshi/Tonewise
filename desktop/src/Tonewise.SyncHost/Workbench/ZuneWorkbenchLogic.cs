@@ -514,6 +514,141 @@ public static class QuickplayPinMatcher
     }
 }
 
+/// <summary>
+/// Pre-indexed O(1) lookup structure over library tracks for Quickplay pin resolution so UI/background
+/// refreshes avoid O(P * N) full-library linear scans.
+/// </summary>
+public sealed class QuickplayLookupIndex<TTrack>
+{
+    private readonly List<TTrack> _all;
+    private readonly Func<TTrack, string> _getArtists;
+    private readonly Func<TTrack, string> _getComposers;
+    private readonly Func<TTrack, string> _getConductors;
+    private readonly Dictionary<string, TTrack> _byUid;
+    private readonly Dictionary<string, List<TTrack>> _byAlbum;
+    private readonly Dictionary<string, List<TTrack>> _byFolder;
+    private readonly Dictionary<string, List<TTrack>> _byWorkBlock;
+    private readonly Dictionary<string, List<TTrack>> _byWorkName;
+    private readonly Dictionary<string, List<TTrack>> _byGenre;
+
+    public QuickplayLookupIndex(
+        IReadOnlyList<TTrack> tracks,
+        Func<TTrack, string> getTrackUid,
+        Func<TTrack, string> getAlbum,
+        Func<TTrack, string> getWorkName,
+        Func<TTrack, string> getGenre,
+        Func<TTrack, string> getArtists,
+        Func<TTrack, string> getComposers,
+        Func<TTrack, string> getConductors,
+        Func<TTrack, string> getAlbumDirectory,
+        Func<TTrack, string> getRelPath)
+    {
+        _all = tracks as List<TTrack> ?? [.. tracks];
+        _getArtists = getArtists;
+        _getComposers = getComposers;
+        _getConductors = getConductors;
+
+        int cap = Math.Max(16, _all.Count);
+        _byUid = new Dictionary<string, TTrack>(cap, StringComparer.Ordinal);
+        _byAlbum = new Dictionary<string, List<TTrack>>(StringComparer.OrdinalIgnoreCase);
+        _byFolder = new Dictionary<string, List<TTrack>>(StringComparer.OrdinalIgnoreCase);
+        _byWorkBlock = new Dictionary<string, List<TTrack>>(StringComparer.OrdinalIgnoreCase);
+        _byWorkName = new Dictionary<string, List<TTrack>>(StringComparer.OrdinalIgnoreCase);
+        _byGenre = new Dictionary<string, List<TTrack>>(StringComparer.OrdinalIgnoreCase);
+
+        static void AddToBucket(Dictionary<string, List<TTrack>> dict, string key, TTrack item)
+        {
+            if (!dict.TryGetValue(key, out var list))
+            {
+                list = [];
+                dict[key] = list;
+            }
+            list.Add(item);
+        }
+
+        foreach (var tr in _all)
+        {
+            string uid = getTrackUid(tr);
+            if (!string.IsNullOrEmpty(uid))
+            {
+                _byUid[uid] = tr;
+            }
+
+            string album = getAlbum(tr);
+            string albumKey = string.IsNullOrWhiteSpace(album) ? QuickplayPinMatcher.EmptyAlbumSentinel : album;
+            AddToBucket(_byAlbum, albumKey, tr);
+
+            string folderKey = QuickplayPinMatcher.NormalizeFolderKey(getAlbumDirectory(tr), getRelPath(tr));
+            AddToBucket(_byFolder, folderKey, tr);
+
+            string workName = getWorkName(tr);
+            if (!string.IsNullOrWhiteSpace(workName))
+            {
+                AddToBucket(_byWorkName, workName, tr);
+            }
+
+            string conductors = getConductors(tr);
+            string? workBlock = WorkAwareShuffleEngine.BuildWorkBlockKey(
+                workName,
+                album,
+                WorkAwareShuffleEngine.BuildAlbumScope(album, conductors));
+            if (!string.IsNullOrEmpty(workBlock))
+            {
+                AddToBucket(_byWorkBlock, workBlock, tr);
+            }
+
+            string genre = getGenre(tr);
+            if (!string.IsNullOrWhiteSpace(genre))
+            {
+                AddToBucket(_byGenre, genre, tr);
+            }
+        }
+    }
+
+    public bool TryGetByUid(string uid, out TTrack track) => _byUid.TryGetValue(uid, out track!);
+
+    public IEnumerable<TTrack> MatchTracks(QuickplayPinRecord pin)
+    {
+        if (string.Equals(pin.Kind, "track", StringComparison.OrdinalIgnoreCase))
+        {
+            return _byUid.TryGetValue(pin.TargetKey, out var tr) ? [tr] : [];
+        }
+
+        if (string.Equals(pin.Kind, "folder", StringComparison.OrdinalIgnoreCase))
+        {
+            string expectedFolder = pin.TargetKey.Replace('\\', '/').Trim();
+            return _byFolder.TryGetValue(expectedFolder, out var list) ? list : [];
+        }
+
+        if (string.Equals(pin.Kind, "album", StringComparison.OrdinalIgnoreCase))
+        {
+            string key = pin.TargetKey is QuickplayPinMatcher.EmptyAlbumSentinel or "(未分配专辑)"
+                ? QuickplayPinMatcher.EmptyAlbumSentinel
+                : pin.TargetKey;
+            return _byAlbum.TryGetValue(key, out var list) ? list : [];
+        }
+
+        if (string.Equals(pin.Kind, "work", StringComparison.OrdinalIgnoreCase))
+        {
+            if (pin.TargetKey.Contains("::", StringComparison.Ordinal))
+            {
+                return _byWorkBlock.TryGetValue(pin.TargetKey, out var scoped) ? scoped : [];
+            }
+            return _byWorkName.TryGetValue(pin.TargetKey, out var byWork) ? byWork : [];
+        }
+
+        if (string.Equals(pin.Kind, "genre", StringComparison.OrdinalIgnoreCase))
+        {
+            return _byGenre.TryGetValue(pin.TargetKey, out var list) ? list : [];
+        }
+
+        return _all.Where(tr =>
+            _getArtists(tr).Contains(pin.TargetKey, StringComparison.OrdinalIgnoreCase)
+            || _getComposers(tr).Contains(pin.TargetKey, StringComparison.OrdinalIgnoreCase)
+            || _getConductors(tr).Contains(pin.TargetKey, StringComparison.OrdinalIgnoreCase));
+    }
+}
+
 public sealed record InboxAuditTrackSeed(
     string Genre,
     string ComposersDisplay,
@@ -643,5 +778,23 @@ public static class InboxAuditEvaluator
                 : $"当前体检筛选：{navLabel} — 命中 {matchedCount:N0} 首（曲库共 {totalCount:N0} 首）";
         }
         return $"当前视图：{navLabel} — 共 {matchedCount:N0} / {totalCount:N0} 首（点击上方体检项筛选元数据缺口）";
+    }
+}
+
+public static class NowPlayingFormatter
+{
+    public static (string Line1, string Line2, string Line3) FormatNonClassicalNowPlaying(
+        string? title,
+        string? artist,
+        string? album,
+        int? year)
+    {
+        string? yearPart = year is > 0
+            ? year.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : null;
+        string line3 = string.Join(" · ", new[] { album, yearPart }
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!.Trim()));
+        return (title?.Trim() ?? "", artist?.Trim() ?? "", line3);
     }
 }

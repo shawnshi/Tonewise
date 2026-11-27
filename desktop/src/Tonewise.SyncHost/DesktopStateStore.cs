@@ -15,6 +15,7 @@ public static class DesktopStateStore
     public const int DefaultAckRetentionDays = 90;
     public const int DefaultAckMaxRows = 50_000;
     private static readonly ConcurrentDictionary<string, byte> SchemaInitializedPaths = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, byte> LegacyMigratedManifestPaths = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly string[] LegacyOperationalTables =
     [
@@ -45,7 +46,7 @@ public static class DesktopStateStore
         SchemaInitializedPaths.TryAdd(Path.GetFullPath(stateDbPath), 0);
     }
 
-    private static void EnsureSchemaOnce(string stateDbPath)
+    public static void EnsureSchemaOnce(string stateDbPath)
     {
         string fullPath = Path.GetFullPath(stateDbPath);
         if (!File.Exists(fullPath))
@@ -134,6 +135,8 @@ public static class DesktopStateStore
     public static void MigrateLegacyOperationalTablesIfPresent(string manifestDbPath, string stateDbPath)
     {
         if (!File.Exists(manifestDbPath)) return;
+        string fullManifestPath = Path.GetFullPath(manifestDbPath);
+        if (LegacyMigratedManifestPaths.ContainsKey(fullManifestPath)) return;
 
         var foundTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (var probeConn = TonewiseSqlite.OpenReadOnly(manifestDbPath))
@@ -151,7 +154,11 @@ public static class DesktopStateStore
             }
         }
 
-        if (foundTables.Count == 0) return;
+        if (foundTables.Count == 0)
+        {
+            LegacyMigratedManifestPaths.TryAdd(fullManifestPath, 0);
+            return;
+        }
 
         using var stateConn = TonewiseSqlite.OpenReadWrite(stateDbPath);
         EnsureSchema(stateConn);
@@ -237,6 +244,7 @@ public static class DesktopStateStore
             dropCmd.ExecuteNonQuery();
         }
         dropTx.Commit();
+        LegacyMigratedManifestPaths.TryAdd(fullManifestPath, 0);
     }
 
     public static int PruneOldLanSyncAcks(

@@ -60,6 +60,18 @@ sealed interface Format {
         override val mimeType = "audio/wav"
     }
 
+    data object AIFF : Format {
+        override val mimeType = "audio/aiff"
+    }
+
+    data object DSF : Format {
+        override val mimeType = "audio/dsf"
+    }
+
+    data object DSDIFF : Format {
+        override val mimeType = "audio/dff"
+    }
+
     data class Unknown(override val mimeType: String) : Format {
         val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)?.uppercase()
     }
@@ -82,6 +94,13 @@ sealed interface Format {
                 "audio/x-wav" to Wav,
                 "audio/vnd.wave" to Wav,
                 "audio/wave" to Wav,
+                "audio/aiff" to AIFF,
+                "audio/x-aiff" to AIFF,
+                "audio/dsf" to DSF,
+                "audio/x-dsf" to DSF,
+                "audio/dff" to DSDIFF,
+                "audio/x-dff" to DSDIFF,
+                "audio/dsdiff" to DSDIFF,
             )
 
         internal fun infer(containerMimeType: String, codecMimeType: String): Format {

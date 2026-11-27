@@ -31,6 +31,8 @@ import com.shawnshi.tonewise.detail.DetailViewModel
 import com.shawnshi.tonewise.detail.WorkRecordingsDialog
 import com.shawnshi.tonewise.home.quickplay.QuickplayPinKind
 import com.shawnshi.tonewise.home.quickplay.QuickplayPinStore
+import com.shawnshi.tonewise.home.quickplay.primaryCoverIdForTarget
+import com.shawnshi.tonewise.home.quickplay.prominentAlbumCoverId
 import com.shawnshi.tonewise.list.ListViewModel
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.MusicViewModel
@@ -151,6 +153,7 @@ class SongMenuDialogFragment : MenuDialogFragment<Menu.ForSong>() {
                         id = menu.song.uid.toString(),
                         title = menu.song.name.resolve(context),
                         subtitle = menu.song.artists.resolveNames(context),
+                        coverId = primaryCoverIdForTarget(menu.song),
                     )
                 context.showToast(
                     if (pinned) R.string.lng_pinned_quickplay else R.string.lng_unpinned_quickplay
@@ -220,6 +223,7 @@ class AlbumMenuDialogFragment : MenuDialogFragment<Menu.ForAlbum>() {
                         id = menu.album.uid.toString(),
                         title = menu.album.name.resolve(context),
                         subtitle = menu.album.artists.resolveNames(context),
+                        coverId = prominentAlbumCoverId(menu.album),
                     )
                 context.showToast(
                     if (pinned) R.string.lng_pinned_quickplay else R.string.lng_unpinned_quickplay
@@ -315,6 +319,7 @@ class ArtistMenuDialogFragment : MenuDialogFragment<Menu.ForArtist>() {
                         id = menu.artist.uid.toString(),
                         title = menu.artist.name.resolve(context),
                         subtitle = getString(R.string.lbl_artist),
+                        coverId = primaryCoverIdForTarget(menu.artist),
                     )
                 context.showToast(
                     if (pinned) R.string.lng_pinned_quickplay else R.string.lng_unpinned_quickplay
@@ -461,6 +466,7 @@ class PlaylistMenuDialogFragment : MenuDialogFragment<Menu.ForPlaylist>() {
                         id = menu.playlist.uid.toString(),
                         title = menu.playlist.name.resolve(context),
                         subtitle = getString(R.string.lbl_playlist),
+                        coverId = primaryCoverIdForTarget(menu.playlist),
                     )
                 context.showToast(
                     if (pinned) R.string.lng_pinned_quickplay else R.string.lng_unpinned_quickplay

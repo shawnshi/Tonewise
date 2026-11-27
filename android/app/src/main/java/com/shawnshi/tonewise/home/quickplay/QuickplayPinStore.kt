@@ -40,6 +40,7 @@ data class QuickplayPinRecord(
     val title: String,
     val subtitle: String,
     val pinnedAtMs: Long,
+    val coverId: String = "",
 )
 
 /**
@@ -56,10 +57,13 @@ object QuickplayPinCodec {
         for ((index, pin) in capped.withIndex()) {
             if (index > 0) sb.append(',')
             sb.append('{')
-            appendJsonField(sb, "kind", pin.kind.wire, comma = false)
-            appendJsonField(sb, "id", pin.id, comma = true)
-            appendJsonField(sb, "title", pin.title, comma = true)
-            appendJsonField(sb, "subtitle", pin.subtitle, comma = true)
+            QuickplayJsonCodecSupport.appendJsonField(sb, "kind", pin.kind.wire, comma = false)
+            QuickplayJsonCodecSupport.appendJsonField(sb, "id", pin.id, comma = true)
+            QuickplayJsonCodecSupport.appendJsonField(sb, "title", pin.title, comma = true)
+            QuickplayJsonCodecSupport.appendJsonField(sb, "subtitle", pin.subtitle, comma = true)
+            if (pin.coverId.isNotEmpty()) {
+                QuickplayJsonCodecSupport.appendJsonField(sb, "coverId", pin.coverId, comma = true)
+            }
             sb.append(",\"pinnedAtMs\":").append(pin.pinnedAtMs)
             sb.append('}')
         }
@@ -70,70 +74,23 @@ object QuickplayPinCodec {
     fun deserializePins(raw: String?): List<QuickplayPinRecord> {
         if (raw.isNullOrBlank()) return emptyList()
         val trimmed = raw.trim()
-        if (!trimmed.startsWith('[')) return emptyList()
+        val objects = QuickplayJsonCodecSupport.splitArrayObjects(trimmed)
+        if (objects.isEmpty()) return emptyList()
         val out = mutableListOf<QuickplayPinRecord>()
-        var idx = 1
-        val len = trimmed.length
-        while (idx < len) {
-            while (idx < len && (trimmed[idx].isWhitespace() || trimmed[idx] == ',')) idx++
-            if (idx >= len || trimmed[idx] == ']') break
-            if (trimmed[idx] != '{') break
-            val objStart = idx
-            var inString = false
-            var escaped = false
-            var depth = 0
-            while (idx < len) {
-                val ch = trimmed[idx]
-                if (escaped) {
-                    escaped = false
-                } else if (ch == '\\' && inString) {
-                    escaped = true
-                } else if (ch == '"') {
-                    inString = !inString
-                } else if (!inString) {
-                    if (ch == '{') depth++
-                    else if (ch == '}') {
-                        depth--
-                        if (depth == 0) {
-                            idx++
-                            break
-                        }
-                    }
-                }
-                idx++
-            }
-            if (depth == 0) {
-                parseObject(trimmed.substring(objStart, idx))?.let(out::add)
-            }
+        for (obj in objects) {
+            parseObject(obj)?.let(out::add)
+            if (out.size >= MAX_PINS) break
         }
-        return out.take(MAX_PINS)
+        return out
     }
 
     private fun parseObject(obj: String): QuickplayPinRecord? {
-        val fields = mutableMapOf<String, String>()
-        var i = 1
-        val len = obj.length - 1
-        while (i < len) {
-            while (i < len && (obj[i].isWhitespace() || obj[i] == ',')) i++
-            if (i >= len || obj[i] != '"') break
-            val (key, afterKey) = readJsonString(obj, i) ?: break
-            i = afterKey
-            while (i < len && (obj[i].isWhitespace() || obj[i] == ':')) i++
-            if (i >= len) break
-            if (obj[i] == '"') {
-                val (value, afterVal) = readJsonString(obj, i) ?: break
-                fields[key] = value
-                i = afterVal
-            } else {
-                val numStart = i
-                while (i < len && obj[i] != ',' && obj[i] != '}') i++
-                fields[key] = obj.substring(numStart, i).trim()
-            }
-        }
+        val fields = QuickplayJsonCodecSupport.parseFlatObject(obj)
         val kind = QuickplayPinKind.fromWire(fields["kind"]) ?: return null
         val id = fields["id"]?.takeIf { it.isNotEmpty() } ?: return null
         val title = fields["title"].orEmpty()
         val subtitle = fields["subtitle"].orEmpty()
+        val coverId = fields["coverId"].orEmpty()
         val pinnedAtMs = fields["pinnedAtMs"]?.toLongOrNull() ?: 0L
         return QuickplayPinRecord(
             kind = kind,
@@ -141,65 +98,8 @@ object QuickplayPinCodec {
             title = title,
             subtitle = subtitle,
             pinnedAtMs = pinnedAtMs,
+            coverId = coverId,
         )
-    }
-
-    private fun readJsonString(src: String, startQuote: Int): Pair<String, Int>? {
-        val sb = StringBuilder()
-        var i = startQuote + 1
-        val len = src.length
-        while (i < len) {
-            val ch = src[i++]
-            when (ch) {
-                '"' -> return sb.toString() to i
-                '\\' -> {
-                    if (i >= len) return null
-                    when (val esc = src[i++]) {
-                        '"' -> sb.append('"')
-                        '\\' -> sb.append('\\')
-                        '/' -> sb.append('/')
-                        'b' -> sb.append('\b')
-                        'f' -> sb.append('\u000C')
-                        'n' -> sb.append('\n')
-                        'r' -> sb.append('\r')
-                        't' -> sb.append('\t')
-                        'u' -> {
-                            if (i + 4 > len) return null
-                            val code = src.substring(i, i + 4).toIntOrNull(16) ?: return null
-                            sb.append(code.toChar())
-                            i += 4
-                        }
-                        else -> sb.append(esc)
-                    }
-                }
-                else -> sb.append(ch)
-            }
-        }
-        return null
-    }
-
-    private fun appendJsonField(sb: StringBuilder, key: String, value: String, comma: Boolean) {
-        if (comma) sb.append(',')
-        sb.append('"')
-        appendEscaped(sb, key)
-        sb.append("\":\"")
-        appendEscaped(sb, value)
-        sb.append('"')
-    }
-
-    private fun appendEscaped(sb: StringBuilder, value: String) {
-        for (ch in value) {
-            when (ch) {
-                '"' -> sb.append("\\\"")
-                '\\' -> sb.append("\\\\")
-                '\n' -> sb.append("\\n")
-                '\r' -> sb.append("\\r")
-                '\t' -> sb.append("\\t")
-                '\b' -> sb.append("\\b")
-                '\u000C' -> sb.append("\\f")
-                else -> if (ch.code < 0x20) sb.append("\\u%04x".format(ch.code)) else sb.append(ch)
-            }
-        }
     }
 }
 
@@ -255,6 +155,7 @@ class QuickplayPinStore @Inject constructor(@ApplicationContext private val cont
         id: String,
         title: String,
         subtitle: String,
+        coverId: String = "",
         nowMs: Long = System.currentTimeMillis(),
     ): Boolean {
         val added: Boolean
@@ -274,6 +175,7 @@ class QuickplayPinStore @Inject constructor(@ApplicationContext private val cont
                         title = title,
                         subtitle = subtitle,
                         pinnedAtMs = nowMs,
+                        coverId = coverId,
                     )
                 next = (listOf(item) + current).take(24)
                 added = true
@@ -282,6 +184,35 @@ class QuickplayPinStore @Inject constructor(@ApplicationContext private val cont
         }
         persistAsync(next)
         return added
+    }
+
+    fun backfillCoverIds(resolved: Map<Pair<QuickplayPinKind, String>, String>) {
+        if (resolved.isEmpty()) return
+        val updated: List<QuickplayPinRecord>?
+        synchronized(stateLock) {
+            val current = _pins.value
+            var changed = false
+            val next =
+                current.map { pin ->
+                    val resolvedCover = resolved[pin.kind to pin.id]
+                    if (!resolvedCover.isNullOrEmpty() && resolvedCover != pin.coverId) {
+                        changed = true
+                        pin.copy(coverId = resolvedCover)
+                    } else {
+                        pin
+                    }
+                }
+            if (changed) {
+                dirty = true
+                _pins.value = next
+                updated = next
+            } else {
+                updated = null
+            }
+        }
+        if (updated != null) {
+            persistAsync(updated)
+        }
     }
 
     fun removePin(kind: QuickplayPinKind, id: String) {

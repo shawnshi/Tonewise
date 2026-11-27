@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -146,6 +148,13 @@ public sealed partial class MainViewModel
         ReplaceCollection(QuickplayPins, pins);
         HasQuickplayPins = QuickplayPins.Count > 0;
         HasNoQuickplayPins = !HasQuickplayPins;
+        _pendingQuickplaySnapshot = new QuickplayMaterializedSnapshot(
+            history,
+            newlyAdded,
+            rediscovery,
+            pins,
+            _libraryDataVersion);
+        _quickplayDirty = false;
 
         ReloadSessionSlots();
         RestoreSavedPlaybackSession(musicRoot);
@@ -227,9 +236,9 @@ public sealed partial class MainViewModel
                 }
             }
             BumpLibraryDataVersion();
-            if (hasPlaylistPins)
+            if (hasPlaylistPins || PrimaryNavId == "quickplay")
             {
-                RefreshQuickplayCollections();
+                ScheduleQuickplayBackgroundMaterialize(immediate: true);
             }
 
             ApplyStagingSnapshot(secondary.approvedCount, secondary.pendingCount, secondary.pendingList);
@@ -283,6 +292,34 @@ public sealed partial class MainViewModel
                     && !string.IsNullOrWhiteSpace(lfmCfg.Username))
                 {
                     _ = AutoSyncLastFmOnLibraryLoadAsync();
+                }
+            }
+
+            if (EnableAutoWatchLibrary && _uiContext is not null && !ct.IsCancellationRequested)
+            {
+                bool needsSync = await Task.Run(() => _store.HasPendingDiskChanges(musicRoot), ct);
+                if (needsSync
+                    && !ct.IsCancellationRequested
+                    && Volatile.Read(ref _disposed) == 0
+                    && Volatile.Read(ref _curationWriteInProgress) == 0
+                    && string.Equals(_store.MusicRoot, musicRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    var syncedTracks = await Task.Run(() =>
+                    {
+                        _store.ScanAndBuildManifestIfMissing(musicRoot, forceRebuild: true, fastMode: true);
+                        return _store.LoadFromMusicRoot(musicRoot).ToList();
+                    }, ct);
+                    if (!ct.IsCancellationRequested
+                        && Volatile.Read(ref _disposed) == 0
+                        && string.Equals(_store.MusicRoot, musicRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _allTracks = syncedTracks;
+                        UpdateClassicalAdaptiveState();
+                        RefreshInboxAuditCounts();
+                        TriggerFilterRefresh();
+                        RefreshPlaylists();
+                        StatusMessage = $"启动增量巡检已同步曲库变化（当前共 {_allTracks.Count:N0} 首）。";
+                    }
                 }
             }
         }
@@ -377,7 +414,12 @@ public sealed partial class MainViewModel
     {
         if (!_suppressFilterRefresh)
         {
-            if (IsEntityBrowserVisible)
+            if (IsNavClassicalWorks)
+            {
+                ApplyClassicalComposerFilter();
+                CurrentViewHeader = $"古典馆藏 ({ClassicalComposers.Count} 位作曲家)";
+            }
+            else if (IsEntityBrowserVisible)
             {
                 RebuildEntityGroups();
             }
@@ -742,15 +784,29 @@ public sealed partial class MainViewModel
     private string _cachedCollectionPills = "";
     private bool _quickplayDirty = true;
     private bool _hasCompletedInitialNavigation;
+    private CancellationTokenSource? _quickplayBgCts;
+    private QuickplayMaterializedSnapshot? _pendingQuickplaySnapshot;
+    private QuickplayLookupIndex<TrackItem>? _cachedQuickplayIndex;
+    private long _cachedQuickplayIndexVersion = -1;
+    private readonly object _quickplayIndexLock = new();
+    private readonly ConcurrentDictionary<string, (DateTime WriteUtc, IReadOnlyList<string> Uids)> _playlistPinUidsCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public long LastQuickplaySwitchMicroseconds { get; private set; }
 
     public event Action<string, string>? NavigationSettled;
 
-    public void MarkQuickplayDirty() => _quickplayDirty = true;
+    public void MarkQuickplayDirty()
+    {
+        _quickplayDirty = true;
+        ScheduleQuickplayBackgroundMaterialize(immediate: false);
+    }
 
     private void BumpLibraryDataVersion()
     {
         _libraryDataVersion++;
         _quickplayDirty = true;
+        ScheduleQuickplayBackgroundMaterialize(immediate: false);
     }
 
     private void RecordCurrentNavSubTab()
@@ -811,7 +867,7 @@ public sealed partial class MainViewModel
                 normalized = "collection";
                 if (rawSub == "all_performers") ShowAllPerformers = true;
                 else if (rawSub == "album_artists") ShowAllPerformers = false;
-                targetSubTab = rawSub is "composers" or "conductors" ? rawSub : "artists";
+                targetSubTab = rawSub == "conductors" ? "conductors" : (rawSub == "composers" ? "composers" : "artists");
                 break;
             case "classical":
                 normalized = "collection";
@@ -884,6 +940,12 @@ public sealed partial class MainViewModel
             _navBackStack.Add((PrimaryNavId, SecondarySubTab, SelectedEntityGroup?.Key));
         }
 
+        long quickplayNavStart = normalized == "quickplay" ? Stopwatch.GetTimestamp() : 0L;
+        if (normalized == "quickplay" && _pendingQuickplaySnapshot is { } readySnapshot)
+        {
+            ApplyQuickplaySnapshotDiff(readySnapshot);
+        }
+
         PrimaryNavId = normalized;
         SecondarySubTab = targetSubTab;
         RecordCurrentNavSubTab();
@@ -891,6 +953,11 @@ public sealed partial class MainViewModel
         ApplyActiveNavigationData();
         UpdateCanNavigateBack();
         _hasCompletedInitialNavigation = true;
+        if (normalized == "quickplay")
+        {
+            LastQuickplaySwitchMicroseconds =
+                (long)((Stopwatch.GetTimestamp() - quickplayNavStart) * 1_000_000.0 / Stopwatch.Frequency);
+        }
         NavigationSettled?.Invoke(PrimaryNavId, SecondarySubTab);
         if (normalized == "studio" && targetSubTab is "sync" or "lastfm" or "usb"
             && _uiContext is not null && !_lanSyncManuallyStopped && _syncHost is not { IsRunning: true }
@@ -914,6 +981,12 @@ public sealed partial class MainViewModel
     [RelayCommand]
     public void GoBack()
     {
+        if (IsNavClassicalWorks && IsClassicalComposerDetailOpen)
+        {
+            CloseClassicalComposerDetail();
+            return;
+        }
+
         if (IsAlbumsGridMode && SelectedEntityGroup is not null)
         {
             CloseSelectedAlbum();
@@ -943,7 +1016,9 @@ public sealed partial class MainViewModel
 
     private void UpdateCanNavigateBack()
     {
-        CanNavigateBack = _navBackStack.Count > 0 || (IsAlbumsGridMode && SelectedEntityGroup is not null);
+        CanNavigateBack = _navBackStack.Count > 0
+            || (IsAlbumsGridMode && SelectedEntityGroup is not null)
+            || (IsNavClassicalWorks && IsClassicalComposerDetailOpen);
     }
 
     public void SelectEntityGroup(EntityGroupItem? group)
@@ -951,7 +1026,8 @@ public sealed partial class MainViewModel
         SelectedEntityGroup = group;
         HasSelectedEntityGroup = group is not null;
         IsAlbumsWallExpanded = IsAlbumsGridMode && group is null;
-        IsTrackTableVisible = (IsNavCollection && !IsAlbumsWallExpanded) || (IsNavStudio && SecondarySubTab == "inbox");
+        IsTrackTableVisible = (IsNavCollection && !IsAlbumsWallExpanded && !IsNavClassicalWorks)
+            || (IsNavStudio && SecondarySubTab == "inbox");
         UpdateCanNavigateBack();
         if (group is not null)
         {
@@ -1127,7 +1203,7 @@ public sealed partial class MainViewModel
         IsNavSync = IsNavStudio && SecondarySubTab is "sync" or "lastfm" or "usb";
 
         bool entityMode = IsNavCollection && SecondarySubTab is "albums" or "artists" or "classical" or "composers" or "conductors" or "genres" or "folders";
-        IsEntityBrowserVisible = entityMode;
+        IsEntityBrowserVisible = entityMode && !IsNavClassicalWorks;
         IsAlbumsGridMode = IsNavCollection && SecondarySubTab == "albums";
         IsAlbumsWallExpanded = IsAlbumsGridMode && SelectedEntityGroup is null;
         IsScenesDeckVisible = IsNavCollection && SecondarySubTab == "scenes";
@@ -1139,7 +1215,8 @@ public sealed partial class MainViewModel
         IsInboxAuditDeckVisible = IsNavStudio && SecondarySubTab == "inbox";
         IsSyncScrobbleViewVisible = IsNavStudio && SecondarySubTab is "sync" or "lastfm" or "usb";
         IsSettingsViewVisible = IsNavSettings;
-        IsTrackTableVisible = (IsNavCollection && !IsAlbumsWallExpanded) || (IsNavStudio && SecondarySubTab == "inbox");
+        IsTrackTableVisible = (IsNavCollection && !IsAlbumsWallExpanded && !IsNavClassicalWorks)
+            || (IsNavStudio && SecondarySubTab == "inbox");
         IsFiveDimFilterStripVisible = (IsNavCollection && SecondarySubTab == "tracks")
                                       || (IsNavCollection && SecondarySubTab == "scenes" && ScenesMode == "presets");
         UpdateFilterDrawerState();
@@ -1213,7 +1290,10 @@ public sealed partial class MainViewModel
     {
         if (PrimaryNavId == "quickplay")
         {
-            RefreshQuickplayCollections();
+            if (_quickplayDirty)
+            {
+                ScheduleQuickplayBackgroundMaterialize(immediate: true);
+            }
             CurrentViewHeader = "";
             ActiveFilterPillsSummary = "";
             return;
@@ -1235,7 +1315,8 @@ public sealed partial class MainViewModel
 
         string dataKey = BuildActiveCollectionDataKey();
         if (string.Equals(dataKey, _lastCollectionDataKey, StringComparison.Ordinal)
-            && (!IsEntityBrowserVisible || CurrentEntityGroups.Count > 0 || _allTracks.Count == 0))
+            && (!IsEntityBrowserVisible || CurrentEntityGroups.Count > 0 || _allTracks.Count == 0)
+            && (!IsNavClassicalWorks || _allClassicalComposerNodes.Count > 0 || _allTracks.Count == 0))
         {
             CurrentViewHeader = _cachedCollectionHeader;
             ActiveFilterPillsSummary = _cachedCollectionPills;
@@ -1256,6 +1337,19 @@ public sealed partial class MainViewModel
                 CurrentViewHeader = "歌单工作区 (暂无 .m3u8 歌单，可新建或在线导入)";
                 ActiveFilterPillsSummary = "Playlists · 支持 Spotify / Apple Music / Billboard / Kworb / TXT 导入";
             }
+            _lastCollectionDataKey = BuildActiveCollectionDataKey();
+            _cachedCollectionHeader = CurrentViewHeader;
+            _cachedCollectionPills = ActiveFilterPillsSummary;
+            return;
+        }
+
+        if (IsNavClassicalWorks)
+        {
+            IsViewingPlaylist = false;
+            SelectedPlaylist = null;
+            RebuildClassicalHierarchyIndex();
+            CurrentViewHeader = $"古典馆藏 ({ClassicalComposers.Count} 位作曲家)";
+            ActiveFilterPillsSummary = "Classical · Composer → Work → Recording → Movement";
             _lastCollectionDataKey = BuildActiveCollectionDataKey();
             _cachedCollectionHeader = CurrentViewHeader;
             _cachedCollectionPills = ActiveFilterPillsSummary;
@@ -1303,7 +1397,12 @@ public sealed partial class MainViewModel
         {
             CurrentEntityGroups.ReplaceAll([]);
             SelectEntityGroup(null);
+            RebuildClassicalHierarchyIndex();
             return;
+        }
+        if ((PrimaryNavId, SecondarySubTab) == ("collection", "classical"))
+        {
+            RebuildClassicalHierarchyIndex();
         }
 
         string q = SearchQuery.Trim();
@@ -1865,53 +1964,194 @@ public sealed partial class MainViewModel
         if (!force && PrimaryNavId != "quickplay")
         {
             _quickplayDirty = true;
+            ScheduleQuickplayBackgroundMaterialize(immediate: false);
             return;
         }
         if (!force && !_quickplayDirty)
         {
             return;
         }
-        _quickplayDirty = false;
-
-        var byUid = _allTracks.ToDictionary(t => t.TrackUid, StringComparer.Ordinal);
-        var seeds = _allTracks.Select(ToQuickplaySeed).ToList();
-
-        void FillTileList(ObservableCollection<QuickplayTileItem> dest, IReadOnlyList<QuickplayCardSeed> src)
+        if (_uiContext is not null && !force)
         {
-            dest.Clear();
-            foreach (var s in src)
-            {
-                var tracks = s.TrackUids
-                    .Select(u => byUid.TryGetValue(u, out var tr) ? tr : null)
-                    .Where(tr => tr is not null)
-                    .Cast<TrackItem>()
-                    .ToList();
-                if (tracks.Count == 0) continue;
-                dest.Add(new QuickplayTileItem(s.TileId, s.Kind, s.TargetKey, s.Title, s.Subtitle, s.BadgeText, s.CoverArtPath, tracks));
-            }
+            _quickplayDirty = true;
+            ScheduleQuickplayBackgroundMaterialize(immediate: true);
+            return;
         }
 
-        var (hist, newest, redisc) = QuickplayAggregator.BuildAll(seeds, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 8);
-        FillTileList(QuickplayHistory, hist);
-        FillTileList(QuickplayNewAlbums, newest);
-        FillTileList(QuickplayRediscovery, redisc);
-        HasQuickplayHistory = QuickplayHistory.Count > 0;
-
-        QuickplayPins.Clear();
+        _quickplayDirty = false;
+        var tracksSnapshot = _allTracks.ToList();
+        var playlistsSnapshot = Playlists.ToList();
         string? stateDbPath = string.IsNullOrWhiteSpace(_store.ManifestDbPath)
             ? null
             : DesktopStateStore.ResolveStateDbPath(_store.ManifestDbPath);
+        var snapshot = MaterializeQuickplaySnapshot(
+            tracksSnapshot,
+            playlistsSnapshot,
+            stateDbPath,
+            _store.MusicRoot,
+            _libraryDataVersion);
+        _pendingQuickplaySnapshot = snapshot;
+        ApplyQuickplaySnapshotDiff(snapshot);
+    }
+
+    private void ScheduleQuickplayBackgroundMaterialize(bool immediate)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        if (_uiContext is null)
+        {
+            if (immediate && PrimaryNavId == "quickplay")
+            {
+                RefreshQuickplayCollections(force: true);
+            }
+            return;
+        }
+
+        var nextCts = new CancellationTokenSource();
+        var prevCts = Interlocked.Exchange(ref _quickplayBgCts, nextCts);
+        if (prevCts is not null)
+        {
+            try { prevCts.Cancel(); } catch { }
+            prevCts.Dispose();
+        }
+        var ct = nextCts.Token;
+
+        var tracksSnapshot = _allTracks.ToList();
+        var playlistsSnapshot = Playlists.ToList();
+        string? stateDbPath = string.IsNullOrWhiteSpace(_store.ManifestDbPath)
+            ? null
+            : DesktopStateStore.ResolveStateDbPath(_store.ManifestDbPath);
+        string? musicRoot = _store.MusicRoot;
+        long dataVersion = _libraryDataVersion;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (!immediate)
+                {
+                    int coalesceMs = PrimaryNavId == "quickplay" ? 180 : 1200;
+                    await Task.Delay(coalesceMs, ct).ConfigureAwait(false);
+                }
+                if (ct.IsCancellationRequested || Volatile.Read(ref _disposed) != 0) return;
+
+                var snapshot = MaterializeQuickplaySnapshot(
+                    tracksSnapshot,
+                    playlistsSnapshot,
+                    stateDbPath,
+                    musicRoot,
+                    dataVersion);
+                if (ct.IsCancellationRequested || Volatile.Read(ref _disposed) != 0) return;
+
+                _pendingQuickplaySnapshot = snapshot;
+                _quickplayDirty = false;
+
+                if (PrimaryNavId == "quickplay" && _uiContext is not null)
+                {
+                    _uiContext.Post(_ =>
+                    {
+                        if (Volatile.Read(ref _disposed) != 0 || ct.IsCancellationRequested) return;
+                        if (PrimaryNavId == "quickplay" && _pendingQuickplaySnapshot is { } latest)
+                        {
+                            ApplyQuickplaySnapshotDiff(latest);
+                        }
+                    }, null);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Coalesced by a newer background materialization request.
+            }
+            catch (Exception ex)
+            {
+                App.WriteCrashLog("MainViewModel.ScheduleQuickplayBackgroundMaterialize", ex);
+            }
+        }, ct);
+    }
+
+    private QuickplayLookupIndex<TrackItem> GetOrBuildQuickplayIndex(
+        IReadOnlyList<TrackItem> tracksSnapshot,
+        long dataVersion)
+    {
+        lock (_quickplayIndexLock)
+        {
+            if (_cachedQuickplayIndex is not null && _cachedQuickplayIndexVersion == dataVersion)
+            {
+                return _cachedQuickplayIndex;
+            }
+            var built = new QuickplayLookupIndex<TrackItem>(
+                tracksSnapshot,
+                t => t.TrackUid,
+                t => t.Album,
+                t => t.WorkName,
+                t => t.Genre,
+                t => t.ArtistsDisplay,
+                t => t.ComposersDisplay,
+                t => t.ConductorsDisplay,
+                t => t.AlbumDirectory,
+                t => t.RelPath);
+            _cachedQuickplayIndex = built;
+            _cachedQuickplayIndexVersion = dataVersion;
+            return built;
+        }
+    }
+
+    private QuickplayMaterializedSnapshot MaterializeQuickplaySnapshot(
+        IReadOnlyList<TrackItem> tracksSnapshot,
+        IReadOnlyList<PlaylistSummary> playlistsSnapshot,
+        string? stateDbPath,
+        string? musicRoot,
+        long dataVersion)
+    {
+        var index = GetOrBuildQuickplayIndex(tracksSnapshot, dataVersion);
+        var seeds = new List<QuickplayTrackSeed>(tracksSnapshot.Count);
+        for (int i = 0; i < tracksSnapshot.Count; i++)
+        {
+            seeds.Add(ToQuickplaySeed(tracksSnapshot[i]));
+        }
+
+        static List<QuickplayTileItem> ConvertCards(
+            IReadOnlyList<QuickplayCardSeed> src,
+            QuickplayLookupIndex<TrackItem> lookup)
+        {
+            var outList = new List<QuickplayTileItem>(src.Count);
+            foreach (var s in src)
+            {
+                var tracks = new List<TrackItem>(s.TrackUids.Count);
+                foreach (var u in s.TrackUids)
+                {
+                    if (lookup.TryGetByUid(u, out var tr))
+                    {
+                        tracks.Add(tr);
+                    }
+                }
+                if (tracks.Count == 0) continue;
+                outList.Add(new QuickplayTileItem(
+                    s.TileId, s.Kind, s.TargetKey, s.Title, s.Subtitle, s.BadgeText, s.CoverArtPath, tracks));
+            }
+            return outList;
+        }
+
+        var (hist, newest, redisc) = QuickplayAggregator.BuildAll(
+            seeds,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            8);
+        var historyTiles = ConvertCards(hist, index);
+        var newestTiles = ConvertCards(newest, index);
+        var rediscTiles = ConvertCards(redisc, index);
+
+        var pinTiles = new List<QuickplayTileItem>();
         if (!string.IsNullOrWhiteSpace(stateDbPath) && File.Exists(stateDbPath))
         {
             var pins = DesktopStateStore.ListQuickplayPins(stateDbPath);
             foreach (var pin in pins)
             {
-                IReadOnlyList<TrackItem> tracks = ResolveTracksForPin(pin);
+                IReadOnlyList<TrackItem> tracks = ResolveTracksForPinIndexed(
+                    pin, index, tracksSnapshot, playlistsSnapshot, musicRoot);
                 string? cover = !string.IsNullOrWhiteSpace(pin.CoverPath)
                     ? pin.CoverPath
                     : tracks.FirstOrDefault(t => !string.IsNullOrWhiteSpace(t.CoverArtPath))?.CoverArtPath;
                 string badge = pin.Kind == "playlist" ? "歌单" : $"{tracks.Count} 首";
-                QuickplayPins.Add(new QuickplayTileItem(
+                pinTiles.Add(new QuickplayTileItem(
                     pin.PinId,
                     pin.Kind,
                     pin.TargetKey,
@@ -1923,43 +2163,80 @@ public sealed partial class MainViewModel
                     IsPinned: true));
             }
         }
+
+        return new QuickplayMaterializedSnapshot(
+            historyTiles,
+            newestTiles,
+            rediscTiles,
+            pinTiles,
+            dataVersion);
+    }
+
+    private void ApplyQuickplaySnapshotDiff(QuickplayMaterializedSnapshot snapshot)
+    {
+        QuickplayTileCollectionHelper.ApplyDiff(QuickplayHistory, snapshot.History);
+        QuickplayTileCollectionHelper.ApplyDiff(QuickplayNewAlbums, snapshot.NewAlbums);
+        QuickplayTileCollectionHelper.ApplyDiff(QuickplayRediscovery, snapshot.Rediscovery);
+        HasQuickplayHistory = QuickplayHistory.Count > 0;
+        QuickplayTileCollectionHelper.ApplyDiff(QuickplayPins, snapshot.Pins);
         HasQuickplayPins = QuickplayPins.Count > 0;
         HasNoQuickplayPins = !HasQuickplayPins;
     }
 
-    private IReadOnlyList<TrackItem> ResolveTracksForPin(QuickplayPinRecord pin)
+    private IReadOnlyList<TrackItem> ResolveTracksForPinIndexed(
+        QuickplayPinRecord pin,
+        QuickplayLookupIndex<TrackItem> index,
+        IReadOnlyList<TrackItem> tracksSnapshot,
+        IReadOnlyList<PlaylistSummary> playlistsSnapshot,
+        string? musicRoot)
     {
         if (string.Equals(pin.Kind, "playlist", StringComparison.OrdinalIgnoreCase))
         {
-            var pl = Playlists.FirstOrDefault(p =>
+            var pl = playlistsSnapshot.FirstOrDefault(p =>
                 string.Equals(p.Name, pin.TargetKey, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(p.FilePath, pin.TargetKey, StringComparison.OrdinalIgnoreCase));
-            if (pl is not null)
+            if (pl is null || string.IsNullOrWhiteSpace(pl.FilePath) || !File.Exists(pl.FilePath))
             {
-                var doc = LoadPlaylistDocument(pl);
-                var byUid = _allTracks.ToDictionary(t => t.TrackUid, StringComparer.Ordinal);
-                return doc.Entries
-                    .Where(e => e.IsLocalMatched && e.MatchedTrackUid is not null && byUid.ContainsKey(e.MatchedTrackUid))
-                    .Select(e => byUid[e.MatchedTrackUid!])
-                    .ToList();
+                return [];
             }
-            return [];
+
+            DateTime writeUtc = File.GetLastWriteTimeUtc(pl.FilePath);
+            if (!_playlistPinUidsCache.TryGetValue(pl.FilePath, out var cached) || cached.WriteUtc != writeUtc)
+            {
+                var refs = tracksSnapshot.Select(t => new LocalLibraryTrackRef(
+                    t.TrackUid, t.RelPath, t.FullPath, t.Title, t.ArtistsDisplay, t.Album,
+                    t.DurationMs, t.SampleRateHz, t.ComposersDisplay, t.ConductorsDisplay,
+                    t.WorkName, t.MovementName, t.AlbumArtist, t.Genre)).ToList();
+                var doc = PlaylistStore.LoadPlaylist(pl.FilePath, refs, musicRoot ?? "");
+                var uids = doc.Entries
+                    .Where(e => e.IsLocalMatched && e.MatchedTrackUid is not null)
+                    .Select(e => e.MatchedTrackUid!)
+                    .ToList();
+                cached = (writeUtc, uids);
+                _playlistPinUidsCache[pl.FilePath] = cached;
+            }
+
+            var resolved = new List<TrackItem>(cached.Uids.Count);
+            foreach (var uid in cached.Uids)
+            {
+                if (index.TryGetByUid(uid, out var tr))
+                {
+                    resolved.Add(tr);
+                }
+            }
+            return resolved;
         }
 
-        return OrderTracksForPin(
-            _allTracks.Where(t => QuickplayPinMatcher.MatchesTrack(
-                pin,
-                t.TrackUid,
-                t.Album,
-                t.WorkName,
-                t.Genre,
-                t.ArtistsDisplay,
-                t.ComposersDisplay,
-                t.ConductorsDisplay,
-                t.AlbumDirectory,
-                t.RelPath)),
-            pin);
+        return OrderTracksForPin(index.MatchTracks(pin), pin);
     }
+
+    private IReadOnlyList<TrackItem> ResolveTracksForPin(QuickplayPinRecord pin) =>
+        ResolveTracksForPinIndexed(
+            pin,
+            GetOrBuildQuickplayIndex(_allTracks, _libraryDataVersion),
+            _allTracks,
+            Playlists,
+            _store.MusicRoot);
 
     private static List<TrackItem> OrderTracksForPin(IEnumerable<TrackItem> matches, QuickplayPinRecord pin)
     {
@@ -2117,10 +2394,17 @@ public sealed partial class MainViewModel
             return;
         }
 
+        if (tile.Kind == "work")
+        {
+            PlayClassicalRecording(playable, 0, tile.Title);
+            return;
+        }
+
         _playbackHistory.Clear();
         _djFreezeBackup = null;
         _currentFreezeToken = "";
         IsDjFreezeActive = false;
+        RestoreGlobalShuffleIfLocked();
         PlaybackQueue.ReplaceAll(playable);
         _unshuffledQueueSnapshot = playable;
         if (IsShuffleEnabled && PlaybackQueue.Count > 1)
@@ -2496,7 +2780,12 @@ public sealed partial class MainViewModel
 
     private async Task OnLibraryFilesChangedAsync(string expectedRoot, IReadOnlyList<string> changedPaths)
     {
-        if (!EnableAutoWatchLibrary || IsBusy) return;
+        if (!EnableAutoWatchLibrary) return;
+        if (IsBusy || Volatile.Read(ref _curationWriteInProgress) > 0)
+        {
+            _libraryWatcher?.RequeuePaths(changedPaths, 2500);
+            return;
+        }
         if (!string.Equals(_store.MusicRoot, expectedRoot, StringComparison.OrdinalIgnoreCase)) return;
 
         var loaded = await Task.Run(() =>
@@ -2507,14 +2796,16 @@ public sealed partial class MainViewModel
 
         void ApplyWatcherUiUpdate()
         {
-            if (!EnableAutoWatchLibrary || !string.Equals(_store.MusicRoot, expectedRoot, StringComparison.OrdinalIgnoreCase))
+            if (!EnableAutoWatchLibrary
+                || Volatile.Read(ref _curationWriteInProgress) > 0
+                || !string.Equals(_store.MusicRoot, expectedRoot, StringComparison.OrdinalIgnoreCase))
                 return;
 
             _allTracks = loaded;
             UpdateClassicalAdaptiveState();
             RefreshInboxAuditCounts();
             TriggerFilterRefresh();
-            RefreshStagingProposals();
+            _ = RefreshStagingProposalsAsync(immediate: false);
             RefreshPlaylists();
 
             FileWatcherStatusText =

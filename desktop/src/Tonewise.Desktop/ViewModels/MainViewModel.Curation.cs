@@ -53,6 +53,9 @@ public sealed partial class MainViewModel
     private readonly List<string> _lastCommitBatchIds = [];
     private readonly Stack<CurationUndoRecord> _undoStack = new();
     private readonly Stack<CurationUndoRecord> _redoStack = new();
+    private readonly SemaphoreSlim _curationWriteGate = new(1, 1);
+    private int _curationWriteInProgress;
+    private CancellationTokenSource? _stagingRefreshCts;
     private const int MaxCurationUndoDepth = 50;
 
     public bool CanUndoCuration => _undoStack.Count > 0;
@@ -136,18 +139,18 @@ public sealed partial class MainViewModel
             return;
         }
 
-        // Approved present: drain ALL explicitly approved items batch-by-batch (500/batch).
+        // Approved present: drain ALL explicitly approved items batch-by-batch (up to 500 proposals / 25 files per batch).
         // None approved: apply a single bounded batch of up to 200 high-confidence (>=80%) items.
         bool approvedMode = approvedCount > 0;
         double threshold = approvedMode ? 1.01 : 0.80;
         int maxProps = approvedMode ? 500 : 200;
         const int maxFiles = 25;
-        int totalBatches = approvedMode ? (int)Math.Ceiling(approvedCount / (double)maxProps) : 1;
+        int maxIterations = approvedMode ? Math.Max(1, approvedCount) : 1;
 
         var token = BeginBusy(
             approvedMode ? $"正在应用 {approvedCount} 条已批准变更..." : "未批准单条，正在应用最多 200 条高置信度变更...",
             indeterminate: false,
-            cancellable: approvedMode && totalBatches > 1);
+            cancellable: approvedMode && approvedCount > maxFiles);
 
         int committedTotal = 0;
         int filesTotal = 0;
@@ -156,9 +159,14 @@ public sealed partial class MainViewModel
         var committedUidSet = new HashSet<string>(StringComparer.Ordinal);
         var physicalFailures = new List<string>();
         bool cancelled = false;
+        bool gateHeld = false;
         try
         {
-            while (batchIndex < totalBatches)
+            await _curationWriteGate.WaitAsync(token);
+            Interlocked.Increment(ref _curationWriteInProgress);
+            gateHeld = true;
+
+            while (batchIndex < maxIterations)
             {
                 if (token.IsCancellationRequested)
                 {
@@ -169,7 +177,8 @@ public sealed partial class MainViewModel
                 var candidateUids = await Task.Run(() => diffStore.GetCommitCandidateTrackUids(threshold, maxProps));
                 if (candidateUids.Count == 0) break;
 
-                ReportBusyProgress(100.0 * batchIndex / totalBatches, $"正在应用第 {batchIndex + 1}/{totalBatches} 批变更...");
+                double pct = approvedMode ? Math.Min(99.0, 100.0 * committedTotal / Math.Max(1, approvedCount)) : 0.0;
+                ReportBusyProgress(pct, $"正在应用第 {batchIndex + 1} 批变更（已完成 {committedTotal}/{approvedCount} 条）...");
 
                 var suspendPaths = CurrentTrack is not null
                     && !string.IsNullOrWhiteSpace(CurrentTrack.FullPath)
@@ -210,12 +219,24 @@ public sealed partial class MainViewModel
             }
             ReportBusyProgress(100.0);
         }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
         catch (Exception ex)
         {
             RefreshStagingProposals();
             Notify($"应用变更失败（已完成 {committedTotal} 条）: {ex.Message}", "error");
             EndBusy();
             return;
+        }
+        finally
+        {
+            if (gateHeld)
+            {
+                Interlocked.Decrement(ref _curationWriteInProgress);
+                _curationWriteGate.Release();
+            }
         }
 
         if (batchIds.Count > 0)
@@ -241,7 +262,7 @@ public sealed partial class MainViewModel
         }
         else if (cancelled)
         {
-            Notify($"已取消：完成 {batchIds.Count}/{totalBatches} 批，应用 {committedTotal} 条变更（写回 {filesTotal} 个文件）。可「撤回上一批次」整体回滚。", "warning");
+            Notify($"已取消：完成 {batchIds.Count} 批，应用 {committedTotal} 条变更（写回 {filesTotal} 个文件）。可「撤回上一批次」整体回滚。", "warning");
         }
         else
         {
@@ -295,23 +316,33 @@ public sealed partial class MainViewModel
         var suspendPaths = CurrentTrack is not null && !string.IsNullOrWhiteSpace(CurrentTrack.FullPath)
             ? new[] { CurrentTrack.FullPath }
             : Array.Empty<string>();
-        using (_libraryWatcher?.SuspendWatching())
-        using (_engine.SuspendIfPlayingFile(suspendPaths))
+        await _curationWriteGate.WaitAsync();
+        Interlocked.Increment(ref _curationWriteInProgress);
+        try
         {
-            var rollbackResults = await Task.Run(() =>
+            using (_libraryWatcher?.SuspendWatching())
+            using (_engine.SuspendIfPlayingFile(suspendPaths))
             {
-                var list = new List<RollbackBatchResult>(ids.Count);
-                for (int i = ids.Count - 1; i >= 0; i--)
+                var rollbackResults = await Task.Run(() =>
                 {
-                    list.Add(diffStore.RollbackBatchDetailed(ids[i]));
+                    var list = new List<RollbackBatchResult>(ids.Count);
+                    for (int i = ids.Count - 1; i >= 0; i--)
+                    {
+                        list.Add(diffStore.RollbackBatchDetailed(ids[i]));
+                    }
+                    return list;
+                });
+                foreach (var r in rollbackResults)
+                {
+                    restored += r.RolledBackCount;
+                    foreach (string uid in r.AffectedTrackUids) affectedUids.Add(uid);
                 }
-                return list;
-            });
-            foreach (var r in rollbackResults)
-            {
-                restored += r.RolledBackCount;
-                foreach (string uid in r.AffectedTrackUids) affectedUids.Add(uid);
             }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _curationWriteInProgress);
+            _curationWriteGate.Release();
         }
         _lastCommitBatchIds.Clear();
         LastCommittedBatchId = null;
@@ -352,33 +383,43 @@ public sealed partial class MainViewModel
         var affectedUids = new HashSet<string>(record.TrackUids, StringComparer.Ordinal);
         var mergedForward = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
 
-        using (SuppressWatcherForUids(record.TrackUids))
-        using (_engine.SuspendIfPlayingFile(GetPlayingPathsToSuspend(record.TrackUids)))
+        await _curationWriteGate.WaitAsync();
+        Interlocked.Increment(ref _curationWriteInProgress);
+        try
         {
-            var rollbackResults = await Task.Run(() =>
+            using (SuppressWatcherForUids(record.TrackUids))
+            using (_engine.SuspendIfPlayingFile(GetPlayingPathsToSuspend(record.TrackUids)))
             {
-                var list = new List<RollbackBatchResult>(record.BatchIds.Count);
-                for (int i = record.BatchIds.Count - 1; i >= 0; i--)
+                var rollbackResults = await Task.Run(() =>
                 {
-                    list.Add(diffStore.RollbackBatchDetailed(record.BatchIds[i]));
-                }
-                return list;
-            });
-
-            foreach (var r in rollbackResults)
-            {
-                restored += r.RolledBackCount;
-                foreach (string uid in r.AffectedTrackUids) affectedUids.Add(uid);
-                foreach (var (uid, fwd) in r.ForwardUpdatesByTrack)
-                {
-                    if (!mergedForward.TryGetValue(uid, out var existing))
+                    var list = new List<RollbackBatchResult>(record.BatchIds.Count);
+                    for (int i = record.BatchIds.Count - 1; i >= 0; i--)
                     {
-                        existing = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-                        mergedForward[uid] = existing;
+                        list.Add(diffStore.RollbackBatchDetailed(record.BatchIds[i]));
                     }
-                    foreach (var (k, v) in fwd) existing[k] = v;
+                    return list;
+                });
+
+                foreach (var r in rollbackResults)
+                {
+                    restored += r.RolledBackCount;
+                    foreach (string uid in r.AffectedTrackUids) affectedUids.Add(uid);
+                    foreach (var (uid, fwd) in r.ForwardUpdatesByTrack)
+                    {
+                        if (!mergedForward.TryGetValue(uid, out var existing))
+                        {
+                            existing = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                            mergedForward[uid] = existing;
+                        }
+                        foreach (var (k, v) in fwd) existing[k] = v;
+                    }
                 }
             }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _curationWriteInProgress);
+            _curationWriteGate.Release();
         }
 
         if (restored > 0)
@@ -423,33 +464,43 @@ public sealed partial class MainViewModel
         var affectedUids = new HashSet<string>(StringComparer.Ordinal);
         int committed = 0;
 
-        using (SuppressWatcherForUids(record.TrackUids))
-        using (_engine.SuspendIfPlayingFile(GetPlayingPathsToSuspend(record.TrackUids)))
+        await _curationWriteGate.WaitAsync();
+        Interlocked.Increment(ref _curationWriteInProgress);
+        try
         {
-            var results = await Task.Run(() =>
+            using (SuppressWatcherForUids(record.TrackUids))
+            using (_engine.SuspendIfPlayingFile(GetPlayingPathsToSuspend(record.TrackUids)))
             {
-                var list = new List<CurationCommitResult>();
-                // Group tracks sharing identical field updates into single batches to preserve undo granularity
-                foreach (var (uid, updates) in record.ForwardUpdatesByTrack)
+                var results = await Task.Run(() =>
                 {
-                    if (updates.Count == 0) continue;
-                    list.Add(diffStore.ApplyDirectCuratedEdits([uid], updates));
-                }
-                return list;
-            });
-
-            foreach (var r in results)
-            {
-                if (r.CommittedCount > 0)
-                {
-                    committed += r.CommittedCount;
-                    newBatchIds.Add(r.BatchId);
-                    if (r.CommittedTrackUids is not null)
+                    var list = new List<CurationCommitResult>();
+                    // Group tracks sharing identical field updates into single batches to preserve undo granularity
+                    foreach (var (uid, updates) in record.ForwardUpdatesByTrack)
                     {
-                        foreach (string uid in r.CommittedTrackUids) affectedUids.Add(uid);
+                        if (updates.Count == 0) continue;
+                        list.Add(diffStore.ApplyDirectCuratedEdits([uid], updates));
+                    }
+                    return list;
+                });
+
+                foreach (var r in results)
+                {
+                    if (r.CommittedCount > 0)
+                    {
+                        committed += r.CommittedCount;
+                        newBatchIds.Add(r.BatchId);
+                        if (r.CommittedTrackUids is not null)
+                        {
+                            foreach (string uid in r.CommittedTrackUids) affectedUids.Add(uid);
+                        }
                     }
                 }
             }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _curationWriteInProgress);
+            _curationWriteGate.Release();
         }
 
         if (newBatchIds.Count > 0)
@@ -505,15 +556,30 @@ public sealed partial class MainViewModel
             CurrentTrack = refreshedCurrent;
         }
         UpdateClassicalAdaptiveState();
-        RefreshInboxAuditCounts();
+        if (PrimaryNavId == "studio" && SecondarySubTab == "inbox")
+        {
+            RefreshInboxAuditCounts();
+        }
         RefreshNowPlayingClassicalActions();
         BumpLibraryDataVersion();
 
-        if (IsEntityBrowserVisible)
+        if (IsNavClassicalWorks)
+        {
+            RebuildClassicalHierarchyIndex();
+        }
+        else if (IsEntityBrowserVisible)
         {
             if (RequiresEntityGroupRebuild(editedFields))
             {
-                RebuildEntityGroups();
+                TracksUpdatingInPlace?.Invoke();
+                try
+                {
+                    RebuildEntityGroups();
+                }
+                finally
+                {
+                    TracksUpdatedInPlace?.Invoke(refreshedMap.Keys.ToList());
+                }
             }
             else
             {
@@ -844,9 +910,11 @@ public sealed partial class MainViewModel
         string tonewiseDir = Path.Combine(_store.MusicRoot, ".tonewise");
         string? lfmApiKey = LastFmAccountConfig.Load(tonewiseDir)?.ApiKey;
         var lookupService = new BasicMetadataLookupService();
-        int updatedTracks = 0;
+        int proposedTracks = 0;
+        int enqueuedTotal = 0;
         int coversSaved = 0;
-        var updatedUids = new List<string>();
+        var coverUpdatedUids = new List<string>();
+        var proposals = new List<TagDiffProposal>();
 
         try
         {
@@ -856,7 +924,7 @@ public sealed partial class MainViewModel
                 var t = targets[i];
                 if (targets.Count > 1)
                 {
-                    ReportBusyProgress(100.0 * i / targets.Count, $"正在补全基础信息 ({i + 1}/{targets.Count})：{t.Title}");
+                    ReportBusyProgress(100.0 * i / targets.Count, $"正在检索基础信息 ({i + 1}/{targets.Count})：{t.Title}");
                 }
 
                 var q = new BasicMetadataQuery(
@@ -878,37 +946,52 @@ public sealed partial class MainViewModel
                     CoverArtPath: t.CoverArtPath);
 
                 var (updates, savedCover) = await lookupService.ResolveMissingMetadataAsync(q, lfmApiKey, token);
-                if (savedCover) coversSaved++;
-
-                if (updates.Count > 0)
+                if (savedCover)
                 {
-                    using (SuppressWatcherForUids([t.TrackUid]))
-                    using (_engine.SuspendIfPlayingFile(GetPlayingPathsToSuspend([t.TrackUid])))
+                    coversSaved++;
+                    coverUpdatedUids.Add(t.TrackUid);
+                }
+
+                bool trackHasProposal = false;
+                foreach (var (field, suggested) in updates)
+                {
+                    if (string.IsNullOrWhiteSpace(suggested)) continue;
+                    string? originalValue = GetOriginalProposalValue(t, field);
+                    var proposal = StagingDiffStore.TryCreateProposal(
+                        trackUid: t.TrackUid,
+                        fieldName: field,
+                        originalValue: originalValue,
+                        suggestedValue: suggested,
+                        confidence: 0.75,
+                        sourceTag: "online:basic_metadata");
+                    if (proposal is not null)
                     {
-                        var res = await Task.Run(() => diffStore.ApplyDirectCuratedEdits([t.TrackUid], updates), token);
-                        if (res.CommittedCount > 0)
-                        {
-                            updatedTracks++;
-                            updatedUids.Add(t.TrackUid);
-                        }
+                        proposals.Add(proposal);
+                        trackHasProposal = true;
                     }
                 }
-                else if (savedCover)
-                {
-                    updatedUids.Add(t.TrackUid);
-                }
+                if (trackHasProposal) proposedTracks++;
             }
 
-            if (updatedUids.Count > 0)
+            if (proposals.Count > 0)
+            {
+                enqueuedTotal = await Task.Run(() => diffStore.EnqueueProposals(proposals), token);
+            }
+            if (coverUpdatedUids.Count > 0)
             {
                 string root = _store.MusicRoot;
-                var refreshedMap = await Task.Run(() => _store.LoadTracksByUids(root, updatedUids));
+                var refreshedMap = await Task.Run(() => _store.LoadTracksByUids(root, coverUpdatedUids));
                 RefreshTracksFromPartialMap(refreshedMap);
             }
         }
         catch (OperationCanceledException)
         {
-            Notify($"已取消补全（已更新 {updatedTracks} 首，保存封面 {coversSaved} 张）。", "warning");
+            if (proposals.Count > 0)
+            {
+                enqueuedTotal = await Task.Run(() => diffStore.EnqueueProposals(proposals));
+            }
+            await RefreshStagingProposalsAsync();
+            Notify($"已取消检索（已生成 {enqueuedTotal} 条待审建议，保存封面 {coversSaved} 张）。", "warning");
             EndBusy();
             return;
         }
@@ -919,10 +1002,11 @@ public sealed partial class MainViewModel
             return;
         }
 
+        await RefreshStagingProposalsAsync();
         EndBusy();
-        if (updatedTracks > 0 || coversSaved > 0)
+        if (enqueuedTotal > 0 || coversSaved > 0)
         {
-            Notify($"已补全 {updatedTracks} 首曲目的缺失基础信息（新增封面 {coversSaved} 张）。", "success");
+            Notify($"已生成 {enqueuedTotal} 条基础信息建议（涉及 {proposedTracks} 首曲目）进入待审队列，请审阅后应用（新增封面 {coversSaved} 张）。", "success");
         }
         else
         {
@@ -945,8 +1029,9 @@ public sealed partial class MainViewModel
         }
 
         var token = BeginBusy($"正在分析 {targets.Count} 首曲目缺失的五维标签...", indeterminate: targets.Count <= 1, cancellable: targets.Count > 1);
-        int updatedTracks = 0;
-        var updatedUids = new List<string>();
+        int proposedTracks = 0;
+        int enqueuedTotal = 0;
+        var proposals = new List<TagDiffProposal>();
 
         try
         {
@@ -960,18 +1045,19 @@ public sealed partial class MainViewModel
                 }
 
                 Acoustic5DResult inferred;
+                bool decodedFromAudio = false;
                 bool isClassical = TrackItem.IsClassicalGenre(t.Genre) || t.IsClassical;
                 if (File.Exists(t.FullPath))
                 {
-                    inferred = await Task.Run(() =>
+                    (inferred, decodedFromAudio) = await Task.Run(() =>
                     {
                         try
                         {
-                            return Acoustic5DInferenceService.AnalyzeFileAndInfer5D(t.TrackUid, t.FullPath, isClassical);
+                            return (Acoustic5DInferenceService.AnalyzeFileAndInfer5D(t.TrackUid, t.FullPath, isClassical), true);
                         }
                         catch
                         {
-                            return Infer5DFromTrackMetadata(t, isClassical);
+                            return (Infer5DFromTrackMetadata(t, isClassical), false);
                         }
                     }, token);
                 }
@@ -1015,31 +1101,42 @@ public sealed partial class MainViewModel
                     if (scenes.Count > 0) updates["dj_scene_json"] = JsonSerializer.Serialize(scenes);
                 }
 
-                if (updates.Count > 0)
+                double confidence = decodedFromAudio ? 0.85 : 0.55;
+                string sourceTag = decodedFromAudio ? "acoustic:5d_analysis" : "prior:metadata_5d";
+                bool trackHasProposal = false;
+                foreach (var (field, suggested) in updates)
                 {
-                    using (SuppressWatcherForUids([t.TrackUid]))
-                    using (_engine.SuspendIfPlayingFile(GetPlayingPathsToSuspend([t.TrackUid])))
+                    if (string.IsNullOrWhiteSpace(suggested)) continue;
+                    string? originalValue = GetOriginalProposalValue(t, field);
+                    var proposal = StagingDiffStore.TryCreateProposal(
+                        trackUid: t.TrackUid,
+                        fieldName: field,
+                        originalValue: originalValue,
+                        suggestedValue: suggested,
+                        confidence: confidence,
+                        sourceTag: sourceTag);
+                    if (proposal is not null)
                     {
-                        var res = await Task.Run(() => diffStore.ApplyDirectCuratedEdits([t.TrackUid], updates), token);
-                        if (res.CommittedCount > 0)
-                        {
-                            updatedTracks++;
-                            updatedUids.Add(t.TrackUid);
-                        }
+                        proposals.Add(proposal);
+                        trackHasProposal = true;
                     }
                 }
+                if (trackHasProposal) proposedTracks++;
             }
 
-            if (updatedUids.Count > 0)
+            if (proposals.Count > 0)
             {
-                string root = _store.MusicRoot;
-                var refreshedMap = await Task.Run(() => _store.LoadTracksByUids(root, updatedUids));
-                RefreshTracksFromPartialMap(refreshedMap);
+                enqueuedTotal = await Task.Run(() => diffStore.EnqueueProposals(proposals), token);
             }
         }
         catch (OperationCanceledException)
         {
-            Notify($"已取消分析（已更新 {updatedTracks} 首五维标签）。", "warning");
+            if (proposals.Count > 0)
+            {
+                enqueuedTotal = await Task.Run(() => diffStore.EnqueueProposals(proposals));
+            }
+            await RefreshStagingProposalsAsync();
+            Notify($"已取消分析（已生成 {enqueuedTotal} 条五维待审建议）。", "warning");
             EndBusy();
             return;
         }
@@ -1050,10 +1147,11 @@ public sealed partial class MainViewModel
             return;
         }
 
+        await RefreshStagingProposalsAsync();
         EndBusy();
-        if (updatedTracks > 0)
+        if (enqueuedTotal > 0)
         {
-            Notify($"已分析并写入 {updatedTracks} 首曲目的缺失五维标签。", "success");
+            Notify($"已生成 {enqueuedTotal} 条五维标签建议（涉及 {proposedTracks} 首曲目）进入待审队列，请审阅后应用。", "success");
         }
         else
         {
@@ -1061,17 +1159,35 @@ public sealed partial class MainViewModel
         }
     }
 
+    private static string? GetOriginalProposalValue(TrackItem t, string field) => field switch
+    {
+        "artists_json" => t.ArtistsDisplay,
+        "album" => t.Album,
+        "year" => t.Year?.ToString(),
+        "genre" => t.Genre,
+        "publisher" => t.Publisher,
+        "composers_json" => t.ComposersDisplay,
+        "work_name" => t.WorkName,
+        "tempo_bpm" => t.TempoBpm?.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture),
+        "tempo_bucket" => t.TempoBucket,
+        "dj_vocals" => t.DjVocals,
+        "dj_energy" => t.DjEnergy,
+        "mood_json" => t.Moods.Count > 0 ? JsonSerializer.Serialize(t.Moods) : "[]",
+        "dj_scene_json" => t.DjScene.Count > 0 ? JsonSerializer.Serialize(t.DjScene) : "[]",
+        _ => null,
+    };
+
     private static Acoustic5DResult Infer5DFromTrackMetadata(TrackItem t, bool isClassical)
     {
         double? instProb = isClassical ? 0.90 : null;
-        double? bpm = t.TempoBpm ?? (isClassical ? 74.0 : 108.0);
+        double? bpm = t.TempoBpm;
         double arousal = string.Equals(t.DjEnergy, "high", StringComparison.OrdinalIgnoreCase) ? 0.78
             : string.Equals(t.DjEnergy, "low", StringComparison.OrdinalIgnoreCase) ? 0.28 : 0.45;
         var vec = new AcousticFeatureVector(
             TrackUid: t.TrackUid,
             InstrumentalProbability: instProb,
             Bpm: bpm,
-            BpmConfidence: 0.80,
+            BpmConfidence: bpm.HasValue ? 0.80 : null,
             Arousal: arousal,
             Valence: 0.52,
             IntegratedLufs: t.ReplayGainTrackDb.HasValue ? -18.0 - t.ReplayGainTrackDb.Value : -15.0,
@@ -1187,7 +1303,7 @@ public sealed partial class MainViewModel
         RefreshStagingProposals();
     }
 
-    private async Task RefreshStagingProposalsAsync()
+    private async Task RefreshStagingProposalsAsync(bool immediate = true)
     {
         var diffStore = _store.GetStagingDiffStore();
         if (diffStore is null)
@@ -1195,42 +1311,67 @@ public sealed partial class MainViewModel
             RefreshStagingProposals();
             return;
         }
-        var trackMap = _allTracks.ToDictionary(t => t.TrackUid, StringComparer.Ordinal);
-        var (approvedCount, pendingCount, proposals, viewItems) = await Task.Run(() =>
+        var nextCts = new CancellationTokenSource();
+        var ct = nextCts.Token;
+        var prevCts = Interlocked.Exchange(ref _stagingRefreshCts, nextCts);
+        if (prevCts is not null)
         {
-            var (appCnt, pendCnt) = diffStore.GetPendingProposalCounts();
-            var list = diffStore.GetPendingProposals(limit: 300).ToList();
-            var items = new List<StagingProposalViewItem>(list.Count);
-            foreach (var p in list)
-            {
-                string trackLabel = trackMap.TryGetValue(p.TrackUid, out var tr)
-                    ? (string.IsNullOrWhiteSpace(tr.ArtistsDisplay) ? tr.Title : $"{tr.Title} · {tr.ArtistsDisplay}")
-                    : p.TrackUid;
-                string origLabel = FormatProposalValueDisplay(p.OriginalValue);
-                string suggestedLabel = FormatProposalValueDisplay(p.SuggestedValue);
-                string statusTag = p.Status == ProposalStatus.Approved ? $"[已批准] {p.SourceTag}" : p.SourceTag;
-                items.Add(new StagingProposalViewItem(
-                    ProposalId: p.ProposalId,
-                    TrackUid: p.TrackUid,
-                    TrackDisplay: trackLabel,
-                    FieldName: FormatProposalFieldLabel(p.FieldName),
-                    ValueTransition: $"{origLabel} → {suggestedLabel}",
-                    SourceBadge: $"{statusTag} ({p.Confidence:P0})",
-                    Status: p.Status
-                ));
-            }
-            return (appCnt, pendCnt, list, items);
-        });
+            try { prevCts.Cancel(); } catch { }
+            prevCts.Dispose();
+        }
 
-        StagingProposals.Clear();
-        foreach (var p in proposals) StagingProposals.Add(p);
-        StagingProposalItems.ReplaceAll(viewItems);
-        _totalPendingStagingCount = approvedCount + pendingCount;
-        HasStagingProposals = _totalPendingStagingCount > 0;
-        StagingSummaryText = _totalPendingStagingCount > viewItems.Count
-            ? $"待审队列：已批准 {approvedCount:N0} 条 / 共 {_totalPendingStagingCount:N0} 条（列表仅显示优先的前 {viewItems.Count} 条）"
-            : $"待审队列：已批准 {approvedCount:N0} 条 / 待审 {pendingCount:N0} 条";
-        UpdateInboxAuditBadge();
+        try
+        {
+            if (!immediate)
+            {
+                await Task.Delay(250, ct);
+            }
+            if (ct.IsCancellationRequested) return;
+
+            var trackMap = _allTracks.ToDictionary(t => t.TrackUid, StringComparer.Ordinal);
+            var (approvedCount, pendingCount, proposals, viewItems) = await Task.Run(() =>
+            {
+                ct.ThrowIfCancellationRequested();
+                var (appCnt, pendCnt) = diffStore.GetPendingProposalCounts();
+                var list = diffStore.GetPendingProposals(limit: 300).ToList();
+                var items = new List<StagingProposalViewItem>(list.Count);
+                foreach (var p in list)
+                {
+                    string trackLabel = trackMap.TryGetValue(p.TrackUid, out var tr)
+                        ? (string.IsNullOrWhiteSpace(tr.ArtistsDisplay) ? tr.Title : $"{tr.Title} · {tr.ArtistsDisplay}")
+                        : p.TrackUid;
+                    string origLabel = FormatProposalValueDisplay(p.OriginalValue);
+                    string suggestedLabel = FormatProposalValueDisplay(p.SuggestedValue);
+                    string statusTag = p.Status == ProposalStatus.Approved ? $"[已批准] {p.SourceTag}" : p.SourceTag;
+                    items.Add(new StagingProposalViewItem(
+                        ProposalId: p.ProposalId,
+                        TrackUid: p.TrackUid,
+                        TrackDisplay: trackLabel,
+                        FieldName: FormatProposalFieldLabel(p.FieldName),
+                        ValueTransition: $"{origLabel} → {suggestedLabel}",
+                        SourceBadge: $"{statusTag} ({p.Confidence:P0})",
+                        Status: p.Status
+                    ));
+                }
+                return (appCnt, pendCnt, list, items);
+            }, ct);
+
+            if (ct.IsCancellationRequested) return;
+
+            StagingProposals.Clear();
+            foreach (var p in proposals) StagingProposals.Add(p);
+            StagingProposalItems.ReplaceAll(viewItems);
+            _totalPendingStagingCount = approvedCount + pendingCount;
+            HasStagingProposals = _totalPendingStagingCount > 0;
+            StagingSummaryText = _totalPendingStagingCount > viewItems.Count
+                ? $"待审队列：已批准 {approvedCount:N0} 条 / 共 {_totalPendingStagingCount:N0} 条（列表仅显示优先的前 {viewItems.Count} 条）"
+                : $"待审队列：已批准 {approvedCount:N0} 条 / 待审 {pendingCount:N0} 条";
+            UpdateInboxAuditBadge();
+        }
+        catch (OperationCanceledException)
+        {
+            // Coalesced by a newer staging proposal refresh request.
+        }
     }
 
     public Task ApplyLexiconTagsToTracks(IReadOnlyList<TrackItem> tracks, IReadOnlyDictionary<string, string?> updates) =>
@@ -1268,21 +1409,47 @@ public sealed partial class MainViewModel
         var trackSnapshot = tracks.ToList();
         string? root = _store.MusicRoot;
 
+        await _curationWriteGate.WaitAsync();
+        Interlocked.Increment(ref _curationWriteInProgress);
         CurationCommitResult result;
         IReadOnlyDictionary<string, TrackItem> refreshedMap = new Dictionary<string, TrackItem>();
-        using (SuppressWatcherForUids(uids))
-        using (_engine.SuspendIfPlayingFile(GetPlayingPathsToSuspend(uids)))
+        try
         {
-            (result, refreshedMap) = await Task.Run(() =>
+            var suspendPaths = GetPlayingPathsToSuspend(uids);
+            var uidSet = uids.ToHashSet(StringComparer.Ordinal);
+            var watchPaths = _allTracks
+                .Where(t => uidSet.Contains(t.TrackUid) && !string.IsNullOrWhiteSpace(t.FullPath))
+                .Select(t => t.FullPath)
+                .ToList();
+            _libraryWatcher?.SuppressPathsTemporarily(watchPaths, 8000);
+            using (SuppressWatcherForUids(uids))
             {
-                var commitRes = diffStore.ApplyDirectCuratedEdits(uids, updatesSnapshot);
-                IReadOnlyDictionary<string, TrackItem> reloaded = new Dictionary<string, TrackItem>();
-                if (commitRes.CommittedCount > 0 && !string.IsNullOrWhiteSpace(root))
+                try
                 {
-                    reloaded = _store.LoadTracksByUids(root, uids);
+                    (result, refreshedMap) = await Task.Run(() =>
+                    {
+                        using (_engine.SuspendIfPlayingFile(suspendPaths))
+                        {
+                            var commitRes = diffStore.ApplyDirectCuratedEdits(uids, updatesSnapshot);
+                            IReadOnlyDictionary<string, TrackItem> reloaded = new Dictionary<string, TrackItem>();
+                            if (commitRes.CommittedCount > 0 && !string.IsNullOrWhiteSpace(root))
+                            {
+                                reloaded = _store.LoadTracksByUids(root, uids);
+                            }
+                            return (commitRes, reloaded);
+                        }
+                    });
                 }
-                return (commitRes, reloaded);
-            });
+                finally
+                {
+                    _libraryWatcher?.SuppressPathsTemporarily(watchPaths, 8000);
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _curationWriteInProgress);
+            _curationWriteGate.Release();
         }
 
         if (result.CommittedCount > 0)
@@ -1339,7 +1506,7 @@ public sealed partial class MainViewModel
         }
         else
         {
-            _ = RefreshStagingProposalsAsync();
+            _ = RefreshStagingProposalsAsync(immediate: false);
         }
 
         if (result.PhysicalWriteFailures is { Count: > 0 })

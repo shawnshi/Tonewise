@@ -1534,7 +1534,15 @@ public sealed partial class MainWindow : Window
             await ViewModel.ApplyLexiconTagsToTracksAsync(targets, updates);
 
             // Ensure selection & scroll position remain intact even if Filter/Sort triggered a view update
-            if (TrackListView is not null)
+            if (ViewModel.IsNavClassicalWorks && ViewModel.IsClassicalComposerDetailOpen)
+            {
+                var restored = ViewModel.RestoreClassicalSelection(savedUids);
+                if (restored.Count > 0)
+                {
+                    SyncInlineInspectorTargets(restored);
+                }
+            }
+            else if (TrackListView is not null)
             {
                 _restoringSelection = true;
                 try
@@ -1575,6 +1583,11 @@ public sealed partial class MainWindow : Window
                     _restoringSelection = false;
                 }
             }
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("MainWindow.SaveInlineInspectorMetadataAsync", ex);
+            ViewModel.Notify($"保存失败：{ex.Message}", "error");
         }
         finally
         {
@@ -1795,7 +1808,7 @@ public sealed partial class MainWindow : Window
 
         LexiconTagMatrixFlyout.Content = panel;
         FrameworkElement anchor =
-            ViewModel.IsCollectionOrStudioMainVisible && ViewModel.IsTrackTableVisible && LexiconTagToolbarButton is not null
+            ViewModel.IsCollectionOrStudioMainVisible && ViewModel.IsWorkbenchCommandBarVisible && LexiconTagToolbarButton is not null
                 ? LexiconTagToolbarButton
                 : (InspectorSplitView?.IsPaneOpen == true && InspectorLexiconTagButton is not null
                     ? InspectorLexiconTagButton

@@ -19,6 +19,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.oxycblt.musikr.cache.Audio
+import org.oxycblt.musikr.cache.CacheResult
 import org.oxycblt.musikr.cache.CachedFile
 import org.oxycblt.musikr.fs.AddedMs
 import org.oxycblt.musikr.fs.Components
@@ -27,7 +28,9 @@ import org.oxycblt.musikr.fs.Path
 import org.oxycblt.musikr.fs.Volume
 import org.oxycblt.musikr.metadata.Properties
 import org.oxycblt.musikr.tag.Date
+import org.oxycblt.musikr.tag.interpret.Naming
 import org.oxycblt.musikr.tag.parse.ParsedTags
+import org.oxycblt.musikr.util.update
 import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
@@ -211,5 +214,103 @@ class DBCacheHydrationTest {
         val afterCleanup = mutableCache.readAll()
         assertEquals(1, afterCleanup.size)
         assertEquals("Music/Bach/Legacy.flac", afterCleanup[0].file.path.components.components.joinToString("/"))
+    }
+
+    @Test
+    fun read_returnsStaleWhenModifiedMsMatchesButFileSizeChanges() = runTest {
+        val uriString = "content://com.android.externalstorage.documents/tree/primary/document/aria.flac"
+        val row =
+            makeCachedFileData(
+                uriString = uriString,
+                filePathVolume = "internal",
+                filePathComponents = "Music/Bach/01 Aria.flac",
+                fileSize = 24_500_000L,
+                fileMimeType = "audio/flac",
+            )
+        val mockReadDao = mockk<CacheReadDao>()
+        coEvery { mockReadDao.selectAllSongs() } returns listOf(row)
+        val dbCache =
+            DBCache.from(mockReadDao) { encoded ->
+                if (encoded == "internal") testVolume else null
+            }
+
+        val diskFile =
+            File(
+                uri = Uri.parse(uriString),
+                path = Path(testVolume, Components.parseUnix("Music/Bach/01 Aria.flac")),
+                addedMs =
+                    object : AddedMs {
+                        override suspend fun resolve(): Long = row.addedMs
+                    },
+                modifiedMs = row.modifiedMs,
+                mimeType = "audio/flac",
+                size = 24_500_512L,
+                parent = null,
+            )
+
+        val result = dbCache.read(diskFile)
+        assertTrue(result is CacheResult.Stale)
+        assertEquals(row.addedMs, (result as CacheResult.Stale).addedMs)
+    }
+
+    @Test
+    fun musicGraph_keepsDistinctUrisOnV363UidCollision() {
+        val baseUri = Uri.parse("content://test/track1.flac")
+        val dupUri = Uri.parse("content://test/track2.mp3")
+        val songUid = org.oxycblt.musikr.Music.UID.auxio(org.oxycblt.musikr.Music.UID.Item.SONG) {
+            update("Same Title")
+        }
+        val genre = org.oxycblt.musikr.tag.interpret.PreGenre(
+            Naming.simple().name("Classical", null),
+            "Classical",
+        )
+        val artist = org.oxycblt.musikr.tag.interpret.PreArtist(
+            null,
+            Naming.simple().name("Glenn Gould", null),
+            "Glenn Gould",
+        )
+        val album = org.oxycblt.musikr.tag.interpret.PreAlbum(
+            null,
+            Naming.simple().name("Goldberg", null),
+            "Goldberg",
+            org.oxycblt.musikr.tag.ReleaseType.Album(null),
+            org.oxycblt.musikr.tag.interpret.PreArtistsFrom.Individual(listOf(artist)),
+        )
+        fun makePre(uri: Uri) =
+            org.oxycblt.musikr.tag.interpret.PreSong(
+                v363Uid = songUid,
+                v400Uid = songUid,
+                v401Uid = songUid,
+                musicBrainzId = null,
+                name = Naming.simple().name("Same Title", null),
+                rawName = "Same Title",
+                track = 1,
+                disc = null,
+                date = null,
+                uri = uri,
+                path = Path(testVolume, Components.parseUnix("Music/${uri.lastPathSegment}")),
+                format = org.oxycblt.musikr.fs.Format.FLAC,
+                size = 1000L,
+                durationMs = 10000L,
+                bitrateKbps = 320,
+                sampleRateHz = 44100,
+                replayGainAdjustment = org.oxycblt.musikr.tag.ReplayGainAdjustment(null, null),
+                modifiedMs = 1L,
+                addedMs = 1L,
+                cover = null,
+                preAlbum = album,
+                preArtists = listOf(artist),
+                preGenres = listOf(genre),
+                composers = emptyList(),
+                conductors = emptyList(),
+            )
+
+        val builder = org.oxycblt.musikr.graph.MusicGraph.builder()
+        builder.add(makePre(baseUri))
+        builder.add(makePre(dupUri))
+        val graph = builder.build()
+
+        assertEquals(2, graph.songVertex.size)
+        assertEquals(setOf(baseUri, dupUri), graph.songVertex.map { it.preSong.uri }.toSet())
     }
 }

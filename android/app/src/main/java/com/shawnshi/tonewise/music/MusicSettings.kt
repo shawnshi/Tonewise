@@ -99,7 +99,7 @@ class MusicSettingsImpl @Inject constructor(@ApplicationContext private val cont
     override var separators: String
         // Differ from convention and store a string of separator characters instead of an int
         // code. This makes it easier to use and more extendable.
-        get() = sharedPreferences.getString(getString(R.string.set_key_separators), "") ?: ""
+        get() = sharedPreferences.getString(getString(R.string.set_key_separators), ";/") ?: ";/"
         set(value) {
             sharedPreferences.edit {
                 putString(getString(R.string.set_key_separators), value)

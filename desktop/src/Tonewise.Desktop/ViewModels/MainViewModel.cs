@@ -543,6 +543,30 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _nowPlayingConductorTooltip = "";
 
+    [ObservableProperty]
+    private bool _nowPlayingIsClassical;
+
+    [ObservableProperty]
+    private string _nowPlayingLine1 = "选择任意曲目开启沉浸画廊";
+
+    [ObservableProperty]
+    private string _nowPlayingLine2 = "TONEWISE GALLERY";
+
+    [ObservableProperty]
+    private string _nowPlayingLine3 = "";
+
+    [ObservableProperty]
+    private double _nowPlayingLine1FontSize = 24.0;
+
+    [ObservableProperty]
+    private int _nowPlayingLine1MaxLines = 1;
+
+    [ObservableProperty]
+    private double _nowPlayingLine2FontSize = 15.0;
+
+    [ObservableProperty]
+    private bool _nowPlayingLine3Visible;
+
     public string SendPlaylistToPhoneButtonLabel =>
         SelectedPlaylistCount > 1 ? $"发送到手机 ({SelectedPlaylistCount})" : "发送到手机";
 
@@ -1223,7 +1247,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             IsSidebarExpanded: IsSidebarExpanded,
             IsInspectorOpen: IsInspectorOpen,
             AppTheme: AppTheme,
-            IsShuffleEnabled: IsShuffleEnabled,
+            IsShuffleEnabled: _sessionShuffleLock.IsLocked ? (_sessionShuffleLock.SavedGlobalShuffle ?? false) : IsShuffleEnabled,
             RepeatMode: RepeatMode,
             EnableAutoWatchLibrary: EnableAutoWatchLibrary,
             ReplayGainMode: ReplayGainMode,
@@ -1488,6 +1512,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         CurrentTrackLoved = value?.IsLoved ?? false;
         RefreshCurrentFreezeCapsule();
         RefreshNowPlayingClassicalActions();
+        UpdateClassicalPlayingHighlight(value?.TrackUid);
         if (value is not null
             && string.Equals(_activeAutoEqTrackUid, value.TrackUid, StringComparison.Ordinal)
             && !string.Equals(_activeAutoEqTrackMetaKey, BuildAutoEqMetaFingerprint(value), StringComparison.Ordinal))
@@ -1529,6 +1554,20 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         _engine.IsMuted = value;
         UpdateVolumeToolTip();
+    }
+
+    public void PreloadInitialAppTheme(string? savedTheme)
+    {
+        string normalized = savedTheme is "light" or "dark" or "system" ? savedTheme : "dark";
+        _suppressSettingsSave = true;
+        try
+        {
+            AppTheme = normalized;
+        }
+        finally
+        {
+            _suppressSettingsSave = false;
+        }
     }
 
     partial void OnAppThemeChanged(string value) => SaveUserSettings();
@@ -1670,6 +1709,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         CancelPendingPlaybackRecovery();
+        var quickplayCts = Interlocked.Exchange(ref _quickplayBgCts, null);
+        if (quickplayCts is not null)
+        {
+            try { quickplayCts.Cancel(); } catch { }
+            quickplayCts.Dispose();
+        }
         var hydrationCts = Interlocked.Exchange(ref _libraryHydrationCts, null);
         if (hydrationCts is not null)
         {

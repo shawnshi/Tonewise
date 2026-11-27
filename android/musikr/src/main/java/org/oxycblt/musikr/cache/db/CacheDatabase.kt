@@ -159,7 +159,7 @@ internal data class CachedFileData(
     object Converters {
         @TypeConverter
         fun fromMultiValue(values: List<String>) =
-            values.joinToString(";") { it.replace(";", "\\;") }
+            values.joinToString(";") { it.replace("\\", "\\\\").replace(";", "\\;") }
 
         @TypeConverter
         fun toMultiValue(string: String) = string.splitEscaped { it == ';' }.correctWhitespace()

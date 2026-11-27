@@ -1795,6 +1795,47 @@ constructor(
             isPatchApplied(resultJson)
         }
 
+    suspend fun fetchPairedLastFmSession(): PairedLastFmSessionResult =
+        withContext(Dispatchers.IO) {
+            val paired =
+                _pairedHost.value ?: lwwStore.loadPairedHost()?.also { _pairedHost.value = it }
+                    ?: return@withContext PairedLastFmSessionResult.Error("请先配对 PC 桌面端")
+            val cleanBase = normalizeBaseUrl(paired.baseUrl)
+            val token =
+                resolveTokenForHost(paired, cleanBase)
+                    ?: return@withContext PairedLastFmSessionResult.Error("已配对主机凭据不可用")
+            runCatching {
+                val raw = httpGetString("$cleanBase/api/v1/lastfm/session", token)
+                @Suppress("UNCHECKED_CAST")
+                val obj =
+                    TonewiseCore.parseJson(raw) as? Map<String, Any?>
+                        ?: return@runCatching PairedLastFmSessionResult.Error("无效响应")
+                val configured = obj["configured"] as? Boolean ?: false
+                if (!configured) {
+                    return@runCatching PairedLastFmSessionResult.Error("PC 端尚未授权 Last.fm")
+                }
+                PairedLastFmSessionResult.Available(
+                    username = obj["username"]?.toString().orEmpty(),
+                    apiKey = obj["api_key"]?.toString().orEmpty(),
+                    sharedSecret = obj["shared_secret"]?.toString().orEmpty(),
+                    sessionKey = obj["session_key"]?.toString().orEmpty(),
+                )
+            }.getOrElse { err ->
+                PairedLastFmSessionResult.Error(err.message ?: "网络异常")
+            }
+        }
+
+    sealed interface PairedLastFmSessionResult {
+        data class Available(
+            val username: String,
+            val apiKey: String,
+            val sharedSecret: String,
+            val sessionKey: String,
+        ) : PairedLastFmSessionResult
+
+        data class Error(val message: String) : PairedLastFmSessionResult
+    }
+
     private fun resolveTokenForBaseUrl(cleanBase: String): String? {
         val paired =
             _pairedHost.value

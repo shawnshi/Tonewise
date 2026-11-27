@@ -71,6 +71,7 @@ import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.playback.replaygain.ReplayGainAudioProcessor
 import com.shawnshi.tonewise.playback.sleep.SleepTimerController
 import com.shawnshi.tonewise.playback.sleep.SleepTimerMode
+import com.shawnshi.tonewise.playback.state.ClassicalSessionShuffleLock
 import com.shawnshi.tonewise.playback.state.DeferredPlayback
 import com.shawnshi.tonewise.playback.state.PlaybackCommand
 import com.shawnshi.tonewise.playback.state.PlaybackStateHolder
@@ -126,6 +127,7 @@ class ExoPlaybackStateHolder(
     private var currentDecoderName: String? = null
     private var consecutiveErrorCount = 0
     private var lastMediaItemIndex: Int = C.INDEX_UNSET
+    private val classicalShuffleLock = ClassicalSessionShuffleLock()
     private val analyticsListener =
         object : AnalyticsListener {
             override fun onAudioDecoderInitialized(
@@ -368,18 +370,25 @@ class ExoPlaybackStateHolder(
     override fun newPlayback(command: PlaybackCommand) {
         consecutiveErrorCount = 0
         parent = command.parent
-        player.shuffleModeEnabled = command.shuffled
+        val effectiveShuffled =
+            classicalShuffleLock.resolveForNewPlayback(
+                currentShuffleEnabled = player.shuffleModeEnabled,
+                commandShuffled = command.shuffled,
+                suppressGlobalShuffle = command.suppressGlobalShuffle,
+                restoreGlobalShuffleOnUnlock = command.restoreGlobalShuffleOnUnlock,
+            )
+        player.shuffleModeEnabled = effectiveShuffled
         player.setMediaItems(command.queue.map { it.buildMediaItem() })
         val startIndex =
             command.song
                 ?.let { command.queue.indexOf(it) }
                 .also { check(it != -1) { "Start song not in queue" } }
-        if (command.shuffled) {
+        if (effectiveShuffled) {
             player.setShuffleOrder(
                 WorkShuffleOrder.fromSongs(command.queue, startIndex ?: -1)
             )
         }
-        val target = startIndex ?: player.currentTimeline.getFirstWindowIndex(command.shuffled)
+        val target = startIndex ?: player.currentTimeline.getFirstWindowIndex(effectiveShuffled)
         sessionOngoing = true
         player.seekTo(target, C.TIME_UNSET)
         lastMediaItemIndex = target
@@ -391,6 +400,7 @@ class ExoPlaybackStateHolder(
     }
 
     override fun shuffled(shuffled: Boolean) {
+        classicalShuffleLock.clearOnUserToggle()
         player.setShuffleModeEnabled(shuffled)
         if (player.shuffleModeEnabled) {
             // Have to manually refresh the shuffle seed and anchor it to the new current songs

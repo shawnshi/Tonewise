@@ -46,6 +46,45 @@ public sealed record NativeAudioAnalysisDto(
     [property: JsonPropertyName("peak_linear")] float PeakLinear
 );
 
+public sealed record NativeTrackProbeDto(
+    [property: JsonPropertyName("audio_frame_blake3_hex")] string AudioFrameBlake3Hex,
+    [property: JsonPropertyName("header_blake3_hex")] string HeaderBlake3Hex,
+    [property: JsonPropertyName("header_size")] ulong HeaderSize,
+    [property: JsonPropertyName("footer_size")] ulong FooterSize,
+    [property: JsonPropertyName("file_size")] ulong FileSize,
+    [property: JsonPropertyName("padding_bytes")] ulong PaddingBytes,
+    [property: JsonPropertyName("codec")] string Codec,
+    [property: JsonPropertyName("sample_rate_hz")] uint SampleRateHz,
+    [property: JsonPropertyName("bit_depth")] uint? BitDepth,
+    [property: JsonPropertyName("bitrate_kbps")] uint? BitrateKbps,
+    [property: JsonPropertyName("duration_ms")] ulong DurationMs,
+    [property: JsonPropertyName("title")] string? Title,
+    [property: JsonPropertyName("album")] string? Album,
+    [property: JsonPropertyName("album_artist")] string? AlbumArtist,
+    [property: JsonPropertyName("artists")] List<string> Artists,
+    [property: JsonPropertyName("composers")] List<string> Composers,
+    [property: JsonPropertyName("conductors")] List<string> Conductors,
+    [property: JsonPropertyName("work_name")] string? WorkName,
+    [property: JsonPropertyName("movement_name")] string? MovementName,
+    [property: JsonPropertyName("movement_number")] uint? MovementNumber,
+    [property: JsonPropertyName("disc_number")] uint DiscNumber,
+    [property: JsonPropertyName("track_number")] uint TrackNumber,
+    [property: JsonPropertyName("publisher")] string? Publisher,
+    [property: JsonPropertyName("genre")] string? Genre,
+    [property: JsonPropertyName("year")] ushort? Year,
+    [property: JsonPropertyName("original_date")] string? OriginalDate,
+    [property: JsonPropertyName("release_type")] string? ReleaseType,
+    [property: JsonPropertyName("replaygain_track_db")] float? ReplayGainTrackDb,
+    [property: JsonPropertyName("replaygain_album_db")] float? ReplayGainAlbumDb,
+    [property: JsonPropertyName("replaygain_peak")] float? ReplayGainPeak,
+    [property: JsonPropertyName("dj_scene")] List<string> DjScene,
+    [property: JsonPropertyName("dj_vocals")] string? DjVocals,
+    [property: JsonPropertyName("dj_energy")] string? DjEnergy,
+    [property: JsonPropertyName("tempo_bpm")] float? TempoBpm,
+    [property: JsonPropertyName("tempo_bucket")] string? TempoBucket,
+    [property: JsonPropertyName("moods")] List<string> Moods
+);
+
 public sealed record AutoEqBiquadDto(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("freq_hz")] float FreqHz,
@@ -317,6 +356,25 @@ public static class TonewiseCoreClient
             ThrowIfError(json);
             return JsonSerializer.Deserialize<NativeAudioAnalysisDto>(json)
                 ?? throw new InvalidOperationException("Empty audio analysis result from tonewise_core");
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pPath);
+        }
+    }
+
+    public static NativeTrackProbeDto ProbeTrack(string filePath)
+    {
+        EnsureAbiVersion();
+        IntPtr pPath = TonewiseCoreNative.AllocUtf8(filePath);
+        try
+        {
+            string json = TonewiseCoreNative.ConsumeOwnedUtf8(
+                TonewiseCoreNative.tonewise_probe_track_path(pPath)
+            );
+            ThrowIfError(json);
+            return JsonSerializer.Deserialize<NativeTrackProbeDto>(json)
+                ?? throw new InvalidOperationException("Empty track probe result from tonewise_core");
         }
         finally
         {

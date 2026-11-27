@@ -79,4 +79,16 @@ class SeparatorsTest {
             )
         }
     }
+
+    @Test
+    fun separators_split_preservesGenerationalSuffixes() {
+        assertEquals(
+            listOf("Harry Connick, Jr.", "Tony Bennett"),
+            Separators.from(",;/+&").split(listOf("Harry Connick, Jr. / Tony Bennett")),
+        )
+        assertEquals(
+            listOf("Sammy Davis, Jr.", "Dean Martin", "Martin, III"),
+            Separators.from(",").split(listOf("Sammy Davis, Jr., Dean Martin, Martin, III")),
+        )
+    }
 }

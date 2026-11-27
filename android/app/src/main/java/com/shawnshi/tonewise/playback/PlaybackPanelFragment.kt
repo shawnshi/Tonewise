@@ -57,6 +57,7 @@ import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentPlaybackPanelBinding
 import com.shawnshi.tonewise.detail.DetailViewModel
 import com.shawnshi.tonewise.list.ListViewModel
+import com.shawnshi.tonewise.music.ClassicalMetadataEngine
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
@@ -118,6 +119,9 @@ class PlaybackPanelFragment :
     private var userAwarePagerCallback: UserAwarePagerCallback? = null
     private var accentSampleJob: Job? = null
     private var latestCoverSeedArgb: Int? = null
+    private var defaultArtistTextColors: ColorStateList? = null
+    private var pendingCreditTiers: List<String> = emptyList()
+    private var creditLayoutListener: View.OnLayoutChangeListener? = null
     private var defaultPlayPauseBgTint: ColorStateList? = null
     private var defaultPlayPauseIconTint: ColorStateList? = null
 
@@ -176,21 +180,30 @@ class PlaybackPanelFragment :
         binding.playbackComposer.setOnClickListener {
             playbackModel.song.value?.composers?.firstOrNull()?.let(detailModel::showComposer)
         }
+        defaultArtistTextColors = binding.playbackArtist.textColors
         binding.playbackSong.apply {
-            isSelected = true
+            isSelected = false
             setOnClickListener { navigateToCurrentSong() }
         }
         binding.playbackArtist.apply {
-            isSelected = true
+            isSelected = false
             setOnClickListener { navigateToCurrentArtist() }
         }
         binding.playbackAlbum.apply {
-            isSelected = true
+            isSelected = false
             setOnClickListener { navigateToCurrentAlbum() }
         }
         binding.playbackMeta.apply {
-            isSelected = true
+            isSelected = false
             setOnClickListener { playbackModel.song.value?.let(detailModel::showSong) }
+            val listener =
+                View.OnLayoutChangeListener { _, left, _, right, _, _, _, _, _ ->
+                    if (pendingCreditTiers.isNotEmpty() && right - left > 0) {
+                        text = selectFittingCreditTier(this, pendingCreditTiers, right - left)
+                    }
+                }
+            addOnLayoutChangeListener(listener)
+            creditLayoutListener = listener
         }
 
         binding.playbackSeekBar?.apply {
@@ -298,6 +311,9 @@ class PlaybackPanelFragment :
         accentSampleJob = null
         equalizerLauncher = null
         binding.playbackRepeat.clearPendingIcon()
+        creditLayoutListener?.let { binding.playbackMeta.removeOnLayoutChangeListener(it) }
+        creditLayoutListener = null
+        pendingCreditTiers = emptyList()
         binding.playbackSong.isSelected = false
         binding.playbackArtist.isSelected = false
         binding.playbackAlbum.isSelected = false
@@ -340,6 +356,22 @@ class PlaybackPanelFragment :
         playbackModel.seekTo(positionDs)
     }
 
+    private fun selectFittingCreditTier(
+        textView: android.widget.TextView,
+        tiers: List<String>,
+        measuredWidthPx: Int,
+    ): String {
+        if (tiers.isEmpty()) return ""
+        val available = (measuredWidthPx - textView.paddingLeft - textView.paddingRight).toFloat()
+        if (available <= 0f) return tiers.first()
+        for (tier in tiers) {
+            if (textView.paint.measureText(tier) <= available) {
+                return tier
+            }
+        }
+        return tiers.last()
+    }
+
     private fun updateSong(song: Song?, playCount: Int) {
         if (song == null) {
             // Nothing to do.
@@ -349,69 +381,107 @@ class PlaybackPanelFragment :
         val binding = requireBinding()
         val context = requireContext()
         L.d("Updating song display: $song")
-        val work = song.workName?.trim()?.takeIf { it.isNotEmpty() }
+        val rawTitle = song.name.resolve(context)
+        val genreNames = song.genres.map { it.name.resolve(context) }
+        val isSongClassical =
+            ClassicalPlaybackActions.isClassicalTrack(
+                workName = song.workName,
+                genreNames = genreNames,
+                conductors = song.conductors,
+                composers = song.composers,
+                title = rawTitle,
+            )
+
+        binding.playbackComposer.isVisible = false
         binding.playbackAlbum.isVisible = false
-        binding.playbackMeta.isVisible = false
 
-        if (work != null) {
-            val mvtTitle =
-                song.movementName?.trim()?.takeIf { it.isNotEmpty() } ?: song.name.resolve(context)
-            val mvtPrefix = song.movementNumber?.let { "$it. " } ?: ""
-            val mvtLabel = "$mvtPrefix$mvtTitle"
-            val composerLabel =
-                song.composers
-                    .filter { it.isNotBlank() }
-                    .distinct()
-                    .joinToString(" · ")
-                    .ifEmpty { song.artists.resolveNames(context) }
+        if (isSongClassical) {
+            val artistNames = song.artists.map { it.name.resolve(context) }.filter { it.isNotBlank() }
+            val formatted =
+                ClassicalMetadataEngine.formatClassicalNowPlaying(
+                    rawTitle = rawTitle,
+                    explicitWork = song.workName,
+                    explicitMovement = song.movementName,
+                    explicitMovementNumber = song.movementNumber,
+                    album = song.album.name.resolve(context),
+                    composers = song.composers,
+                    artists = artistNames,
+                    conductors = song.conductors,
+                    year = song.date?.year,
+                )
+            val tiers = formatted.line3Tiers
+            pendingCreditTiers = tiers
 
-            // Classical 3-row editorial typography:
-            // 1. Composer · Work eyebrow -> 2. Movement title -> 3. Ensemble · Conductor
-            binding.playbackComposer.apply {
-                isVisible = true
-                typeface = Typeface.SERIF
-                text = "$composerLabel · $work"
-            }
             binding.playbackSong.apply {
-                typeface = Typeface.SERIF
+                typeface = Typeface.DEFAULT
+                textSize = 17.5f
                 isSingleLine = false
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
                 isSelected = false
-                text = mvtLabel
+                text = formatted.line1
             }
-            val performerPart = song.artists.resolveNames(context)
-            val conductorPart = song.conductors.firstOrNull()?.takeIf { it.isNotBlank() }
-            val ensembleLine =
-                listOfNotNull(performerPart.takeIf { it.isNotBlank() }, conductorPart)
-                    .distinct()
-                    .joinToString(" · ")
-                    .ifEmpty { song.album.name.resolve(context) }
             binding.playbackArtist.apply {
                 typeface = Typeface.DEFAULT
+                textSize = 14f
+                setTextColor(binding.playbackSong.textColors)
                 isSingleLine = true
                 maxLines = 1
-                ellipsize = TextUtils.TruncateAt.MARQUEE
-                isSelected = true
-                text = ensembleLine
+                ellipsize = TextUtils.TruncateAt.END
+                isSelected = false
+                text = formatted.line2
+            }
+            binding.playbackMeta.apply {
+                typeface = Typeface.DEFAULT
+                textSize = 12.5f
+                visibility = View.VISIBLE
+                isSingleLine = true
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                isSelected = false
+                val fallbackMeta =
+                    if (tiers.isNotEmpty()) {
+                        selectFittingCreditTier(this, tiers, width)
+                    } else {
+                        song.album.name.resolve(context)
+                    }
+                text = fallbackMeta
             }
         } else {
-            binding.playbackComposer.isVisible = false
+            pendingCreditTiers = emptyList()
+            val artistPart = song.artists.resolveNames(context).trim()
+            val albumPart = song.album.name.resolve(context).takeIf { it.isNotBlank() }
+            val yearPart = song.date?.year?.takeIf { it > 0 }?.toString()
+            val albumYearLine = listOfNotNull(albumPart, yearPart).joinToString(" · ")
+
             binding.playbackSong.apply {
+                typeface = Typeface.DEFAULT
+                textSize = 19f
                 isSingleLine = true
                 maxLines = 1
-                ellipsize = TextUtils.TruncateAt.MARQUEE
-                isSelected = true
-                typeface = Typeface.DEFAULT
-                text = song.name.resolve(context)
+                ellipsize = TextUtils.TruncateAt.END
+                isSelected = false
+                text = rawTitle
             }
             binding.playbackArtist.apply {
+                typeface = Typeface.DEFAULT
+                textSize = 14f
+                defaultArtistTextColors?.let(::setTextColor)
                 isSingleLine = true
                 maxLines = 1
-                ellipsize = TextUtils.TruncateAt.MARQUEE
-                isSelected = true
+                ellipsize = TextUtils.TruncateAt.END
+                isSelected = false
+                text = artistPart
+            }
+            binding.playbackMeta.apply {
                 typeface = Typeface.DEFAULT
-                text = "${song.artists.resolveNames(context)} · ${song.album.name.resolve(context)}"
+                textSize = 12.5f
+                isSingleLine = true
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                isSelected = false
+                text = albumYearLine
+                visibility = if (albumYearLine.isNotEmpty()) View.VISIBLE else View.INVISIBLE
             }
         }
         updateLoveButton(song)
@@ -427,7 +497,25 @@ class PlaybackPanelFragment :
         b.playbackVinylView.isVisible = vinylMode
         b.playbackPager.visibility = if (vinylMode) View.INVISIBLE else View.VISIBLE
         b.playbackPager.isUserInputEnabled = !vinylMode
-        b.playbackStageToggle.alpha = if (vinylMode) 0.78f else 0.56f
+        val activeColor =
+            if (uiSettings.enableDynamicCoverAccent) {
+                dynamicAccentController.activeAccentArgb.value
+            } else {
+                null
+            } ?: MaterialColors.getColor(
+                b.playbackStageToggle,
+                androidx.appcompat.R.attr.colorPrimary,
+                if (requireContext().isNight) Color.WHITE else Color.BLACK,
+            )
+        val inactiveColor =
+            MaterialColors.getColor(
+                b.playbackStageToggle,
+                MaterialR.attr.colorOnSurfaceVariant,
+                if (requireContext().isNight) Color.LTGRAY else Color.DKGRAY,
+            )
+        b.playbackStageToggle.iconTint =
+            ColorStateList.valueOf(if (vinylMode) activeColor else inactiveColor)
+        b.playbackStageToggle.alpha = if (vinylMode) 1.0f else 0.78f
     }
 
     private fun applyBackdropStyle() {
@@ -536,6 +624,7 @@ class PlaybackPanelFragment :
             b.playbackPlayPause.backgroundTintList = defaultPlayPauseBgTint
             b.playbackPlayPause.iconTint = defaultPlayPauseIconTint
         }
+        applyStageVisualMode()
     }
 
     private fun updateParent(parent: MusicParent?) {

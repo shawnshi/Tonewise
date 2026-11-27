@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Tonewise.Interop;
@@ -33,13 +34,41 @@ public sealed record BasicMetadataQuery(
 public sealed partial class BasicMetadataLookupService
 {
     private static readonly HttpClient SharedHttp = CreateHttpClient();
+    private static readonly ConcurrentDictionary<string, (SemaphoreSlim Gate, long LastUtcTicks)> ProviderRateState = new(StringComparer.Ordinal);
     private readonly HttpClient _http;
+    private readonly bool _enableRateLimiting;
     private readonly CoverArtWaterfallService _coverService;
 
     public BasicMetadataLookupService(HttpClient? httpClient = null)
     {
         _http = httpClient ?? SharedHttp;
+        _enableRateLimiting = httpClient is null;
         _coverService = new CoverArtWaterfallService(_http);
+    }
+
+    private async Task WaitRateLimitAsync(string provider, int minIntervalMs, CancellationToken ct)
+    {
+        if (!_enableRateLimiting || minIntervalMs <= 0) return;
+        var state = ProviderRateState.GetOrAdd(provider, _ => (new SemaphoreSlim(1, 1), 0L));
+        await state.Gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            long nowTicks = DateTime.UtcNow.Ticks;
+            var current = ProviderRateState[provider];
+            long elapsedMs = current.LastUtcTicks == 0
+                ? long.MaxValue
+                : (nowTicks - current.LastUtcTicks) / TimeSpan.TicksPerMillisecond;
+            if (elapsedMs < minIntervalMs)
+            {
+                await Task.Delay((int)(minIntervalMs - elapsedMs), ct).ConfigureAwait(false);
+                nowTicks = DateTime.UtcNow.Ticks;
+            }
+            ProviderRateState[provider] = (state.Gate, nowTicks);
+        }
+        finally
+        {
+            state.Gate.Release();
+        }
     }
 
     public async Task<(Dictionary<string, string?> FieldUpdates, bool SavedCover)> ResolveMissingMetadataAsync(
@@ -83,9 +112,11 @@ public sealed partial class BasicMetadataLookupService
         }
 
         // 3) Online MusicBrainz fallback for publisher / year / genre / album
-        if (string.IsNullOrWhiteSpace(onlinePublisher)
+        bool needPublisher = string.IsNullOrWhiteSpace(q.Publisher) && string.IsNullOrWhiteSpace(onlinePublisher);
+        if (needPublisher
             || (string.IsNullOrWhiteSpace(q.Genre) && string.IsNullOrWhiteSpace(onlineGenre))
-            || (!effectiveYear.HasValue && !onlineYear.HasValue))
+            || (!effectiveYear.HasValue && !onlineYear.HasValue)
+            || (string.IsNullOrWhiteSpace(effectiveAlbum) && string.IsNullOrWhiteSpace(onlineAlbum)))
         {
             string queryTitle = effectiveTitle;
             string queryArtist = !string.IsNullOrWhiteSpace(effectiveArtist)
@@ -103,7 +134,8 @@ public sealed partial class BasicMetadataLookupService
         }
 
         // 3.5) Online Douban Music (豆瓣音乐) fallback for publisher / genre / year / album / artist
-        if (string.IsNullOrWhiteSpace(onlinePublisher)
+        bool needPublisherAfterMb = string.IsNullOrWhiteSpace(q.Publisher) && string.IsNullOrWhiteSpace(onlinePublisher);
+        if (needPublisherAfterMb
             || (string.IsNullOrWhiteSpace(q.Genre) && string.IsNullOrWhiteSpace(onlineGenre))
             || (!effectiveYear.HasValue && !onlineYear.HasValue)
             || (string.IsNullOrWhiteSpace(effectiveAlbum) && string.IsNullOrWhiteSpace(onlineAlbum))
@@ -313,18 +345,21 @@ public sealed partial class BasicMetadataLookupService
         string[] segs = relPath.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segs.Length >= 3 && !segs[^3].Contains("Various", StringComparison.OrdinalIgnoreCase))
         {
-            return segs[^3].Trim();
+            string candidate = segs[^3].Trim();
+            string norm = ArtistEntitySplitter.NormalizeComposerName(candidate);
+            if (ClassicalMetadataEngine.ClassifyComposerEra(norm, "") is not null)
+            {
+                return candidate;
+            }
         }
-        if (!string.IsNullOrWhiteSpace(artist) && (artist.Contains("Bach", StringComparison.OrdinalIgnoreCase)
-            || artist.Contains("Mozart", StringComparison.OrdinalIgnoreCase)
-            || artist.Contains("Beethoven", StringComparison.OrdinalIgnoreCase)
-            || artist.Contains("Chopin", StringComparison.OrdinalIgnoreCase)
-            || artist.Contains("Schubert", StringComparison.OrdinalIgnoreCase)
-            || artist.Contains("Mahler", StringComparison.OrdinalIgnoreCase)
-            || artist.Contains("Brahms", StringComparison.OrdinalIgnoreCase)
-            || artist.Contains("Tchaikovsky", StringComparison.OrdinalIgnoreCase)))
+        if (!string.IsNullOrWhiteSpace(artist))
         {
-            return PrimaryToken(artist);
+            string primary = PrimaryToken(artist);
+            string norm = ArtistEntitySplitter.NormalizeComposerName(primary);
+            if (ClassicalMetadataEngine.ClassifyComposerEra(norm, "") is not null)
+            {
+                return primary;
+            }
         }
         return null;
     }
@@ -340,6 +375,7 @@ public sealed partial class BasicMetadataLookupService
         {
             try
             {
+                await WaitRateLimitAsync("itunes", 350, ct);
                 string url = $"https://itunes.apple.com/search?term={Uri.EscapeDataString(term)}&entity=song&limit=5&country={country}";
                 using var resp = await _http.GetAsync(url, ct);
                 if (!resp.IsSuccessStatusCode) continue;
@@ -353,9 +389,17 @@ public sealed partial class BasicMetadataLookupService
                 {
                     string trackName = item.TryGetProperty("trackName", out var tn) ? (tn.GetString() ?? "") : "";
                     int durMs = item.TryGetProperty("trackTimeMillis", out var tm) && tm.TryGetInt32(out int d) ? d : 0;
-                    double score = 0;
-                    if (trackName.Equals(expectedTitle, StringComparison.OrdinalIgnoreCase)) score += 3.0;
-                    else if (trackName.Contains(expectedTitle, StringComparison.OrdinalIgnoreCase) || expectedTitle.Contains(trackName, StringComparison.OrdinalIgnoreCase)) score += 1.5;
+                    double titleScore = 0;
+                    if (trackName.Equals(expectedTitle, StringComparison.OrdinalIgnoreCase)) titleScore = 3.0;
+                    else if (!string.IsNullOrWhiteSpace(trackName) && !string.IsNullOrWhiteSpace(expectedTitle)
+                             && (trackName.Contains(expectedTitle, StringComparison.OrdinalIgnoreCase)
+                                 || expectedTitle.Contains(trackName, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        titleScore = 1.5;
+                    }
+                    if (titleScore <= 0) continue;
+
+                    double score = titleScore;
                     if (expectedDurationMs > 0 && durMs > 0)
                     {
                         int diffMs = Math.Abs(durMs - expectedDurationMs);
@@ -394,6 +438,29 @@ public sealed partial class BasicMetadataLookupService
         return (null, null, null, null, null);
     }
 
+    private static string EscapeLucenePhrase(string raw) =>
+        raw.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+    private static bool TitlesCompatible(string expectedTitle, string candidateTitle)
+    {
+        string a = expectedTitle.Trim();
+        string b = candidateTitle.Trim();
+        if (a.Length == 0 || b.Length == 0) return false;
+        if (b.Contains(a, StringComparison.OrdinalIgnoreCase) || a.Contains(b, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var tokensA = a.Split([' ', '\t', '-', ':', '/', ',', '(', ')', '（', '）', '：', '·'], StringSplitOptions.RemoveEmptyEntries)
+            .Where(t => t.Length >= 2)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (tokensA.Count == 0) return false;
+
+        foreach (string tok in b.Split([' ', '\t', '-', ':', '/', ',', '(', ')', '（', '）', '：', '·'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (tok.Length >= 2 && tokensA.Contains(tok)) return true;
+        }
+        return false;
+    }
+
     private async Task<(string? Artist, string? Album, int? Year, string? Genre, string? Publisher)> QueryMusicBrainzRecordingAsync(
         string artist,
         string title,
@@ -402,9 +469,11 @@ public sealed partial class BasicMetadataLookupService
     {
         try
         {
+            await WaitRateLimitAsync("musicbrainz", 1100, ct);
+            string escapedTitle = EscapeLucenePhrase(title);
             string query = string.IsNullOrWhiteSpace(artist)
-                ? $"recording:\"{title}\""
-                : $"recording:\"{title}\" AND artist:\"{artist}\"";
+                ? $"recording:\"{escapedTitle}\""
+                : $"recording:\"{escapedTitle}\" AND artist:\"{EscapeLucenePhrase(artist)}\"";
             string url = $"https://musicbrainz.org/ws/2/recording/?query={Uri.EscapeDataString(query)}&fmt=json&limit=4";
             using var resp = await _http.GetAsync(url, ct);
             if (!resp.IsSuccessStatusCode) return (null, null, null, null, null);
@@ -415,6 +484,13 @@ public sealed partial class BasicMetadataLookupService
 
             foreach (var rec in recs.EnumerateArray())
             {
+                if (rec.TryGetProperty("score", out var scEl) && scEl.TryGetInt32(out int mbScore) && mbScore < 60) continue;
+                if (rec.TryGetProperty("title", out var rtEl) && rtEl.ValueKind == JsonValueKind.String)
+                {
+                    string recTitle = rtEl.GetString() ?? "";
+                    if (!string.IsNullOrWhiteSpace(recTitle) && !TitlesCompatible(title, recTitle)) continue;
+                }
+
                 int durMs = rec.TryGetProperty("length", out var len) && len.TryGetInt32(out int l) ? l : 0;
                 if (expectedDurationMs > 0 && durMs > 0 && Math.Abs(durMs - expectedDurationMs) > 15_000) continue;
 
@@ -490,6 +566,7 @@ public sealed partial class BasicMetadataLookupService
         string query = string.Join(" ", new[] { artist.Trim(), targetTerm.Trim() }.Where(s => !string.IsNullOrWhiteSpace(s)));
         if (string.IsNullOrWhiteSpace(query)) return (null, null, null, null, null, null);
 
+        await WaitRateLimitAsync("douban", 500, ct);
         var subject = await DoubanMusicClient.LookupSubjectAsync(_http, query, artist, album, title, ct);
         if (subject is null) return (null, null, null, null, null, null);
 
@@ -558,7 +635,7 @@ public sealed partial class BasicMetadataLookupService
         return c;
     }
 
-    [GeneratedRegex(@"^\s*\d{1,3}[\.\-\s]+")]
+    [GeneratedRegex(@"^\s*(?:\d{1,2}-\d{2,3}\s+|\d{1,2}\.\s+|\d{1,2}\s+-\s+)")]
     private static partial Regex TrackNumberPrefixRegex();
 
     [GeneratedRegex(@"[\[\(]?\b((?:19|20)\d{2})\b[\]\)]?")]
@@ -689,7 +766,7 @@ internal static partial class DoubanMusicClient
             }
         }
 
-        return bestId;
+        return bestScore > 0 ? bestId : null;
     }
 
     private static DoubanSubjectDetail ParseDetailJson(string subjectId, string detailJson, string? expectedAlbum, string? expectedTitle)

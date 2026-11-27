@@ -942,4 +942,48 @@ public sealed class LanSyncV2Tests
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task SyncHostServer_LastFmSessionEndpoint_RequiresAuthAndReturnsSavedSession()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_lfm_session_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            CreateEmptyManifestDb(tempRoot);
+            await using var server = new SyncHostServer(tempRoot, "pc-lfm");
+            int port = await server.StartAsync(port: 0, enableMdns: false);
+            using var anonHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            var anonResp = await anonHttp.GetAsync("/api/v1/lastfm/session");
+            Assert.Equal(HttpStatusCode.Unauthorized, anonResp.StatusCode);
+
+            using var authedHttp = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            await PairHttpClientAsync(authedHttp, server, "dev-lfm");
+
+            using (var docUnconfigured = JsonDocument.Parse(await authedHttp.GetStringAsync("/api/v1/lastfm/session")))
+            {
+                Assert.False(docUnconfigured.RootElement.GetProperty("configured").GetBoolean());
+            }
+
+            string dotDir = Path.Combine(tempRoot, ".tonewise");
+            Tonewise.SyncHost.Ledger.LastFmAccountConfig.Save(
+                dotDir,
+                new Tonewise.SyncHost.Ledger.LastFmAccountConfig(
+                    ApiKey: "0123456789abcdef0123456789abcdef",
+                    ApiSecret: "fedcba9876543210fedcba9876543210",
+                    Username: "shawn_test",
+                    SessionKey: "sk_test_12345"));
+
+            using var docConfigured = JsonDocument.Parse(await authedHttp.GetStringAsync("/api/v1/lastfm/session"));
+            Assert.True(docConfigured.RootElement.GetProperty("configured").GetBoolean());
+            Assert.Equal("shawn_test", docConfigured.RootElement.GetProperty("username").GetString());
+            Assert.Equal("0123456789abcdef0123456789abcdef", docConfigured.RootElement.GetProperty("api_key").GetString());
+            Assert.Equal("fedcba9876543210fedcba9876543210", docConfigured.RootElement.GetProperty("shared_secret").GetString());
+            Assert.Equal("sk_test_12345", docConfigured.RootElement.GetProperty("session_key").GetString());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
 }

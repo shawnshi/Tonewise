@@ -36,13 +36,18 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.updatePadding
+import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.databinding.ActivityMainBinding
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.state.DeferredPlayback
+import com.shawnshi.tonewise.sync.LastFmAuthCallbackParser
+import com.shawnshi.tonewise.sync.LastFmRepository
 import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.isNight
+import com.shawnshi.tonewise.util.showToast
 import com.shawnshi.tonewise.util.systemBarInsetsCompat
 import timber.log.Timber as L
 
@@ -64,6 +69,7 @@ import timber.log.Timber as L
 class MainActivity : AppCompatActivity() {
     private val playbackModel: PlaybackViewModel by viewModels()
     @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var lastFmRepository: LastFmRepository
     private var isServiceBound = false
     private var notificationPermissionLauncher: ActivityResultLauncher<String>? = null
     private val serviceConnection =
@@ -219,6 +225,29 @@ class MainActivity : AppCompatActivity() {
             return true
         }
         intent.putExtra(KEY_INTENT_USED, true)
+
+        val uri = intent.data
+        if (
+            intent.action == Intent.ACTION_VIEW &&
+                LastFmAuthCallbackParser.isLastFmCallback(
+                    scheme = uri?.scheme,
+                    host = uri?.host,
+                    expectedScheme = BuildConfig.APPLICATION_ID,
+                )
+        ) {
+            val token =
+                uri?.getQueryParameter("token")
+                    ?: LastFmAuthCallbackParser.extractCallbackToken(uri?.encodedQuery)
+            intent.data = null
+            intent.action = null
+            lifecycleScope.launch {
+                val ok = lastFmRepository.handleBrowserAuthCallback(token)
+                if (ok) {
+                    showToast(R.string.lbl_lastfm_connected_toast)
+                }
+            }
+            return true
+        }
 
         val action =
             when (intent.action) {

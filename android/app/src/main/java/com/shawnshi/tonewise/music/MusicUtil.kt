@@ -169,5 +169,8 @@ fun Format.resolve(context: Context): String =
         is Format.Vorbis -> context.getString(R.string.cdc_vorbis)
         is Format.FLAC -> context.getString(R.string.cdc_flac)
         is Format.Wav -> context.getString(R.string.cdc_wav)
+        is Format.AIFF -> "AIFF"
+        is Format.DSF -> "DSF"
+        is Format.DSDIFF -> "DSD"
         is Format.Unknown -> extension ?: context.getString(R.string.cdc_unknown)
     }

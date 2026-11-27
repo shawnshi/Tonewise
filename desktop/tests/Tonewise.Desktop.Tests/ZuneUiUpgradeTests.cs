@@ -314,9 +314,9 @@ public sealed class ZuneUiUpgradeTests
         Assert.Contains("VirtualKey.Number3 => (\"now_playing\"", cs, StringComparison.Ordinal);
         Assert.Contains("VirtualKey.Number4 => (\"studio\"", cs, StringComparison.Ordinal);
 
-        // Quickplay cover binding + fallback logical-tree resolution
+        // Quickplay single-pass cover binding (redundant ElementPrepared tree traversal removed)
         Assert.Contains("CoverArtImageCache.GetQuickplayCover(CoverArtPath)", xaml, StringComparison.Ordinal);
-        Assert.Contains("FindLogicalOrVisualImage", cs, StringComparison.Ordinal);
+        Assert.DoesNotContain("OnQuickplayRepeaterElementPrepared", xaml, StringComparison.Ordinal);
 
         // Collapsible Now Playing right queue panel
         Assert.Contains("x:Name=\"NowPlayingQueuePanel\"", xaml, StringComparison.Ordinal);
@@ -621,7 +621,9 @@ public sealed class ZuneUiUpgradeTests
 
             // D2 + D3 + D4: Version alignment, fail-closed Release guard, and Core+Desktop CI workflow
             string cargoToml = File.ReadAllText(Path.Combine(repoRoot, "core", "Cargo.toml"));
-            Assert.Contains("version = \"1.0.7\"", cargoToml, StringComparison.Ordinal);
+            Assert.Contains("version = \"1.0.13\"", cargoToml, StringComparison.Ordinal);
+            string directoryProps = File.ReadAllText(Path.Combine(repoRoot, "desktop", "Directory.Build.props"));
+            Assert.Contains("<Version>1.0.13</Version>", directoryProps, StringComparison.Ordinal);
             string desktopCsproj = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "Tonewise.Desktop.csproj"));
             Assert.Contains("EnsureNativeCoreBinariesInRelease", desktopCsproj, StringComparison.Ordinal);
             Assert.Contains("tonewise-cli.exe", File.ReadAllText(Path.Combine(repoRoot, "scripts", "build-core-desktop.ps1")), StringComparison.Ordinal);
@@ -846,5 +848,144 @@ public sealed class ZuneUiUpgradeTests
         Assert.Contains("Text=\"编辑属性\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"NowPlayingComposerButton\"", mainXaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"NowPlayingConductorButton\"", mainXaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ClassicalComposerDetail_SupportsWorkAndMovementSelection_ContextMenu_And_MetadataEditing()
+    {
+        string repoRoot = FindRepoRoot();
+        string desktopRoot = Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop");
+
+        string vmClassical = File.ReadAllText(Path.Combine(desktopRoot, "ViewModels", "MainViewModel.Classical.cs"));
+        Assert.Contains("IsWorkbenchCommandBarVisible", vmClassical, StringComparison.Ordinal);
+        Assert.Contains("SelectClassicalWorkTracks", vmClassical, StringComparison.Ordinal);
+        Assert.Contains("SelectClassicalMovementTrack", vmClassical, StringComparison.Ordinal);
+        Assert.Contains("SelectAllVisibleClassicalTracks", vmClassical, StringComparison.Ordinal);
+        Assert.Contains("RestoreClassicalSelection", vmClassical, StringComparison.Ordinal);
+        Assert.Contains("SyncClassicalMultiSelectMode", vmClassical, StringComparison.Ordinal);
+
+        string viewItems = File.ReadAllText(Path.Combine(desktopRoot, "Models", "ClassicalViewItems.cs"));
+        Assert.Contains("UpdateSelectionState", viewItems, StringComparison.Ordinal);
+        Assert.Contains("SetMultiSelectVisible", viewItems, StringComparison.Ordinal);
+        Assert.Contains("PickSelectionBackground", viewItems, StringComparison.Ordinal);
+
+        string mainXaml = File.ReadAllText(Path.Combine(desktopRoot, "MainWindow.xaml"));
+        Assert.Contains("Visibility=\"{x:Bind ViewModel.IsWorkbenchCommandBarVisible, Mode=OneWay}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("OnClassicalWorkCheckboxClick", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("OnEditClassicalWorkClick", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("OnClassicalWorkRightTapped", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("OnClassicalMovementTapped", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("OnClassicalMovementDoubleTapped", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("OnClassicalMovementRightTapped", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("OnClassicalMovementCheckboxClick", mainXaml, StringComparison.Ordinal);
+
+        string mainCs = ReadAllMainWindowSources(desktopRoot);
+        Assert.Contains("IsClassicalComposerDetailSelectionActive", mainCs, StringComparison.Ordinal);
+        Assert.Contains("ResolveTargetTracksForAction", mainCs, StringComparison.Ordinal);
+        Assert.Contains("ClassicalWorkViewItem work", mainCs, StringComparison.Ordinal);
+        Assert.Contains("ClassicalMovementViewItem mov", mainCs, StringComparison.Ordinal);
+        Assert.Contains("ResolveClassicalBoundItem", mainCs, StringComparison.Ordinal);
+        Assert.Contains("Tag=\"{x:Bind}\"", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("RestoreClassicalSelection(savedUids)", mainCs, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NowPlaying_NonClassical_FormatsThreeLines_TitleArtistAlbumYear()
+    {
+        var full = NowPlayingFormatter.FormatNonClassicalNowPlaying(
+            "So What",
+            "Miles Davis",
+            "Kind of Blue",
+            1959);
+        Assert.Equal("So What", full.Line1);
+        Assert.Equal("Miles Davis", full.Line2);
+        Assert.Equal("Kind of Blue · 1959", full.Line3);
+
+        var noYear = NowPlayingFormatter.FormatNonClassicalNowPlaying(
+            "Track A",
+            "Artist A",
+            "Album A",
+            null);
+        Assert.Equal("Track A", noYear.Line1);
+        Assert.Equal("Artist A", noYear.Line2);
+        Assert.Equal("Album A", noYear.Line3);
+
+        var noAlbum = NowPlayingFormatter.FormatNonClassicalNowPlaying(
+            "Single B",
+            "Artist B",
+            "",
+            2024);
+        Assert.Equal("Single B", noAlbum.Line1);
+        Assert.Equal("Artist B", noAlbum.Line2);
+        Assert.Equal("2024", noAlbum.Line3);
+
+        var minimal = NowPlayingFormatter.FormatNonClassicalNowPlaying(
+            "Loose Demo",
+            "Artist C",
+            "",
+            0);
+        Assert.Equal("Loose Demo", minimal.Line1);
+        Assert.Equal("Artist C", minimal.Line2);
+        Assert.Equal("", minimal.Line3);
+    }
+
+    [Fact]
+    public void ZuneMosaicWallState_BuildsMultiScaleGrid_DriftsSeamlessly_AndCrossfadesIndividualTiles()
+    {
+        var wall = new ZuneMosaicWallState();
+        wall.EnsureLayout(1920, 1080, coverCount: 24);
+
+        Assert.True(wall.PatternCols >= 12);
+        Assert.True(wall.PatternRows >= 7);
+        Assert.Contains(wall.Cells, c => c.Span == 1);
+        Assert.Contains(wall.Cells, c => c.Span == 2);
+
+        bool[,] occupied = new bool[wall.PatternRows, wall.PatternCols];
+        foreach (var cell in wall.Cells)
+        {
+            for (int dr = 0; dr < cell.Span; dr++)
+            {
+                for (int dc = 0; dc < cell.Span; dc++)
+                {
+                    Assert.False(occupied[cell.Row + dr, cell.Col + dc], $"Overlapping cell at ({cell.Row + dr},{cell.Col + dc})");
+                    occupied[cell.Row + dr, cell.Col + dc] = true;
+                }
+            }
+        }
+        for (int r = 0; r < wall.PatternRows; r++)
+        {
+            for (int c = 0; c < wall.PatternCols; c++)
+            {
+                Assert.True(occupied[r, c], $"Gap in mosaic grid at ({r},{c})");
+            }
+        }
+
+        Assert.True(wall.Advance(0.05, 24));
+        Assert.True(wall.DriftXPx > 0f);
+        Assert.True(wall.DriftXPx < wall.PatternWidthPx);
+
+        for (int i = 0; i < 42; i++)
+        {
+            wall.Advance(0.05, 24);
+        }
+
+        int transitioningCount = wall.Cells.Count(c => c.IsTransitioning);
+        Assert.InRange(transitioningCount, 1, 2);
+        Assert.True(wall.DriftXPx >= 0f && wall.DriftXPx < wall.PatternWidthPx);
+
+        var activeCell = wall.Cells.First(c => c.IsTransitioning);
+        int targetIdx = activeCell.NextCoverIndex;
+        for (int i = 0; i < 20; i++)
+        {
+            wall.Advance(0.05, 24);
+        }
+        Assert.False(activeCell.IsTransitioning);
+        Assert.Equal(targetIdx, activeCell.CurrentCoverIndex);
+
+        string repoRoot = FindRepoRoot();
+        string mainCs = ReadAllMainWindowSources(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop"));
+        Assert.Contains("_mosaicAnimTimer", mainCs, StringComparison.Ordinal);
+        Assert.Contains("ZuneMotionHelper.IsMotionEnabled()", mainCs, StringComparison.Ordinal);
+        Assert.Contains("_accessibilitySettings.HighContrast", mainCs, StringComparison.Ordinal);
     }
 }

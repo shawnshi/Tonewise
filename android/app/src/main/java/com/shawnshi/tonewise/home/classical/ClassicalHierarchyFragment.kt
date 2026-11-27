@@ -5,18 +5,19 @@
 
 package com.shawnshi.tonewise.home.classical
 
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.OnBackPressedCallback
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,9 +31,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -48,16 +54,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.platform.rememberNestedScrollInteropConnection
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -69,9 +80,11 @@ import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.detail.WorkRecordingsDialog
 import com.shawnshi.tonewise.home.quickplay.QuickplayPinKind
 import com.shawnshi.tonewise.home.quickplay.QuickplayPinStore
+import com.shawnshi.tonewise.home.quickplay.prominentAlbumCoverId
 import com.shawnshi.tonewise.music.ClassicalWork
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.MusicViewModel
+import com.shawnshi.tonewise.music.WorkRecording
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.formatDurationMs
@@ -80,15 +93,23 @@ import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
 import dagger.hilt.android.AndroidEntryPoint
+import java.io.File
+import java.util.Locale
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private val ZUNE_MAGENTA = Color(0xFFFF0099)
+
 /**
- * Zune 3-level frameless classical hierarchy: Composer (Level 1) → Work (Level 2) → Movement
- * (Level 3), with right-aligned recording badges, multi-recording A/B launcher, and a Zune
- * full-screen 0dp `# / A–Z` jump matrix when tapping any composer header.
+ * Two-stage classical collection hub:
+ * - Stage 1: Minimalist all-lowercase Composer index (18dp negative space, zero dividers,
+ *   optional 0dp grayscale portrait only when local file exists) + full-screen #000000 0dp
+ *   Metro Era & `# / a–z` Jump Matrix.
+ * - Stage 2: Composer detail with Form pivot (`all / symphonies / concertos / chamber / solo`),
+ *   multi-version work rows, inline horizontal recording switcher (`karajan · 1963`), and
+ *   borderless 16dp-indented Roman-numeral movement rows.
  */
 @AndroidEntryPoint
 class ClassicalHierarchyFragment : Fragment() {
@@ -101,11 +122,16 @@ class ClassicalHierarchyFragment : Fragment() {
     private val musicModel: MusicViewModel by activityViewModels()
 
     private var showJumpMatrixState by mutableStateOf(false)
-    private val jumpMatrixBackCallback =
+    private var selectedComposerKeyState by mutableStateOf<String?>(null)
+
+    private val backCallback =
         object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() {
-                showJumpMatrixState = false
-                isEnabled = false
+                when {
+                    showJumpMatrixState -> showJumpMatrixState = false
+                    selectedComposerKeyState != null -> selectedComposerKeyState = null
+                }
+                isEnabled = showJumpMatrixState || selectedComposerKeyState != null
             }
         }
 
@@ -113,7 +139,7 @@ class ClassicalHierarchyFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         requireActivity()
             .onBackPressedDispatcher
-            .addCallback(viewLifecycleOwner, jumpMatrixBackCallback)
+            .addCallback(viewLifecycleOwner, backCallback)
     }
 
     override fun onCreateView(
@@ -125,16 +151,30 @@ class ClassicalHierarchyFragment : Fragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val indexingState by musicModel.indexingState.collectAsStateWithLifecycle()
+                val libraryRevision by musicRepository.libraryRevision.collectAsStateWithLifecycle()
+                val activeSong by playbackModel.song.collectAsStateWithLifecycle()
                 val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
+
+                val portraitDirs =
+                    remember {
+                        listOf(
+                            File(requireContext().filesDir, "composers"),
+                            File(requireContext().cacheDir, "composers"),
+                        )
+                    }
 
                 val groups by
                     produceState(
                         initialValue = emptyList<ClassicalComposerGroup>(),
                         indexingState,
+                        libraryRevision,
                     ) {
                         value =
                             withContext(Dispatchers.Default) {
-                                ClassicalHierarchyLogic.groupByComposer(musicRepository.classicalWorks)
+                                ClassicalHierarchyLogic.groupByComposer(
+                                    musicRepository.classicalWorks,
+                                    portraitDirs = portraitDirs,
+                                )
                             }
                     }
 
@@ -144,19 +184,22 @@ class ClassicalHierarchyFragment : Fragment() {
                 ) {
                     ClassicalHierarchyContent(
                         groups = groups,
+                        activeSongUid = activeSong?.uid?.toString(),
+                        selectedComposerKey = selectedComposerKeyState,
+                        onSelectComposer = { composerKey ->
+                            selectedComposerKeyState = composerKey
+                            backCallback.isEnabled = showJumpMatrixState || composerKey != null
+                        },
                         showJumpMatrix = showJumpMatrixState,
                         onShowJumpMatrixChange = { visible ->
                             showJumpMatrixState = visible
-                            jumpMatrixBackCallback.isEnabled = visible
+                            backCallback.isEnabled = visible || selectedComposerKeyState != null
                         },
-                        onPlayWork = { work, movementIndex ->
-                            val rec = work.recordings.firstOrNull()
-                            if (rec != null && rec.movements.isNotEmpty()) {
-                                val safeIdx = movementIndex.coerceIn(0, rec.movements.lastIndex)
-                                playbackModel.restoreSessionQueue(
-                                    songs = rec.movements,
-                                    index = safeIdx,
-                                    positionMs = 0L,
+                        onPlayRecording = { rec, movementIndex ->
+                            if (rec.movements.isNotEmpty()) {
+                                playbackModel.playClassicalRecording(
+                                    movements = rec.movements,
+                                    startIndex = movementIndex,
                                 )
                             }
                         },
@@ -173,6 +216,12 @@ class ClassicalHierarchyFragment : Fragment() {
                                     id = work.key,
                                     title = work.workTitle,
                                     subtitle = work.composerName,
+                                    coverId =
+                                        work.recordings
+                                            .firstOrNull()
+                                            ?.album
+                                            ?.let(::prominentAlbumCoverId)
+                                            .orEmpty(),
                                 )
                             requireContext().showToast(
                                 if (pinned) R.string.lng_pinned_quickplay
@@ -189,20 +238,40 @@ class ClassicalHierarchyFragment : Fragment() {
 @Composable
 private fun ClassicalHierarchyContent(
     groups: List<ClassicalComposerGroup>,
+    activeSongUid: String?,
+    selectedComposerKey: String?,
+    onSelectComposer: (String?) -> Unit,
     showJumpMatrix: Boolean,
     onShowJumpMatrixChange: (Boolean) -> Unit,
-    onPlayWork: (ClassicalWork, Int) -> Unit,
+    onPlayRecording: (WorkRecording, Int) -> Unit,
     onOpenRecordingsAb: (ClassicalWork) -> Unit,
     onTogglePinWork: (ClassicalWork) -> Unit,
 ) {
     val context = LocalContext.current
-    val listState = rememberLazyListState()
+    val stage1ListState = rememberLazyListState()
+    val stage2ListState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val nestedScroll = rememberNestedScrollInteropConnection()
-    val expandedWorkKeys = remember { mutableStateMapOf<String, Boolean>() }
 
+    var selectedEraFilter by remember { mutableStateOf<String?>(null) }
+    var selectedFormFilter by remember(selectedComposerKey) { mutableStateOf("all") }
+    val expandedWorkKeys = remember(selectedComposerKey) { mutableStateMapOf<String, Boolean>() }
+    val selectedRecordingIdx = remember(selectedComposerKey) { mutableStateMapOf<String, Int>() }
+
+    val filteredGroups =
+        remember(groups, selectedEraFilter) {
+            ClassicalHierarchyLogic.filterComposersByEra(groups, selectedEraFilter)
+        }
     val availableInitials =
-        remember(groups) { ClassicalHierarchyLogic.extractAvailableInitials(groups) }
+        remember(filteredGroups) { ClassicalHierarchyLogic.extractAvailableInitials(filteredGroups) }
+
+    val selectedGroup =
+        remember(groups, selectedComposerKey) {
+            selectedComposerKey?.let { key ->
+                groups.firstOrNull { it.composerName.equals(key, ignoreCase = true) }
+            }
+        }
+
     val jumpHint = stringResource(R.string.desc_classical_jump_hint)
     val pinActionLabel = stringResource(R.string.desc_classical_pin_action)
 
@@ -223,182 +292,378 @@ private fun ClassicalHierarchyContent(
         }
 
         Box(modifier = Modifier.fillMaxSize()) {
-            LazyColumn(
-                state = listState,
-                modifier =
-                    Modifier.fillMaxSize()
-                        .nestedScroll(nestedScroll)
-                        .navigationBarsPadding(),
-                contentPadding =
-                    PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 104.dp),
-            ) {
-                groups.forEachIndexed { groupIndex, group ->
-                    item(key = "composer_${group.composerName}_$groupIndex") {
+            if (selectedGroup == null) {
+                // Stage 1: All-lowercase composer index
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier =
+                            Modifier.fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Row(
-                            modifier =
-                                Modifier.fillMaxWidth()
-                                    .defaultMinSize(minHeight = 48.dp)
-                                    .clickable(onClickLabel = jumpHint) {
-                                        onShowJumpMatrixChange(true)
-                                    }
-                                    .padding(top = if (groupIndex == 0) 4.dp else 18.dp, bottom = 6.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Box(
-                                modifier =
-                                    Modifier.width(3.dp)
-                                        .height(22.dp)
-                                        .background(MaterialTheme.colorScheme.primary)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = group.composerName,
-                                fontSize = 22.sp,
-                                fontWeight = FontWeight.Light,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
+                                text = stringResource(R.string.lbl_classical_all_eras),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (selectedEraFilter == null) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier =
+                                    Modifier.defaultMinSize(minHeight = 36.dp)
+                                        .clickable { selectedEraFilter = null }
+                                        .padding(vertical = 8.dp),
                             )
+                            for (era in ClassicalHierarchyLogic.ERA_KEYS) {
+                                val eraLabel = eraDisplayLabel(era)
+                                Text(
+                                    text = eraLabel,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (selectedEraFilter == era) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier =
+                                        Modifier.defaultMinSize(minHeight = 36.dp)
+                                            .clickable {
+                                                selectedEraFilter = if (selectedEraFilter == era) null else era
+                                            }
+                                            .padding(vertical = 8.dp),
+                                )
+                            }
+                        }
+
+                        Box(
+                            modifier =
+                                Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 40.dp)
+                                    .semantics { contentDescription = jumpHint }
+                                    .clickable(onClickLabel = jumpHint) { onShowJumpMatrixChange(true) }
+                                    .padding(horizontal = 8.dp),
+                            contentAlignment = Alignment.CenterEnd,
+                        ) {
                             Text(
                                 text = "a–z",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(start = 8.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = ZUNE_MAGENTA,
                             )
                         }
                     }
 
-                    for (work in group.works) {
-                        val isExpanded = expandedWorkKeys[work.key] ?: false
-                        val primaryRec = work.recordings.firstOrNull()
-                        val badge =
-                            primaryRec?.let { ClassicalHierarchyLogic.formatRecordingBadge(it) }.orEmpty()
-
-                        item(key = "work_${work.key}") {
-                            val recBrowseDesc =
-                                if (work.recordings.size > 1) {
-                                    stringResource(R.string.desc_open_work_recordings, work.recordings.size)
-                                } else {
-                                    ""
-                                }
-                            Column(
+                    LazyColumn(
+                        state = stage1ListState,
+                        modifier =
+                            Modifier.fillMaxSize()
+                                .nestedScroll(nestedScroll)
+                                .navigationBarsPadding(),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 104.dp),
+                    ) {
+                        itemsIndexed(
+                            items = filteredGroups,
+                            key = { idx, g -> "composer_${g.composerName}_$idx" },
+                        ) { _, group ->
+                            Row(
                                 modifier =
                                     Modifier.fillMaxWidth()
                                         .defaultMinSize(minHeight = 48.dp)
-                                        .semantics {
-                                            stateDescription = if (isExpanded) "Expanded" else "Collapsed"
-                                        }
-                                        .combinedClickable(
-                                            onClick = {
-                                                expandedWorkKeys[work.key] = !isExpanded
-                                            },
-                                            onLongClickLabel = pinActionLabel,
-                                            onLongClick = { onTogglePinWork(work) },
-                                        )
-                                        .padding(start = 14.dp, top = 8.dp, bottom = 8.dp)
+                                        .clickable { onSelectComposer(group.composerName) },
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(
-                                        text = work.workTitle,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f).padding(end = 8.dp),
-                                    )
-                                    if (work.recordings.size > 1) {
-                                        Box(
-                                            modifier =
-                                                Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                                                    .semantics { contentDescription = recBrowseDesc }
-                                                    .clickable(onClickLabel = recBrowseDesc) {
-                                                        onOpenRecordingsAb(work)
-                                                    },
-                                            contentAlignment = Alignment.CenterEnd,
-                                        ) {
-                                            Box(
-                                                modifier =
-                                                    Modifier.background(MaterialTheme.colorScheme.primary)
-                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                            ) {
-                                                Text(
-                                                    text = stringResource(R.string.fmt_classical_rec_badge, work.recordings.size),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onPrimary,
-                                                )
-                                            }
-                                        }
+                                val portraitPath = group.localPortraitPath
+                                val portraitBitmap =
+                                    remember(portraitPath) {
+                                        portraitPath?.let { BitmapFactory.decodeFile(it)?.asImageBitmap() }
                                     }
+                                if (portraitBitmap != null) {
+                                    Image(
+                                        bitmap = portraitBitmap,
+                                        contentDescription = group.composerName,
+                                        contentScale = ContentScale.Crop,
+                                        colorFilter =
+                                            ColorFilter.colorMatrix(
+                                                ColorMatrix().apply { setToSaturation(0f) }
+                                            ),
+                                        modifier = Modifier.size(44.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(14.dp))
                                 }
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
+
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = badge.ifEmpty { stringResource(R.string.fmt_classical_mov_badge, primaryRec?.movements?.size ?: 0) },
-                                        style = MaterialTheme.typography.labelSmall,
+                                        text = group.displayLowercase,
+                                        fontSize = 24.sp,
+                                        fontWeight = FontWeight.Light,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = ClassicalHierarchyLogic.formatComposerStatsLine(group),
+                                        style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f),
                                     )
-                                    Box(
-                                        modifier =
-                                            Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                                                .clickable {
-                                                    if (!isExpanded) {
-                                                        onPlayWork(work, 0)
-                                                    } else {
-                                                        expandedWorkKeys[work.key] = false
-                                                    }
-                                                },
-                                        contentAlignment = Alignment.CenterEnd,
-                                    ) {
-                                        Text(
-                                            text = stringResource(if (isExpanded) R.string.lbl_classical_collapse else R.string.lbl_classical_play_mov),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.primary,
-                                        )
-                                    }
                                 }
+
+                                Text(
+                                    text = group.initial.lowercase(Locale.ROOT),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                                    modifier =
+                                        Modifier.defaultMinSize(minWidth = 36.dp, minHeight = 36.dp)
+                                            .clickable(onClickLabel = jumpHint) { onShowJumpMatrixChange(true) }
+                                            .padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
+                                )
                             }
                         }
+                    }
+                }
+            } else {
+                // Stage 2: Composer Detail (Form filter + Multi-version Work + Horizontal Switcher + Movements)
+                val visibleWorks =
+                    remember(selectedGroup.works, selectedFormFilter) {
+                        ClassicalHierarchyLogic.filterWorksByForm(selectedGroup.works, selectedFormFilter)
+                    }
+                val autoExpandAll = visibleWorks.size <= 3
 
-                        if (isExpanded && primaryRec != null) {
-                            primaryRec.movements.forEachIndexed { moveIdx, song ->
-                                val moveTitle =
-                                    song.movementName?.trim()?.takeIf { it.isNotEmpty() }
-                                        ?: song.name.resolve(context)
-                                val numPrefix = song.movementNumber?.let { "$it. " } ?: "${moveIdx + 1}. "
-                                item(key = "mov_${work.key}_${song.uid}_$moveIdx") {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier =
+                            Modifier.fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier =
+                                Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                    .clickable { onSelectComposer(null) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_back_24),
+                                contentDescription = stringResource(R.string.desc_classical_back_composers),
+                                tint = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = selectedGroup.displayLowercase,
+                                fontSize = 26.sp,
+                                fontWeight = FontWeight.Light,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = ClassicalHierarchyLogic.formatComposerStatsLine(selectedGroup),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    // Pure-text Form Pivot strip
+                    Row(
+                        modifier =
+                            Modifier.fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(18.dp),
+                    ) {
+                        for (formKey in ClassicalHierarchyLogic.FORM_FILTERS) {
+                            val active = selectedFormFilter == formKey
+                            Text(
+                                text = formDisplayLabel(formKey),
+                                fontSize = 14.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (active) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier =
+                                    Modifier.defaultMinSize(minHeight = 36.dp)
+                                        .clickable { selectedFormFilter = formKey }
+                                        .padding(vertical = 6.dp),
+                            )
+                        }
+                    }
+
+                    LazyColumn(
+                        state = stage2ListState,
+                        modifier =
+                            Modifier.fillMaxSize()
+                                .nestedScroll(nestedScroll)
+                                .navigationBarsPadding(),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 104.dp),
+                    ) {
+                        for (work in visibleWorks) {
+                            val isExpanded = expandedWorkKeys[work.key] ?: autoExpandAll
+                            val recIndex = (selectedRecordingIdx[work.key] ?: 0).coerceIn(0, maxOf(0, work.recordings.lastIndex))
+                            val selectedRec = work.recordings.getOrNull(recIndex)
+
+                            item(key = "work_${work.key}") {
+                                val versionLabel =
+                                    if (work.recordings.size > 1) {
+                                        stringResource(R.string.fmt_classical_version_count, work.recordings.size)
+                                    } else {
+                                        stringResource(R.string.fmt_classical_single_version)
+                                    }
+                                val recBrowseDesc = stringResource(R.string.desc_open_work_recordings, work.recordings.size)
+                                Column(
+                                    modifier =
+                                        Modifier.fillMaxWidth()
+                                            .defaultMinSize(minHeight = 48.dp)
+                                            .semantics {
+                                                stateDescription = if (isExpanded) "Expanded" else "Collapsed"
+                                            }
+                                            .combinedClickable(
+                                                onClick = { expandedWorkKeys[work.key] = !isExpanded },
+                                                onLongClickLabel = pinActionLabel,
+                                                onLongClick = { onTogglePinWork(work) },
+                                            )
+                                            .padding(vertical = 4.dp),
+                                ) {
                                     Row(
-                                        modifier =
-                                            Modifier.fillMaxWidth()
-                                                .defaultMinSize(minHeight = 48.dp)
-                                                .clickable { onPlayWork(work, moveIdx) }
-                                                .padding(start = 30.dp, top = 8.dp, bottom = 8.dp),
+                                        modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
                                         Text(
-                                            text = "$numPrefix$moveTitle",
-                                            style = MaterialTheme.typography.bodySmall,
+                                            text = work.workTitle,
+                                            style = MaterialTheme.typography.titleMedium,
                                             color = MaterialTheme.colorScheme.onSurface,
-                                            maxLines = 1,
+                                            maxLines = 2,
                                             overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                            modifier = Modifier.weight(1f).padding(end = 10.dp),
                                         )
-                                        Text(
-                                            text = song.durationMs.formatDurationMs(true),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(
+                                                modifier =
+                                                    Modifier.defaultMinSize(minWidth = 44.dp, minHeight = 40.dp)
+                                                        .semantics { contentDescription = recBrowseDesc }
+                                                        .clickable(onClickLabel = recBrowseDesc) {
+                                                            if (work.recordings.size > 1) {
+                                                                onOpenRecordingsAb(work)
+                                                            } else {
+                                                                expandedWorkKeys[work.key] = !isExpanded
+                                                            }
+                                                        },
+                                                contentAlignment = Alignment.CenterEnd,
+                                            ) {
+                                                Text(
+                                                    text = versionLabel,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = ZUNE_MAGENTA,
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Box(
+                                                modifier =
+                                                    Modifier.defaultMinSize(minWidth = 40.dp, minHeight = 40.dp)
+                                                        .clickable {
+                                                            selectedRec?.let { onPlayRecording(it, 0) }
+                                                        },
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                Icon(
+                                                    painter = painterResource(R.drawable.ic_play_24),
+                                                    contentDescription = stringResource(R.string.desc_classical_play_whole_work),
+                                                    tint = ZUNE_MAGENTA,
+                                                    modifier = Modifier.size(20.dp),
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Inline horizontal recording version switcher
+                                    if (isExpanded && work.recordings.isNotEmpty()) {
+                                        Row(
+                                            modifier =
+                                                Modifier.fillMaxWidth()
+                                                    .horizontalScroll(rememberScrollState())
+                                                    .padding(top = 6.dp, bottom = 4.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            work.recordings.forEachIndexed { idx, rec ->
+                                                val recActive = idx == recIndex
+                                                val badgeText =
+                                                    ClassicalHierarchyLogic.formatRecordingBadge(rec)
+                                                        .ifEmpty { rec.album.name.resolve(context).lowercase(Locale.ROOT) }
+                                                Box(
+                                                    modifier =
+                                                        Modifier.border(
+                                                            width = 1.dp,
+                                                            color = if (recActive) ZUNE_MAGENTA else MaterialTheme.colorScheme.outlineVariant,
+                                                        )
+                                                            .background(
+                                                                if (recActive) ZUNE_MAGENTA.copy(alpha = 0.14f) else Color.Transparent
+                                                            )
+                                                            .clickable {
+                                                                selectedRecordingIdx[work.key] = idx
+                                                            }
+                                                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                                                ) {
+                                                    Text(
+                                                        text = badgeText,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (recActive) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        maxLines = 1,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Borderless 16dp-indented Roman-numeral movement rows
+                            if (isExpanded && selectedRec != null) {
+                                selectedRec.movements.forEachIndexed { moveIdx, song ->
+                                    val isPlayingMvt = activeSongUid == song.uid.toString()
+                                    val (roman, moveTitle) =
+                                        ClassicalHierarchyLogic.formatMovementDisplay(
+                                            rawTitle = song.name.resolve(context),
+                                            explicitWork = song.workName,
+                                            explicitMovement = song.movementName,
+                                            explicitMovementNumber = song.movementNumber,
+                                            index = moveIdx,
                                         )
+                                    item(key = "mov_${work.key}_${selectedRec.scopeKey}_${song.uid}_$moveIdx") {
+                                        Row(
+                                            modifier =
+                                                Modifier.fillMaxWidth()
+                                                    .defaultMinSize(minHeight = 44.dp)
+                                                    .clickable { onPlayRecording(selectedRec, moveIdx) }
+                                                    .padding(start = 16.dp, top = 6.dp, bottom = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(
+                                                text = roman,
+                                                style =
+                                                    MaterialTheme.typography.bodySmall.merge(
+                                                        TextStyle(fontFeatureSettings = "tnum")
+                                                    ),
+                                                color = if (isPlayingMvt) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.width(34.dp),
+                                            )
+                                            Text(
+                                                text = moveTitle,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = if (isPlayingMvt) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f).padding(end = 10.dp),
+                                            )
+                                            Text(
+                                                text = song.durationMs.formatDurationMs(true),
+                                                style =
+                                                    MaterialTheme.typography.labelSmall.merge(
+                                                        TextStyle(fontFeatureSettings = "tnum")
+                                                    ),
+                                                color = if (isPlayingMvt) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -407,11 +672,12 @@ private fun ClassicalHierarchyContent(
                 }
             }
 
+            // Full-screen pure #000000 0dp Metro Era + A–Z Jump Matrix
             if (showJumpMatrix) {
                 Box(
                     modifier =
                         Modifier.fillMaxSize()
-                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.96f))
+                            .background(Color(0xFF000000))
                             .clickable { onShowJumpMatrixChange(false) }
                             .padding(24.dp),
                     contentAlignment = Alignment.Center,
@@ -425,9 +691,41 @@ private fun ClassicalHierarchyContent(
                             text = stringResource(R.string.lbl_composers_az),
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Light,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            color = Color.White,
                             modifier = Modifier.padding(bottom = 8.dp),
                         )
+
+                        // Era tiles
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            for (era in ClassicalHierarchyLogic.ERA_KEYS) {
+                                val eraActive = selectedEraFilter == era
+                                Box(
+                                    modifier =
+                                        Modifier.weight(1f)
+                                            .height(42.dp)
+                                            .background(if (eraActive) ZUNE_MAGENTA else Color(0xFF141414))
+                                            .border(1.dp, if (eraActive) ZUNE_MAGENTA else Color(0xFF333333))
+                                            .clickable {
+                                                selectedEraFilter = if (selectedEraFilter == era) null else era
+                                                onSelectComposer(null)
+                                                onShowJumpMatrixChange(false)
+                                            },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = era,
+                                        fontSize = 12.sp,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
+                        }
+
+                        // # and A–Z tiles
                         for (row in rows) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -440,44 +738,30 @@ private fun ClassicalHierarchyContent(
                                             Modifier.weight(1f)
                                                 .aspectRatio(1f)
                                                 .background(
-                                                    if (available) {
-                                                        MaterialTheme.colorScheme.primary
-                                                    } else {
-                                                        MaterialTheme.colorScheme.surfaceContainerLow
-                                                    }
+                                                    if (available) ZUNE_MAGENTA else Color(0xFF0F0F0F)
                                                 )
                                                 .border(
                                                     1.dp,
-                                                    MaterialTheme.colorScheme.outlineVariant,
+                                                    if (available) ZUNE_MAGENTA else Color(0xFF282828),
                                                 )
                                                 .clickable(enabled = available) {
+                                                    onSelectComposer(null)
                                                     onShowJumpMatrixChange(false)
-                                                    val targetItemOffset =
-                                                        computeItemIndexForInitial(
-                                                            groups,
-                                                            expandedWorkKeys,
-                                                            key,
-                                                        )
-                                                    if (targetItemOffset >= 0) {
+                                                    val idx =
+                                                        filteredGroups.indexOfFirst { it.initial == key }
+                                                    if (idx >= 0) {
                                                         scope.launch {
-                                                            listState.scrollToItem(targetItemOffset)
+                                                            stage1ListState.scrollToItem(idx)
                                                         }
                                                     }
                                                 },
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         Text(
-                                            text = key,
+                                            text = key.lowercase(Locale.ROOT),
                                             fontSize = 18.sp,
                                             fontWeight = FontWeight.Light,
-                                            color =
-                                                if (available) {
-                                                    MaterialTheme.colorScheme.onPrimary
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
-                                                        alpha = 0.58f
-                                                    )
-                                                },
+                                            color = if (available) Color.White else Color(0xFF555555),
                                         )
                                     }
                                 }
@@ -491,23 +775,23 @@ private fun ClassicalHierarchyContent(
     }
 }
 
-private fun computeItemIndexForInitial(
-    groups: List<ClassicalComposerGroup>,
-    expandedWorkKeys: Map<String, Boolean>,
-    initial: String,
-): Int {
-    var offset = 0
-    for (group in groups) {
-        if (group.initial == initial) {
-            return offset
-        }
-        offset += 1 // composer header
-        for (work in group.works) {
-            offset += 1 // work row
-            if (expandedWorkKeys[work.key] == true) {
-                offset += work.recordings.firstOrNull()?.movements?.size ?: 0
-            }
-        }
+@Composable
+private fun eraDisplayLabel(era: String): String =
+    when (era) {
+        "baroque" -> stringResource(R.string.lbl_classical_era_baroque)
+        "classical" -> stringResource(R.string.lbl_classical_era_classical)
+        "romantic" -> stringResource(R.string.lbl_classical_era_romantic)
+        "modern" -> stringResource(R.string.lbl_classical_era_modern)
+        else -> era
     }
-    return -1
-}
+
+@Composable
+private fun formDisplayLabel(form: String): String =
+    when (form) {
+        "all" -> stringResource(R.string.lbl_classical_all_forms)
+        "symphonies" -> stringResource(R.string.lbl_classical_form_symphonies)
+        "concertos" -> stringResource(R.string.lbl_classical_form_concertos)
+        "chamber" -> stringResource(R.string.lbl_classical_form_chamber)
+        "solo" -> stringResource(R.string.lbl_classical_form_solo)
+        else -> form
+    }

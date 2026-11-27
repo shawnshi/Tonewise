@@ -73,6 +73,7 @@ import org.oxycblt.musikr.Artist
 import org.oxycblt.musikr.Genre
 import org.oxycblt.musikr.Playlist
 import org.oxycblt.musikr.Song
+import org.oxycblt.musikr.covers.Cover
 import org.oxycblt.musikr.covers.CoverCollection
 
 /**
@@ -363,6 +364,17 @@ constructor(context: Context, attrs: AttributeSet? = null, @AttrRes defStyleAttr
             context.getString(R.string.desc_album_cover, song.album.name),
             R.drawable.ic_album_24,
             if (sharpSquare) ShapeAppearanceModel.builder().build() else squareishShapeAppearance,
+        )
+
+    /**
+     * Bind a pre-resolved [Cover] directly without waiting for a hydrated library entity.
+     */
+    fun bind(cover: Cover, desc: String, @DrawableRes errorRes: Int = R.drawable.ic_album_24) =
+        bindImpl(
+            { cover },
+            desc,
+            errorRes,
+            squareishShapeAppearance,
         )
 
     /**

@@ -114,7 +114,7 @@ private class ExtractStepImpl(
                                 // added query is basically free, it's only saf that has
                                 // it's slow hacky workaround that we must accommodate
                                 // here.)
-                                item.newSong.file.addedMs.resolve() ?: addingMs,
+                                item.newSong.cachedAddedMs ?: item.newSong.file.addedMs.resolve() ?: addingMs,
                             )
                         )
                     }

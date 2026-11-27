@@ -148,4 +148,14 @@ class TagUtilTest {
     fun parsId3v2Genre_singleId3v1() {
         assertEquals(listOf("Post-Rock"), listOf("176").parseId3GenreNames())
     }
+
+    @Test
+    fun cachedFileDataConverters_backslashAndSemicolonRoundTrip() {
+        val input = listOf("A\\", "B;C", "Path\\To\\File")
+        val encoded = org.oxycblt.musikr.cache.db.CachedFileData.Converters.fromMultiValue(input)
+        assertEquals(
+            input,
+            org.oxycblt.musikr.cache.db.CachedFileData.Converters.toMultiValue(encoded),
+        )
+    }
 }

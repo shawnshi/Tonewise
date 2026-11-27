@@ -7,6 +7,7 @@ using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using Tonewise.Audio;
 using Tonewise.SyncHost;
+using Tonewise.SyncHost.Curation;
 using Tonewise.SyncHost.Playlists;
 using Xunit;
 
@@ -392,16 +393,81 @@ public sealed class StabilityAndSyncRegressionTests
         }
         finally
         {
-            var roCsb = new SqliteConnectionStringBuilder
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LibraryFileWatcher_IgnoresTonewiseAtomicTempAndBackupFiles()
+    {
+        Assert.False(LibraryFileWatcherService.ShouldProcessPath(@"D:\Music\Beethoven\01.twtmp.1234.5.flac", isChangeOnly: false));
+        Assert.False(LibraryFileWatcherService.ShouldProcessPath(@"D:\Music\Beethoven\track.twtmp.99.0.mp3", isChangeOnly: true));
+        Assert.False(LibraryFileWatcherService.ShouldProcessPath(@"D:\Music\Beethoven\01.twbak.1234.5", isChangeOnly: false));
+        Assert.True(LibraryFileWatcherService.ShouldProcessPath(@"D:\Music\Beethoven\01.flac", isChangeOnly: true));
+    }
+
+    [Fact]
+    public async Task StagingDiffStore_ConsecutiveRapidSaves_WithConcurrentPendingReads_DoNotLockOrHang()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_rapid_save_" + Guid.NewGuid().ToString("N"));
+        string tonewiseDir = Path.Combine(tempRoot, ".tonewise");
+        string dbPath = Path.Combine(tonewiseDir, "manifest.db");
+        try
+        {
+            string schemaPath = Path.Combine(FindRepoRoot(), "protocol", "schemas", "manifest.sql");
+            Directory.CreateDirectory(tonewiseDir);
+
+            using (var conn = new SqliteConnection($"Data Source={dbPath};Pooling=False"))
             {
-                DataSource = dbPath,
-                Mode = SqliteOpenMode.ReadOnly,
-                DefaultTimeout = 5
-            };
-            using (var roConn = new SqliteConnection(roCsb.ToString()))
-            {
-                SqliteConnection.ClearPool(roConn);
+                conn.Open();
+                using var setup = conn.CreateCommand();
+                setup.CommandText = File.ReadAllText(schemaPath);
+                setup.ExecuteNonQuery();
+
+                using var ins = conn.CreateCommand();
+                ins.CommandText = """
+                    INSERT INTO tracks (
+                        track_uid, audio_frame_blake3, header_size, header_blake3, padding_bytes,
+                        rel_path, file_size, mtime_ms, codec, sample_rate_hz, duration_ms,
+                        title, album, album_artist, artists_json, composers_json, conductors_json, genre
+                    ) VALUES (
+                        'u_rapid', X'CC01', 4, X'DD01', 0, 'ArtistA/01.flac', 8, 1000, 'flac', 44100, 180000,
+                        'Track', 'Album', 'Artist', '["Artist"]', '[]', '[]', 'Classical'
+                    );
+                    """;
+                ins.ExecuteNonQuery();
             }
+
+            var store = new StagingDiffStore(dbPath, tempRoot, ensureSchemaImmediately: false);
+            using var cts = new CancellationTokenSource();
+            var readerTask = Task.Run(() =>
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    _ = store.GetPendingProposalCounts();
+                    _ = store.GetPendingProposals(limit: 50);
+                }
+            }, cts.Token);
+
+            for (int i = 1; i <= 12; i++)
+            {
+                var res = store.ApplyDirectCuratedEdits(
+                    ["u_rapid"],
+                    new Dictionary<string, string?>
+                    {
+                        ["title"] = $"Track v{i}",
+                        ["rating"] = ((i % 5) + 1).ToString(),
+                    });
+                Assert.Equal(2, res.CommittedCount);
+            }
+
+            cts.Cancel();
+            await readerTask;
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
         }
     }

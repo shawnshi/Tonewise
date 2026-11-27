@@ -72,7 +72,7 @@ private class ExploreStepImpl(private val fs: FS, private val storage: Storage) 
                 }
                 when (val cacheResult = storage.cache.read(file)) {
                     is CacheResult.Hit -> NeedsHydration(cacheResult.file)
-                    is CacheResult.Stale -> Finalized(NewSong(cacheResult.file))
+                    is CacheResult.Stale -> Finalized(NewSong(cacheResult.file, cacheResult.addedMs))
                     is CacheResult.Miss -> Finalized(NewSong(cacheResult.file))
                 }
             }

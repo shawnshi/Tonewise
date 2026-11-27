@@ -341,10 +341,228 @@ fn save_primary_tag_or_file(
 }
 
 #[cfg(not(target_os = "android"))]
+fn strip_id3v2_txxx_work_on_mpeg(path: &std::path::Path) -> Result<(), String> {
+    use lofty::config::{ParseOptions, ParsingMode, WriteOptions};
+    use lofty::file::AudioFile;
+    use lofty::mpeg::MpegFile;
+    use lofty::tag::TagExt;
+
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open mpeg failed: {e}"))?;
+    let mut mpeg = MpegFile::read_from(
+        &mut file,
+        ParseOptions::new()
+            .read_properties(false)
+            .parsing_mode(ParsingMode::Relaxed),
+    )
+    .map_err(|e| format!("read mpeg failed: {e}"))?;
+    drop(file);
+
+    if let Some(id3v2) = mpeg.id3v2_mut() {
+        let mut removed = false;
+        for desc in ["WORK", "work", "Work"] {
+            while id3v2.remove_user_text(desc).is_some() {
+                removed = true;
+            }
+        }
+        if removed {
+            id3v2
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|e| format!("id3v2 save failed: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, not(target_os = "android")))]
 fn save_tagged_file_atomically(
     path: &std::path::Path,
     tagged: &lofty::file::TaggedFile,
 ) -> Result<(), String> {
+    save_tagged_file_atomically_ex(path, tagged, false)
+}
+
+#[cfg(not(target_os = "android"))]
+fn find_flac_marker_after_id3v2(file: &mut std::fs::File) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut offset = 0u64;
+    for _ in 0..8 {
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut hdr = [0u8; 10];
+        let n = file.read(&mut hdr).ok()?;
+        if n < 4 {
+            return None;
+        }
+        if &hdr[..4] == b"fLaC" {
+            return Some(offset);
+        }
+        if n < 10 || &hdr[..3] != b"ID3" {
+            break;
+        }
+        if (hdr[6] & 0x80) != 0 || (hdr[7] & 0x80) != 0 || (hdr[8] & 0x80) != 0 || (hdr[9] & 0x80) != 0 {
+            return None;
+        }
+        let size = ((hdr[6] as u64) << 21)
+            | ((hdr[7] as u64) << 14)
+            | ((hdr[8] as u64) << 7)
+            | (hdr[9] as u64);
+        let has_footer = (hdr[5] & 0x10) != 0;
+        let step = 10u64
+            .checked_add(size)?
+            .checked_add(if has_footer { 10 } else { 0 })?;
+        offset = offset.checked_add(step)?;
+    }
+
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut probe_buf = vec![0u8; 4096];
+    let n = file.read(&mut probe_buf).ok()?;
+    if n < 4 {
+        return None;
+    }
+    let nul_skip = probe_buf[..n].iter().position(|&b| b != 0)?;
+    if n - nul_skip >= 4 && &probe_buf[nul_skip..nul_skip + 4] == b"fLaC" {
+        return offset.checked_add(nul_skip as u64);
+    }
+    None
+}
+
+#[cfg(not(target_os = "android"))]
+fn strip_leading_id3v2_from_flac(tmp_path: &std::path::Path) -> Result<bool, String> {
+    use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+
+    let mut src = std::fs::File::open(tmp_path).map_err(|e| format!("open flac temp failed: {e}"))?;
+    let Some(marker_offset) = find_flac_marker_after_id3v2(&mut src) else {
+        return Ok(false);
+    };
+    if marker_offset == 0 {
+        return Ok(false);
+    }
+
+    src.seek(SeekFrom::Start(marker_offset))
+        .map_err(|e| format!("seek flac marker failed: {e}"))?;
+
+    let stripped_path = tmp_path.with_extension("twstrip");
+    {
+        let mut reader = BufReader::with_capacity(64 * 1024, src);
+        let dst = std::fs::File::create(&stripped_path)
+            .map_err(|e| format!("create stripped flac temp failed: {e}"))?;
+        let mut writer = BufWriter::with_capacity(64 * 1024, dst);
+        if let Err(e) = std::io::copy(&mut reader, &mut writer) {
+            let _ = std::fs::remove_file(&stripped_path);
+            return Err(format!("copy stripped flac failed: {e}"));
+        }
+        if let Err(e) = writer.flush() {
+            let _ = std::fs::remove_file(&stripped_path);
+            return Err(format!("flush stripped flac failed: {e}"));
+        }
+    }
+
+    if let Err(e) = std::fs::remove_file(tmp_path) {
+        let _ = std::fs::remove_file(&stripped_path);
+        return Err(format!("remove prefixed flac temp failed: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&stripped_path, tmp_path) {
+        let _ = std::fs::remove_file(&stripped_path);
+        return Err(format!("rename stripped flac temp failed: {e}"));
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "android"))]
+fn backfill_flac_vorbis_from_id3v2(primary: &mut lofty::tag::Tag, id3: &lofty::tag::Tag) {
+    use lofty::tag::{Accessor, ItemKey, ItemValue, TagItem};
+
+    if primary.title().as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        && let Some(v) = id3.title().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    {
+        primary.set_title(v);
+    }
+    if primary.artist().as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        && let Some(v) = id3.artist().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    {
+        primary.set_artist(v);
+    }
+    if primary.album().as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        && let Some(v) = id3.album().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    {
+        primary.set_album(v);
+    }
+    if primary.genre().as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        && let Some(v) = id3.genre().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    {
+        primary.set_genre(v);
+    }
+    if primary.track().is_none()
+        && let Some(t) = id3.track()
+    {
+        primary.set_track(t);
+    }
+    if primary.disk().is_none()
+        && let Some(d) = id3.disk()
+    {
+        primary.set_disk(d);
+    }
+    if primary.year().is_none()
+        && let Some(y) = id3.year()
+    {
+        primary.set_year(y);
+    }
+    if primary.comment().as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none()
+        && let Some(v) = id3.comment().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    {
+        primary.set_comment(v);
+    }
+
+    for key in [
+        ItemKey::TrackArtists,
+        ItemKey::AlbumArtist,
+        ItemKey::Composer,
+        ItemKey::Conductor,
+        ItemKey::Work,
+        ItemKey::ContentGroup,
+        ItemKey::Movement,
+        ItemKey::MovementNumber,
+        ItemKey::RecordingDate,
+        ItemKey::OriginalReleaseDate,
+        ItemKey::Publisher,
+        ItemKey::Label,
+        ItemKey::Mood,
+        ItemKey::Bpm,
+        ItemKey::IntegerBpm,
+        ItemKey::FlagCompilation,
+        ItemKey::ReplayGainTrackGain,
+        ItemKey::ReplayGainAlbumGain,
+        ItemKey::ReplayGainTrackPeak,
+    ] {
+        if primary.get_strings(&key).next().is_none() {
+            for val in id3.get_strings(&key) {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() {
+                    primary.push(TagItem::new(
+                        key.clone(),
+                        ItemValue::Text(trimmed.to_string()),
+                    ));
+                }
+            }
+        }
+    }
+    if primary.get_strings(&ItemKey::Work).next().is_none()
+        && let Some(cg) = id3.get_string(&ItemKey::ContentGroup)
+    {
+        let trimmed = cg.trim();
+        if !trimmed.is_empty() {
+            primary.insert_text(ItemKey::Work, trimmed.to_string());
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn save_tagged_file_atomically_ex(
+    path: &std::path::Path,
+    tagged: &lofty::file::TaggedFile,
+    strip_id3v2_txxx_work: bool,
+) -> Result<(), String> {
+    use lofty::file::TaggedFileExt;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -366,13 +584,32 @@ fn save_tagged_file_atomically(
     let tmp_path = parent.join(tmp_name);
 
     std::fs::copy(path, &tmp_path).map_err(|e| format!("temp copy failed: {e}"))?;
+    if tagged.file_type() == lofty::file::FileType::Flac
+        && let Err(e) = strip_leading_id3v2_from_flac(&tmp_path)
+    {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
     if let Err(e) = save_primary_tag_or_file(&tmp_path, tagged) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(format!("lofty save failed: {e}"));
     }
-    if let Ok(f) = std::fs::File::open(&tmp_path) {
-        let _ = f.sync_data();
+    if strip_id3v2_txxx_work && let Err(e) = strip_id3v2_txxx_work_on_mpeg(&tmp_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp_path)
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("open temp for sync failed: {e}")
+        })?;
+    f.sync_all().map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("sync temp failed: {e}")
+    })?;
+    drop(f);
 
     #[cfg(windows)]
     {
@@ -428,8 +665,503 @@ fn save_tagged_file_atomically(
 }
 
 #[cfg(not(target_os = "android"))]
+#[derive(Debug, serde::Serialize)]
+struct ProbeTrackResult {
+    audio_frame_blake3_hex: String,
+    header_blake3_hex: String,
+    header_size: u64,
+    footer_size: u64,
+    file_size: u64,
+    padding_bytes: u64,
+    codec: String,
+    sample_rate_hz: u32,
+    bit_depth: Option<u32>,
+    bitrate_kbps: Option<u32>,
+    duration_ms: u64,
+    title: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    artists: Vec<String>,
+    composers: Vec<String>,
+    conductors: Vec<String>,
+    work_name: Option<String>,
+    movement_name: Option<String>,
+    movement_number: Option<u32>,
+    disc_number: u32,
+    track_number: u32,
+    publisher: Option<String>,
+    genre: Option<String>,
+    year: Option<u16>,
+    original_date: Option<String>,
+    release_type: Option<String>,
+    replaygain_track_db: Option<f32>,
+    replaygain_album_db: Option<f32>,
+    replaygain_peak: Option<f32>,
+    dj_scene: Vec<String>,
+    dj_vocals: Option<String>,
+    dj_energy: Option<String>,
+    tempo_bpm: Option<f32>,
+    tempo_bucket: Option<String>,
+    moods: Vec<String>,
+}
+
+#[cfg(not(target_os = "android"))]
+fn canonical_codec_name(file_type: Option<lofty::file::FileType>, ext_lower: &str) -> String {
+    use lofty::file::FileType;
+    match file_type {
+        Some(FileType::Flac) => "flac".to_string(),
+        Some(FileType::Mpeg) => "mp3".to_string(),
+        Some(FileType::Vorbis) => "ogg".to_string(),
+        Some(FileType::Opus) => "opus".to_string(),
+        Some(FileType::Wav) => "wav".to_string(),
+        Some(FileType::Aiff) => "aiff".to_string(),
+        Some(FileType::Aac) => "aac".to_string(),
+        Some(FileType::Ape) => "ape".to_string(),
+        Some(FileType::WavPack) => "wv".to_string(),
+        Some(FileType::Mp4) => {
+            if matches!(ext_lower, "m4a" | "alac" | "aac") {
+                ext_lower.to_string()
+            } else {
+                "mp4".to_string()
+            }
+        }
+        Some(other) => {
+            if !ext_lower.is_empty() {
+                ext_lower.to_string()
+            } else {
+                format!("{other:?}").to_ascii_lowercase()
+            }
+        }
+        None => ext_lower.to_string(),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn detect_flac_padding_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = File::open(path).ok()?;
+    let marker_offset = find_flac_marker_after_id3v2(&mut f)?;
+    f.seek(SeekFrom::Start(marker_offset + 4)).ok()?;
+    let mut total_padding = 0u64;
+    loop {
+        let mut hdr = [0u8; 4];
+        if f.read_exact(&mut hdr).is_err() {
+            break;
+        }
+        let is_last = (hdr[0] & 0x80) != 0;
+        let block_type = hdr[0] & 0x7F;
+        let len = ((hdr[1] as u64) << 16) | ((hdr[2] as u64) << 8) | (hdr[3] as u64);
+        if block_type == 1 {
+            total_padding += len;
+        }
+        if f.seek(SeekFrom::Current(len as i64)).is_err() {
+            break;
+        }
+        if is_last {
+            break;
+        }
+    }
+    Some(total_padding)
+}
+
+#[cfg(not(target_os = "android"))]
+fn parse_probe_gain_db(s: &str) -> Option<f32> {
+    s.trim()
+        .trim_end_matches("dB")
+        .trim_end_matches("db")
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())
+}
+
+#[cfg(not(target_os = "android"))]
+fn parse_probe_movement_number(raw: &str) -> Option<u32> {
+    let trimmed = raw.trim();
+    if let Some(roman) = tonewise_metadata::parse_roman_numeral(trimmed.trim_end_matches('.')) {
+        return Some(roman);
+    }
+    let digits: String = trimmed
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u32>().ok().filter(|&n| n > 0)
+}
+
+#[cfg(not(target_os = "android"))]
+fn dedup_strings_ci(items: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|s| seen.insert(s.to_ascii_lowercase()));
+}
+
+#[cfg(not(target_os = "android"))]
+fn probe_track_path_impl(path_str: &str) -> String {
+    use lofty::config::{ParseOptions, ParsingMode};
+    use lofty::file::{AudioFile, TaggedFileExt};
+    use lofty::probe::Probe;
+    use lofty::tag::{Accessor, ItemKey};
+    use tonewise_metadata::{
+        DjEnergy, DjVocals, TempoBucket, bpm_to_tempo_bucket, is_classical_track,
+        normalize_album_artist, normalize_dj_scenes, normalize_genre, normalize_year,
+        split_artists_preserving_whitelist, split_composers_preserving_whitelist,
+        split_multi_value, split_work_and_movement,
+    };
+
+    let path = std::path::Path::new(path_str);
+    let fp = match File::open(path)
+        .map_err(|e| format!("open failed: {e}"))
+        .and_then(|f| {
+            let mut reader = std::io::BufReader::new(f);
+            compute_audio_frame_fingerprint(&mut reader)
+                .map_err(|e| format!("fingerprint failed: {e}"))
+        }) {
+        Ok(fp) => fp,
+        Err(e) => return json_error(&e),
+    };
+    if fp.file_size == 0 {
+        return json_error("empty audio file");
+    }
+
+    let ext_lower = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_dsd = matches!(ext_lower.as_str(), "dsf" | "dff");
+
+    let read_opts = |read_props: bool| {
+        ParseOptions::new()
+            .read_properties(read_props)
+            .parsing_mode(ParsingMode::Relaxed)
+    };
+    let tagged = match Probe::open(path).and_then(|p| p.options(read_opts(true)).read()) {
+        Ok(t) => Some(t),
+        Err(_) => Probe::open(path)
+            .and_then(|p| p.options(read_opts(false)).read())
+            .ok(),
+    };
+
+    let (codec, sample_rate_hz, bit_depth, bitrate_kbps, duration_ms) = if let Some(ref t) = tagged
+    {
+        let props = t.properties();
+        (
+            canonical_codec_name(Some(t.file_type()), &ext_lower),
+            props.sample_rate().unwrap_or(if is_dsd { 2_822_400 } else { 0 }),
+            props
+                .bit_depth()
+                .map(|b| b as u32)
+                .or_else(|| if is_dsd { Some(1) } else { None }),
+            props.audio_bitrate().or_else(|| props.overall_bitrate()),
+            props.duration().as_millis() as u64,
+        )
+    } else {
+        (
+            canonical_codec_name(None, &ext_lower),
+            if is_dsd { 2_822_400 } else { 0 },
+            if is_dsd { Some(1) } else { None },
+            None,
+            0,
+        )
+    };
+
+    let primary_tag = tagged
+        .as_ref()
+        .and_then(|t| t.primary_tag().or_else(|| t.first_tag()));
+
+    let title = primary_tag
+        .and_then(|t| t.title().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty());
+    let album = primary_tag
+        .and_then(|t| t.album().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty());
+
+    let raw_genres: Vec<&str> = primary_tag
+        .map(|t| t.get_strings(&ItemKey::Genre).collect())
+        .unwrap_or_default();
+    let genre = if !raw_genres.is_empty() {
+        let joined = raw_genres.join("; ");
+        let norm = normalize_genre(&joined);
+        if norm.is_empty() { None } else { Some(norm) }
+    } else {
+        primary_tag
+            .and_then(|t| t.genre())
+            .map(|s| normalize_genre(&s))
+            .filter(|s| !s.is_empty())
+    };
+
+    let mut album_artist = None;
+    let mut artists = Vec::new();
+    let mut composers = Vec::new();
+    let mut conductors = Vec::new();
+    let mut work_name = None;
+    let mut movement_name = None;
+    let mut movement_number = None;
+    let disc_number = primary_tag.and_then(|t| t.disk()).unwrap_or(0);
+    let track_number = primary_tag.and_then(|t| t.track()).unwrap_or(0);
+    let mut publisher = primary_tag.and_then(|t| {
+        t.get_string(&ItemKey::Publisher)
+            .or_else(|| t.get_string(&ItemKey::Label))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    let mut year = primary_tag.and_then(|t| t.year()).map(|y| y as u16);
+    let mut original_date = None;
+    let mut release_type = None;
+    let mut replaygain_track_db = None;
+    let mut replaygain_album_db = None;
+    let mut replaygain_peak = None;
+    let mut dj_scene = Vec::new();
+    let mut dj_vocals = None;
+    let mut dj_energy = None;
+    let mut tempo_bpm = None;
+    let mut moods = Vec::new();
+
+    if let Some(tag) = primary_tag {
+        album_artist = tag
+            .get_string(&ItemKey::AlbumArtist)
+            .or_else(|| {
+                tag.items().find_map(|it| match it.key() {
+                    ItemKey::Unknown(k) if k.eq_ignore_ascii_case("ALBUM ARTIST") => {
+                        it.value().text()
+                    }
+                    _ => None,
+                })
+            })
+            .map(normalize_album_artist)
+            .filter(|s| !s.is_empty());
+
+        for item in tag.get_strings(&ItemKey::TrackArtists) {
+            artists.extend(split_artists_preserving_whitelist(item));
+        }
+        if artists.is_empty()
+            && let Some(a) = tag.artist()
+        {
+            artists = split_artists_preserving_whitelist(&a);
+        }
+
+        for item in tag.get_strings(&ItemKey::Composer) {
+            composers.extend(split_composers_preserving_whitelist(item));
+        }
+        for item in tag.get_strings(&ItemKey::Conductor) {
+            conductors.extend(split_artists_preserving_whitelist(item));
+        }
+
+        work_name = tag
+            .get_string(&ItemKey::Work)
+            .or_else(|| tag.get_string(&ItemKey::ContentGroup))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        movement_name = tag
+            .get_string(&ItemKey::Movement)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        movement_number = tag
+            .get_string(&ItemKey::MovementNumber)
+            .and_then(parse_probe_movement_number);
+
+        original_date = tag
+            .get_string(&ItemKey::OriginalReleaseDate)
+            .or_else(|| tag.get_string(&ItemKey::RecordingDate))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if year.is_none()
+            && let Some(ref d) = original_date
+        {
+            year = normalize_year(d);
+        }
+        release_type = tag
+            .get_string(&ItemKey::FlagCompilation)
+            .filter(|v| v.trim() == "1")
+            .map(|_| "compilation".to_string());
+
+        replaygain_track_db = tag
+            .get_string(&ItemKey::ReplayGainTrackGain)
+            .and_then(parse_probe_gain_db);
+        replaygain_album_db = tag
+            .get_string(&ItemKey::ReplayGainAlbumGain)
+            .and_then(parse_probe_gain_db);
+        replaygain_peak = tag
+            .get_string(&ItemKey::ReplayGainTrackPeak)
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite());
+
+        tempo_bpm = tag
+            .get_string(&ItemKey::Bpm)
+            .or_else(|| tag.get_string(&ItemKey::IntegerBpm))
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0);
+        for m in tag.get_strings(&ItemKey::Mood) {
+            moods.extend(split_multi_value(m));
+        }
+
+        for item in tag.items() {
+            let desc = match item.key() {
+                ItemKey::Unknown(k) => k.to_ascii_uppercase(),
+                _ => continue,
+            };
+            let Some(val) = item.value().text() else {
+                continue;
+            };
+            match desc.as_str() {
+                "DJ_SCENE" => dj_scene.extend(normalize_dj_scenes(val)),
+                "DJ_VOCALS" if dj_vocals.is_none() => {
+                    dj_vocals = DjVocals::parse(val).map(|v| v.as_str().to_string());
+                }
+                "DJ_ENERGY" if dj_energy.is_none() => {
+                    dj_energy = DjEnergy::parse(val).map(|v| v.as_str().to_string());
+                }
+                "TEMPO" if tempo_bpm.is_none() => {
+                    if let Ok(b) = val.trim().parse::<f32>()
+                        && b.is_finite()
+                        && b > 0.0
+                    {
+                        tempo_bpm = Some(b);
+                    }
+                }
+                "WORK" | "GROUPING" | "CONTENTGROUP" if work_name.is_none() => {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        work_name = Some(trimmed.to_string());
+                    }
+                }
+                "MOVEMENT" | "MOVEMENTNAME" if movement_name.is_none() => {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        movement_name = Some(trimmed.to_string());
+                    }
+                }
+                "MOVEMENTNUMBER" if movement_number.is_none() => {
+                    movement_number = parse_probe_movement_number(val);
+                }
+                "COMPOSER" if composers.is_empty() => {
+                    composers.extend(split_composers_preserving_whitelist(val));
+                }
+                "CONDUCTOR" if conductors.is_empty() => {
+                    conductors.extend(split_artists_preserving_whitelist(val));
+                }
+                "REPLAYGAIN_ALBUM_GAIN" if replaygain_album_db.is_none() => {
+                    replaygain_album_db = parse_probe_gain_db(val);
+                }
+                "REPLAYGAIN_TRACK_GAIN" if replaygain_track_db.is_none() => {
+                    replaygain_track_db = parse_probe_gain_db(val);
+                }
+                "PUBLISHER" | "LABEL" | "ORGANIZATION" if publisher.is_none() => {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        publisher = Some(trimmed.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let tempo_bucket = tempo_bpm
+        .and_then(bpm_to_tempo_bucket)
+        .map(|b| match b {
+            TempoBucket::VerySlow => "Very Slow",
+            TempoBucket::Slow => "Slow",
+            TempoBucket::Moderate => "Moderate",
+            TempoBucket::Fast => "Fast",
+            TempoBucket::VeryFast => "Very Fast",
+        })
+        .map(str::to_string);
+
+    let title_for_classical = title.as_deref().unwrap_or("");
+    let genre_str = genre.as_deref().unwrap_or("");
+    let primary_composer = composers.first().map(String::as_str);
+    let primary_conductor = conductors.first().map(String::as_str);
+    if (!title_for_classical.is_empty() || work_name.is_some() || movement_name.is_some())
+        && is_classical_track(
+            genre_str,
+            work_name.as_deref(),
+            primary_composer,
+            primary_conductor,
+            title_for_classical,
+        )
+        && (work_name.is_none() || movement_name.is_none() || movement_number.is_none())
+    {
+        let parsed = split_work_and_movement(
+            title_for_classical,
+            work_name.as_deref(),
+            movement_name.as_deref(),
+            movement_number,
+        );
+        if work_name.is_none() && !parsed.work.is_empty() {
+            work_name = Some(parsed.work);
+        }
+        if movement_name.is_none() && !parsed.movement.is_empty() {
+            movement_name = Some(parsed.movement);
+        }
+        if movement_number.is_none() {
+            movement_number = parsed.movement_number;
+        }
+    }
+
+    dedup_strings_ci(&mut artists);
+    dedup_strings_ci(&mut composers);
+    dedup_strings_ci(&mut conductors);
+    dedup_strings_ci(&mut dj_scene);
+    dedup_strings_ci(&mut moods);
+
+    let padding_bytes = detect_flac_padding_bytes(path).unwrap_or(0);
+    let result = ProbeTrackResult {
+        audio_frame_blake3_hex: fp.audio_frame_blake3_hex,
+        header_blake3_hex: fp.header_blake3_hex,
+        header_size: fp.header_size,
+        footer_size: fp.footer_size,
+        file_size: fp.file_size,
+        padding_bytes,
+        codec,
+        sample_rate_hz,
+        bit_depth,
+        bitrate_kbps,
+        duration_ms,
+        title,
+        album,
+        album_artist,
+        artists,
+        composers,
+        conductors,
+        work_name,
+        movement_name,
+        movement_number,
+        disc_number,
+        track_number,
+        publisher,
+        genre,
+        year,
+        original_date,
+        release_type,
+        replaygain_track_db,
+        replaygain_album_db,
+        replaygain_peak,
+        dj_scene,
+        dj_vocals,
+        dj_energy,
+        tempo_bpm,
+        tempo_bucket,
+        moods,
+    };
+
+    serde_json::to_string(&result).unwrap_or_else(|e| json_error(&e.to_string()))
+}
+
+#[cfg(target_os = "android")]
+fn probe_track_path_impl(_path_str: &str) -> String {
+    json_error("probe_track_path is not enabled in Android slim build")
+}
+
+#[cfg(not(target_os = "android"))]
 fn write_audio_tags_json_impl(request_json: &str) -> String {
-    use lofty::config::ParseOptions;
+    use lofty::config::{ParseOptions, ParsingMode};
     use lofty::file::TaggedFileExt;
     use lofty::probe::Probe;
     use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagItem};
@@ -441,15 +1173,35 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
 
     let path = std::path::Path::new(&req.path);
     let mut tagged = match Probe::open(path).and_then(|p| {
-        p.options(ParseOptions::new().read_properties(false)).read()
+        p.options(
+            ParseOptions::new()
+                .read_properties(false)
+                .parsing_mode(ParsingMode::Relaxed),
+        )
+        .read()
     }) {
         Ok(t) => t,
         Err(e) => return json_error(&format!("lofty read failed: {e}")),
     };
 
+    let touched_work = req.updates.keys().any(|k| {
+        let f = k.trim().to_ascii_lowercase();
+        f == "work" || f == "work_name"
+    });
+    let strip_id3v2_txxx_work =
+        touched_work && tagged.file_type() == lofty::file::FileType::Mpeg;
+
     let tag_type = tagged.primary_tag_type();
+    let flac_id3v2_backup = if tagged.file_type() == lofty::file::FileType::Flac {
+        tagged.tag(lofty::tag::TagType::Id3v2).cloned()
+    } else {
+        None
+    };
     if tagged.primary_tag_mut().is_none() {
         tagged.insert_tag(Tag::new(tag_type));
+    }
+    if let (Some(id3), Some(primary)) = (flac_id3v2_backup.as_ref(), tagged.primary_tag_mut()) {
+        backfill_flac_vorbis_from_id3v2(primary, id3);
     }
 
     if let Some(tag) = tagged.primary_tag_mut() {
@@ -537,18 +1289,29 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
                     }
                 },
                 "work" | "work_name" => {
-                    let key = if matches!(tag_type, lofty::tag::TagType::Id3v2) {
-                        ItemKey::ContentGroup
-                    } else {
-                        ItemKey::Work
-                    };
-                    match clean_val {
-                        Some(v) => {
-                            tag.insert_text(key, v.to_string());
+                    if matches!(tag_type, lofty::tag::TagType::Id3v2) {
+                        // Clear any stale TXXX:WORK (ItemKey::Work / Unknown("WORK")) so rescans never read outdated work values over TIT1.
+                        tag.remove_key(&ItemKey::Work);
+                        tag.retain(|it| {
+                            !matches!(it.key(), ItemKey::Unknown(k) if k.eq_ignore_ascii_case("WORK"))
+                        });
+                        match clean_val {
+                            Some(v) => {
+                                tag.insert_text(ItemKey::ContentGroup, v.to_string());
+                            }
+                            None => {
+                                tag.remove_key(&ItemKey::ContentGroup);
+                            }
                         }
-                        None => {
-                            tag.remove_key(&ItemKey::Work);
-                            tag.remove_key(&ItemKey::ContentGroup);
+                    } else {
+                        match clean_val {
+                            Some(v) => {
+                                tag.insert_text(ItemKey::Work, v.to_string());
+                            }
+                            None => {
+                                tag.remove_key(&ItemKey::Work);
+                                tag.remove_key(&ItemKey::ContentGroup);
+                            }
                         }
                     }
                 }
@@ -613,7 +1376,7 @@ fn write_audio_tags_json_impl(request_json: &str) -> String {
         }
     }
 
-    if let Err(e) = save_tagged_file_atomically(path, &tagged) {
+    if let Err(e) = save_tagged_file_atomically_ex(path, &tagged, strip_id3v2_txxx_work) {
         return json_error(&e);
     }
 
@@ -791,6 +1554,16 @@ pub unsafe extern "C" fn tonewise_analyze_audio_path(path_utf8: *const c_char) -
         return into_c_string(json_error("null or invalid utf-8 input"));
     };
     ffi_catch(|| analyze_audio_path_impl(path))
+}
+
+/// # Safety
+/// `path_utf8` must be a valid NUL-terminated UTF-8 string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tonewise_probe_track_path(path_utf8: *const c_char) -> *mut c_char {
+    let Some(path) = (unsafe { read_c_str(path_utf8) }) else {
+        return into_c_string(json_error("null or invalid utf-8 input"));
+    };
+    ffi_catch(|| probe_track_path_impl(path))
 }
 
 /// # Safety
@@ -1609,6 +2382,392 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".twtmp."))
             .collect();
         assert!(leftover_temps.is_empty(), "temp file should be cleaned on failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn write_audio_tags_clears_stale_txxx_work_on_id3v2_update() {
+        use lofty::config::ParseOptions;
+        use lofty::file::{AudioFile, TaggedFileExt};
+        use lofty::mpeg::MpegFile;
+        use lofty::probe::Probe;
+        use lofty::tag::ItemKey;
+
+        let dir = std::env::temp_dir().join(format!("tw_ffi_txxx_work_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mp3_path = dir.join("stale_work.mp3");
+
+        let txxx_payload = b"\x03WORK\x00Old Work: I. Allegro";
+        let frame_len = txxx_payload.len() as u32;
+        let tag_len = 10 + frame_len;
+        let to_synchsafe = |v: u32| -> [u8; 4] {
+            [
+                ((v >> 21) & 0x7F) as u8,
+                ((v >> 14) & 0x7F) as u8,
+                ((v >> 7) & 0x7F) as u8,
+                (v & 0x7F) as u8,
+            ]
+        };
+
+        let mut mp3 = Vec::new();
+        mp3.extend_from_slice(b"ID3\x04\x00\x00");
+        mp3.extend_from_slice(&to_synchsafe(tag_len));
+        mp3.extend_from_slice(b"TXXX");
+        mp3.extend_from_slice(&to_synchsafe(frame_len));
+        mp3.extend_from_slice(b"\x00\x00");
+        mp3.extend_from_slice(txxx_payload);
+        let mut frame = vec![0u8; 417];
+        frame[0] = 0xFF;
+        frame[1] = 0xFB;
+        frame[2] = 0x90;
+        frame[3] = 0x00;
+        for _ in 0..8 {
+            mp3.extend_from_slice(&frame);
+        }
+        std::fs::write(&mp3_path, &mp3).unwrap();
+
+        {
+            let mut f = std::fs::File::open(&mp3_path).unwrap();
+            let mpeg_before =
+                MpegFile::read_from(&mut f, ParseOptions::new().read_properties(false)).unwrap();
+            assert_eq!(
+                mpeg_before.id3v2().unwrap().get_user_text("WORK"),
+                Some("Old Work: I. Allegro")
+            );
+        }
+
+        let before: serde_json::Value =
+            serde_json::from_str(&fingerprint_path_impl(&mp3_path.to_string_lossy())).unwrap();
+
+        let req = serde_json::json!({
+            "path": mp3_path.to_string_lossy(),
+            "updates": {
+                "work_name": "Canonical Work",
+                "movement_name": "I. Allegro"
+            }
+        })
+        .to_string();
+
+        let raw_resp = write_audio_tags_json_impl(&req);
+        let after: serde_json::Value = serde_json::from_str(&raw_resp).unwrap();
+        assert!(after.get("error").is_none(), "unexpected error: {after}");
+        assert_eq!(after["audio_frame_blake3_hex"], before["audio_frame_blake3_hex"]);
+
+        let reloaded = Probe::open(&mp3_path).unwrap().read().unwrap();
+        let tag = reloaded.primary_tag().unwrap();
+        assert_eq!(tag.get_string(&ItemKey::ContentGroup), Some("Canonical Work"));
+        assert_eq!(tag.get_string(&ItemKey::Work), None);
+        assert_eq!(tag.get_string(&ItemKey::Movement), Some("I. Allegro"));
+
+        let mut f_after = std::fs::File::open(&mp3_path).unwrap();
+        let mpeg_after =
+            MpegFile::read_from(&mut f_after, ParseOptions::new().read_properties(false)).unwrap();
+        assert_eq!(mpeg_after.id3v2().unwrap().get_user_text("WORK"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn write_audio_tags_tolerates_malformed_id3v2_timestamp_frame() {
+        use lofty::config::{ParseOptions, ParsingMode};
+        use lofty::file::TaggedFileExt;
+        use lofty::probe::Probe;
+        use lofty::tag::ItemKey;
+
+        let dir = std::env::temp_dir().join(format!("tw_ffi_bad_tdrc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mp3_path = dir.join("bad_tdrc.mp3");
+
+        let to_synchsafe = |v: u32| -> [u8; 4] {
+            [
+                ((v >> 21) & 0x7F) as u8,
+                ((v >> 14) & 0x7F) as u8,
+                ((v >> 7) & 0x7F) as u8,
+                (v & 0x7F) as u8,
+            ]
+        };
+
+        let tdrc_payload = b"\x002016/1/1";
+        let tyer_payload = b"\x032016";
+        let tag_len = (10 + tdrc_payload.len() + 10 + tyer_payload.len()) as u32;
+
+        let mut mp3 = Vec::new();
+        mp3.extend_from_slice(b"ID3\x04\x00\x00");
+        mp3.extend_from_slice(&to_synchsafe(tag_len));
+        mp3.extend_from_slice(b"TDRC");
+        mp3.extend_from_slice(&to_synchsafe(tdrc_payload.len() as u32));
+        mp3.extend_from_slice(b"\x00\x00");
+        mp3.extend_from_slice(tdrc_payload);
+        mp3.extend_from_slice(b"TYER");
+        mp3.extend_from_slice(&to_synchsafe(tyer_payload.len() as u32));
+        mp3.extend_from_slice(b"\x00\x00");
+        mp3.extend_from_slice(tyer_payload);
+
+        let mut frame = vec![0u8; 417];
+        frame[0] = 0xFF;
+        frame[1] = 0xFB;
+        frame[2] = 0x90;
+        frame[3] = 0x00;
+        for _ in 0..8 {
+            mp3.extend_from_slice(&frame);
+        }
+        std::fs::write(&mp3_path, &mp3).unwrap();
+
+        let before: serde_json::Value =
+            serde_json::from_str(&fingerprint_path_impl(&mp3_path.to_string_lossy())).unwrap();
+
+        let req = serde_json::json!({
+            "path": mp3_path.to_string_lossy(),
+            "updates": {
+                "work_name": "Piano Quartet No. 3 in C minor, Op. 60",
+                "movement_name": "IV. Finale. Allegro comodo"
+            }
+        })
+        .to_string();
+
+        let raw_resp = write_audio_tags_json_impl(&req);
+        let after: serde_json::Value = serde_json::from_str(&raw_resp).unwrap();
+        assert!(after.get("error").is_none(), "unexpected error: {after}");
+        assert_eq!(after["audio_frame_blake3_hex"], before["audio_frame_blake3_hex"]);
+
+        let reloaded = Probe::open(&mp3_path)
+            .unwrap()
+            .options(ParseOptions::new().parsing_mode(ParsingMode::Relaxed))
+            .read()
+            .unwrap();
+        let tag = reloaded.primary_tag().unwrap();
+        assert_eq!(
+            tag.get_string(&ItemKey::ContentGroup),
+            Some("Piano Quartet No. 3 in C minor, Op. 60")
+        );
+        assert_eq!(
+            tag.get_string(&ItemKey::Movement),
+            Some("IV. Finale. Allegro comodo")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn probe_track_path_extracts_multivalue_flac_tags_padding_and_wav_props() {
+        use lofty::config::WriteOptions;
+        use lofty::file::TaggedFileExt;
+        use lofty::probe::Probe;
+        use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagExt, TagItem};
+
+        let dir = std::env::temp_dir().join(format!("tw_ffi_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. Multi-tag FLAC with padding, publisher, DJ_SCENE, multiple ARTIST/GENRE/COMPOSER, and classical work splitting
+        let flac_path = dir.join("symphony.flac");
+        let mut flac = Vec::new();
+        flac.extend_from_slice(b"fLaC");
+        flac.push(0x00);
+        flac.extend_from_slice(&[0, 0, 34]);
+        let mut streaminfo = [0u8; 34];
+        streaminfo[10] = 0x0A;
+        streaminfo[11] = 0xC4;
+        streaminfo[12] = 0x42;
+        streaminfo[13] = 0xF0;
+        // total_samples = 44100 * 3 = 132300 (0x204CC)
+        streaminfo[14] = 0x00;
+        streaminfo[15] = 0x02;
+        streaminfo[16] = 0x04;
+        streaminfo[17] = 0xCC;
+        flac.extend_from_slice(&streaminfo);
+        flac.push(0x81);
+        flac.extend_from_slice(&[0, 0, 128]);
+        flac.extend_from_slice(&[0u8; 128]);
+        flac.extend_from_slice(&vec![0xABu8; 4096]);
+        std::fs::write(&flac_path, &flac).unwrap();
+
+        let initial = Probe::open(&flac_path).unwrap().read().unwrap();
+        let mut tag = Tag::new(initial.primary_tag_type());
+        tag.set_title("Symphony No. 5: I. Allegro".to_string());
+        tag.set_album("Beethoven Symphonies".to_string());
+        tag.set_track(1);
+        tag.set_disk(2);
+        tag.set_year(1963);
+        tag.push_unchecked(TagItem::new(
+            ItemKey::Unknown("ALBUM ARTIST".to_string()),
+            ItemValue::Text("Berliner Philharmoniker".to_string()),
+        ));
+        tag.push(TagItem::new(
+            ItemKey::TrackArtists,
+            ItemValue::Text("Herbert von Karajan".to_string()),
+        ));
+        tag.push(TagItem::new(
+            ItemKey::TrackArtists,
+            ItemValue::Text("Berliner Philharmoniker".to_string()),
+        ));
+        tag.push(TagItem::new(
+            ItemKey::Composer,
+            ItemValue::Text("Ludwig van Beethoven".to_string()),
+        ));
+        tag.push(TagItem::new(
+            ItemKey::Conductor,
+            ItemValue::Text("Herbert von Karajan".to_string()),
+        ));
+        tag.push(TagItem::new(
+            ItemKey::Genre,
+            ItemValue::Text("クラシック".to_string()),
+        ));
+        tag.push(TagItem::new(
+            ItemKey::Genre,
+            ItemValue::Text("オペラ".to_string()),
+        ));
+        tag.insert_text(ItemKey::Publisher, "Deutsche Grammophon".to_string());
+        tag.push_unchecked(TagItem::new(
+            ItemKey::Unknown("DJ_SCENE".to_string()),
+            ItemValue::Text("focus; relax".to_string()),
+        ));
+        tag.push_unchecked(TagItem::new(
+            ItemKey::Unknown("DJ_VOCALS".to_string()),
+            ItemValue::Text("instrumental".to_string()),
+        ));
+        tag.push_unchecked(TagItem::new(
+            ItemKey::Unknown("TEMPO".to_string()),
+            ItemValue::Text("112.5".to_string()),
+        ));
+        tag.save_to_path(&flac_path, WriteOptions::default()).unwrap();
+
+        let raw_flac_probe = probe_track_path_impl(&flac_path.to_string_lossy());
+        let flac_json: serde_json::Value = serde_json::from_str(&raw_flac_probe).unwrap();
+        assert!(flac_json.get("error").is_none(), "probe error: {flac_json}");
+        assert_eq!(flac_json["codec"], "flac");
+        assert_eq!(flac_json["sample_rate_hz"], 44100);
+        assert_eq!(flac_json["bit_depth"], 16);
+        assert_eq!(flac_json["duration_ms"], 3000);
+        assert_eq!(flac_json["album_artist"], "Berlin Philharmonic");
+        assert_eq!(
+            flac_json["artists"],
+            serde_json::json!(["Herbert von Karajan", "Berlin Philharmonic"])
+        );
+        assert_eq!(flac_json["composers"], serde_json::json!(["Ludwig van Beethoven"]));
+        assert_eq!(flac_json["conductors"], serde_json::json!(["Herbert von Karajan"]));
+        assert_eq!(flac_json["genre"], "Classical; Opera");
+        assert_eq!(flac_json["publisher"], "Deutsche Grammophon");
+        assert_eq!(flac_json["work_name"], "Symphony No. 5");
+        assert_eq!(flac_json["movement_name"], "Allegro");
+        assert_eq!(flac_json["movement_number"], 1);
+        assert_eq!(flac_json["disc_number"], 2);
+        assert_eq!(flac_json["track_number"], 1);
+        assert_eq!(flac_json["year"], 1963);
+        assert_eq!(flac_json["dj_scene"], serde_json::json!(["focus", "relax"]));
+        assert_eq!(flac_json["dj_vocals"], "instrumental");
+        assert_eq!(flac_json["tempo_bpm"], 112.5);
+        assert_eq!(flac_json["tempo_bucket"], "Moderate");
+
+        // 2. Minimal WAV verification
+        let wav_path = dir.join("tone.wav");
+        let mut wav = Vec::new();
+        let data_bytes = (44100u32 * 2) as u32;
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&44100u32.to_le_bytes());
+        wav.extend_from_slice(&(44100u32 * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        wav.extend_from_slice(&vec![0u8; data_bytes as usize]);
+        std::fs::write(&wav_path, &wav).unwrap();
+
+        let raw_wav_probe = probe_track_path_impl(&wav_path.to_string_lossy());
+        let wav_json: serde_json::Value = serde_json::from_str(&raw_wav_probe).unwrap();
+        assert!(wav_json.get("error").is_none(), "wav probe error: {wav_json}");
+        assert_eq!(wav_json["codec"], "wav");
+        assert_eq!(wav_json["sample_rate_hz"], 44100);
+        assert_eq!(wav_json["bit_depth"], 16);
+        assert_eq!(wav_json["duration_ms"], 1000);
+        assert!(wav_json["title"].is_null());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn write_audio_tags_strips_leading_id3v2_on_flac_preserving_audio_hash_and_tags() {
+        let dir = std::env::temp_dir().join(format!("tw_ffi_id3_flac_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let flac_path = dir.join("prefixed.flac");
+
+        let title_payload = [b"\x03".as_slice(), b"Legacy ID3 Title"].concat();
+        let frame_len = title_payload.len() as u32;
+        let tag_len = 10 + frame_len;
+        let to_synchsafe = |v: u32| -> [u8; 4] {
+            [
+                ((v >> 21) & 0x7F) as u8,
+                ((v >> 14) & 0x7F) as u8,
+                ((v >> 7) & 0x7F) as u8,
+                (v & 0x7F) as u8,
+            ]
+        };
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"ID3\x03\x00\x00");
+        bytes.extend_from_slice(&to_synchsafe(tag_len));
+        bytes.extend_from_slice(b"TIT2");
+        bytes.extend_from_slice(&(frame_len.to_be_bytes()));
+        bytes.extend_from_slice(&[0u8; 2]);
+        bytes.extend_from_slice(&title_payload);
+
+        let mut stream_info = [0u8; 34];
+        stream_info[10] = 0x0A;
+        stream_info[11] = 0xC4;
+        stream_info[12] = 0x42;
+        stream_info[13] = 0xF0;
+        stream_info[14] = 0x00;
+        stream_info[15] = 0x02;
+        stream_info[16] = 0x04;
+        stream_info[17] = 0xCC;
+        bytes.extend_from_slice(b"fLaC");
+        bytes.push(0x00);
+        bytes.extend_from_slice(&[0, 0, 34]);
+        bytes.extend_from_slice(&stream_info);
+        bytes.push(0x81);
+        bytes.extend_from_slice(&[0, 0, 128]);
+        bytes.extend_from_slice(&[0u8; 128]);
+        bytes.extend_from_slice(&vec![0xABu8; 4096]);
+        std::fs::write(&flac_path, &bytes).unwrap();
+
+        let before_fp_raw = fingerprint_path_impl(&flac_path.to_string_lossy());
+        let before_fp: serde_json::Value = serde_json::from_str(&before_fp_raw).unwrap();
+        let expected_hash = before_fp["audio_frame_blake3_hex"].as_str().unwrap().to_string();
+
+        let req = serde_json::json!({
+            "path": flac_path.to_string_lossy(),
+            "updates": {
+                "composer": "Sergei Prokofiev",
+                "album": "Prokofiev Classics"
+            }
+        });
+        let write_raw = write_audio_tags_json_impl(&req.to_string());
+        let write_val: serde_json::Value = serde_json::from_str(&write_raw).unwrap();
+        assert!(write_val.get("error").is_none(), "write failed: {write_val}");
+        assert_eq!(write_val["audio_frame_blake3_hex"], expected_hash);
+
+        let updated_bytes = std::fs::read(&flac_path).unwrap();
+        assert!(updated_bytes.starts_with(b"fLaC"), "ID3v2 prefix should be stripped");
+
+        let probe_raw = probe_track_path_impl(&flac_path.to_string_lossy());
+        let probe_val: serde_json::Value = serde_json::from_str(&probe_raw).unwrap();
+        assert_eq!(probe_val["audio_frame_blake3_hex"], expected_hash);
+        assert_eq!(probe_val["title"], "Legacy ID3 Title");
+        assert_eq!(probe_val["composers"], serde_json::json!(["Sergei Prokofiev"]));
+        assert_eq!(probe_val["album"], "Prokofiev Classics");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

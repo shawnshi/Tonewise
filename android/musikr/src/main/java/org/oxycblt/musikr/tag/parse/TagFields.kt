@@ -103,13 +103,11 @@ internal fun Metadata.albumName() = (xiph["ALBUM"] ?: mp4["©alb"] ?: id3v2["TAL
 internal fun Metadata.albumSortName() = (xiph["ALBUMSORT"] ?: mp4["soal"] ?: id3v2["TSOA"])?.first()
 
 internal fun Metadata.releaseTypes() =
-    // GRP/GRP1 are assumed to also pertain to release types.
     // GRP1 is a non-standard iTunes extension.
     (xiph["RELEASETYPE"]
         ?: xiph["MUSICBRAINZ ALBUM TYPE"]
         ?: mp4["----:COM.APPLE.ITUNES:MUSICBRAINZ ALBUM TYPE"]
         ?: mp4["----:COM.APPLE.ITUNES:RELEASETYPE"]
-        ?: mp4["©grp"]
         ?: id3v2["TXXX:MUSICBRAINZ ALBUM TYPE"]
         ?: id3v2["TXXX:RELEASETYPE"]
         ?: id3v2["GRP1"])
@@ -189,6 +187,7 @@ internal fun Metadata.composerSortNames() =
         ?: mp4["----:COM.APPLE.ITUNES:COMPOSERS_SORT"]
         ?: mp4["----:COM.APPLE.ITUNES:COMPOSERS SORT"]
         ?: mp4["----:COM.APPLE.ITUNES:COMPOSERSORT"]
+        ?: mp4["soco"]
         ?: mp4["soCo"]
         ?: mp4["----:COM.APPLE.ITUNES:COMPOSER SORT"]
         ?: id3v2["TXXX:COMPOSERSSORT"]
@@ -284,7 +283,10 @@ internal fun Metadata.workName(): String? =
             ?: mp4["©wrk"]
             ?: mp4["----:COM.APPLE.ITUNES:WORK"]
             ?: id3v2["TIT1"]
-            ?: id3v2["TXXX:WORK"])
+            ?: id3v2["TXXX:WORK"]
+            ?: xiph["GROUPING"]
+            ?: xiph["CONTENTGROUP"]
+            ?: mp4["©grp"])
         ?.firstOrNull()
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
@@ -299,15 +301,51 @@ internal fun Metadata.movementName(): String? =
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
 
+private val MOVEMENT_LEADING_INT_REGEX =
+    Regex("^0*(\\d+)(?:\\s*(?:/|of\\b|\\.)\\s*.*)?$", RegexOption.IGNORE_CASE)
+
+private val MOVEMENT_ROMAN_NUMERALS =
+    mapOf(
+        "I" to 1,
+        "II" to 2,
+        "III" to 3,
+        "IV" to 4,
+        "V" to 5,
+        "VI" to 6,
+        "VII" to 7,
+        "VIII" to 8,
+        "IX" to 9,
+        "X" to 10,
+        "XI" to 11,
+        "XII" to 12,
+        "XIII" to 13,
+        "XIV" to 14,
+        "XV" to 15,
+        "XVI" to 16,
+        "XVII" to 17,
+        "XVIII" to 18,
+        "XIX" to 19,
+        "XX" to 20,
+    )
+
+private fun parseMovementNumber(raw: String): Int? {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return null
+    val intMatch = MOVEMENT_LEADING_INT_REGEX.matchEntire(trimmed)
+    if (intMatch != null) {
+        return intMatch.groupValues[1].toIntOrNull()?.takeIf { it > 0 }
+    }
+    val head = trimmed.substringBefore('/').trim().trimEnd('.').uppercase()
+    return MOVEMENT_ROMAN_NUMERALS[head]
+}
+
 internal fun Metadata.movementNumber(): Int? =
     (xiph["MOVEMENTNUMBER"]
             ?: mp4["©mvi"]
             ?: id3v2["MVIN"]
             ?: id3v2["TXXX:MOVEMENTNUMBER"])
         ?.firstOrNull()
-        ?.substringBefore('/')
-        ?.trim()
-        ?.toIntOrNull()
+        ?.let(::parseMovementNumber)
 
 internal fun Metadata.musicBrainzWorkId(): String? =
     (xiph["MUSICBRAINZ_WORKID"]

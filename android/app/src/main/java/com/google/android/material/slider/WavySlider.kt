@@ -754,18 +754,39 @@ constructor(
                 tmpTrackInactiveTintList.defaultColor,
             )
 
-        val count = envelope.size
-        val step = trackLength / count
+        val srcCount = envelope.size
+        val visibleCount =
+            if (trackLength / srcCount < 2.2f * density) {
+                (trackLength / (2.4f * density)).toInt().coerceIn(min(48, srcCount), srcCount)
+            } else {
+                srcCount
+            }
+        val step = trackLength / visibleCount
         val barWidth = (step * 0.62f).coerceIn(1.2f * density, 4f * density)
         val halfBarW = barWidth / 2f
         val minHalfH = max(trackHeight / 2f, 2f * density)
         val availableHalfH = max(minHalfH + 4f * density, (height - paddingTop - paddingBottom) * 0.44f)
         val maxHalfH = min(availableHalfH, 16f * density)
 
-        for (i in 0 until count) {
-            val barIdx = if (isRtl) count - 1 - i else i
+        for (i in 0 until visibleCount) {
+            val logicalIdx = if (isRtl) visibleCount - 1 - i else i
+            val amp =
+                if (visibleCount == srcCount) {
+                    envelope[logicalIdx].coerceIn(0f, 1f)
+                } else {
+                    val startIdx = (logicalIdx * srcCount) / visibleCount
+                    val endIdx =
+                        (((logicalIdx + 1) * srcCount) / visibleCount)
+                            .coerceAtLeast(startIdx + 1)
+                            .coerceAtMost(srcCount)
+                    var peak = 0f
+                    for (j in startIdx until endIdx) {
+                        val v = envelope[j]
+                        if (v > peak) peak = v
+                    }
+                    peak.coerceIn(0f, 1f)
+                }
             val cx = originX + (i + 0.5f) * step
-            val amp = envelope[barIdx].coerceIn(0f, 1f)
             val halfH = minHalfH + amp * (maxHalfH - minHalfH)
             val isPlayed = if (isRtl) cx >= thumbX else cx <= thumbX
             waveformBarPaint.color = if (isPlayed) activeColor else inactiveColor

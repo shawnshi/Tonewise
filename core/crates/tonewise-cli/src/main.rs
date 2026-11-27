@@ -1,4 +1,4 @@
-use lofty::config::WriteOptions;
+use lofty::config::{ParseOptions, ParsingMode, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, Tag};
@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tonewise_dsp_core::{AudioAnalysisResult, analyze_audio_file};
 use tonewise_metadata::{
-    DjEnergy, DjVocals, TempoBucket, normalize_album_artist, normalize_dj_scenes, normalize_genre,
-    normalize_year, split_artists_preserving_whitelist, split_composers_preserving_whitelist,
-    split_multi_value,
+    DjEnergy, DjVocals, TempoBucket, is_classical_track, normalize_album_artist,
+    normalize_dj_scenes, normalize_genre, normalize_year, parse_roman_numeral,
+    split_artists_preserving_whitelist, split_composers_preserving_whitelist, split_multi_value,
+    split_work_and_movement,
 };
 use tonewise_rules::MoodDictionary;
 use tonewise_sync::{
@@ -296,10 +297,18 @@ fn process_single_track(
         .unwrap_or_default();
     let is_dsd = matches!(ext_lower.as_str(), "dsf" | "dff");
 
-    let mut tagged = match Probe::open(path).and_then(|p| p.read()) {
+    let read_opts = |read_props: bool| {
+        ParseOptions::new()
+            .read_properties(read_props)
+            .parsing_mode(ParsingMode::Relaxed)
+    };
+    let mut tagged = match Probe::open(path).and_then(|p| p.options(read_opts(true)).read()) {
         Ok(t) => Some(t),
-        Err(_) if is_dsd => None,
-        Err(e) => return Err(format!("{}: lofty read failed: {e}", path.display())),
+        Err(first_err) => match Probe::open(path).and_then(|p| p.options(read_opts(false)).read()) {
+            Ok(t) => Some(t),
+            Err(_) if is_dsd => None,
+            Err(_) => return Err(format!("{}: lofty read failed: {first_err}", path.display())),
+        },
     };
 
     let dsd_fallback_analysis = |codec: &str| AudioAnalysisResult {
@@ -319,7 +328,7 @@ fn process_single_track(
         if let Some(ref t) = tagged {
             let props = t.properties();
             AudioAnalysisResult {
-                codec: format!("{:?}", t.file_type()),
+                codec: canonical_codec_name(Some(t.file_type()), &ext_lower),
                 duration_ms: props.duration().as_millis() as u64,
                 sample_rate_hz: props.sample_rate().unwrap_or(44100),
                 bit_depth: props.bit_depth().map(|b| b as u32),
@@ -335,7 +344,14 @@ fn process_single_track(
         }
     } else {
         match analyze_audio_file(path) {
-            Ok(res) => res,
+            Ok(mut res) => {
+                if let Some(ref t) = tagged {
+                    res.codec = canonical_codec_name(Some(t.file_type()), &ext_lower);
+                } else if !ext_lower.is_empty() {
+                    res.codec = ext_lower.clone();
+                }
+                res
+            }
             Err(_) if is_dsd => dsd_fallback_analysis(&ext_lower),
             Err(e) => return Err(format!("{}: analysis failed: {e}", path.display())),
         }
@@ -353,10 +369,18 @@ fn process_single_track(
         .and_then(|t| t.title().map(|s| s.to_string()))
         .unwrap_or(fallback_title);
     let album = primary_tag.and_then(|t| t.album().map(|s| s.to_string()));
-    let genre = primary_tag
-        .and_then(|t| t.genre())
-        .map(|s| normalize_genre(&s))
-        .filter(|s| !s.is_empty());
+    let raw_genres: Vec<&str> = primary_tag
+        .map(|t| t.get_strings(&ItemKey::Genre).collect())
+        .unwrap_or_default();
+    let genre = if !raw_genres.is_empty() {
+        let norm = normalize_genre(&raw_genres.join("; "));
+        if norm.is_empty() { None } else { Some(norm) }
+    } else {
+        primary_tag
+            .and_then(|t| t.genre())
+            .map(|s| normalize_genre(&s))
+            .filter(|s| !s.is_empty())
+    };
 
     let mut album_artist = None;
     let mut raw_artists = Vec::new();
@@ -389,6 +413,14 @@ fn process_single_track(
     if let Some(tag) = primary_tag {
         album_artist = tag
             .get_string(&ItemKey::AlbumArtist)
+            .or_else(|| {
+                tag.items().find_map(|it| match it.key() {
+                    ItemKey::Unknown(k) if k.eq_ignore_ascii_case("ALBUM ARTIST") => {
+                        it.value().text()
+                    }
+                    _ => None,
+                })
+            })
             .map(normalize_album_artist)
             .filter(|s| !s.is_empty());
         for item in tag.get_strings(&ItemKey::TrackArtists) {
@@ -555,6 +587,34 @@ fn process_single_track(
             }
         }
         save_tagged_file_atomically(path, tf)?;
+    }
+
+    let genre_str = genre.as_deref().unwrap_or("");
+    let primary_composer = composers.first().map(String::as_str);
+    let primary_conductor = conductors.first().map(String::as_str);
+    if is_classical_track(
+        genre_str,
+        work_name.as_deref(),
+        primary_composer,
+        primary_conductor,
+        &title,
+    ) && (work_name.is_none() || movement_name.is_none() || movement_number.is_none())
+    {
+        let parsed = split_work_and_movement(
+            &title,
+            work_name.as_deref(),
+            movement_name.as_deref(),
+            movement_number,
+        );
+        if work_name.is_none() && !parsed.work.is_empty() {
+            work_name = Some(parsed.work);
+        }
+        if movement_name.is_none() && !parsed.movement.is_empty() {
+            movement_name = Some(parsed.movement);
+        }
+        if movement_number.is_none() {
+            movement_number = parsed.movement_number;
+        }
     }
 
     let fp = compute_fingerprint_from_path(path)?;
@@ -1091,6 +1151,36 @@ fn is_audio_file(path: &Path) -> bool {
         })
 }
 
+fn canonical_codec_name(file_type: Option<lofty::file::FileType>, ext_lower: &str) -> String {
+    use lofty::file::FileType;
+    match file_type {
+        Some(FileType::Flac) => "flac".to_string(),
+        Some(FileType::Mpeg) => "mp3".to_string(),
+        Some(FileType::Vorbis) => "ogg".to_string(),
+        Some(FileType::Opus) => "opus".to_string(),
+        Some(FileType::Wav) => "wav".to_string(),
+        Some(FileType::Aiff) => "aiff".to_string(),
+        Some(FileType::Aac) => "aac".to_string(),
+        Some(FileType::Ape) => "ape".to_string(),
+        Some(FileType::WavPack) => "wv".to_string(),
+        Some(FileType::Mp4) => {
+            if matches!(ext_lower, "m4a" | "alac" | "aac") {
+                ext_lower.to_string()
+            } else {
+                "mp4".to_string()
+            }
+        }
+        Some(other) => {
+            if !ext_lower.is_empty() {
+                ext_lower.to_string()
+            } else {
+                format!("{other:?}").to_ascii_lowercase()
+            }
+        }
+        None => ext_lower.to_string(),
+    }
+}
+
 fn parse_gain_db(s: &str) -> Option<f32> {
     s.trim()
         .trim_end_matches("dB")
@@ -1487,8 +1577,11 @@ mod tests {
 }
 
 fn parse_movement_number(raw: &str) -> Option<u32> {
-    let digits: String = raw
-        .trim()
+    let trimmed = raw.trim();
+    if let Some(roman) = parse_roman_numeral(trimmed.trim_end_matches('.')) {
+        return Some(roman);
+    }
+    let digits: String = trimmed
         .chars()
         .skip_while(|c| !c.is_ascii_digit())
         .take_while(|c| c.is_ascii_digit())

@@ -144,13 +144,13 @@ class ZuneMobileUiUpgradeTest {
     }
 
     @Test
-    fun collectionPivot_preservesFixedEightZuneSubPivotsWithoutScenes() {
+    fun collectionPivot_preservesConvergedSevenZuneSubPivotsWithoutComposersOrScenes() {
         assertEquals(
-            listOf("albums", "tracks", "artists", "genres", "classical", "composers", "conductors", "playlists"),
-            CollectionPivot.entries.map { it.label },
+            listOf("albums", "tracks", "artists", "genres", "classical", "conductors", "playlists"),
+            CollectionPivot.DEFAULT_PIVOTS.map { it.label },
         )
-        assertEquals(CollectionPivot.entries, CollectionPivot.DEFAULT_PIVOTS)
-        assertFalse(CollectionPivot.entries.any { it.musicType == MusicType.SCENES })
+        assertFalse(CollectionPivot.DEFAULT_PIVOTS.contains(CollectionPivot.COMPOSERS))
+        assertFalse(CollectionPivot.DEFAULT_PIVOTS.any { it.musicType == MusicType.SCENES })
     }
 
     @Test
@@ -632,7 +632,7 @@ class ZuneMobileUiUpgradeTest {
 
         val homeVm = File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/home/HomeViewModel.kt").readText(Charsets.UTF_8)
         assertTrue(homeVm.contains("val quickplaySections: StateFlow<QuickplaySections>"))
-        assertTrue(homeVm.contains("lastQuickplayCacheKey"))
+        assertTrue(homeVm.contains("KEY_QUICKPLAY_SECTIONS_SNAPSHOT"))
         assertTrue(homeVm.contains("delay(180L)"))
 
         val quickplayFrag = File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/home/quickplay/QuickplayFragment.kt").readText(Charsets.UTF_8)
@@ -693,5 +693,58 @@ class ZuneMobileUiUpgradeTest {
         assertTrue(headerSrc.contains("override fun onMeasure"))
         assertTrue(headerSrc.contains("MeasureSpec.UNSPECIFIED"))
         assertTrue(headerSrc.contains("maxScroll = (strip.measuredWidth - width).coerceAtLeast(0)"))
+    }
+
+    @Test
+    fun nowPlaying_NonClassicalThreeLines_and_SingleRowSeekBarHold() {
+        val repoRoot = findRepoRoot()
+
+        val seekXml =
+            File(repoRoot, "android/app/src/main/res/layout/view_seek_bar.xml")
+                .readText(Charsets.UTF_8)
+        assertTrue(seekXml.contains("<LinearLayout"))
+        assertTrue(seekXml.contains("android:orientation=\"horizontal\""))
+        assertTrue(seekXml.contains("android:layout_weight=\"1\""))
+        assertTrue(seekXml.contains("android:layout_height=\"48dp\""))
+        assertTrue(seekXml.contains("app:thumbRadius=\"4dp\""))
+
+        val h360Xml =
+            File(repoRoot, "android/app/src/main/res/layout-h360dp/fragment_playback_panel.xml")
+                .readText(Charsets.UTF_8)
+        val seekIdx = h360Xml.indexOf("android:id=\"@+id/playback_seek_bar\"")
+        assertTrue(seekIdx > 0)
+        val seekBlock = h360Xml.substring(seekIdx, (seekIdx + 360).coerceAtMost(h360Xml.length))
+        assertTrue(seekBlock.contains("app:layout_constraintEnd_toEndOf=\"parent\""))
+
+        val panelSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/playback/PlaybackPanelFragment.kt")
+                .readText(Charsets.UTF_8)
+        assertTrue(panelSrc.contains("val albumYearLine = listOfNotNull(albumPart, yearPart).joinToString(\" · \")"))
+        assertTrue(panelSrc.contains("if (albumYearLine.isNotEmpty()) View.VISIBLE else View.INVISIBLE"))
+    }
+
+    @Test
+    fun playbackLove_MovedToUtilityBarBelowControls_WithFullWidthInfoAcrossAllLayouts() {
+        val repoRoot = findRepoRoot()
+        val panelVariants =
+            listOf(
+                "android/app/src/main/res/layout/fragment_playback_panel.xml",
+                "android/app/src/main/res/layout-h360dp/fragment_playback_panel.xml",
+                "android/app/src/main/res/layout-h520dp/fragment_playback_panel.xml",
+            )
+        for (rel in panelVariants) {
+            val xml = File(repoRoot, rel).readText(Charsets.UTF_8)
+            assertTrue("$rel must contain playback_utility_bar", xml.contains("android:id=\"@+id/playback_utility_bar\""))
+            assertTrue("$rel must contain playback_love", xml.contains("android:id=\"@+id/playback_love\""))
+            assertTrue("$rel must contain lbl_love_track", xml.contains("android:contentDescription=\"@string/lbl_love_track\""))
+            assertFalse(
+                "$rel must not constrain playback_info_container to playback_love",
+                xml.contains("app:layout_constraintEnd_toStartOf=\"@+id/playback_love\""),
+            )
+            assertFalse(
+                "$rel must not overlay playback_stage_toggle with #66000000 on cover",
+                xml.contains("app:backgroundTint=\"#66000000\""),
+            )
+        }
     }
 }

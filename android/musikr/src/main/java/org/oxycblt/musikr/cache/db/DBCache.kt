@@ -94,7 +94,12 @@ private constructor(
     override suspend fun read(file: File): CacheResult {
         val currentMapping = getOrLoadMapping()
         val dbSong = currentMapping[file.uri] ?: return CacheResult.Miss(file)
-        if (dbSong.modifiedMs != file.modifiedMs) {
+        val sizeChanged =
+            dbSong.fileSize != null &&
+                dbSong.fileSize > 0L &&
+                file.size > 0L &&
+                dbSong.fileSize != file.size
+        if (dbSong.modifiedMs != file.modifiedMs || sizeChanged) {
             return CacheResult.Stale(file, dbSong.addedMs)
         }
         val song = CachedFile(file, dbSong.toAudio(), addedMs = dbSong.addedMs)

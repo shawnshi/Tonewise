@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using Tonewise.SyncHost.Workbench;
 
 namespace Tonewise.Desktop.Models;
 
@@ -243,20 +244,12 @@ public sealed record TrackItem(
         string? genre,
         string? workName,
         string? composersDisplay,
-        string? conductorsDisplay)
-    {
-        if (IsClassicalGenre(genre)) return true;
-        if (IsExplicitNonClassicalGenre(genre))
-        {
-            return IsClassicalWorkSignal(workName);
-        }
-        if (!string.IsNullOrWhiteSpace(workName)) return true;
-        if (!string.IsNullOrWhiteSpace(conductorsDisplay)) return true;
-        return string.IsNullOrWhiteSpace(genre) && !string.IsNullOrWhiteSpace(composersDisplay);
-    }
+        string? conductorsDisplay,
+        string? title = null)
+        => ClassicalMetadataEngine.IsClassicalTrack(genre, workName, composersDisplay, conductorsDisplay, title);
 
     public bool IsClassical =>
-        ClassifyIsClassical(Genre, WorkName, ComposersDisplay, ConductorsDisplay);
+        ClassifyIsClassical(Genre, WorkName, ComposersDisplay, ConductorsDisplay, Title);
 
     public string ClassicalFourLevelSummary =>
         IsClassical
@@ -389,6 +382,67 @@ public sealed record QuickplayTileItem(
 {
     public override string ToString() =>
         string.IsNullOrWhiteSpace(Subtitle) ? Title : $"{Title} · {Subtitle}";
+}
+
+public sealed record QuickplayMaterializedSnapshot(
+    IReadOnlyList<QuickplayTileItem> History,
+    IReadOnlyList<QuickplayTileItem> NewAlbums,
+    IReadOnlyList<QuickplayTileItem> Rediscovery,
+    IReadOnlyList<QuickplayTileItem> Pins,
+    long DataVersion
+);
+
+public static class QuickplayTileCollectionHelper
+{
+    public static bool AreEquivalent(QuickplayTileItem a, QuickplayTileItem b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (!string.Equals(a.TileId, b.TileId, StringComparison.Ordinal)
+            || !string.Equals(a.Kind, b.Kind, StringComparison.Ordinal)
+            || !string.Equals(a.TargetKey, b.TargetKey, StringComparison.Ordinal)
+            || !string.Equals(a.Title, b.Title, StringComparison.Ordinal)
+            || !string.Equals(a.Subtitle, b.Subtitle, StringComparison.Ordinal)
+            || !string.Equals(a.BadgeText, b.BadgeText, StringComparison.Ordinal)
+            || !string.Equals(a.CoverArtPath, b.CoverArtPath, StringComparison.Ordinal)
+            || a.IsPinned != b.IsPinned
+            || a.Tracks.Count != b.Tracks.Count)
+        {
+            return false;
+        }
+        for (int i = 0; i < a.Tracks.Count; i++)
+        {
+            if (!string.Equals(a.Tracks[i].TrackUid, b.Tracks[i].TrackUid, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static int ApplyDiff(ObservableCollection<QuickplayTileItem> dest, IReadOnlyList<QuickplayTileItem> src)
+    {
+        int changes = 0;
+        int shared = Math.Min(dest.Count, src.Count);
+        for (int i = 0; i < shared; i++)
+        {
+            if (!AreEquivalent(dest[i], src[i]))
+            {
+                dest[i] = src[i];
+                changes++;
+            }
+        }
+        while (dest.Count > src.Count)
+        {
+            dest.RemoveAt(dest.Count - 1);
+            changes++;
+        }
+        for (int i = shared; i < src.Count; i++)
+        {
+            dest.Add(src[i]);
+            changes++;
+        }
+        return changes;
+    }
 }
 
 public sealed record SubTabOption(

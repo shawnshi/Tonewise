@@ -627,6 +627,27 @@ public sealed class SyncHostServer : IAsyncDisposable
             return Results.Text(SerializeAutoEqPolicy(policy), "application/json", Encoding.UTF8);
         });
 
+        app.MapGet("/api/v1/lastfm/session", (HttpRequest request) =>
+        {
+            if (!TryAuthenticateV2(request, out _, out var authErr))
+                return authErr!;
+
+            var cfg = Ledger.LastFmAccountConfig.Load(_tonewiseDir);
+            if (cfg is null || !cfg.HasWriteSession)
+            {
+                return Results.Json(new { configured = false });
+            }
+
+            return Results.Json(new
+            {
+                configured = true,
+                username = cfg.Username,
+                api_key = cfg.ApiKey,
+                shared_secret = cfg.ApiSecret,
+                session_key = cfg.SessionKey,
+            });
+        });
+
         app.MapPost("/api/v1/auto-eq", async (HttpRequest request) =>
         {
             if (!TryAuthenticateV2(request, out _, out var authErr))

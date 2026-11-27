@@ -552,6 +552,11 @@ public sealed partial class MainWindow : Window
         var accentBrush = new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
 
         var tabs = ViewModel.CurrentSubTabs;
+        if (tabs.Count == 0)
+        {
+            // Keep existing collection/studio buttons intact while SubPivotBar's parent Border is Collapsed.
+            return;
+        }
         bool canReuseInPlace = SubPivotBar.Children.Count == tabs.Count;
         if (canReuseInPlace)
         {
@@ -678,49 +683,6 @@ public sealed partial class MainWindow : Window
     }
 
     private QuickplayTileItem? _rightClickedQuickplayTile;
-
-    private void OnQuickplayRepeaterElementPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
-    {
-        if (args.Element is not FrameworkElement root) return;
-        var img = FindLogicalOrVisualImage(root, "TileCoverImage");
-        if (img is null) return;
-        var tile = (sender.ItemsSourceView?.GetAt(args.Index) as QuickplayTileItem)
-            ?? (root.DataContext as QuickplayTileItem);
-        img.Source = CoverArtImageCache.GetQuickplayCover(tile?.CoverArtPath);
-    }
-
-    private static Image? FindLogicalOrVisualImage(DependencyObject root, string targetName)
-    {
-        if (root is FrameworkElement fe && fe.FindName(targetName) is Image named)
-        {
-            return named;
-        }
-        return FindImageInLogicalOrVisualTree(root);
-    }
-
-    private static Image? FindImageInLogicalOrVisualTree(DependencyObject node)
-    {
-        if (node is Image img) return img;
-        if (node is ContentControl { Content: DependencyObject contentObj })
-        {
-            var inner = FindImageInLogicalOrVisualTree(contentObj);
-            if (inner is not null) return inner;
-        }
-        if (node is Border { Child: DependencyObject borderChild })
-        {
-            var inner = FindImageInLogicalOrVisualTree(borderChild);
-            if (inner is not null) return inner;
-        }
-        if (node is Panel panel)
-        {
-            foreach (var child in panel.Children)
-            {
-                var inner = FindImageInLogicalOrVisualTree(child);
-                if (inner is not null) return inner;
-            }
-        }
-        return FindDescendantImage(node);
-    }
 
     private void OnQuickplayTileClick(object sender, RoutedEventArgs e)
     {

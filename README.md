@@ -1,7 +1,7 @@
 <p align="center"><img src="docs/assets/tonewise-icon.jpg" width="140" alt="Tonewise Icon"></p>
 <h1 align="center"><b>Tonewise 知律</b></h1>
 <h4 align="center">懂作品的章法，亦懂入景的直觉。Structured for works. Built for scenes. Bit-perfect to the ear.</h4>
-<p align="center"><code>v1.0.7</code> · <code>GPL-3.0</code> · <code>Rust 2024</code> · <code>WinUI 3 (.NET 9)</code> · <code>Android Kotlin / Compose</code></p>
+<p align="center"><code>v1.0.13</code> · <code>GPL-3.0</code> · <code>Rust 2024</code> · <code>WinUI 3 (.NET 9)</code> · <code>Android Kotlin / Compose</code></p>
 
 <p align="center"><img src="docs/assets/tonewise-banner.jpg" width="640" alt="Tonewise Banner"></p>
 
@@ -26,15 +26,14 @@
 
 * **多维度古典元数据建模**：深度解析 `WORK`、`MOVEMENTNAME`、`MOVEMENTNUMBER`、`MUSICBRAINZ_WORKID` 与作曲家 / 指挥字段；支持“作曲家 → 作品 → 录音版本”三级联动检索，并在播放与洗牌时自动按作品整部展开、按指挥维度隔离合辑同作品录音。
 * **版本对比与数码画册**：支持同一作品多个演绎版本之间一键比对与按比例进度切曲，内置基于原生 `PdfRenderer` 的专辑 `booklet.pdf` 阅读器。
-* **安全原子标签策展**：桌面端审校台基于 Rust `lofty` 实现原地事务写回（保留纯音频 `audio_frame_blake3` 不变、规避 ID3v1 30 字节截断异常），并共享多语种艺人 / 作曲家 / 流派规整词典与 ICU 汉字拼音映射表。
+* **安全原子标签策展**：桌面端审校台基于 Rust `lofty` 实现原地事务写回（保留纯音频 `audio_frame_blake3` 不变、规避 ID3v1 30 字节截断异常，并支持自动将 FLAC 非标准前置 `ID3v2` 标签回填至 `VorbisComments` 后原子剥离修复），共享多语种艺人 / 作曲家 / 流派规整词典与 ICU 汉字拼音映射表；跨端统一支持多值标签解析、增量自愈重扫与重复音频指纹跳过缓存。
 
-### 3. 双端 Zune / Metro 界面体系（`v1.0.7`）
+### 3. 双端 Zune / Metro 界面体系（`v1.0.13`）
 
-* **Windows 11 桌面端**：基于 WinUI 3 无边框壳层构建纯黑 `#000000` / 纯白 `#FFFFFF` 双场高对比工作台；顶部设 **`quickplay · collection · now playing · studio`** 四大枢纽与 10 维馆藏子视图，集成专辑拼贴背景墙、`up next | booklet | recordings` 可收起队列面板、键盘多选撤销工作流与纯黑 OLED 壁挂钟。
+* **Windows 11 桌面端**：基于 WinUI 3 无边框壳层构建纯黑 `#000000` / 纯白 `#FFFFFF` 双场高对比工作台（支持启动首帧持久化主题预载与 DWM 标题栏同步，消除浅色模式启动黑闪）；顶部设 **`quickplay · collection · now playing · studio`** 四大枢纽与 10 维馆藏子视图（保留独立 `composers` 视图的同时新增两段式 `classical` 枢纽并采用时期分桶 `O(1)` 切换与虚拟化延迟绑定），集成后台预物化毫秒级 `quickplay` 切换、三行自适应古典/流行播放舞台、两段式 `Composer → Work → Recording → Movement` 树、`up next | booklet | recordings` 可收起队列面板与纯黑 OLED 壁挂钟。
 * **Android 移动端**：
-  * **精简全景架构**：顶部 **`quickplay · collection · autodj`** 三大枢纽；`collection` 固定提供 **`albums · tracks · artists · genres · classical · composers · conductors · playlists`** 八维常驻二级视图；`autodj` 聚焦一键 50 首时段电台与 **`scenes`** 场景磁贴；右上角 `···` 抽屉收敛为 6 项高频工具。
-  * **谜底黑胶灵感双形态播放页**：支持在**拟真旋转黑胶唱盘（同心纹路 + 居中封面唱芯 + 动态金属唱臂）**与**精装专辑封套**之间一键切换，默认采用当前封面取色的低饱和径向氛围光晕背景（设置中可切回 Zune 马赛克墙）。
-  * **降噪与交互收敛**：移除歌曲下方冗余通道与 5D 胶囊；配备 150 段声学波形进度条（等宽数字 `tnum`，点击总时长可切换剩余时间）；曲目更多菜单（含信号链路、多版录音对比与数码画册）移至顶栏右上角；睡眠定时统一合并进纯黑 OLED 电子挂钟界面，提供大尺寸夜间触控靶区与常驻倒计时徽标。
+  * **精简全景架构与冷启瞬显**：顶部 **`quickplay · collection · autodj`** 三大枢纽；`quickplay` 启用 `sync_kv` 快照首帧直出与启动预热；`collection` 收敛为 **`albums · tracks · artists · genres · classical · conductors · playlists`** 七维常驻二级视图，其中 `classical` 采用“全小写作曲家索引 + 全黑 0dp 时期/字母跳转矩阵 → 体裁筛选/多版本聚合/横向演绎切换/无边框罗马数字乐章”两段式结构，并支持整部/单乐章顺序连播锁定（不覆写全局随机）。
+  * **三行自适应播放页与一步 Last.fm 授权**：支持黑胶唱盘与封套一键切换，采用三行自适应固定高度信息区（非古典保留第三行极简负空间，古典优先保留作曲家与指挥并分级缩略乐团名）；同步抽屉支持一键 Browser Auth 回调与直接继承已配对 PC 端的 Last.fm 会话。
 
 ### 4. 无云双端同步（LAN Sync v2 & USB ADB）
 
@@ -57,14 +56,14 @@
 
 ---
 
-## 发行包下载（`v1.0.7`）
+## 发行包下载（`v1.0.13`）
 
 仓库随附最新构建并校验的双端 Release 发行包：
 
 | 平台 | 安装包 / 发行归档 | 版本与运行环境 | 文件大小 | SHA-256 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v1.0.7`（`versionCode 107`） | `16,813,006` bytes（~16.03 MiB） | `cfc505e07fff80995dd156556940624c550cd18cb9309f5333b9fb10b253ff58` |
-| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | `v1.0.7` · WinUI 3（`net9.0-windows10.0.26100.0`） | `48,995,125` bytes（~46.73 MiB） | `b734eb434fb30b3b1b85652929cc6462075acb6682597a0d419a328167f7ad63` |
+| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v1.0.13`（`versionCode 113`） | `16,864,331` bytes（~16.08 MiB） | `e47f48f277225e158abbbd6538156dfef7975627468b1d5fd8add29d403496d4` |
+| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | `v1.0.13` · WinUI 3（`net9.0-windows10.0.26100.0`） | `49,753,622` bytes（~47.45 MiB） | `aed8d66ea791401a1959b9971b4ce832e912c21b0ffa8c08aa77719a8fa0292e` |
 
 * **Android 签名与升级说明**：已通过 R8 优化、`zipalign` 4 字节对齐与 `apksigner` 校验（覆盖 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`）；当前仓库发行包使用调试签名密钥封装以保持本地覆盖升级一致，正式构建可通过 `TONEWISE_RELEASE_*` 环境变量与 `-PrequireReleaseSigning` 启用独立发布签名。
 * **Windows x64 运行说明**：解压 `tonewise-windows-x64-release.zip` 后运行 `Tonewise.Desktop.exe`（需安装 .NET 9 Desktop Runtime；Windows App SDK 1.7、Rust `tonewise_core.dll` 与 `tonewise-cli.exe` 已自包含打包；USB 自动同步支持自动探测 `adb.exe`）。
@@ -73,7 +72,7 @@
 
 ## 界面预览
 
-> 以下预览图展示 Zune / Metro 视觉基线与桌面 / 移动核心布局；`v1.0.7` 手机端已进一步精简主菜单、固定 `collection` 八维子导航并新增黑胶双形态播放舞台。
+> 以下预览图展示 Zune / Metro 视觉基线与桌面 / 移动核心布局；`v1.0.13` 已进一步完成双端两段式古典索引（含时期分桶 `O(1)` 切换与列表虚拟化优化）、启动首帧主题零闪烁预载、FLAC 前置 `ID3v2` 原子自愈剥离与跨端多值元数据入库升级。
 
 ### Android 移动端
 

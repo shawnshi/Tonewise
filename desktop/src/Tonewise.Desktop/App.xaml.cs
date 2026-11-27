@@ -9,8 +9,28 @@ public partial class App : Application
     private const long MaxCrashLogBytes = 512 * 1024;
     private Window? _window;
 
+    internal static string InitialAppTheme { get; private set; } = "dark";
+
     public App()
     {
+        try
+        {
+            var saved = Tonewise.SyncHost.Workbench.DesktopSettingsStore.Load();
+            InitialAppTheme = saved.AppTheme is "light" or "dark" or "system" ? saved.AppTheme : "dark";
+            if (InitialAppTheme == "light")
+            {
+                RequestedTheme = ApplicationTheme.Light;
+            }
+            else if (InitialAppTheme == "dark")
+            {
+                RequestedTheme = ApplicationTheme.Dark;
+            }
+        }
+        catch
+        {
+            InitialAppTheme = "dark";
+        }
+
         InitializeComponent();
         UnhandledException += OnAppUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;

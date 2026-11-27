@@ -52,6 +52,9 @@ internal static class TonewiseCoreNative
     internal static extern IntPtr tonewise_analyze_audio_path(IntPtr pathUtf8);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tonewise_probe_track_path(IntPtr pathUtf8);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tonewise_write_audio_tags_json(IntPtr requestJson);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]

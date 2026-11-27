@@ -29,6 +29,7 @@ import org.oxycblt.musikr.tag.interpret.PreArtistsFrom
 import org.oxycblt.musikr.tag.interpret.PreGenre
 import org.oxycblt.musikr.tag.interpret.PreSong
 import org.oxycblt.musikr.util.unlikelyToBeNull
+import org.oxycblt.musikr.util.update
 
 internal data class MusicGraph(
     val songVertex: List<SongVertex>,
@@ -186,30 +187,43 @@ private class MusicGraphBuilderImpl : MusicGraph.Builder {
     private val playlistVertices = mutableSetOf<PlaylistVertex>()
 
     override fun add(preSong: PreSong) {
-        val uid = preSong.v363Uid
-        if (songVertices.containsKey(uid)) {
-            return
+        var effectivePreSong = preSong
+        var uid = preSong.v363Uid
+        val existingVertex = songVertices[uid]
+        if (existingVertex != null) {
+            if (existingVertex.preSong.uri == preSong.uri) {
+                return
+            }
+            uid =
+                Music.UID.auxio(Music.UID.Item.SONG) {
+                    update(uid.toString())
+                    update(preSong.uri.toString())
+                }
+            if (songVertices.containsKey(uid)) {
+                return
+            }
+            effectivePreSong = preSong.copy(v363Uid = uid)
         }
 
         val songGenreVertices =
-            preSong.preGenres.map { preGenre ->
+            effectivePreSong.preGenres.map { preGenre ->
                 genreVertices.getOrPut(preGenre) { GenreVertex(preGenre) }
             }
 
         val songArtistVertices =
-            preSong.preArtists.map { preArtist ->
+            effectivePreSong.preArtists.map { preArtist ->
                 artistVertices.getOrPut(preArtist) { ArtistVertex(preArtist) }
             }
 
         val albumVertex =
-            albumVertices.getOrPut(preSong.preAlbum) {
+            albumVertices.getOrPut(effectivePreSong.preAlbum) {
                 // Albums themselves have their own parent artists that also need to be
                 // linked up.
                 val albumArtistVertices =
-                    preSong.preAlbum.preArtists.preArtists.map { preArtist ->
+                    effectivePreSong.preAlbum.preArtists.preArtists.map { preArtist ->
                         artistVertices.getOrPut(preArtist) { ArtistVertex(preArtist) }
                     }
-                val albumVertex = AlbumVertex(preSong.preAlbum, albumArtistVertices.toMutableList())
+                val albumVertex = AlbumVertex(effectivePreSong.preAlbum, albumArtistVertices.toMutableList())
                 // Album vertex is linked, now link artists back to album.
                 albumArtistVertices.forEach { artistVertex ->
                     artistVertex.albumVertices.add(albumVertex)
@@ -219,7 +233,7 @@ private class MusicGraphBuilderImpl : MusicGraph.Builder {
 
         val songVertex =
             SongVertex(
-                preSong,
+                effectivePreSong,
                 albumVertex,
                 songArtistVertices.toMutableList(),
                 songGenreVertices.toMutableList(),

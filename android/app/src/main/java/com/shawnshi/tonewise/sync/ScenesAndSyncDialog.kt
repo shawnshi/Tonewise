@@ -48,6 +48,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -66,6 +67,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.activityViewModels
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BackportBottomSheetDialogFragment
@@ -192,6 +196,14 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                             lastFmRepository.authenticateMobileSession(key, secret, user, pass)
                         },
                         onStartLastFmBrowserAuth = { key, secret ->
+                            val url = lastFmRepository.beginOneTapBrowserAuth(key, secret)
+                            if (url != null) {
+                                runCatching {
+                                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                }
+                            }
+                        },
+                        onStartFallbackTokenBrowserAuth = { key, secret ->
                             val url = lastFmRepository.startBrowserAuth(key, secret)
                             if (url != null) {
                                 runCatching {
@@ -201,6 +213,37 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                         },
                         onCompleteLastFmBrowserAuth = { key, secret ->
                             lastFmRepository.completeBrowserAuth(key, secret)
+                        },
+                        onResumeCheckLastFmAuth = {
+                            lastFmRepository.tryAutoCompletePendingAuthOnResume()
+                        },
+                        onDisconnectLastFm = {
+                            lastFmRepository.disconnectAccount()
+                        },
+                        onImportLastFmFromPc = {
+                            when (val res = lanSyncRepository.fetchPairedLastFmSession()) {
+                                is LanSyncRepository.PairedLastFmSessionResult.Available -> {
+                                    val ok =
+                                        lastFmRepository.importPairedDesktopSession(
+                                            username = res.username,
+                                            apiKey = res.apiKey,
+                                            sharedSecret = res.sharedSecret,
+                                            sessionKey = res.sessionKey,
+                                        )
+                                    if (ok) {
+                                        requireContext().showToast(R.string.lbl_lastfm_connected_toast)
+                                    }
+                                    ok
+                                }
+                                is LanSyncRepository.PairedLastFmSessionResult.Error -> {
+                                    android.widget.Toast.makeText(
+                                        requireContext(),
+                                        res.message,
+                                        android.widget.Toast.LENGTH_SHORT,
+                                    ).show()
+                                    false
+                                }
+                            }
                         },
                         onSyncLastFmHistory = { lastFmRepository.syncLocalPlayHistory() },
                     )
@@ -234,10 +277,24 @@ private fun SyncHubSheet(
     onSaveLastFm: (Boolean, Boolean, String, String, String, String) -> Unit,
     onAuthLastFm: suspend (String, String, String, String) -> Boolean,
     onStartLastFmBrowserAuth: suspend (String, String) -> Unit,
+    onStartFallbackTokenBrowserAuth: suspend (String, String) -> Unit,
     onCompleteLastFmBrowserAuth: suspend (String, String) -> Boolean,
+    onResumeCheckLastFmAuth: suspend () -> Boolean,
+    onDisconnectLastFm: () -> Unit,
+    onImportLastFmFromPc: suspend () -> Boolean,
     onSyncLastFmHistory: suspend () -> Int,
 ) {
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                scope.launch { onResumeCheckLastFmAuth() }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     var manualUrl by
         remember(pairedHost?.baseUrl) {
             mutableStateOf(pairedHost?.baseUrl ?: discoveredHosts.firstOrNull()?.baseUrl ?: "")
@@ -250,15 +307,16 @@ private fun SyncHubSheet(
     var broadcastEnabled by remember(lastFmState.broadcastEnabled) {
         mutableStateOf(lastFmState.broadcastEnabled)
     }
-    var apiKey by remember(lastFmState.apiKey) { mutableStateOf(lastFmState.apiKey) }
-    var sharedSecret by remember(lastFmState.sharedSecret) { mutableStateOf(lastFmState.sharedSecret) }
+    var apiKey by remember(lastFmState.hasCustomCredentials, lastFmState.apiKey) {
+        mutableStateOf(if (lastFmState.hasCustomCredentials) lastFmState.apiKey else "")
+    }
+    var sharedSecret by remember(lastFmState.hasCustomCredentials, lastFmState.sharedSecret) {
+        mutableStateOf(if (lastFmState.hasCustomCredentials) lastFmState.sharedSecret else "")
+    }
     var username by remember(lastFmState.username) { mutableStateOf(lastFmState.username) }
     var sessionKey by remember(lastFmState.sessionKey) { mutableStateOf(lastFmState.sessionKey) }
     var password by remember { mutableStateOf("") }
-    var showLastFmConfig by
-        remember(lastFmState.sessionKey) {
-            mutableStateOf(!lastFmState.hasValidApiSession && lastFmState.sessionKey.isBlank())
-        }
+    var showAdvancedLastFm by remember { mutableStateOf(false) }
 
     LaunchedEffect(lastFmState.sessionKey) {
         if (lastFmState.sessionKey.isNotEmpty()) {
@@ -389,7 +447,7 @@ private fun SyncHubSheet(
 
             HorizontalDivider()
 
-            // 2. Last.fm Scrobble & Local Play History Sync (compact summary + collapsible config)
+            // 2. Last.fm Scrobble & Local Play History Sync (1-tap Browser Auth + PC Sync + collapsed Advanced)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -398,7 +456,7 @@ private fun SyncHubSheet(
                 Text(
                     text =
                         if (lastFmState.username.isNotBlank()) {
-                            "${stringResource(R.string.lbl_lastfm_title)} · ${lastFmState.username}"
+                            "${stringResource(R.string.lbl_lastfm_title)} · @${lastFmState.username}"
                         } else {
                             stringResource(R.string.lbl_lastfm_title)
                         },
@@ -406,16 +464,49 @@ private fun SyncHubSheet(
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { showLastFmConfig = !showLastFmConfig }) {
+                TextButton(onClick = { showAdvancedLastFm = !showAdvancedLastFm }) {
                     Text(stringResource(R.string.lbl_lastfm_config_toggle))
                     Icon(
                         painter = painterResource(R.drawable.ic_down_24),
                         contentDescription = null,
-                        modifier = Modifier.rotate(if (showLastFmConfig) 180f else 0f),
+                        modifier = Modifier.rotate(if (showAdvancedLastFm) 180f else 0f),
                     )
                 }
             }
-            if (showLastFmConfig) {
+
+            if (lastFmState.hasValidApiSession) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = { scope.launch { onSyncLastFmHistory() } },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(stringResource(R.string.lbl_lastfm_sync_now))
+                    }
+                    OutlinedButton(onClick = onDisconnectLastFm) {
+                        Text(stringResource(R.string.lbl_lastfm_disconnect))
+                    }
+                }
+            } else {
+                Button(
+                    onClick = { scope.launch { onStartLastFmBrowserAuth(apiKey, sharedSecret) } },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.lbl_lastfm_connect))
+                }
+                if (pairedHost != null) {
+                    OutlinedButton(
+                        onClick = { scope.launch { onImportLastFmFromPc() } },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(stringResource(R.string.lbl_lastfm_sync_from_pc))
+                    }
+                }
+            }
+
+            if (showAdvancedLastFm) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -452,6 +543,11 @@ private fun SyncHubSheet(
                         },
                     )
                 }
+                Text(
+                    text = stringResource(R.string.lbl_lastfm_advanced),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 OutlinedTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
@@ -518,7 +614,7 @@ private fun SyncHubSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(
-                        onClick = { scope.launch { onStartLastFmBrowserAuth(apiKey, sharedSecret) } },
+                        onClick = { scope.launch { onStartFallbackTokenBrowserAuth(apiKey, sharedSecret) } },
                         modifier = Modifier.weight(1f),
                     ) {
                         Text(stringResource(R.string.lbl_lastfm_browser_auth))
@@ -530,12 +626,6 @@ private fun SyncHubSheet(
                         Text(stringResource(R.string.lbl_lastfm_complete_auth))
                     }
                 }
-            }
-            Button(
-                onClick = { scope.launch { onSyncLastFmHistory() } },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(stringResource(R.string.lbl_lastfm_sync_now))
             }
             Text(
                 text =

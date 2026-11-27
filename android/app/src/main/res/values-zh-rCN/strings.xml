@@ -479,6 +479,11 @@
     <string name="lbl_lastfm_complete_auth">完成授权并获取 Session</string>
     <string name="lbl_lastfm_save">保存配置</string>
     <string name="lbl_lastfm_sync_now">同步播放记录与喜爱到 Last.fm</string>
+    <string name="lbl_lastfm_connect">浏览器一键连接 Last.fm</string>
+    <string name="lbl_lastfm_sync_from_pc">从已配对电脑导入 Last.fm 会话</string>
+    <string name="lbl_lastfm_disconnect">断开连接</string>
+    <string name="lbl_lastfm_advanced">高级 / 自定义 API Key</string>
+    <string name="lbl_lastfm_connected_toast">Last.fm 已连接</string>
     <string name="fmt_lastfm_stats">待上传队列：%1$d 条 · 累计已同步：%2$d 次播放</string>
     <string name="fmt_lastfm_stats_with_loved">待上传：%1$d 条播放 · %2$d 条喜爱 · 累计已同步：%3$d 次播放</string>
     <string name="lbl_dj_exclude_vocal">排除人声 (NOT vocal)</string>
@@ -543,4 +548,20 @@
     <string name="set_playback_ambient_backdrop">氛围封面光晕背景</string>
     <string name="set_playback_ambient_backdrop_desc">播放页背景使用当前封面氛围光晕替代马赛克墙</string>
     <string name="desc_toggle_vinyl_mode">切换黑胶唱盘与专辑封套</string>
+    <string name="lbl_classical_all_forms">all</string>
+    <string name="lbl_classical_form_symphonies">symphonies</string>
+    <string name="lbl_classical_form_concertos">concertos</string>
+    <string name="lbl_classical_form_chamber">chamber</string>
+    <string name="lbl_classical_form_solo">solo</string>
+    <string name="lbl_classical_era_baroque">baroque</string>
+    <string name="lbl_classical_era_classical">classical</string>
+    <string name="lbl_classical_era_romantic">romantic</string>
+    <string name="lbl_classical_era_modern">modern</string>
+    <string name="lbl_classical_all_eras">all eras</string>
+    <string name="fmt_classical_version_count">%d versions</string>
+    <string name="fmt_classical_single_version">1 version</string>
+    <string name="fmt_classical_composer_stats_with_era">%1$s · %2$d works · %3$d recordings</string>
+    <string name="fmt_classical_composer_stats">%1$d works · %2$d recordings</string>
+    <string name="desc_classical_back_composers">返回作曲家列表</string>
+    <string name="desc_classical_play_whole_work">按顺序连播整部作品</string>
 </resources>

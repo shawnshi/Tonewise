@@ -91,6 +91,8 @@ object PlayLedgerWatermarkMath {
 interface PlayCountRepository {
     val updates: StateFlow<Long>
 
+    fun ensureLoaded() {}
+
     fun getSnapshot(song: Song): PlayLedgerSnapshot
 
     fun getSnapshotByUid(songUid: String): PlayLedgerSnapshot
@@ -152,6 +154,10 @@ constructor(@ApplicationContext private val context: Context) : PlayCountReposit
 
     init {
         ioScope.launch { ensureCacheLoaded() }
+    }
+
+    override fun ensureLoaded() {
+        ensureCacheLoaded()
     }
 
     private fun ensureCacheLoaded() {

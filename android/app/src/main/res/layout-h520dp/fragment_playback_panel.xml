@@ -53,30 +53,17 @@
         app:layout_constraintStart_toStartOf="@+id/playback_pager"
         app:layout_constraintTop_toTopOf="@+id/playback_pager" />
 
-    <com.shawnshi.tonewise.ui.RippleFixMaterialButton
-        android:id="@+id/playback_stage_toggle"
-        style="@style/Widget.Auxio.Button.Playback.More"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_margin="8dp"
-        android:alpha="0.76"
-        android:contentDescription="@string/desc_toggle_vinyl_mode"
-        app:backgroundTint="#66000000"
-        app:icon="@drawable/ic_album_24"
-        app:iconTint="@android:color/white"
-        app:layout_constraintBottom_toBottomOf="@+id/playback_pager"
-        app:layout_constraintEnd_toEndOf="@+id/playback_pager"
-        app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Small" />
-
     <LinearLayout
         android:id="@+id/playback_info_container"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:minHeight="84dp"
+        android:gravity="center_vertical"
         android:layout_marginStart="@dimen/spacing_medium"
         android:layout_marginEnd="@dimen/spacing_medium"
         android:orientation="vertical"
         app:layout_constraintBottom_toTopOf="@+id/playback_seek_bar"
-        app:layout_constraintEnd_toStartOf="@+id/playback_love"
+        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintHorizontal_bias="0.5"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/playback_toolbar"
@@ -93,28 +80,35 @@
             android:textColor="?attr/colorSecondary"
             android:textSize="12sp"
             android:visibility="gone"
-            tools:text="Johann Sebastian Bach"
-            tools:visibility="visible" />
+            tools:text="Johann Sebastian Bach" />
 
         <TextView
             android:id="@+id/playback_song"
             style="@style/Widget.Auxio.TextView.Primary"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:ellipsize="end"
             android:fallbackLineSpacing="false"
+            android:fontFamily="sans-serif"
+            android:maxLines="1"
+            android:textSize="19sp"
             tools:text="Song Name" />
 
         <TextView
             android:id="@+id/playback_artist"
-            style="@style/Widget.Auxio.TextView.Secondary.Marquee"
+            style="@style/Widget.Auxio.TextView.Secondary.Ellipsize"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:ellipsize="end"
             android:fallbackLineSpacing="false"
-            tools:text="Artist Name" />
+            android:fontFamily="sans-serif"
+            android:maxLines="1"
+            android:textSize="13.5sp"
+            tools:text="Artist" />
 
         <TextView
             android:id="@+id/playback_album"
-            style="@style/Widget.Auxio.TextView.Secondary.Marquee"
+            style="@style/Widget.Auxio.TextView.Secondary.Ellipsize"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:fallbackLineSpacing="false"
@@ -123,29 +117,19 @@
 
         <TextView
             android:id="@+id/playback_meta"
-            style="@style/Widget.Auxio.TextView.Secondary.Marquee"
+            style="@style/Widget.Auxio.TextView.Secondary.Ellipsize"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:alpha="0.8"
+            android:alpha="0.72"
+            android:ellipsize="end"
             android:fallbackLineSpacing="false"
-            android:textSize="12sp"
-            android:visibility="gone"
-            tools:text="2024 • Genre • 3 plays" />
+            android:fontFamily="sans-serif"
+            android:maxLines="1"
+            android:textSize="12.5sp"
+            android:visibility="invisible"
+            tools:text="Album · 2024" />
 
     </LinearLayout>
-
-    <com.shawnshi.tonewise.ui.RippleFixMaterialButton
-        android:id="@+id/playback_love"
-        style="@style/Widget.Auxio.Button.Playback.More"
-        app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Small"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginEnd="@dimen/spacing_medium"
-        android:contentDescription="@string/lbl_love_track"
-        app:icon="@drawable/ic_heart_outline_24"
-        app:layout_constraintBottom_toBottomOf="@+id/playback_info_container"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="@+id/playback_info_container" />
 
     <com.shawnshi.tonewise.playback.ui.StyledSeekBar
         android:id="@+id/playback_seek_bar"
@@ -163,9 +147,9 @@
         android:layout_height="wrap_content"
         android:layout_marginStart="@dimen/spacing_medium"
         android:layout_marginEnd="@dimen/spacing_medium"
-        android:layout_marginBottom="@dimen/spacing_medium"
+        android:layout_marginBottom="@dimen/spacing_tiny"
         app:layout_constraintTop_toBottomOf="@+id/playback_seek_bar"
-        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/playback_utility_bar"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintWidth_max="400dp">
@@ -223,5 +207,50 @@
 
         </com.shawnshi.tonewise.playback.ui.button.ScaledPlaybackButtonGroup>
     </com.shawnshi.tonewise.playback.ui.ForcedLTRFrameLayout>
+
+    <LinearLayout
+        android:id="@+id/playback_utility_bar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:minHeight="48dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:layout_marginStart="@dimen/spacing_medium"
+        android:layout_marginEnd="@dimen/spacing_medium"
+        android:layout_marginBottom="@dimen/spacing_small"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/playback_controls_container"
+        app:layout_constraintWidth_max="400dp">
+
+        <com.shawnshi.tonewise.ui.RippleFixMaterialButton
+            android:id="@+id/playback_love"
+            style="@style/Widget.Auxio.Button.Playback.More"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
+            android:contentDescription="@string/lbl_love_track"
+            app:icon="@drawable/ic_heart_outline_24"
+            app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Small" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <com.shawnshi.tonewise.ui.RippleFixMaterialButton
+            android:id="@+id/playback_stage_toggle"
+            style="@style/Widget.Auxio.Button.Playback.More"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
+            android:contentDescription="@string/desc_toggle_vinyl_mode"
+            app:icon="@drawable/ic_album_24"
+            app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Small" />
+
+    </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

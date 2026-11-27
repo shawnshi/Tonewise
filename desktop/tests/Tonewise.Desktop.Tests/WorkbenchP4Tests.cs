@@ -1331,6 +1331,18 @@ public sealed class WorkbenchP4Tests
         using var ms = new MemoryStream();
         ms.Write("fLaC"u8);
 
+        // Spec-valid STREAMINFO (block 0, not last)
+        ms.WriteByte(0x00);
+        ms.Write([0, 0, 34]);
+        byte[] streaminfo = new byte[34];
+        streaminfo[10] = 0x0A;
+        streaminfo[11] = 0xC4;
+        streaminfo[12] = 0x42;
+        streaminfo[13] = 0xF0;
+        streaminfo[16] = 0xAC;
+        streaminfo[17] = 0x44;
+        ms.Write(streaminfo);
+
         using var vc = new MemoryStream();
         vc.Write([4, 0, 0, 0]);
         vc.Write("test"u8);

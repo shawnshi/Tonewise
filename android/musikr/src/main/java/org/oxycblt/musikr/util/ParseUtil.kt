@@ -43,9 +43,8 @@ internal inline fun String.splitEscaped(selector: (Char) -> Boolean): List<Strin
             continue
         }
 
-        if (b != null && a == '\\' && selector(b)) {
-            // Is an escaped character, add the non-escaped variant and skip two
-            // characters to move on to the next one.
+        if (b != null && a == '\\' && (b == '\\' || selector(b))) {
+            // Escaped backslash or separator character: emit literal char and advance past escape sequence.
             currentString += b
             i += 2
         } else {

@@ -18,12 +18,80 @@ namespace Tonewise.Desktop.ViewModels;
 
 public sealed partial class MainViewModel
 {
+    private readonly ClassicalSessionShuffleLock _sessionShuffleLock = new();
+
+    public bool IsSessionShuffleLockActive => _sessionShuffleLock.IsLocked;
+
+    private void EngageClassicalSessionShuffleLock()
+    {
+        bool targetShuffle = _sessionShuffleLock.Engage(IsShuffleEnabled);
+        if (IsShuffleEnabled != targetShuffle)
+        {
+            bool prevSuppress = _suppressSettingsSave;
+            _suppressSettingsSave = true;
+            try
+            {
+                IsShuffleEnabled = targetShuffle;
+            }
+            finally
+            {
+                _suppressSettingsSave = prevSuppress;
+            }
+        }
+    }
+
+    private void RestoreGlobalShuffleIfLocked()
+    {
+        var (wasLocked, restore) = _sessionShuffleLock.ReleaseOnNonClassical();
+        if (!wasLocked) return;
+        if (IsShuffleEnabled != restore)
+        {
+            bool prevSuppress = _suppressSettingsSave;
+            _suppressSettingsSave = true;
+            try
+            {
+                IsShuffleEnabled = restore;
+            }
+            finally
+            {
+                _suppressSettingsSave = prevSuppress;
+            }
+        }
+    }
+
+    public void PlayClassicalRecording(
+        IReadOnlyList<TrackItem> recordingMovements,
+        int startIndex = 0,
+        string? queueTitle = null)
+    {
+        if (recordingMovements is null || recordingMovements.Count == 0) return;
+        var slice = ClassicalSessionShuffleLock.SliceRecordingMovements(recordingMovements, startIndex)
+            .Where(item => !string.IsNullOrWhiteSpace(item.FullPath))
+            .ToList();
+        if (slice.Count == 0) return;
+
+        _playbackHistory.Clear();
+        _djFreezeBackup = null;
+        _currentFreezeToken = "";
+        IsDjFreezeActive = false;
+
+        EngageClassicalSessionShuffleLock();
+        PlaybackQueue.ReplaceAll(slice);
+        _unshuffledQueueSnapshot = [.. slice];
+        PlaybackQueueTitle = !string.IsNullOrWhiteSpace(queueTitle)
+            ? queueTitle!
+            : (string.IsNullOrWhiteSpace(slice[0].WorkDisplay) ? slice[0].Album : slice[0].WorkDisplay);
+        UpdatePlaybackQueueSummary();
+        PlayTrack(slice[0]);
+    }
+
     public void PlayFromBrowseView(TrackItem track)
     {
         _playbackHistory.Clear();
         _djFreezeBackup = null;
         _currentFreezeToken = "";
         IsDjFreezeActive = false;
+        RestoreGlobalShuffleIfLocked();
 
         var playable = FilteredTracks.Where(item => !string.IsNullOrWhiteSpace(item.FullPath)).ToList();
         PlaybackQueue.ReplaceAll(playable);
@@ -99,6 +167,7 @@ public sealed partial class MainViewModel
         _djFreezeBackup = null;
         _currentFreezeToken = "";
         IsDjFreezeActive = false;
+        RestoreGlobalShuffleIfLocked();
         var playable = FilteredTracks.Where(item => !string.IsNullOrWhiteSpace(item.FullPath)).ToList();
         PlaybackQueue.ReplaceAll(playable);
         _unshuffledQueueSnapshot = playable;
@@ -116,6 +185,7 @@ public sealed partial class MainViewModel
     [RelayCommand]
     private void ToggleShuffle()
     {
+        _sessionShuffleLock.ClearOnUserToggle();
         IsShuffleEnabled = !IsShuffleEnabled;
         Notify($"播放顺序已切换为：{ShuffleModeLabel}", "info");
     }
@@ -1322,6 +1392,76 @@ public sealed partial class MainViewModel
         NowPlayingConductorTooltip = ShowNowPlayingConductorAction
             ? $"在馆藏指挥家视图中查看：{primaryConductor}"
             : "";
+        RefreshNowPlayingPresentation();
+    }
+
+    public static string SelectBestClassicalCreditTier(IReadOnlyList<string> tiers, double maxWidthPx = 460.0) =>
+        ClassicalMetadataEngine.SelectBestClassicalCreditTier(tiers, maxWidthPx);
+
+    public static (string Line1, string Line2, string Line3) FormatNonClassicalNowPlaying(
+        string? title,
+        string? artist,
+        string? album,
+        int? year) =>
+        NowPlayingFormatter.FormatNonClassicalNowPlaying(title, artist, album, year);
+
+    public void RefreshNowPlayingPresentation(double maxCreditWidthPx = 460.0)
+    {
+        var track = CurrentTrack;
+        if (track is null)
+        {
+            NowPlayingIsClassical = false;
+            NowPlayingLine1 = "选择任意曲目开启沉浸画廊";
+            NowPlayingLine2 = "TONEWISE GALLERY";
+            NowPlayingLine3 = "";
+            NowPlayingLine1FontSize = 24.0;
+            NowPlayingLine1MaxLines = 1;
+            NowPlayingLine2FontSize = 15.0;
+            NowPlayingLine3Visible = false;
+            return;
+        }
+
+        if (track.IsClassical)
+        {
+            var formatted = ClassicalMetadataEngine.FormatClassicalNowPlaying(
+                rawTitle: track.Title,
+                explicitWork: track.WorkName,
+                explicitMovement: track.MovementName,
+                explicitMovementNumber: track.MovementNumber,
+                album: track.Album,
+                composers: SplitComposers(track.ComposersDisplay),
+                artists: SplitPerformers(track.ArtistsDisplay),
+                conductors: SplitPerformers(track.ConductorsDisplay),
+                year: track.Year);
+
+            NowPlayingIsClassical = true;
+            NowPlayingLine1 = formatted.Line1;
+            NowPlayingLine2 = formatted.Line2;
+            NowPlayingLine3 = formatted.Line3Tiers.Count > 0
+                ? SelectBestClassicalCreditTier(formatted.Line3Tiers, maxCreditWidthPx)
+                : track.Album;
+            NowPlayingLine1FontSize = 21.0;
+            NowPlayingLine1MaxLines = 2;
+            NowPlayingLine2FontSize = 16.0;
+            NowPlayingLine3Visible = !string.IsNullOrWhiteSpace(NowPlayingLine3);
+        }
+        else
+        {
+            var (line1, line2, line3) = FormatNonClassicalNowPlaying(
+                track.Title,
+                track.ArtistsDisplay,
+                track.Album,
+                track.Year);
+
+            NowPlayingIsClassical = false;
+            NowPlayingLine1 = line1;
+            NowPlayingLine2 = line2;
+            NowPlayingLine3 = line3;
+            NowPlayingLine1FontSize = 24.0;
+            NowPlayingLine1MaxLines = 1;
+            NowPlayingLine2FontSize = 15.0;
+            NowPlayingLine3Visible = !string.IsNullOrWhiteSpace(line3);
+        }
     }
 
     public void NavigateToCurrentTrackComposer()
@@ -1329,7 +1469,8 @@ public sealed partial class MainViewModel
         if (CurrentTrack is null) return;
         string? primaryComposer = SplitComposers(CurrentTrack.ComposersDisplay).FirstOrDefault();
         if (string.IsNullOrWhiteSpace(primaryComposer)) return;
-        NavigateToCreditCollectionGroup("composers", primaryComposer);
+        NavigateToPrimary("collection", "classical");
+        OpenClassicalComposerByName(primaryComposer);
     }
 
     public void NavigateToCurrentTrackConductor()

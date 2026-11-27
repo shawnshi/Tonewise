@@ -1,8 +1,8 @@
-using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
+using Tonewise.Interop;
 
 namespace Tonewise.SyncHost.Curation;
 
@@ -712,391 +712,40 @@ public static partial class LibraryFolderOrganizerService
         double? ReplayGainAlbumDb = null,
         int? SampleRateHz = null,
         int? BitDepth = null,
-        long? DurationMs = null
+        long? DurationMs = null,
+        int? Year = null
     );
 
     public static EmbeddedHeaderTags ReadEmbeddedHeaderTags(string filePath)
     {
-        string ext = Path.GetExtension(filePath).ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(filePath)) return default;
         try
         {
-            using var fs = new FileStream(LongPathHelper.ToExtendedPath(filePath), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            if (ext == ".flac") return ReadFlacComments(fs);
-            if (ext == ".mp3") return ReadId3v2Comments(fs);
-            if (ext == ".wav") return ReadWavHeaderInfo(fs);
+            var probe = TonewiseCoreClient.ProbeTrack(LongPathHelper.ToExtendedIfLong(filePath));
+            return new EmbeddedHeaderTags(
+                AlbumArtist: probe.AlbumArtist,
+                Artist: probe.Artists.Count > 0 ? string.Join(" / ", probe.Artists) : null,
+                Album: probe.Album,
+                Title: probe.Title,
+                DiscNumber: probe.DiscNumber > 0 ? (int)probe.DiscNumber : null,
+                TrackNumber: probe.TrackNumber > 0 ? (int)probe.TrackNumber : null,
+                Composer: probe.Composers.Count > 0 ? string.Join("; ", probe.Composers) : null,
+                Conductor: probe.Conductors.Count > 0 ? string.Join("; ", probe.Conductors) : null,
+                WorkName: probe.WorkName,
+                MovementName: probe.MovementName,
+                MovementNumber: probe.MovementNumber.HasValue ? (int)probe.MovementNumber.Value : null,
+                Genre: probe.Genre,
+                ReplayGainTrackDb: probe.ReplayGainTrackDb,
+                ReplayGainAlbumDb: probe.ReplayGainAlbumDb,
+                SampleRateHz: probe.SampleRateHz > 0 ? (int)probe.SampleRateHz : null,
+                BitDepth: probe.BitDepth.HasValue ? (int)probe.BitDepth.Value : null,
+                DurationMs: probe.DurationMs > 0 ? (long)probe.DurationMs : null,
+                Year: probe.Year);
         }
         catch
         {
-        }
-        return default;
-    }
-
-    private static EmbeddedHeaderTags ReadWavHeaderInfo(Stream fs)
-    {
-        Span<byte> riff = stackalloc byte[12];
-        if (fs.Read(riff) != 12 || riff[0] != 'R' || riff[1] != 'I' || riff[2] != 'F' || riff[3] != 'F'
-            || riff[8] != 'W' || riff[9] != 'A' || riff[10] != 'V' || riff[11] != 'E')
             return default;
-
-        int? sr = null, bd = null;
-        int byteRate = 0;
-        long dataSize = 0;
-        Span<byte> hdr = stackalloc byte[8];
-        while (fs.Read(hdr) == 8)
-        {
-            uint chunkLen = BinaryPrimitives.ReadUInt32LittleEndian(hdr.Slice(4, 4));
-            if (hdr[0] == 'f' && hdr[1] == 'm' && hdr[2] == 't' && hdr[3] == ' ' && chunkLen >= 16)
-            {
-                byte[] fmt = new byte[Math.Min(chunkLen, 64)];
-                if (fs.Read(fmt, 0, fmt.Length) == fmt.Length)
-                {
-                    int parsedSr = BinaryPrimitives.ReadInt32LittleEndian(fmt.AsSpan(4, 4));
-                    byteRate = BinaryPrimitives.ReadInt32LittleEndian(fmt.AsSpan(8, 4));
-                    int parsedBd = BinaryPrimitives.ReadUInt16LittleEndian(fmt.AsSpan(14, 2));
-                    if (parsedSr > 0) sr = parsedSr;
-                    if (parsedBd > 0) bd = parsedBd;
-                    if (chunkLen > fmt.Length) fs.Seek(chunkLen - fmt.Length, SeekOrigin.Current);
-                }
-                else
-                {
-                    break;
-                }
-            }
-            else if (hdr[0] == 'd' && hdr[1] == 'a' && hdr[2] == 't' && hdr[3] == 'a')
-            {
-                dataSize = chunkLen;
-                fs.Seek(chunkLen, SeekOrigin.Current);
-            }
-            else
-            {
-                fs.Seek(chunkLen, SeekOrigin.Current);
-            }
-
-            if ((chunkLen & 1) != 0 && fs.Position < fs.Length)
-            {
-                fs.Seek(1, SeekOrigin.Current);
-            }
         }
-
-        long? durMs = byteRate > 0 && dataSize > 0 ? (long)(dataSize * 1000.0 / byteRate) : null;
-        return new EmbeddedHeaderTags(
-            null, null, null, null, null, null,
-            SampleRateHz: sr,
-            BitDepth: bd,
-            DurationMs: durMs);
-    }
-
-    private static EmbeddedHeaderTags ReadFlacComments(Stream fs)
-    {
-        Span<byte> sig = stackalloc byte[4];
-        if (fs.Read(sig) != 4 || sig[0] != 'f' || sig[1] != 'L' || sig[2] != 'a' || sig[3] != 'C')
-            return default;
-
-        int? flacSampleRate = null, flacBitDepth = null;
-        long? flacDurationMs = null;
-        Span<byte> hdr = stackalloc byte[4];
-        Span<byte> si = stackalloc byte[34];
-        while (fs.Read(hdr) == 4)
-        {
-            bool isLast = (hdr[0] & 0x80) != 0;
-            int blockType = hdr[0] & 0x7F;
-            int len = (hdr[1] << 16) | (hdr[2] << 8) | hdr[3];
-            if (len < 0 || len > 4 * 1024 * 1024) break;
-
-            if (blockType == 0 && len >= 34)
-            {
-                if (fs.Read(si) != 34) break;
-                ulong packed = BinaryPrimitives.ReadUInt64BigEndian(si.Slice(10, 8));
-                int sr = (int)((packed >> 44) & 0xFFFFFUL);
-                int bd = (int)(((packed >> 36) & 0x1FUL) + 1);
-                long totalSamples = (long)(packed & 0xF_FFFF_FFFFUL);
-                if (sr > 0)
-                {
-                    flacSampleRate = sr;
-                    flacBitDepth = bd;
-                    if (totalSamples > 0)
-                    {
-                        flacDurationMs = totalSamples * 1000L / sr;
-                    }
-                }
-                if (len > 34) fs.Seek(len - 34, SeekOrigin.Current);
-                if (isLast) break;
-                continue;
-            }
-
-            if (blockType == 4)
-            {
-                byte[] buf = new byte[len];
-                if (fs.Read(buf, 0, len) != len || len < 8)
-                {
-                    return new EmbeddedHeaderTags(
-                        null, null, null, null, null, null,
-                        SampleRateHz: flacSampleRate,
-                        BitDepth: flacBitDepth,
-                        DurationMs: flacDurationMs);
-                }
-                int pos = 0;
-                uint vendorLen = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos, 4));
-                pos += 4 + (int)Math.Min(vendorLen, (uint)(len - 4));
-                if (pos + 4 > len)
-                {
-                    return new EmbeddedHeaderTags(
-                        null, null, null, null, null, null,
-                        SampleRateHz: flacSampleRate,
-                        BitDepth: flacBitDepth,
-                        DurationMs: flacDurationMs);
-                }
-                uint count = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos, 4));
-                pos += 4;
-
-                string? aa = null, ar = null, al = null, ti = null, work = null, contentGroup = null, mov = null, genre = null;
-                int? dn = null, tn = null, movNo = null;
-                double? rgTrack = null, rgAlbum = null;
-                var composers = new List<string>();
-                var conductors = new List<string>();
-                for (uint i = 0; i < count && pos + 4 <= len; i++)
-                {
-                    uint clen = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos, 4));
-                    pos += 4;
-                    if (clen > (uint)(len - pos)) break;
-                    string entry = Encoding.UTF8.GetString(buf, pos, (int)clen);
-                    pos += (int)clen;
-                    int eq = entry.IndexOf('=');
-                    if (eq <= 0) continue;
-                    string k = entry[..eq].Trim().ToUpperInvariant();
-                    string v = entry[(eq + 1)..].Trim();
-                    if (string.IsNullOrEmpty(v)) continue;
-                    switch (k)
-                    {
-                        case "ALBUMARTIST" or "ALBUM ARTIST": aa ??= v; break;
-                        case "ARTIST": ar ??= v; break;
-                        case "ALBUM": al ??= v; break;
-                        case "TITLE": ti ??= v; break;
-                        case "DISCNUMBER" or "DISC": dn ??= ParseLeadingPositiveInt(v); break;
-                        case "TRACKNUMBER" or "TRACK": tn ??= ParseLeadingPositiveInt(v); break;
-                        case "COMPOSER": composers.Add(v); break;
-                        case "CONDUCTOR": conductors.Add(v); break;
-                        case "WORK": work ??= v; break;
-                        case "CONTENTGROUP" or "GROUPING": contentGroup ??= v; break;
-                        case "MOVEMENT" or "MOVEMENTNAME": mov ??= v; break;
-                        case "MOVEMENTNUMBER": movNo ??= ParseLeadingPositiveInt(v); break;
-                        case "GENRE": genre ??= v; break;
-                        case "REPLAYGAIN_TRACK_GAIN": rgTrack ??= ParseGainDb(v); break;
-                        case "REPLAYGAIN_ALBUM_GAIN": rgAlbum ??= ParseGainDb(v); break;
-                    }
-                }
-                return new EmbeddedHeaderTags(
-                    aa,
-                    ar,
-                    al,
-                    ti,
-                    dn,
-                    tn,
-                    Composer: composers.Count > 0 ? string.Join("; ", composers) : null,
-                    Conductor: conductors.Count > 0 ? string.Join("; ", conductors) : null,
-                    WorkName: work ?? contentGroup,
-                    MovementName: mov,
-                    MovementNumber: movNo,
-                    Genre: genre,
-                    ReplayGainTrackDb: rgTrack,
-                    ReplayGainAlbumDb: rgAlbum,
-                    SampleRateHz: flacSampleRate,
-                    BitDepth: flacBitDepth,
-                    DurationMs: flacDurationMs);
-            }
-
-            fs.Seek(len, SeekOrigin.Current);
-            if (isLast) break;
-        }
-        return new EmbeddedHeaderTags(
-            null, null, null, null, null, null,
-            SampleRateHz: flacSampleRate,
-            BitDepth: flacBitDepth,
-            DurationMs: flacDurationMs);
-    }
-
-    private static EmbeddedHeaderTags ReadId3v2Comments(Stream fs)
-    {
-        Span<byte> hdr = stackalloc byte[10];
-        if (fs.Read(hdr) != 10 || hdr[0] != 'I' || hdr[1] != 'D' || hdr[2] != '3')
-            return default;
-
-        byte version = hdr[3];
-        if (version is < 3 or > 4) return default;
-        int tagSize = ((hdr[6] & 0x7F) << 21) | ((hdr[7] & 0x7F) << 14) | ((hdr[8] & 0x7F) << 7) | (hdr[9] & 0x7F);
-        int readCap = Math.Min(tagSize, 512 * 1024);
-        byte[] buf = new byte[readCap];
-        int actual = fs.Read(buf, 0, readCap);
-
-        string? aa = null, ar = null, al = null, ti = null, work = null, tit1 = null, mov = null, genre = null;
-        int? dn = null, tn = null, movNo = null;
-        double? rgTrack = null, rgAlbum = null;
-        var composers = new List<string>();
-        var conductors = new List<string>();
-        int pos = 0;
-        while (pos + 10 <= actual)
-        {
-            if (buf[pos] == 0) break;
-            string frameId = Encoding.ASCII.GetString(buf, pos, 4);
-            int frameSize = version == 4
-                ? ((buf[pos + 4] & 0x7F) << 21) | ((buf[pos + 5] & 0x7F) << 14) | ((buf[pos + 6] & 0x7F) << 7) | (buf[pos + 7] & 0x7F)
-                : BinaryPrimitives.ReadInt32BigEndian(buf.AsSpan(pos + 4, 4));
-            pos += 10;
-            if (frameSize <= 1 || pos + frameSize > actual) break;
-
-            var payload = buf.AsSpan(pos, frameSize);
-            if (frameId is "TPE2" or "TPE1" or "TALB" or "TIT2" or "TPOS" or "TRCK"
-                or "TCOM" or "TPE3" or "TIT1" or "MVNM" or "MVIN" or "TCON")
-            {
-                string val = DecodeId3TextFrame(payload);
-                if (!string.IsNullOrEmpty(val))
-                {
-                    switch (frameId)
-                    {
-                        case "TPE2": aa ??= val; break;
-                        case "TPE1": ar ??= val; break;
-                        case "TALB": al ??= val; break;
-                        case "TIT2": ti ??= val; break;
-                        case "TPOS": dn ??= ParseLeadingPositiveInt(val); break;
-                        case "TRCK": tn ??= ParseLeadingPositiveInt(val); break;
-                        case "TCOM": composers.Add(val); break;
-                        case "TPE3": conductors.Add(val); break;
-                        case "TIT1": tit1 ??= val; break;
-                        case "MVNM": mov ??= val; break;
-                        case "MVIN": movNo ??= ParseLeadingPositiveInt(val); break;
-                        case "TCON": genre ??= NormalizeId3Genre(val); break;
-                    }
-                }
-            }
-            else if (frameId == "TXXX" && TryDecodeId3TxxxFrame(payload, out string desc, out string txxxVal) && !string.IsNullOrEmpty(txxxVal))
-            {
-                switch (desc.ToUpperInvariant())
-                {
-                    case "WORK": work ??= txxxVal; break;
-                    case "GROUPING" or "CONTENTGROUP": tit1 ??= txxxVal; break;
-                    case "MOVEMENT" or "MOVEMENTNAME": mov ??= txxxVal; break;
-                    case "MOVEMENTNUMBER": movNo ??= ParseLeadingPositiveInt(txxxVal); break;
-                    case "COMPOSER" when composers.Count == 0: composers.Add(txxxVal); break;
-                    case "CONDUCTOR" when conductors.Count == 0: conductors.Add(txxxVal); break;
-                    case "REPLAYGAIN_TRACK_GAIN": rgTrack ??= ParseGainDb(txxxVal); break;
-                    case "REPLAYGAIN_ALBUM_GAIN": rgAlbum ??= ParseGainDb(txxxVal); break;
-                }
-            }
-            pos += frameSize;
-        }
-        return new EmbeddedHeaderTags(
-            aa,
-            ar,
-            al,
-            ti,
-            dn,
-            tn,
-            Composer: composers.Count > 0 ? string.Join("; ", composers) : null,
-            Conductor: conductors.Count > 0 ? string.Join("; ", conductors) : null,
-            WorkName: work ?? tit1,
-            MovementName: mov,
-            MovementNumber: movNo,
-            Genre: genre,
-            ReplayGainTrackDb: rgTrack,
-            ReplayGainAlbumDb: rgAlbum);
-    }
-
-    private static string DecodeId3TextFrame(ReadOnlySpan<byte> payload)
-    {
-        if (payload.Length <= 1) return "";
-        byte enc = payload[0];
-        var raw = payload[1..];
-        if (enc is 1 or 2) return DecodeUtf16Segment(raw, enc == 2);
-        Encoding e = enc == 3 ? Encoding.UTF8 : Encoding.Latin1;
-        return e.GetString(raw).Trim('\0', ' ', '\uFEFF');
-    }
-
-    private static bool TryDecodeId3TxxxFrame(ReadOnlySpan<byte> payload, out string description, out string value)
-    {
-        description = "";
-        value = "";
-        if (payload.Length <= 2) return false;
-        byte enc = payload[0];
-        var raw = payload[1..];
-        if (enc is 1 or 2)
-        {
-            int split = -1;
-            for (int i = 0; i + 1 < raw.Length; i += 2)
-            {
-                if (raw[i] == 0 && raw[i + 1] == 0)
-                {
-                    split = i;
-                    break;
-                }
-            }
-            if (split < 0 || split + 2 > raw.Length) return false;
-            description = DecodeUtf16Segment(raw[..split], enc == 2);
-            value = DecodeUtf16Segment(raw[(split + 2)..], enc == 2);
-            return true;
-        }
-
-        int nul = raw.IndexOf((byte)0);
-        if (nul < 0 || nul + 1 > raw.Length) return false;
-        Encoding e = enc == 3 ? Encoding.UTF8 : Encoding.Latin1;
-        description = e.GetString(raw[..nul]).Trim('\0', ' ');
-        value = e.GetString(raw[(nul + 1)..]).Trim('\0', ' ');
-        return true;
-    }
-
-    private static string DecodeUtf16Segment(ReadOnlySpan<byte> slice, bool defaultBigEndian)
-    {
-        if (slice.Length < 2) return "";
-        bool bigEndian = defaultBigEndian;
-        if (slice[0] == 0xFF && slice[1] == 0xFE)
-        {
-            bigEndian = false;
-            slice = slice[2..];
-        }
-        else if (slice[0] == 0xFE && slice[1] == 0xFF)
-        {
-            bigEndian = true;
-            slice = slice[2..];
-        }
-        Encoding e = bigEndian ? Encoding.BigEndianUnicode : Encoding.Unicode;
-        return e.GetString(slice).Trim('\0', ' ', '\uFEFF');
-    }
-
-    private static double? ParseGainDb(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-        string cleaned = raw.Trim();
-        int dbIdx = cleaned.IndexOf("db", StringComparison.OrdinalIgnoreCase);
-        if (dbIdx >= 0) cleaned = cleaned[..dbIdx].Trim();
-        return double.TryParse(
-            cleaned,
-            System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture,
-            out double val) && double.IsFinite(val)
-            ? val
-            : null;
-    }
-
-    private static string? NormalizeId3Genre(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-        string trimmed = raw.Trim();
-        if (trimmed.StartsWith('('))
-        {
-            int close = trimmed.IndexOf(')');
-            if (close > 1 && int.TryParse(trimmed[1..close], out int id3Num))
-            {
-                string after = trimmed[(close + 1)..].Trim();
-                if (!string.IsNullOrEmpty(after)) return after;
-                if (id3Num == 32) return "Classical";
-            }
-        }
-        return trimmed;
-    }
-
-    private static int? ParseLeadingPositiveInt(string raw)
-    {
-        var m = LeadingPositiveIntRegex().Match(raw);
-        return m.Success && int.TryParse(m.Groups[1].Value, out int v) && v > 0 ? v : null;
     }
 
     [GeneratedRegex(@"^(?<disc>\d{1,2})-(?<track>\d{2,3})\s+")]
@@ -1116,9 +765,6 @@ public static partial class LibraryFolderOrganizerService
 
     [GeneratedRegex(@"\s{2,}")]
     private static partial Regex MultiSpaceRegex();
-
-    [GeneratedRegex(@"^0*(\d+)")]
-    private static partial Regex LeadingPositiveIntRegex();
 }
 
 /// <summary>
@@ -1129,7 +775,7 @@ public sealed class LibraryFileWatcherService : IDisposable
 {
     private static readonly HashSet<string> WatchedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".flac", ".mp3", ".wav", ".aiff", ".aif", ".m4a", ".alac", ".aac", ".ogg", ".opus", ".dsf", ".dff", ".m3u8"
+        ".flac", ".mp3", ".wav", ".aiff", ".aif", ".m4a", ".mp4", ".alac", ".aac", ".ogg", ".opus", ".dsf", ".dff", ".m3u8"
     };
 
     private static readonly HashSet<string> TempExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -1267,6 +913,13 @@ public sealed class LibraryFileWatcherService : IDisposable
     {
         if (string.IsNullOrWhiteSpace(fullPath)) return false;
 
+        string fileName = Path.GetFileName(fullPath);
+        if (fileName.Contains(".twtmp.", StringComparison.OrdinalIgnoreCase)
+            || fileName.Contains(".twbak.", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         string normalized = fullPath.Replace('\\', '/');
         foreach (string seg in normalized.Split('/', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -1319,6 +972,29 @@ public sealed class LibraryFileWatcherService : IDisposable
         catch
         {
             return stripped;
+        }
+    }
+
+    public void RequeuePaths(IEnumerable<string> paths, int delayMs = 2500)
+    {
+        if (paths is null) return;
+        int clampedDelay = Math.Clamp(delayMs, 200, 30_000);
+        lock (_gate)
+        {
+            if (_disposed) return;
+            bool added = false;
+            foreach (string raw in paths)
+            {
+                if (!string.IsNullOrWhiteSpace(raw))
+                {
+                    _pendingPaths.Add(raw);
+                    added = true;
+                }
+            }
+            if (added && Volatile.Read(ref _suspendCount) == 0)
+            {
+                _debounceTimer.Change(clampedDelay, Timeout.Infinite);
+            }
         }
     }
 
@@ -1445,6 +1121,16 @@ public sealed class LibraryFileWatcherService : IDisposable
         }
     }
 
+    private void UpdateSuppressUntilAtLeast(long targetUtcTicks)
+    {
+        while (true)
+        {
+            long current = Interlocked.Read(ref _suppressUntilUtcTicks);
+            if (current >= targetUtcTicks) return;
+            if (Interlocked.CompareExchange(ref _suppressUntilUtcTicks, targetUtcTicks, current) == current) return;
+        }
+    }
+
     private sealed class SuspendScope(LibraryFileWatcherService owner) : IDisposable
     {
         private int _ended;
@@ -1452,7 +1138,7 @@ public sealed class LibraryFileWatcherService : IDisposable
         {
             if (Interlocked.Exchange(ref _ended, 1) == 0)
             {
-                Interlocked.Exchange(ref owner._suppressUntilUtcTicks, DateTime.UtcNow.AddMilliseconds(450).Ticks);
+                owner.UpdateSuppressUntilAtLeast(DateTime.UtcNow.AddMilliseconds(450).Ticks);
                 if (Interlocked.Decrement(ref owner._suspendCount) == 0)
                 {
                     bool scheduleRescan = false;

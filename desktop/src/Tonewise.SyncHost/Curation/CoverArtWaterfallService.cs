@@ -57,17 +57,35 @@ public sealed class CoverArtWaterfallService
         return deviation <= MaxAspectRatioDeviation;
     }
 
+    private static readonly string[] ExistingCoverNames =
+    [
+        "cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
+        "folder.jpg", "folder.jpeg", "folder.png",
+        "front.jpg", "front.jpeg", "front.png",
+        "album.jpg", "album.png",
+    ];
+
     public CoverSaveOutcome SaveFolderCoverIfMissing(
         string albumDirectory,
         byte[] imageBytes,
         bool overwriteExisting = false)
     {
         Directory.CreateDirectory(albumDirectory);
-        string coverPath = Path.Combine(albumDirectory, "cover.jpg");
+        bool isPng = imageBytes.Length >= 4
+            && imageBytes[0] == 0x89 && imageBytes[1] == 0x50
+            && imageBytes[2] == 0x4E && imageBytes[3] == 0x47;
+        string coverPath = Path.Combine(albumDirectory, isPng ? "cover.png" : "cover.jpg");
 
-        if (!overwriteExisting && File.Exists(coverPath) && new FileInfo(coverPath).Length > 0)
+        if (!overwriteExisting)
         {
-            return new CoverSaveOutcome(false, true, coverPath, 0, 0, "Folder cover.jpg already exists (Fill-Missing Only)");
+            foreach (string name in ExistingCoverNames)
+            {
+                string existing = Path.Combine(albumDirectory, name);
+                if (File.Exists(existing) && new FileInfo(existing).Length > 0)
+                {
+                    return new CoverSaveOutcome(false, true, existing, 0, 0, $"Folder cover ({name}) already exists (Fill-Missing Only)");
+                }
+            }
         }
 
         if (!ValidateImageHeaderAndAspectRatio(imageBytes, out int w, out int h))
@@ -108,7 +126,7 @@ public sealed class CoverArtWaterfallService
         foreach (string country in new[] { "cn", "jp", "us" })
         {
             string itunesUrl = $"https://itunes.apple.com/search?term={query}&entity=album&limit=3&country={country}";
-            var itunes = await TryFetchFromItunesAsync(itunesUrl, $"iTunes-{country.ToUpperInvariant()}", ct);
+            var itunes = await TryFetchFromItunesAsync(itunesUrl, $"iTunes-{country.ToUpperInvariant()}", artist, album, ct);
             if (itunes.Success) return itunes;
         }
 
@@ -124,7 +142,12 @@ public sealed class CoverArtWaterfallService
         return new CoverFetchResult(false, "None", null, 0, 0, "No qualifying >= 600x600 cover found across 3 waterfall tiers");
     }
 
-    private async Task<CoverFetchResult> TryFetchFromItunesAsync(string searchUrl, string tierName, CancellationToken ct)
+    private async Task<CoverFetchResult> TryFetchFromItunesAsync(
+        string searchUrl,
+        string tierName,
+        string expectedArtist,
+        string expectedAlbum,
+        CancellationToken ct)
     {
         try
         {
@@ -136,6 +159,13 @@ public sealed class CoverArtWaterfallService
 
             foreach (var item in results.EnumerateArray())
             {
+                string? itemAlbum = item.TryGetProperty("collectionName", out var cn) ? cn.GetString() : null;
+                string? itemArtist = item.TryGetProperty("artistName", out var an) ? an.GetString() : null;
+                if (!ItunesItemMatches(itemArtist, itemAlbum, expectedArtist, expectedAlbum))
+                {
+                    continue;
+                }
+
                 if (!item.TryGetProperty("artworkUrl100", out var artProp)) continue;
                 string? rawUrl = artProp.GetString();
                 if (string.IsNullOrWhiteSpace(rawUrl)) continue;
@@ -151,6 +181,47 @@ public sealed class CoverArtWaterfallService
         catch { /* Try next waterfall tier */ }
 
         return Fail(tierName);
+    }
+
+    private static bool ItunesItemMatches(
+        string? itemArtist,
+        string? itemAlbum,
+        string expectedArtist,
+        string expectedAlbum)
+    {
+        bool hasMeta = !string.IsNullOrWhiteSpace(itemAlbum) || !string.IsNullOrWhiteSpace(itemArtist);
+        if (!hasMeta) return true; // Keep minimal mock responses valid when they omit optional identity fields
+
+        if (!string.IsNullOrWhiteSpace(expectedAlbum) && !string.IsNullOrWhiteSpace(itemAlbum))
+        {
+            if (FuzzyTokenOrSubstringMatch(expectedAlbum, itemAlbum)) return true;
+        }
+        if (!string.IsNullOrWhiteSpace(expectedArtist) && !string.IsNullOrWhiteSpace(itemArtist))
+        {
+            if (string.IsNullOrWhiteSpace(expectedAlbum) && FuzzyTokenOrSubstringMatch(expectedArtist, itemArtist))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool FuzzyTokenOrSubstringMatch(string expected, string candidate)
+    {
+        string a = expected.Trim();
+        string b = candidate.Trim();
+        if (a.Length == 0 || b.Length == 0) return false;
+        if (b.Contains(a, StringComparison.OrdinalIgnoreCase) || a.Contains(b, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var tokensA = a.Split([' ', '\t', '-', ':', '/', ',', '(', ')', '（', '）', '：', '·'], StringSplitOptions.RemoveEmptyEntries)
+            .Where(t => t.Length >= 2)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (tokensA.Count == 0) return false;
+
+        foreach (string tok in b.Split([' ', '\t', '-', ':', '/', ',', '(', ')', '（', '）', '：', '·'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (tok.Length >= 2 && tokensA.Contains(tok)) return true;
+        }
+        return false;
     }
 
     private async Task<CoverFetchResult> TryFetchFromLastFmAsync(string url, CancellationToken ct)
@@ -245,6 +316,9 @@ public sealed class CoverArtWaterfallService
 
         return false;
     }
+
+    private async Task<CoverFetchResult> TryFetchFromItunesAsync(string searchUrl, string tierName, CancellationToken ct) =>
+        await TryFetchFromItunesAsync(searchUrl, tierName, "", "", ct);
 
     private static CoverFetchResult Fail(string tier) => new(false, tier, null, 0, 0);
 

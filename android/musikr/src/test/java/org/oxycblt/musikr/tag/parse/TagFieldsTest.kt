@@ -357,6 +357,32 @@ class TagFieldsTest {
         assertEquals(listOf("Claudio Abbado"), metadata.conductorNames())
     }
 
+    @Test
+    fun metadata_composerSort_soco_and_grouping_work_parity() {
+        val mp4Lower = createTestMetadata(mp4Tags = mapOf("soco" to listOf("Bach, Johann Sebastian")))
+        assertEquals(listOf("Bach, Johann Sebastian"), mp4Lower.composerSortNames())
+
+        val mp4Grp = createTestMetadata(mp4Tags = mapOf("©grp" to listOf("Goldberg Variations, BWV 988")))
+        assertEquals("Goldberg Variations, BWV 988", mp4Grp.workName())
+        assertNull(mp4Grp.releaseTypes())
+
+        val xiphGrouping = createTestMetadata(xiphTags = mapOf("GROUPING" to listOf("Symphony No. 5")))
+        assertEquals("Symphony No. 5", xiphGrouping.workName())
+
+        val xiphContentGroup = createTestMetadata(xiphTags = mapOf("CONTENTGROUP" to listOf("Piano Concerto No. 2")))
+        assertEquals("Piano Concerto No. 2", xiphContentGroup.workName())
+    }
+
+    @Test
+    fun metadata_movementNumber_handlesIntsOfFormsAndRomans() {
+        assertEquals(3, createTestMetadata(xiphTags = mapOf("MOVEMENTNUMBER" to listOf("3"))).movementNumber())
+        assertEquals(3, createTestMetadata(xiphTags = mapOf("MOVEMENTNUMBER" to listOf("03/04"))).movementNumber())
+        assertEquals(3, createTestMetadata(xiphTags = mapOf("MOVEMENTNUMBER" to listOf("03 of 4"))).movementNumber())
+        assertEquals(4, createTestMetadata(id3v2Tags = mapOf("MVIN" to listOf("IV"))).movementNumber())
+        assertEquals(4, createTestMetadata(id3v2Tags = mapOf("MVIN" to listOf("IV/IV"))).movementNumber())
+        assertEquals(9, createTestMetadata(mp4Tags = mapOf("©mvi" to listOf("IX."))).movementNumber())
+    }
+
     private fun createTestMetadata(
         id3v2Tags: Map<String, List<String>> = emptyMap(),
         xiphTags: Map<String, List<String>> = emptyMap(),

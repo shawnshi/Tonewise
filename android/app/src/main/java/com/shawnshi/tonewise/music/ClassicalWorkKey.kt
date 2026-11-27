@@ -6,6 +6,7 @@
 package com.shawnshi.tonewise.music
 
 import org.oxycblt.musikr.Song
+import org.oxycblt.musikr.tag.Name
 
 /**
  * Single source of truth for classical recording/work identity keys and movement ordering across
@@ -20,8 +21,35 @@ object ClassicalWorkKey {
     }
 
     fun workBlockKey(song: Song): String? {
-        val work = song.workName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
-        return "${recordingScope(song)}::$work"
+        val explicitWork = song.workName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        if (explicitWork != null) {
+            return "${recordingScope(song)}::$explicitWork"
+        }
+
+        val rawTitle = song.name.raw
+        if (!ClassicalMetadataEngine.isClassicalTrack(
+                genre = (song.genres.firstOrNull()?.name as? Name.Known)?.raw,
+                work = null,
+                composer = song.composers.firstOrNull(),
+                conductor = song.conductors.firstOrNull(),
+                title = rawTitle,
+            )
+        ) {
+            return null
+        }
+
+        val parsed =
+            ClassicalMetadataEngine.splitWorkAndMovement(
+                rawTitle = rawTitle,
+                explicitWork = null,
+                explicitMovement = song.movementName,
+                explicitMovementNumber = song.movementNumber,
+            )
+        val derivedWork = parsed.work.trim().lowercase()
+        if (derivedWork.isEmpty() || (parsed.movement.isBlank() && parsed.movementNumber == null)) {
+            return null
+        }
+        return "${recordingScope(song)}::$derivedWork"
     }
 
     fun movementComparator(): Comparator<Song> =

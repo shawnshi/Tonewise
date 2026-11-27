@@ -15,10 +15,19 @@ android {
     ndkVersion ndk_version
     namespace "com.shawnshi.tonewise"
 
+    def localProps = new Properties()
+    def localPropsFile = rootProject.file("local.properties")
+    if (localPropsFile.isFile()) {
+        localPropsFile.withInputStream { localProps.load(it) }
+    }
+    def lastFmDefaultApiKey = (System.getenv("TONEWISE_LASTFM_API_KEY") ?: localProps.getProperty("TONEWISE_LASTFM_API_KEY") ?: "").trim()
+    def lastFmDefaultSharedSecret = (System.getenv("TONEWISE_LASTFM_SHARED_SECRET") ?: localProps.getProperty("TONEWISE_LASTFM_SHARED_SECRET") ?: "").trim()
+    def escapeBuildConfig = { String raw -> raw.replace("\\", "\\\\").replace("\"", "\\\"") }
+
     defaultConfig {
         applicationId namespace
-        versionName "1.0.7"
-        versionCode 107
+        versionName "1.0.13"
+        versionCode 113
 
         minSdk min_sdk
         // randomly flickers between deprecated and required depending on what mood my gradle is in
@@ -27,6 +36,9 @@ android {
         targetSdk target_sdk
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "String", "LASTFM_API_KEY", "\"${escapeBuildConfig(lastFmDefaultApiKey)}\""
+        buildConfigField "String", "LASTFM_SHARED_SECRET", "\"${escapeBuildConfig(lastFmDefaultSharedSecret)}\""
+        manifestPlaceholders += [lastFmAuthScheme: namespace]
     }
 
     compileOptions {
@@ -67,6 +79,7 @@ android {
         debug {
             applicationIdSuffix ".debug"
             versionNameSuffix "-DEBUG"
+            manifestPlaceholders += [lastFmAuthScheme: "${namespace}.debug"]
         }
 
         release {

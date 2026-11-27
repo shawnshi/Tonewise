@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "is_classical_cases": [
+    {
+      "name": "classical_genre",
+      "genre": "Classical",
+      "work": "",
+      "composer": "",
+      "conductor": "",
+      "title": "Track 01",
+      "expected": true
+    },
+    {
+      "name": "explicit_work",
+      "genre": "",
+      "work": "Goldberg Variations, BWV 988",
+      "composer": "",
+      "conductor": "",
+      "title": "Aria",
+      "expected": true
+    },
+    {
+      "name": "pop_with_composer_not_classical",
+      "genre": "Pop",
+      "work": "",
+      "composer": "Lennon-McCartney",
+      "conductor": "",
+      "title": "Yesterday",
+      "expected": false
+    },
+    {
+      "name": "rock_with_composer_not_classical",
+      "genre": "Rock",
+      "work": "",
+      "composer": "Freddie Mercury",
+      "conductor": "",
+      "title": "Bohemian Rhapsody",
+      "expected": false
+    },
+    {
+      "name": "soundtrack_without_work_signal_not_classical",
+      "genre": "Soundtrack",
+      "work": "",
+      "composer": "Joe Hisaishi",
+      "conductor": "",
+      "title": "One Summer's Day",
+      "expected": false
+    },
+    {
+      "name": "soundtrack_with_classical_work_signal_is_classical",
+      "genre": "Soundtrack",
+      "work": "",
+      "composer": "Ludwig van Beethoven",
+      "conductor": "",
+      "title": "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio",
+      "expected": true
+    },
+    {
+      "name": "empty_genre_with_composer_is_classical",
+      "genre": "",
+      "work": "",
+      "composer": "Frédéric Chopin",
+      "conductor": "",
+      "title": "Nocturne in E-flat major, Op. 9 No. 2",
+      "expected": true
+    },
+    {
+      "name": "instrumental_genre_with_composer_is_classical",
+      "genre": "Instrumental",
+      "work": "",
+      "composer": "Johann Sebastian Bach",
+      "conductor": "",
+      "title": "Partita No. 2 in D minor, BWV 1004: V. Chaconne",
+      "expected": true
+    }
+  ],
+  "split_work_cases": [
+    {
+      "name": "colon_with_roman_movement",
+      "raw_title": "Symphony No. 5 in C minor, Op. 67: I. Allegro con brio",
+      "explicit_work": null,
+      "explicit_movement": null,
+      "explicit_mvt_num": null,
+      "expected_work": "Symphony No. 5 in C minor, Op. 67",
+      "expected_movement": "Allegro con brio",
+      "expected_mvt_num": 1
+    },
+    {
+      "name": "dash_with_roman_movement",
+      "raw_title": "Piano Concerto No. 2 in C minor, Op. 18 - II. Adagio sostenuto",
+      "explicit_work": null,
+      "explicit_movement": null,
+      "explicit_mvt_num": null,
+      "expected_work": "Piano Concerto No. 2 in C minor, Op. 18",
+      "expected_movement": "Adagio sostenuto",
+      "expected_mvt_num": 2
+    },
+    {
+      "name": "protected_catalog_colon_hob",
+      "raw_title": "Piano Sonata No. 52 in E-flat major, Hob. XVI:52: I. Allegro",
+      "explicit_work": null,
+      "explicit_movement": null,
+      "explicit_mvt_num": null,
+      "expected_work": "Piano Sonata No. 52 in E-flat major, Hob. XVI:52",
+      "expected_movement": "Allegro",
+      "expected_mvt_num": 1
+    },
+    {
+      "name": "protected_catalog_colon_no_movement_suffix",
+      "raw_title": "Piano Sonata in E-flat major, Hob. XVI:52",
+      "explicit_work": null,
+      "explicit_movement": null,
+      "explicit_mvt_num": null,
+      "expected_work": "Piano Sonata in E-flat major, Hob. XVI:52",
+      "expected_movement": "",
+      "expected_mvt_num": null
+    },
+    {
+      "name": "single_movement_piece_no_separator",
+      "raw_title": "Clair de lune",
+      "explicit_work": null,
+      "explicit_movement": null,
+      "explicit_mvt_num": null,
+      "expected_work": "Clair de lune",
+      "expected_movement": "",
+      "expected_mvt_num": null
+    },
+    {
+      "name": "explicit_work_parses_roman_from_title",
+      "raw_title": "IV. Presto",
+      "explicit_work": "Symphony No. 9 in D minor, Op. 125",
+      "explicit_movement": null,
+      "explicit_mvt_num": null,
+      "expected_work": "Symphony No. 9 in D minor, Op. 125",
+      "expected_movement": "Presto",
+      "expected_mvt_num": 4
+    }
+  ],
+  "era_cases": [
+    { "composer": "Johann Sebastian Bach", "genre": "Classical", "expected": "baroque" },
+    { "composer": "Bach", "genre": "", "expected": "baroque" },
+    { "composer": "Wolfgang Amadeus Mozart", "genre": "Classical", "expected": "classical" },
+    { "composer": "Ludwig van Beethoven", "genre": "Classical", "expected": "romantic" },
+    { "composer": "Frédéric Chopin", "genre": "Classical", "expected": "romantic" },
+    { "composer": "Dmitri Shostakovich", "genre": "Classical", "expected": "modern" },
+    { "composer": "Unknown Baroque Master", "genre": "Baroque", "expected": "baroque" },
+    { "composer": "Completely Unknown", "genre": "Classical", "expected": null }
+  ],
+  "form_cases": [
+    { "work": "Symphony No. 9 in D minor, Op. 125", "genre": "Classical", "expected": "symphonies" },
+    { "work": "Violin Concerto in D major, Op. 61", "genre": "Classical", "expected": "concertos" },
+    { "work": "String Quartet No. 14 in C-sharp minor, Op. 131", "genre": "Classical", "expected": "chamber" },
+    { "work": "Goldberg Variations, BWV 988", "genre": "Classical", "expected": "solo" },
+    { "work": "Piano Sonata No. 14 in C-sharp minor, Op. 27 No. 2", "genre": "Classical", "expected": "solo" },
+    { "work": "Requiem in D minor, K. 626", "genre": "Classical", "expected": "other" }
+  ],
+  "performer_separation_cases": [
+    {
+      "artists": ["Anne-Sophie Mutter", "Berlin Philharmonic"],
+      "album_artist": null,
+      "conductors": ["Herbert von Karajan"],
+      "explicit_orchestra": null,
+      "explicit_soloists": [],
+      "expected_soloists": ["Anne-Sophie Mutter"],
+      "expected_ensemble": "Berlin Philharmonic"
+    },
+    {
+      "artists": ["Herbert von Karajan", "Wiener Philharmoniker"],
+      "album_artist": "Wiener Philharmoniker",
+      "conductors": ["Herbert von Karajan"],
+      "explicit_orchestra": null,
+      "explicit_soloists": [],
+      "expected_soloists": [],
+      "expected_ensemble": "Wiener Philharmoniker"
+    }
+  ],
+  "credit_tier_cases": [
+    {
+      "composer": "Ludwig van Beethoven",
+      "conductors": ["Herbert von Karajan"],
+      "soloists": ["Anne-Sophie Mutter", "Yo-Yo Ma"],
+      "ensemble": "Berliner Philharmoniker",
+      "year": 1980,
+      "expected_tiers": [
+        "Ludwig van Beethoven · Herbert von Karajan / Anne-Sophie Mutter, Yo-Yo Ma · Berliner Philharmoniker · 1980",
+        "Ludwig van Beethoven · Herbert von Karajan / Anne-Sophie Mutter, Yo-Yo Ma · BPO · 1980",
+        "Ludwig van Beethoven · Herbert von Karajan / Anne-Sophie Mutter · BPO · 1980",
+        "Ludwig van Beethoven · Herbert von Karajan · 1980",
+        "Beethoven · Karajan · 1980"
+      ]
+    }
+  ]
+}
