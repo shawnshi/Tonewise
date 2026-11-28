@@ -148,4 +148,23 @@ class QueueViewModel @Inject constructor(private val playbackManager: PlaybackSt
         playbackManager.moveQueueItem(adapterFrom, adapterTo)
         return true
     }
+
+    fun clearUpcoming(): List<Song> {
+        val curQueue = queue.value
+        val curIdx = index.value
+        if (curIdx !in 0 until curQueue.lastIndex) {
+            return emptyList()
+        }
+        val upcoming = curQueue.subList(curIdx + 1, curQueue.size).toList()
+        if (upcoming.isNotEmpty()) {
+            playbackManager.clearUpcoming()
+        }
+        return upcoming
+    }
+
+    fun restoreUpcoming(songs: List<Song>) {
+        if (songs.isNotEmpty()) {
+            playbackManager.addToQueue(songs)
+        }
+    }
 }

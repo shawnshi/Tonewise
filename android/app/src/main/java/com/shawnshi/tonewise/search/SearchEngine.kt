@@ -62,6 +62,8 @@ interface SearchEngine {
         val artists: Collection<Artist>? = null,
         val genres: Collection<Genre>? = null,
         val playlists: Collection<Playlist>? = null,
+        val composers: Collection<Artist>? = null,
+        val conductors: Collection<Artist>? = null,
     )
 }
 
@@ -73,6 +75,8 @@ class SearchEngineImpl @Inject constructor(@ApplicationContext private val conte
             songs =
                 items.songs?.searchListImpl(query) { q, song ->
                     song.path.name?.contains(q, ignoreCase = true) == true ||
+                        song.workName?.contains(q, ignoreCase = true) == true ||
+                        song.movementName?.contains(q, ignoreCase = true) == true ||
                         song.composers.any { it.contains(q, ignoreCase = true) } ||
                         song.conductors.any { it.contains(q, ignoreCase = true) }
                 },
@@ -80,6 +84,8 @@ class SearchEngineImpl @Inject constructor(@ApplicationContext private val conte
             artists = items.artists?.searchListImpl(query),
             genres = items.genres?.searchListImpl(query),
             playlists = items.playlists?.searchListImpl(query),
+            composers = items.composers?.searchListImpl(query),
+            conductors = items.conductors?.searchListImpl(query),
         )
     }
 

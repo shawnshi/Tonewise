@@ -46,20 +46,20 @@ class QueueBottomSheetBehavior<V : View>(context: Context, attributeSet: Attribu
     private var barSpacing = context.getDimenPixels(R.dimen.spacing_small)
 
     init {
-        // Not hide-able (and not programmatically hide-able)
-        isHideable = false
+        // Hide completely until the user explicitly opens Queue from the Now Playing pill.
+        isHideable = true
+        skipCollapsed = true
     }
 
-    override fun getIdealBarHeight(context: Context) =
-        context.getDimenPixels(R.dimen.size_touchable_large)
+    override fun getIdealBarHeight(context: Context) = 0
 
     override fun onLayoutChild(parent: CoordinatorLayout, child: V, layoutDirection: Int): Boolean {
-        // Pre-calculate expandedOffset before the sheet is positioned by super.onLayoutChild().
-        // This ensures the sheet uses the correct offset during configuration changes like
-        // split-screen resize, where layout happens before insets are re-applied.
-        val effectiveBarHeight = if (barHeight > 0) barHeight else getIdealBarHeight(child.context)
+        val effectiveBarHeight =
+            if (barHeight > 0) barHeight else child.context.getDimenPixels(R.dimen.size_touchable_large)
         expandedOffset = effectiveBarHeight + barSpacing
-        return super.onLayoutChild(parent, child, layoutDirection)
+        val layout = super.onLayoutChild(parent, child, layoutDirection)
+        peekHeight = 0
+        return layout
     }
 
     override fun layoutDependsOn(parent: CoordinatorLayout, child: V, dependency: View) =
@@ -100,11 +100,13 @@ class QueueBottomSheetBehavior<V : View>(context: Context, attributeSet: Attribu
 
     override fun applyWindowInsets(child: View, insets: WindowInsets): WindowInsets {
         super.applyWindowInsets(child, insets)
+        peekHeight = 0
         // Offset our expanded panel by the size of the playback bar, as that is shown when
         // we slide up the panel. Use ideal bar height as fallback when the bar hasn't been
         // measured yet (can occur when window insets are applied before onDependentViewChanged).
         val bars = insets.systemBarInsetsCompat
-        val effectiveBarHeight = if (barHeight > 0) barHeight else getIdealBarHeight(child.context)
+        val effectiveBarHeight =
+            if (barHeight > 0) barHeight else child.context.getDimenPixels(R.dimen.size_touchable_large)
         expandedOffset = effectiveBarHeight + barSpacing
         return insets.replaceSystemBarInsetsCompat(
             bars.left,

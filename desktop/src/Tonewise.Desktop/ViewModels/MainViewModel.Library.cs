@@ -414,10 +414,12 @@ public sealed partial class MainViewModel
     {
         if (!_suppressFilterRefresh)
         {
-            if (IsNavClassicalWorks)
+            if (IsClassicalComposerViewVisible)
             {
                 ApplyClassicalComposerFilter();
-                CurrentViewHeader = $"古典馆藏 ({ClassicalComposers.Count} 位作曲家)";
+                CurrentViewHeader = ShowClassicalEnsembles
+                    ? $"古典乐团 / 独奏 ({ClassicalComposers.Count} 组)"
+                    : $"古典馆藏 ({ClassicalComposers.Count} 位作曲家)";
             }
             else if (IsEntityBrowserVisible)
             {
@@ -901,6 +903,10 @@ public sealed partial class MainViewModel
         {
             targetSubTab = "folders";
         }
+        if (normalized == "collection" && string.Equals(targetSubTab, "composers", StringComparison.OrdinalIgnoreCase))
+        {
+            targetSubTab = "classical";
+        }
 
         if (string.IsNullOrEmpty(targetSubTab)
             && _lastSubTabByPrimary.TryGetValue(normalized, out var rememberedSubTab)
@@ -1026,7 +1032,7 @@ public sealed partial class MainViewModel
         SelectedEntityGroup = group;
         HasSelectedEntityGroup = group is not null;
         IsAlbumsWallExpanded = IsAlbumsGridMode && group is null;
-        IsTrackTableVisible = (IsNavCollection && !IsAlbumsWallExpanded && !IsNavClassicalWorks)
+        IsTrackTableVisible = (IsNavCollection && !IsAlbumsWallExpanded && !IsClassicalComposerViewVisible)
             || (IsNavStudio && SecondarySubTab == "inbox");
         UpdateCanNavigateBack();
         if (group is not null)
@@ -1158,11 +1164,23 @@ public sealed partial class MainViewModel
         }
     }
 
+    [RelayCommand]
+    private void SetClassicalSubMode(string mode)
+    {
+        ShowClassicalEnsembles = string.Equals(mode, "ensembles", StringComparison.OrdinalIgnoreCase);
+    }
+
     partial void OnShowClassicalEnsemblesChanged(bool value)
     {
+        OnPropertyChanged(nameof(IsClassicalComposersMode));
+        OnPropertyChanged(nameof(ClassicalJumpButtonText));
+        OnPropertyChanged(nameof(ClassicalJumpMatrixHeader));
+        CloseClassicalComposerDetail();
+        IsClassicalJumpMatrixOpen = false;
+        UpdateNavigationState();
         if (PrimaryNavId == "collection" && SecondarySubTab == "classical")
         {
-            RebuildEntityGroups();
+            ApplyActiveNavigationData();
         }
     }
 
@@ -1195,6 +1213,7 @@ public sealed partial class MainViewModel
         IsNavArtists = IsNavCollection && SecondarySubTab == "artists";
         IsNavClassical = IsNavCollection && SecondarySubTab is "classical" or "composers" or "conductors";
         IsNavClassicalWorks = IsNavCollection && SecondarySubTab == "classical";
+        IsClassicalComposerViewVisible = IsNavClassicalWorks;
         IsNavClassicalComposers = IsNavCollection && SecondarySubTab == "composers";
         IsNavClassicalConductors = IsNavCollection && SecondarySubTab == "conductors";
         IsNavScenes = IsNavCollection && SecondarySubTab == "scenes";
@@ -1284,6 +1303,7 @@ public sealed partial class MainViewModel
         {
             BreadcrumbItems.Add(activeEntity);
         }
+        BreadcrumbTrail = string.Join("  ›  ", BreadcrumbItems);
     }
 
     private void ApplyActiveNavigationData()
@@ -1348,8 +1368,13 @@ public sealed partial class MainViewModel
             IsViewingPlaylist = false;
             SelectedPlaylist = null;
             RebuildClassicalHierarchyIndex();
-            CurrentViewHeader = $"古典馆藏 ({ClassicalComposers.Count} 位作曲家)";
-            ActiveFilterPillsSummary = "Classical · Composer → Work → Recording → Movement";
+            CurrentViewHeader = ShowClassicalEnsembles
+                ? $"古典乐团 / 独奏 ({ClassicalComposers.Count} 组)"
+                : $"古典馆藏 ({ClassicalComposers.Count} 位作曲家)";
+            ActiveFilterPillsSummary = ShowClassicalEnsembles
+                ? "Classical · Ensemble / Soloist → Work → Recording → Movement"
+                : "Classical · Composer → Work → Recording → Movement";
+            RefreshBreadcrumbs(_selectedClassicalComposerNode?.DisplayLowercase);
             _lastCollectionDataKey = BuildActiveCollectionDataKey();
             _cachedCollectionHeader = CurrentViewHeader;
             _cachedCollectionPills = ActiveFilterPillsSummary;
@@ -1479,7 +1504,7 @@ public sealed partial class MainViewModel
                 }
                 case ("collection", "classical"):
                 {
-                    if (!track.IsClassical && string.IsNullOrWhiteSpace(track.WorkName)) break;
+                    if (!track.IsClassical) break;
                     if (ShowClassicalEnsembles)
                     {
                         foreach (string ensemble in SplitPerformers(track.ArtistsDisplay))

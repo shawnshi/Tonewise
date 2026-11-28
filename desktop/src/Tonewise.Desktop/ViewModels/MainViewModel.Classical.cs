@@ -11,6 +11,8 @@ public sealed partial class MainViewModel
     private IReadOnlyList<ClassicalComposerNode<TrackItem>> _allClassicalComposerNodes = [];
     private IReadOnlyList<ClassicalComposerViewItem> _allClassicalComposerItems = [];
     private Dictionary<string, IReadOnlyList<ClassicalComposerViewItem>> _classicalComposerItemsByEra = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<ClassicalComposerNode<TrackItem>> _allClassicalEnsembleNodes = [];
+    private IReadOnlyList<ClassicalComposerViewItem> _allClassicalEnsembleItems = [];
     private long _classicalHierarchyBuiltVersion = -1;
     private bool _classicalJumpMatrixDirty = true;
     private string? _pendingClassicalComposerToOpen;
@@ -19,6 +21,9 @@ public sealed partial class MainViewModel
 
     public bool IsWorkbenchCommandBarVisible =>
         IsTrackTableVisible || (IsNavClassicalWorks && IsClassicalComposerDetailOpen);
+
+    public string ClassicalJumpButtonText => ShowClassicalEnsembles ? "a–z" : "era · a–z";
+    public string ClassicalJumpMatrixHeader => ShowClassicalEnsembles ? "ensembles · a–z" : "composers · era & a–z";
 
     public BulkObservableCollection<ClassicalComposerViewItem> ClassicalComposers { get; } = [];
     public BulkObservableCollection<ClassicalWorkViewItem> ClassicalVisibleWorks { get; } = [];
@@ -125,7 +130,7 @@ public sealed partial class MainViewModel
             portraitDirs.Add(Path.Combine(_store.MusicRoot, ".tonewise", "composers"));
         }
 
-        var seeds = _allTracks.Select(t => new ClassicalTrackSeed<TrackItem>(
+        var seedList = _allTracks.Select(t => new ClassicalTrackSeed<TrackItem>(
             Track: t,
             TrackUid: t.TrackUid,
             Title: t.Title,
@@ -140,10 +145,17 @@ public sealed partial class MainViewModel
             TrackNumber: t.TrackNumber,
             Year: t.Year,
             Genre: t.Genre,
-            DurationMs: t.DurationMs));
+            DurationMs: t.DurationMs)).ToList();
 
         _allClassicalComposerNodes = ClassicalHierarchyBuilder.Build(
-            seeds,
+            seedList,
+            SplitComposers,
+            SplitPerformers,
+            (album, cond) => WorkAwareShuffleEngine.BuildAlbumScope(album, cond),
+            portraitDirs);
+
+        _allClassicalEnsembleNodes = ClassicalHierarchyBuilder.BuildByEnsemble(
+            seedList,
             SplitComposers,
             SplitPerformers,
             (album, cond) => WorkAwareShuffleEngine.BuildAlbumScope(album, cond),
@@ -169,6 +181,7 @@ public sealed partial class MainViewModel
             kv => kv.Key,
             kv => (IReadOnlyList<ClassicalComposerViewItem>)kv.Value,
             StringComparer.OrdinalIgnoreCase);
+        _allClassicalEnsembleItems = _allClassicalEnsembleNodes.Select(n => new ClassicalComposerViewItem(n)).ToList();
         _classicalHierarchyBuiltVersion = _libraryDataVersion;
 
         ApplyClassicalComposerFilter();
@@ -181,7 +194,8 @@ public sealed partial class MainViewModel
         }
         else if (_selectedClassicalComposerNode is not null)
         {
-            var refreshed = _allClassicalComposerNodes.FirstOrDefault(c =>
+            var activeNodes = ShowClassicalEnsembles ? _allClassicalEnsembleNodes : _allClassicalComposerNodes;
+            var refreshed = activeNodes.FirstOrDefault(c =>
                 string.Equals(c.ComposerName, _selectedClassicalComposerNode.ComposerName, StringComparison.OrdinalIgnoreCase));
             if (refreshed is not null)
             {
@@ -196,21 +210,40 @@ public sealed partial class MainViewModel
 
     private void ApplyClassicalComposerFilter()
     {
-        IReadOnlyList<ClassicalComposerViewItem> eraItems = string.IsNullOrWhiteSpace(ClassicalSelectedEra)
-            ? _allClassicalComposerItems
-            : (_classicalComposerItemsByEra.TryGetValue(ClassicalSelectedEra.Trim(), out var bucket) ? bucket : []);
-
         string q = SearchQuery.Trim();
-        IReadOnlyList<ClassicalComposerViewItem> filteredItems = string.IsNullOrEmpty(q)
-            ? eraItems
-            : eraItems.Where(c =>
-                    c.ComposerName.Contains(q, StringComparison.OrdinalIgnoreCase)
-                    || (!string.IsNullOrEmpty(c.Era) && c.Era.Contains(q, StringComparison.OrdinalIgnoreCase))
-                    || c.Node.Works.Any(w => w.WorkTitle.Contains(q, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
+        IReadOnlyList<ClassicalComposerViewItem> sourceItems;
+        IReadOnlyList<ClassicalComposerViewItem> filteredItems;
+
+        if (ShowClassicalEnsembles)
+        {
+            sourceItems = _allClassicalEnsembleItems;
+            filteredItems = string.IsNullOrEmpty(q)
+                ? sourceItems
+                : sourceItems.Where(e =>
+                        e.ComposerName.Contains(q, StringComparison.OrdinalIgnoreCase)
+                        || e.Node.Works.Any(w =>
+                            w.WorkTitle.Contains(q, StringComparison.OrdinalIgnoreCase)
+                            || w.ComposerName.Contains(q, StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
+        }
+        else
+        {
+            sourceItems = _allClassicalComposerItems;
+            IReadOnlyList<ClassicalComposerViewItem> eraItems = string.IsNullOrWhiteSpace(ClassicalSelectedEra)
+                ? _allClassicalComposerItems
+                : (_classicalComposerItemsByEra.TryGetValue(ClassicalSelectedEra.Trim(), out var bucket) ? bucket : []);
+
+            filteredItems = string.IsNullOrEmpty(q)
+                ? eraItems
+                : eraItems.Where(c =>
+                        c.ComposerName.Contains(q, StringComparison.OrdinalIgnoreCase)
+                        || (!string.IsNullOrEmpty(c.Era) && c.Era.Contains(q, StringComparison.OrdinalIgnoreCase))
+                        || c.Node.Works.Any(w => w.WorkTitle.Contains(q, StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
+        }
 
         ClassicalComposers.ReplaceAll(filteredItems);
-        HasClassicalComposers = _allClassicalComposerItems.Count > 0;
+        HasClassicalComposers = sourceItems.Count > 0;
         _classicalJumpMatrixDirty = true;
 
         if (IsClassicalJumpMatrixOpen)
@@ -317,6 +350,7 @@ public sealed partial class MainViewModel
     public void OpenClassicalComposerByName(string? composerName)
     {
         if (string.IsNullOrWhiteSpace(composerName)) return;
+        ShowClassicalEnsembles = false;
         if (_allClassicalComposerNodes.Count == 0 && _allTracks.Count > 0)
         {
             RebuildClassicalHierarchyIndex();
@@ -343,6 +377,7 @@ public sealed partial class MainViewModel
         if (resetForm) ClassicalSelectedForm = "all";
         IsClassicalJumpMatrixOpen = false;
         IsClassicalComposerDetailOpen = true;
+        RefreshBreadcrumbs(node.DisplayLowercase);
         RebuildClassicalVisibleWorks();
     }
 
@@ -353,6 +388,7 @@ public sealed partial class MainViewModel
         ClassicalDetailStatsLine = "";
         ClassicalVisibleWorks.Clear();
         IsClassicalComposerDetailOpen = false;
+        RefreshBreadcrumbs();
     }
 
     public void SetClassicalFormFilter(string? form)

@@ -65,6 +65,9 @@ interface PlaybackSettings : Settings<PlaybackSettings.Listener> {
     /** Whether to request Android 14+ MIXER_BEHAVIOR_BIT_PERFECT when a USB DAC is attached. */
     val usbBitPerfect: Boolean
 
+    /** Update whether USB DAC hardware bit-perfect mode is requested. */
+    fun setUsbBitPerfect(enabled: Boolean) {}
+
     interface Listener {
         /** Called when one of the ReplayGain configurations have changed. */
         fun onReplayGainSettingsChanged() {}
@@ -149,6 +152,12 @@ class PlaybackSettingsImpl @Inject constructor(@ApplicationContext context: Cont
 
     override val usbBitPerfect: Boolean
         get() = sharedPreferences.getBoolean(getString(R.string.set_key_usb_bit_perfect), true)
+
+    override fun setUsbBitPerfect(enabled: Boolean) {
+        sharedPreferences.edit {
+            putBoolean(getString(R.string.set_key_usb_bit_perfect), enabled)
+        }
+    }
 
     override fun migrate() {
         // MusicMode was converted to PlaySong in 3.2.0

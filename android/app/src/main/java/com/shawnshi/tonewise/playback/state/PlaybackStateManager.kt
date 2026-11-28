@@ -66,6 +66,10 @@ interface PlaybackStateManager {
     /** Whether the queue is shuffled or not. */
     val isShuffled: Boolean
 
+    /** Whether shuffle is currently locked by a classical work session. */
+    val isClassicalShuffleLocked: Boolean
+        get() = false
+
     /** The audio session ID of the internal player. Null if no internal player exists. */
     val currentAudioSessionId: Int?
 
@@ -176,6 +180,9 @@ interface PlaybackStateManager {
      * @param at The position of the [Song] to remove in the queue.
      */
     fun removeQueueItem(at: Int)
+
+    /** Remove all upcoming songs after the current index without interrupting playback. */
+    fun clearUpcoming() {}
 
     /**
      * (Re)shuffle or (Re)order this instance.
@@ -313,6 +320,9 @@ interface PlaybackStateManager {
          */
         fun onRepeatModeChanged(repeatMode: RepeatMode) {}
 
+        /** Called when classical session shuffle lock state changes. */
+        fun onClassicalShuffleLockChanged(isLocked: Boolean) {}
+
         fun onSessionEnded() {}
     }
 
@@ -342,6 +352,7 @@ class PlaybackStateManagerImpl @Inject constructor() : PlaybackStateManager {
         val queue: List<Song>,
         val index: Int,
         val isShuffled: Boolean,
+        val isClassicalShuffleLocked: Boolean = false,
         val rawQueue: RawQueue,
     )
 
@@ -356,6 +367,7 @@ class PlaybackStateManagerImpl @Inject constructor() : PlaybackStateManager {
             queue = emptyList(),
             index = -1,
             isShuffled = false,
+            isClassicalShuffleLocked = false,
             rawQueue = RawQueue.nil(),
         )
     @Volatile private var stateHolder: PlaybackStateHolder? = null
@@ -383,6 +395,9 @@ class PlaybackStateManagerImpl @Inject constructor() : PlaybackStateManager {
     override val isShuffled
         get() = stateMirror.isShuffled
 
+    override val isClassicalShuffleLocked
+        get() = stateMirror.isClassicalShuffleLocked
+
     override val currentAudioSessionId: Int?
         get() = stateHolder?.audioSessionId
 
@@ -401,6 +416,7 @@ class PlaybackStateManagerImpl @Inject constructor() : PlaybackStateManager {
             )
             listener.onProgressionChanged(stateMirror.progression)
             listener.onRepeatModeChanged(stateMirror.repeatMode)
+            listener.onClassicalShuffleLockChanged(stateMirror.isClassicalShuffleLocked)
         }
     }
 
@@ -520,6 +536,13 @@ class PlaybackStateManagerImpl @Inject constructor() : PlaybackStateManager {
         val stateHolder = stateHolder ?: return
         L.d("Removing item at $at")
         stateHolder.remove(at, StateAck.Remove(at))
+    }
+
+    @Synchronized
+    override fun clearUpcoming() {
+        val stateHolder = stateHolder ?: return
+        L.d("Clearing upcoming queue items")
+        stateHolder.clearUpcoming()
     }
 
     @Synchronized
@@ -659,11 +682,13 @@ class PlaybackStateManagerImpl @Inject constructor() : PlaybackStateManager {
             }
             is StateAck.QueueReordered -> {
                 val rawQueue = stateHolder.resolveQueue()
+                val shuffleLocked = stateHolder.isClassicalShuffleLocked
                 stateMirror =
                     stateMirror.copy(
                         queue = rawQueue.resolveSongs(),
                         index = rawQueue.resolveIndex(),
                         isShuffled = rawQueue.isShuffled,
+                        isClassicalShuffleLocked = shuffleLocked,
                         rawQueue = rawQueue,
                     )
                 listeners.forEach {
@@ -672,16 +697,19 @@ class PlaybackStateManagerImpl @Inject constructor() : PlaybackStateManager {
                         stateMirror.index,
                         stateMirror.isShuffled,
                     )
+                    it.onClassicalShuffleLockChanged(shuffleLocked)
                 }
             }
             is StateAck.NewPlayback -> {
                 val rawQueue = stateHolder.resolveQueue()
+                val shuffleLocked = stateHolder.isClassicalShuffleLocked
                 stateMirror =
                     stateMirror.copy(
                         parent = stateHolder.parent,
                         queue = rawQueue.resolveSongs(),
                         index = rawQueue.resolveIndex(),
                         isShuffled = rawQueue.isShuffled,
+                        isClassicalShuffleLocked = shuffleLocked,
                         rawQueue = rawQueue,
                     )
                 listeners.forEach {
@@ -691,6 +719,7 @@ class PlaybackStateManagerImpl @Inject constructor() : PlaybackStateManager {
                         stateMirror.index,
                         stateMirror.isShuffled,
                     )
+                    it.onClassicalShuffleLockChanged(shuffleLocked)
                 }
             }
             is StateAck.ProgressionChanged -> {

@@ -69,10 +69,46 @@ public sealed partial class MainWindow : Window
                     }
                 });
             };
+            _smtc.PlaybackPositionChangeRequested += (_, args) =>
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (ViewModel.PlaybackDurationSeconds > 0)
+                    {
+                        ViewModel.SeekToSeconds(args.RequestedPlaybackPosition.TotalSeconds);
+                        SyncSmtcTimeline(force: true);
+                    }
+                });
+            };
         }
         catch
         {
             // Headless or restricted environment without SMTC shell service
+        }
+    }
+
+    private void SyncSmtcTimeline(bool force = false)
+    {
+        if (_smtc is null) return;
+        if (!force && (DateTime.UtcNow - _lastSmtcTimelineUpdateUtc).TotalSeconds < 1.5) return;
+        try
+        {
+            double dur = Math.Max(0.0, ViewModel.PlaybackDurationSeconds);
+            double pos = Math.Clamp(ViewModel.PlaybackPositionSeconds, 0.0, dur);
+            var props = new SystemMediaTransportControlsTimelineProperties
+            {
+                StartTime = TimeSpan.Zero,
+                MinSeekTime = TimeSpan.Zero,
+                EndTime = TimeSpan.FromSeconds(dur),
+                MaxSeekTime = TimeSpan.FromSeconds(dur),
+                Position = TimeSpan.FromSeconds(pos),
+            };
+            _smtc.UpdateTimelineProperties(props);
+            _lastSmtcTimelineUpdateUtc = DateTime.UtcNow;
+        }
+        catch
+        {
+            // Non-fatal SMTC timeline fallback
         }
     }
 
@@ -84,6 +120,7 @@ public sealed partial class MainWindow : Window
             _smtc.PlaybackStatus = ViewModel.IsPlaying
                 ? MediaPlaybackStatus.Playing
                 : (ViewModel.CurrentTrack is null ? MediaPlaybackStatus.Closed : MediaPlaybackStatus.Paused);
+            SyncSmtcTimeline(force: true);
         }
         catch
         {
@@ -100,8 +137,36 @@ public sealed partial class MainWindow : Window
         {
             var updater = _smtc.DisplayUpdater;
             updater.Type = MediaPlaybackType.Music;
-            updater.MusicProperties.Title = track.Title;
-            updater.MusicProperties.Artist = track.ArtistsDisplay;
+            string smtcTitle = track.Title;
+            string smtcArtist = track.ArtistsDisplay;
+            if (track.IsClassical && (!string.IsNullOrWhiteSpace(track.WorkName) || !string.IsNullOrWhiteSpace(track.ComposersDisplay)))
+            {
+                var formatted = ClassicalMetadataEngine.FormatClassicalNowPlaying(
+                    track.Title,
+                    string.IsNullOrWhiteSpace(track.WorkName) ? null : track.WorkName,
+                    string.IsNullOrWhiteSpace(track.MovementName) ? null : track.MovementName,
+                    track.MovementNumber,
+                    track.Album,
+                    MainViewModel.SplitComposers(track.ComposersDisplay),
+                    MainViewModel.SplitPerformers(track.ArtistsDisplay),
+                    MainViewModel.SplitPerformers(track.ConductorsDisplay),
+                    track.Year > 0 ? track.Year : null);
+                if (!string.IsNullOrWhiteSpace(formatted.Line2) && !string.Equals(formatted.Line2, track.Album, StringComparison.Ordinal))
+                {
+                    smtcTitle = $"{formatted.Line1} · {formatted.Line2}";
+                }
+                else if (!string.IsNullOrWhiteSpace(formatted.Line1))
+                {
+                    smtcTitle = formatted.Line1;
+                }
+                string? credit = formatted.Line3Tiers.FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
+                if (!string.IsNullOrWhiteSpace(credit))
+                {
+                    smtcArtist = credit;
+                }
+            }
+            updater.MusicProperties.Title = smtcTitle;
+            updater.MusicProperties.Artist = smtcArtist;
             updater.MusicProperties.AlbumTitle = track.Album;
             bool hasCover = !string.IsNullOrWhiteSpace(track.CoverArtPath)
                 && await Task.Run(() => File.Exists(track.CoverArtPath));
@@ -124,6 +189,7 @@ public sealed partial class MainWindow : Window
             {
                 updater.Thumbnail = null;
             }
+            if (ViewModel.CurrentTrack?.TrackUid != track.TrackUid) return;
             updater.Update();
         }
         catch
@@ -142,7 +208,7 @@ public sealed partial class MainWindow : Window
             _bookletDoc = null;
             _loadedBookletPath = null;
             BookletPageImage.Source = null;
-            if (NowPlayingBookletImage is not null) NowPlayingBookletImage.Source = null;
+            BookletPageStatusText.Text = "数字册页";
             return;
         }
         if (string.Equals(_loadedBookletPath, pdfPath, StringComparison.OrdinalIgnoreCase))
@@ -163,6 +229,39 @@ public sealed partial class MainWindow : Window
             _bookletDoc = null;
             _loadedBookletPath = null;
             BookletPageStatusText.Text = "Booklet PDF unavailable";
+        }
+    }
+
+    private async Task LoadPlayingBookletForTrackAsync(TrackItem? track)
+    {
+        string? pdfPath = track?.BookletPdfPath;
+        bool exists = !string.IsNullOrWhiteSpace(pdfPath)
+            && await Task.Run(() => File.Exists(pdfPath));
+        if (!exists || string.IsNullOrWhiteSpace(pdfPath))
+        {
+            _playingBookletDoc = null;
+            _loadedPlayingBookletPath = null;
+            if (NowPlayingBookletImage is not null) NowPlayingBookletImage.Source = null;
+            if (NowPlayingBookletStatusText is not null) NowPlayingBookletStatusText.Text = "数字册页";
+            return;
+        }
+        if (string.Equals(_loadedPlayingBookletPath, pdfPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        try
+        {
+            var file = await StorageFile.GetFileFromPathAsync(pdfPath);
+            _playingBookletDoc = await PdfDocument.LoadFromFileAsync(file);
+            _loadedPlayingBookletPath = pdfPath;
+            _playingBookletPageIndex = 0;
+            await RenderCurrentPlayingBookletPageAsync();
+        }
+        catch
+        {
+            _playingBookletDoc = null;
+            _loadedPlayingBookletPath = null;
             if (NowPlayingBookletStatusText is not null) NowPlayingBookletStatusText.Text = "Booklet PDF unavailable";
         }
     }
@@ -173,16 +272,38 @@ public sealed partial class MainWindow : Window
         int pageCount = (int)_bookletDoc.PageCount;
         _bookletPageIndex = Math.Clamp(_bookletPageIndex, 0, pageCount - 1);
 
-        using var page = _bookletDoc.GetPage((uint)_bookletPageIndex);
+        var bmp = await RenderPdfPageToBitmapAsync(_bookletDoc, (uint)_bookletPageIndex, 1080);
+        BookletPageImage.Source = bmp;
+        BookletPageStatusText.Text = $"Booklet PDF · Page {_bookletPageIndex + 1} / {pageCount}";
+    }
+
+    private async Task RenderCurrentPlayingBookletPageAsync()
+    {
+        if (_playingBookletDoc is null || _playingBookletDoc.PageCount == 0) return;
+        int pageCount = (int)_playingBookletDoc.PageCount;
+        _playingBookletPageIndex = Math.Clamp(_playingBookletPageIndex, 0, pageCount - 1);
+
+        var bmp = await RenderPdfPageToBitmapAsync(_playingBookletDoc, (uint)_playingBookletPageIndex, 1400);
+        if (NowPlayingBookletImage is not null) NowPlayingBookletImage.Source = bmp;
+        if (NowPlayingBookletStatusText is not null) NowPlayingBookletStatusText.Text = $"Page {_playingBookletPageIndex + 1} / {pageCount}";
+    }
+
+    private static async Task<BitmapImage> RenderPdfPageToBitmapAsync(PdfDocument doc, uint pageIndex, uint destinationWidth)
+    {
+        using var page = doc.GetPage(pageIndex);
         using var stream = new InMemoryRandomAccessStream();
-        await page.RenderToStreamAsync(stream);
+        var opts = new PdfPageRenderOptions();
+        if (page.Size.Width > 0 && destinationWidth > 0)
+        {
+            double scale = destinationWidth / page.Size.Width;
+            opts.DestinationWidth = destinationWidth;
+            opts.DestinationHeight = (uint)Math.Max(1, Math.Round(page.Size.Height * scale));
+        }
+        await page.RenderToStreamAsync(stream, opts);
         stream.Seek(0);
         var bmp = new BitmapImage();
         await bmp.SetSourceAsync(stream);
-        BookletPageImage.Source = bmp;
-        BookletPageStatusText.Text = $"Booklet PDF · Page {_bookletPageIndex + 1} / {pageCount}";
-        if (NowPlayingBookletImage is not null) NowPlayingBookletImage.Source = bmp;
-        if (NowPlayingBookletStatusText is not null) NowPlayingBookletStatusText.Text = $"Page {_bookletPageIndex + 1} / {pageCount}";
+        return bmp;
     }
 
     private async void OnBookletPrevClick(object sender, RoutedEventArgs e)
@@ -210,6 +331,34 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             App.WriteCrashLog("OnBookletNextClick", ex);
+        }
+    }
+
+    private async void OnPlayingBookletPrevClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_playingBookletDoc is null || _playingBookletPageIndex <= 0) return;
+            _playingBookletPageIndex--;
+            await RenderCurrentPlayingBookletPageAsync();
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnPlayingBookletPrevClick", ex);
+        }
+    }
+
+    private async void OnPlayingBookletNextClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_playingBookletDoc is null || _playingBookletPageIndex + 1 >= (int)_playingBookletDoc.PageCount) return;
+            _playingBookletPageIndex++;
+            await RenderCurrentPlayingBookletPageAsync();
+        }
+        catch (Exception ex)
+        {
+            App.WriteCrashLog("OnPlayingBookletNextClick", ex);
         }
     }
 
@@ -244,6 +393,22 @@ public sealed partial class MainWindow : Window
     {
         try
         {
+            if (ViewModel.HasCustomBuiltInEqDraft)
+            {
+                var confirm = new ContentDialog
+                {
+                    Title = "覆盖当前自定义内置 EQ？",
+                    Content = "当前内置 10 段均衡或前级增益处于 Custom 修改状态，导入 Equalizer APO 配置将替换当前 Layer A 曲线。",
+                    PrimaryButtonText = "继续导入",
+                    CloseButtonText = "取消",
+                    DefaultButton = ContentDialogButton.Close,
+                };
+                if (await ShowDialogSafeAsync(confirm) != ContentDialogResult.Primary)
+                {
+                    return;
+                }
+            }
+
             var picker = new FileOpenPicker();
             picker.FileTypeFilter.Add(".txt");
             InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
@@ -333,7 +498,9 @@ public sealed partial class MainWindow : Window
                     : "当前已配置 SessionKey（读写已就绪）。若推送异常，可重新执行浏览器授权刷新会话。",
                 FontSize = 12,
                 TextWrapping = TextWrapping.Wrap,
-                Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x94, 0xA3, 0xB8)),
+                Foreground = Application.Current.Resources.TryGetValue("ZuneInkSecondaryBrush", out object? secBrush) && secBrush is Brush b
+                    ? b
+                    : new SolidColorBrush(Color.FromArgb(0xFF, 0x88, 0x88, 0x88)),
             };
 
             var openBrowserAuthBtn = new Button
@@ -547,9 +714,16 @@ public sealed partial class MainWindow : Window
     {
         if (SubPivotBar is null) return;
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
-        var activeBrush = new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x00, 0x00, 0x00) : Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
-        var inactiveBrush = new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x59, 0x59, 0x59) : Color.FromArgb(0xFF, 0xA3, 0xA3, 0xA3));
-        var accentBrush = new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
+        var ui = _accessibilitySettings.HighContrast ? new Windows.UI.ViewManagement.UISettings() : null;
+        var activeBrush = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground))
+            : new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x00, 0x00, 0x00) : Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+        var inactiveBrush = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground))
+            : new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x59, 0x59, 0x59) : Color.FromArgb(0xFF, 0xA3, 0xA3, 0xA3));
+        var accentBrush = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent))
+            : new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentInkRgb.R, _currentAccentInkRgb.G, _currentAccentInkRgb.B));
 
         var tabs = ViewModel.CurrentSubTabs;
         if (tabs.Count == 0)
@@ -826,7 +1000,7 @@ public sealed partial class MainWindow : Window
             if (!_isNowPlayingChromeFaded && (DateTime.UtcNow - _lastNowPlayingActivityUtc).TotalSeconds >= 4.0)
             {
                 _isNowPlayingChromeFaded = true;
-                TopHeaderContainer.IsHitTestVisible = false;
+                TopHeaderContainer.IsHitTestVisible = true;
                 ZuneMotionHelper.AnimateOpacity(TopHeaderContainer, 0.0f, durationMs: 320);
             }
         }
@@ -914,9 +1088,16 @@ public sealed partial class MainWindow : Window
         }
         if (root.FindName("QueueTitleText") is TextBlock titleText)
         {
-            if (isPlayingRow)
+            if (_accessibilitySettings.HighContrast)
             {
-                titleText.Foreground = new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
+                var ui = new Windows.UI.ViewManagement.UISettings();
+                titleText.Foreground = new SolidColorBrush(ui.GetColorValue(isPlayingRow
+                    ? Windows.UI.ViewManagement.UIColorType.Accent
+                    : Windows.UI.ViewManagement.UIColorType.Foreground));
+            }
+            else if (isPlayingRow)
+            {
+                titleText.Foreground = new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentInkRgb.R, _currentAccentInkRgb.G, _currentAccentInkRgb.B));
             }
             else
             {
@@ -992,82 +1173,174 @@ public sealed partial class MainWindow : Window
 
     private async void OnOpenBookletTheaterClick(object sender, RoutedEventArgs e)
     {
+        await OpenBookletTheaterAsync(
+            _bookletDoc,
+            _bookletPageIndex,
+            $"数字册页剧场 · {ViewModel.InspectedTrack?.Album ?? "Booklet"}",
+            async idx =>
+            {
+                _bookletPageIndex = idx;
+                await RenderCurrentBookletPageAsync();
+            });
+    }
+
+    private async void OnOpenPlayingBookletTheaterClick(object sender, RoutedEventArgs e)
+    {
+        await OpenBookletTheaterAsync(
+            _playingBookletDoc,
+            _playingBookletPageIndex,
+            $"数字册页剧场 · {ViewModel.CurrentTrack?.Album ?? "Booklet"}",
+            async idx =>
+            {
+                _playingBookletPageIndex = idx;
+                await RenderCurrentPlayingBookletPageAsync();
+            });
+    }
+
+    private async Task OpenBookletTheaterAsync(
+        PdfDocument? doc,
+        int initialPageIndex,
+        string title,
+        Func<int, Task> syncPageAsync)
+    {
         await RunSafeUiActionAsync(async () =>
         {
-            if (_bookletDoc is null || _bookletDoc.PageCount == 0) return;
+            if (doc is null || doc.PageCount == 0) return;
 
-            var img = new Image { Stretch = Stretch.Uniform };
+            int count = (int)doc.PageCount;
+            int currentIdx = Math.Clamp(initialPageIndex, 0, count - 1);
+            bool spreadMode = false;
+            bool fullscreenMode = false;
+
+            var leftImg = new Image { Stretch = Stretch.Uniform };
+            var rightImg = new Image { Stretch = Stretch.Uniform, Visibility = Visibility.Collapsed };
+            var pageRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 12,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            pageRow.Children.Add(leftImg);
+            pageRow.Children.Add(rightImg);
+
+            var zoomScroller = new ScrollViewer
+            {
+                ZoomMode = ZoomMode.Enabled,
+                MinZoomFactor = 0.5f,
+                MaxZoomFactor = 4.0f,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = pageRow,
+            };
+
+            var viewerBorder = new Border
+            {
+                Background = Application.Current.Resources.TryGetValue("ZuneSurfaceSubtleBrush", out object? sb) && sb is Brush bgBrush
+                    ? bgBrush
+                    : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                CornerRadius = new CornerRadius(0),
+                Padding = new Thickness(6),
+                MaxHeight = 620,
+                Child = zoomScroller,
+            };
+
             var status = new TextBlock { FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
 
             async Task RenderModalPageAsync()
             {
-                int count = (int)_bookletDoc.PageCount;
-                _bookletPageIndex = Math.Clamp(_bookletPageIndex, 0, count - 1);
-                using var page = _bookletDoc.GetPage((uint)_bookletPageIndex);
-                using var stream = new InMemoryRandomAccessStream();
-                await page.RenderToStreamAsync(stream);
-                stream.Seek(0);
-                var bmp = new BitmapImage();
-                await bmp.SetSourceAsync(stream);
-                img.Source = bmp;
-                status.Text = $"第 {_bookletPageIndex + 1} / {count} 页";
+                currentIdx = Math.Clamp(currentIdx, 0, count - 1);
+                leftImg.Source = await RenderPdfPageToBitmapAsync(doc, (uint)currentIdx, spreadMode ? 1200u : 1800u);
+                if (spreadMode && currentIdx + 1 < count)
+                {
+                    rightImg.Source = await RenderPdfPageToBitmapAsync(doc, (uint)(currentIdx + 1), 1200u);
+                    rightImg.Visibility = Visibility.Visible;
+                    status.Text = $"第 {currentIdx + 1}–{currentIdx + 2} / {count} 页（双页对开）";
+                }
+                else
+                {
+                    rightImg.Source = null;
+                    rightImg.Visibility = Visibility.Collapsed;
+                    status.Text = $"第 {currentIdx + 1} / {count} 页";
+                }
             }
 
-            var prevBtn = new Button { Content = "上一页", Padding = new Thickness(10, 4, 10, 4) };
-            prevBtn.Click += async (_, _) =>
+            async Task StepPageAsync(int delta)
             {
-                await RunSafeUiActionAsync(async () =>
-                {
-                    if (_bookletPageIndex > 0)
-                    {
-                        _bookletPageIndex--;
-                        await RenderModalPageAsync();
-                        await RenderCurrentBookletPageAsync();
-                    }
-                }, "数字册页上一页");
+                int step = spreadMode ? delta * 2 : delta;
+                int next = Math.Clamp(currentIdx + step, 0, count - 1);
+                if (next == currentIdx) return;
+                currentIdx = next;
+                await RenderModalPageAsync();
+                await syncPageAsync(currentIdx);
+            }
+
+            var prevBtn = new Button { Content = "上一页 (←)", Padding = new Thickness(10, 4, 10, 4) };
+            prevBtn.Click += async (_, _) => await RunSafeUiActionAsync(() => StepPageAsync(-1), "数字册页上一页");
+
+            var nextBtn = new Button { Content = "下一页 (→)", Padding = new Thickness(10, 4, 10, 4) };
+            nextBtn.Click += async (_, _) => await RunSafeUiActionAsync(() => StepPageAsync(1), "数字册页下一页");
+
+            var spreadToggle = new ToggleButton { Content = "双页对开", Padding = new Thickness(10, 4, 10, 4) };
+            spreadToggle.Click += async (_, _) =>
+            {
+                spreadMode = spreadToggle.IsChecked == true;
+                await RunSafeUiActionAsync(RenderModalPageAsync, "切换双页对开");
             };
 
-            var nextBtn = new Button { Content = "下一页", Padding = new Thickness(10, 4, 10, 4) };
-            nextBtn.Click += async (_, _) =>
-            {
-                await RunSafeUiActionAsync(async () =>
-                {
-                    if (_bookletPageIndex + 1 < (int)_bookletDoc.PageCount)
-                    {
-                        _bookletPageIndex++;
-                        await RenderModalPageAsync();
-                        await RenderCurrentBookletPageAsync();
-                    }
-                }, "数字册页下一页");
-            };
-
-            var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-            controls.Children.Add(prevBtn);
-            controls.Children.Add(nextBtn);
-            controls.Children.Add(status);
-
-            var body = new StackPanel { Spacing = 8 };
-            body.Children.Add(controls);
-            body.Children.Add(new Border
-            {
-                Background = (Brush)Application.Current.Resources["SolidBackgroundFillColorBaseBrush"],
-                CornerRadius = new CornerRadius(0),
-                Padding = new Thickness(6),
-                MaxHeight = 620,
-                Child = img,
-            });
-
-            await RenderModalPageAsync();
+            var zoom100Btn = new Button { Content = "100%", Padding = new Thickness(8, 4, 8, 4) };
+            zoom100Btn.Click += (_, _) => zoomScroller.ChangeView(null, null, 1.0f);
+            var zoom150Btn = new Button { Content = "150%", Padding = new Thickness(8, 4, 8, 4) };
+            zoom150Btn.Click += (_, _) => zoomScroller.ChangeView(null, null, 1.5f);
+            var zoom200Btn = new Button { Content = "200%", Padding = new Thickness(8, 4, 8, 4) };
+            zoom200Btn.Click += (_, _) => zoomScroller.ChangeView(null, null, 2.0f);
 
             var dialog = new ContentDialog
             {
-                Title = $"数字册页剧场 · {ViewModel.InspectedTrack?.Album ?? "Booklet"}",
-                Content = body,
+                Title = title,
                 CloseButtonText = "关闭",
                 RequestedTheme = RootWorkbench.ActualTheme,
                 XamlRoot = RootWorkbench.XamlRoot,
             };
-            dialog.Resources["ContentDialogMaxWidth"] = 920.0;
+            dialog.Resources["ContentDialogMaxWidth"] = 980.0;
+
+            var fullscreenToggle = new ToggleButton { Content = "大屏展开", Padding = new Thickness(10, 4, 10, 4) };
+            fullscreenToggle.Click += (_, _) =>
+            {
+                fullscreenMode = fullscreenToggle.IsChecked == true;
+                dialog.Resources["ContentDialogMaxWidth"] = fullscreenMode ? 1560.0 : 980.0;
+                viewerBorder.MaxHeight = fullscreenMode ? 840 : 620;
+            };
+
+            var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            controls.Children.Add(prevBtn);
+            controls.Children.Add(nextBtn);
+            controls.Children.Add(spreadToggle);
+            controls.Children.Add(zoom100Btn);
+            controls.Children.Add(zoom150Btn);
+            controls.Children.Add(zoom200Btn);
+            controls.Children.Add(fullscreenToggle);
+            controls.Children.Add(status);
+
+            var body = new StackPanel { Spacing = 8 };
+            body.Children.Add(controls);
+            body.Children.Add(viewerBorder);
+            body.KeyDown += async (_, args) =>
+            {
+                if (args.Key is VirtualKey.Left or VirtualKey.PageUp)
+                {
+                    args.Handled = true;
+                    await RunSafeUiActionAsync(() => StepPageAsync(-1), "数字册页上一页");
+                }
+                else if (args.Key is VirtualKey.Right or VirtualKey.PageDown)
+                {
+                    args.Handled = true;
+                    await RunSafeUiActionAsync(() => StepPageAsync(1), "数字册页下一页");
+                }
+            };
+
+            await RenderModalPageAsync();
+            dialog.Content = body;
             await ShowDialogSafeAsync(dialog);
         }, "打开数字册页剧场");
     }
@@ -1181,5 +1454,81 @@ public sealed partial class MainWindow : Window
             hcActivePaint?.Dispose();
             hcInactivePaint?.Dispose();
         }
+    }
+
+    private void OnPaintDspResponse(object? sender, SKPaintSurfaceEventArgs e)
+    {
+        var canvas = e.Surface.Canvas;
+        canvas.Clear(SKColors.Transparent);
+
+        int w = e.Info.Width;
+        int h = e.Info.Height;
+        if (w <= 8 || h <= 8) return;
+
+        bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
+        var (_, layerADb, combinedDb) = ViewModel.GetDspFrequencyResponseCurve(96);
+
+        float dbToY(double db)
+        {
+            double clamped = Math.Clamp(db, -15.0, 15.0);
+            return (float)(h * (15.0 - clamped) / 30.0);
+        }
+
+        using var gridPaint = new SKPaint
+        {
+            Color = isLight ? new SKColor(0x00, 0x00, 0x00, 0x22) : new SKColor(0xFF, 0xFF, 0xFF, 0x22),
+            StrokeWidth = 1f,
+            Style = SKPaintStyle.Stroke,
+            IsAntialias = false,
+        };
+        using var zeroPaint = new SKPaint
+        {
+            Color = isLight ? new SKColor(0x00, 0x00, 0x00, 0x44) : new SKColor(0xFF, 0xFF, 0xFF, 0x44),
+            StrokeWidth = 1.25f,
+            Style = SKPaintStyle.Stroke,
+            IsAntialias = false,
+        };
+        foreach (double refDb in new[] { -12.0, -6.0, 6.0, 12.0 })
+        {
+            float y = dbToY(refDb);
+            canvas.DrawLine(0, y, w, y, gridPaint);
+        }
+        float zeroY = dbToY(0.0);
+        canvas.DrawLine(0, zeroY, w, zeroY, zeroPaint);
+
+        var accent = _currentAccentInkRgb;
+        using var layerAPaint = new SKPaint
+        {
+            Color = new SKColor(accent.R, accent.G, accent.B, 0xFF),
+            StrokeWidth = 2f,
+            Style = SKPaintStyle.Stroke,
+            IsAntialias = true,
+        };
+        using var dashEffect = SKPathEffect.CreateDash([6f, 4f], 0f);
+        using var combinedPaint = new SKPaint
+        {
+            Color = isLight ? new SKColor(0x11, 0x11, 0x11, 0xDD) : new SKColor(0xF5, 0xF5, 0xF5, 0xCC),
+            StrokeWidth = 1.75f,
+            Style = SKPaintStyle.Stroke,
+            IsAntialias = true,
+            PathEffect = dashEffect,
+        };
+
+        void DrawCurve(double[] dbArr, SKPaint paint)
+        {
+            if (dbArr.Length < 2) return;
+            using var path = new SKPath();
+            for (int i = 0; i < dbArr.Length; i++)
+            {
+                float x = (float)i / (dbArr.Length - 1) * (w - 1);
+                float y = dbToY(dbArr[i]);
+                if (i == 0) path.MoveTo(x, y);
+                else path.LineTo(x, y);
+            }
+            canvas.DrawPath(path, paint);
+        }
+
+        DrawCurve(layerADb, layerAPaint);
+        DrawCurve(combinedDb, combinedPaint);
     }
 }

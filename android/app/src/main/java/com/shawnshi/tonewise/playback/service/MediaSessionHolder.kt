@@ -226,11 +226,43 @@ private constructor(
 
         // Populate MediaMetadataCompat. For efficiency, cache some fields that are re-used
         // several times.
-        val title = song.name.resolve(context)
-        val artist = song.artists.resolveNames(context)
+        val rawTitle = song.name.resolve(context)
+        val rawArtist = song.artists.resolveNames(context)
         val album = song.album.name.resolve(context)
+        val genreName = (song.genres.firstOrNull()?.name as? org.oxycblt.musikr.tag.Name.Known)?.raw
+        val isClassical =
+            com.shawnshi.tonewise.music.ClassicalMetadataEngine.isClassicalTrack(
+                genre = genreName,
+                work = song.workName,
+                composer = song.composers.firstOrNull(),
+                conductor = song.conductors.firstOrNull(),
+                title = rawTitle,
+            )
+        val (title, artist) =
+            if (isClassical && (!song.workName.isNullOrBlank() || song.composers.isNotEmpty())) {
+                val formatted =
+                    com.shawnshi.tonewise.music.ClassicalMetadataEngine.formatClassicalNowPlaying(
+                        rawTitle = rawTitle,
+                        explicitWork = song.workName,
+                        explicitMovement = song.movementName,
+                        explicitMovementNumber = song.movementNumber,
+                        album = album,
+                        composers = song.composers,
+                        artists = song.artists.map { it.name.resolve(context) },
+                        conductors = song.conductors,
+                        year = song.date?.year,
+                    )
+                val formattedTitle =
+                    formatted.line2.takeIf { it.isNotBlank() && it != album }?.let {
+                        "${formatted.line1} · $it"
+                    } ?: formatted.line1.ifBlank { rawTitle }
+                val credit = formatted.line3Tiers.firstOrNull { it.isNotBlank() } ?: rawArtist
+                formattedTitle to credit
+            } else {
+                rawTitle to rawArtist
+            }
         val composers =
-            song.composers.filter { it.isNotBlank() }.distinct().joinToString(", ").ifEmpty { artist }
+            song.composers.filter { it.isNotBlank() }.distinct().joinToString(", ").ifEmpty { rawArtist }
         val builder =
             MediaMetadataCompat.Builder()
                 .putText(MediaMetadataCompat.METADATA_KEY_TITLE, title)
@@ -419,7 +451,7 @@ private class PlaybackNotification(
     sessionToken: MediaSessionCompat.Token,
 ) : ForegroundServiceNotification(context, CHANNEL_INFO) {
     init {
-        setSmallIcon(R.drawable.ic_auxio_24)
+        setSmallIcon(R.drawable.ic_tonewise_24)
         setCategory(NotificationCompat.CATEGORY_TRANSPORT)
         setShowWhen(false)
         setSilent(true)

@@ -262,7 +262,7 @@ pub fn is_classical_track(
 
 pub fn parse_roman_numeral(raw: &str) -> Option<u32> {
     let s = raw.trim().to_ascii_uppercase();
-    if s.is_empty() || !s.chars().all(|c| matches!(c, 'I' | 'V' | 'X')) {
+    if s.is_empty() || !s.chars().all(|c| matches!(c, 'I' | 'V' | 'X' | 'L' | 'C')) {
         return None;
     }
     let mut total: i32 = 0;
@@ -272,6 +272,8 @@ pub fn parse_roman_numeral(raw: &str) -> Option<u32> {
             'I' => 1,
             'V' => 5,
             'X' => 10,
+            'L' => 50,
+            'C' => 100,
             _ => return None,
         };
         if val < prev {
@@ -281,7 +283,7 @@ pub fn parse_roman_numeral(raw: &str) -> Option<u32> {
             prev = val;
         }
     }
-    if total <= 0 || total > 39 {
+    if total <= 0 || total > 99 {
         return None;
     }
     let n = total as u32;
@@ -293,10 +295,10 @@ pub fn parse_roman_numeral(raw: &str) -> Option<u32> {
 }
 
 pub fn format_roman_numeral(n: u32) -> String {
-    if n == 0 || n > 39 {
+    if n == 0 || n > 99 {
         return n.to_string();
     }
-    let tens = ["", "X", "XX", "XXX"];
+    let tens = ["", "X", "XX", "XXX", "XL", "L", "LX", "LXX", "LXXX", "XC"];
     let ones = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX"];
     format!("{}{}", tens[(n / 10) as usize], ones[(n % 10) as usize])
 }
@@ -312,7 +314,7 @@ pub fn parse_movement_prefix(raw: &str) -> (Option<u32>, String) {
     // Try Roman numeral prefix: e.g., "I. Allegro", "II - Adagio", "IV: Presto", "III Allegro"
     let first_non_roman = trimmed
         .char_indices()
-        .find(|(_, c)| !matches!(c.to_ascii_uppercase(), 'I' | 'V' | 'X'))
+        .find(|(_, c)| !matches!(c.to_ascii_uppercase(), 'I' | 'V' | 'X' | 'L' | 'C'))
         .map(|(i, _)| i)
         .unwrap_or(trimmed.len());
 
@@ -645,16 +647,57 @@ pub fn abbreviate_ensemble(name: &str) -> String {
     out
 }
 
+fn is_cjk_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x3040..=0x30FF | 0xAC00..=0xD7AF
+    )
+}
+
 pub fn short_surname(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    trimmed
-        .split_whitespace()
-        .last()
-        .unwrap_or(trimmed)
-        .to_string()
+    if let Some((surname, _)) = trimmed.split_once(',') {
+        let s = surname.trim();
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if parts.is_empty() {
+        return trimmed.to_string();
+    }
+    if parts
+        .iter()
+        .all(|p| !p.is_empty() && p.chars().all(is_cjk_char))
+    {
+        return parts.concat();
+    }
+    if parts.len() >= 2 {
+        let prev = parts[parts.len() - 2].to_ascii_lowercase();
+        let is_compound = matches!(
+            prev.as_str(),
+            "vaughan"
+                | "de"
+                | "di"
+                | "da"
+                | "del"
+                | "della"
+                | "dos"
+                | "das"
+                | "du"
+                | "la"
+                | "le"
+                | "saint"
+                | "st."
+        );
+        if is_compound {
+            return format!("{} {}", parts[parts.len() - 2], parts[parts.len() - 1]);
+        }
+    }
+    parts[parts.len() - 1].to_string()
 }
 
 pub fn build_classical_credit_tiers(
@@ -893,5 +936,32 @@ mod tests {
             );
             assert_eq!(actual, c.expected_tiers);
         }
+    }
+
+    #[test]
+    fn supports_roman_numerals_up_to_99_and_compound_cjk_surnames() {
+        assert_eq!(parse_roman_numeral("XL"), Some(40));
+        assert_eq!(parse_roman_numeral("XLII"), Some(42));
+        assert_eq!(parse_roman_numeral("L"), Some(50));
+        assert_eq!(parse_roman_numeral("LXIV"), Some(64));
+        assert_eq!(parse_roman_numeral("XC"), Some(90));
+        assert_eq!(parse_roman_numeral("XCIX"), Some(99));
+        assert_eq!(parse_roman_numeral("XXXX"), None);
+        assert_eq!(parse_roman_numeral("IL"), None);
+        assert_eq!(parse_roman_numeral("IC"), None);
+        assert_eq!(parse_roman_numeral("C"), None);
+        assert_eq!(format_roman_numeral(42), "XLII");
+        assert_eq!(format_roman_numeral(99), "XCIX");
+        assert_eq!(
+            parse_movement_prefix("XLII. Aria"),
+            (Some(42), "Aria".to_string())
+        );
+
+        assert_eq!(short_surname("Ludwig van Beethoven"), "Beethoven");
+        assert_eq!(short_surname("Ralph Vaughan Williams"), "Vaughan Williams");
+        assert_eq!(short_surname("Manuel de Falla"), "de Falla");
+        assert_eq!(short_surname("Beethoven, Ludwig van"), "Beethoven");
+        assert_eq!(short_surname("谭盾"), "谭盾");
+        assert_eq!(short_surname("陈 其钢"), "陈其钢");
     }
 }

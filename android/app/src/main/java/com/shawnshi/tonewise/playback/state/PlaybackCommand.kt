@@ -258,7 +258,8 @@ constructor(
             queue = queue,
             shuffled = isShuffled(shuffle),
             suppressGlobalShuffle = false,
-            restoreGlobalShuffleOnUnlock = shuffle == ShuffleMode.IMPLICIT,
+            restoreGlobalShuffleOnUnlock =
+                shuffle == ShuffleMode.IMPLICIT && playbackSettings.keepShuffle,
         )
     }
 

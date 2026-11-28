@@ -127,6 +127,10 @@ constructor(
     val isShuffled: StateFlow<Boolean>
         field = MutableStateFlow(false)
 
+    /** Whether shuffle is currently locked for classical movement order preservation. */
+    val isClassicalShuffleLocked: StateFlow<Boolean>
+        field = MutableStateFlow(false)
+
     /** The current secondary action to show alongside the play button in the playback bar. */
     val currentBarAction: StateFlow<ActionMode>
         field = MutableStateFlow(playbackSettings.barAction)
@@ -230,6 +234,10 @@ constructor(
 
         pagerCommand.put(PagerCommand(update = UpdateInstructions.Replace(0), scroll = index))
         _pagerQueue.value = PagerQueue(queue = queue, index = index)
+    }
+
+    override fun onClassicalShuffleLockChanged(isLocked: Boolean) {
+        this.isClassicalShuffleLocked.value = isLocked
     }
 
     override fun onProgressionChanged(progression: Progression) {

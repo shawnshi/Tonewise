@@ -62,13 +62,13 @@
             Canvas.ZIndex="10">
 
             <!-- TitleBar Utility Strip (38px) -->
-            <Grid Height="38" Padding="18,0,0,0">
+            <Grid MinHeight="38" Padding="18,0,0,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="138" />
+                    <ColumnDefinition x:Name="TitleBarRightInsetColumn" Width="138" />
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
@@ -260,11 +260,31 @@
                     </Button>
                 </StackPanel>
 
-                <!-- Active context header & filter summary -->
-                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <TextBlock Text="{x:Bind ViewModel.CurrentViewHeader, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                    <TextBlock Text="{x:Bind ViewModel.ActiveFilterPillsSummary, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextTrimming="CharacterEllipsis" />
-                </StackPanel>
+                <!-- Active context header & filter summary + draggable empty title space -->
+                <Grid Grid.Column="1" HorizontalAlignment="Stretch">
+                    <Border x:Name="PivotHeaderDragSpacer" Background="Transparent" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+                    <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <ItemsControl
+                            ItemsSource="{x:Bind ViewModel.BreadcrumbItems, Mode=OneWay}"
+                            ToolTipService.ToolTip="{x:Bind ViewModel.BreadcrumbTrail, Mode=OneWay}"
+                            VerticalAlignment="Center">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal" Spacing="4" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="x:String">
+                                    <Border Padding="5,1" Background="{ThemeResource ZuneSurfaceElevatedBrush}" BorderBrush="{ThemeResource ZuneHairlineBrush}" BorderThickness="1">
+                                        <TextBlock Text="{x:Bind}" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Text="{x:Bind ViewModel.CurrentViewHeader, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneAccentInkBrush}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{x:Bind ViewModel.ActiveFilterPillsSummary, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </Grid>
             </Grid>
 
             <!-- Sub-Pivot Strip + Workbench Action Bar (hidden in quickplay / now playing) -->
@@ -281,9 +301,11 @@
                         </Grid.ColumnDefinitions>
 
                         <ScrollViewer
+                            x:Name="SubPivotScrollViewer"
                             Grid.Column="0"
                             HorizontalScrollBarVisibility="Auto"
                             VerticalScrollBarVisibility="Disabled"
+                            PointerWheelChanged="OnSubPivotPointerWheelChanged"
                             VerticalAlignment="Center">
                             <StackPanel x:Name="SubPivotBar" Orientation="Horizontal" Spacing="20" />
                         </ScrollViewer>
@@ -293,7 +315,7 @@
                             Grid.Column="1"
                             Background="Transparent"
                             DefaultLabelPosition="Right"
-                            IsDynamicOverflowEnabled="False"
+                            IsDynamicOverflowEnabled="True"
                             Visibility="{x:Bind ViewModel.IsWorkbenchCommandBarVisible, Mode=OneWay}"
                             VerticalAlignment="Center">
                             <AppBarToggleButton
@@ -408,6 +430,23 @@
                         Visibility="Collapsed"
                         Click="OnGlobalNotificationUndoClick"
                         AutomationProperties.Name="撤销上一步操作" />
+                </InfoBar.ActionButton>
+            </InfoBar>
+            <InfoBar
+                x:Name="EndpointVolumeSafetyBar"
+                Margin="18,4,18,0"
+                CornerRadius="0"
+                Severity="Warning"
+                IsOpen="{x:Bind ViewModel.IsEndpointVolumeSafetyPromptVisible, Mode=TwoWay}"
+                Message="{x:Bind ViewModel.EndpointVolumeSafetyPromptText, Mode=OneWay}"
+                IsClosable="True"
+                AutomationProperties.LiveSetting="Assertive">
+                <InfoBar.ActionButton>
+                    <Button
+                        Style="{StaticResource StudioChipButtonStyle}"
+                        Content="恢复该设备记忆音量"
+                        Command="{x:Bind ViewModel.ConfirmRestoreEndpointVolumeCommand}"
+                        AutomationProperties.Name="确认恢复该输出设备的高音量设置" />
                 </InfoBar.ActionButton>
             </InfoBar>
             <Grid
@@ -763,13 +802,6 @@
                                             Padding="10,4"
                                             IsChecked="{x:Bind ViewModel.ShowAllPerformers, Mode=TwoWay}"
                                             Visibility="{x:Bind ViewModel.IsNavArtists, Mode=OneWay}" />
-                                        <ToggleButton
-                                            Grid.Column="1"
-                                            Content="切换乐团 / 独奏"
-                                            FontSize="12"
-                                            Padding="10,4"
-                                            IsChecked="{x:Bind ViewModel.ShowClassicalEnsembles, Mode=TwoWay}"
-                                            Visibility="{x:Bind ViewModel.IsNavClassicalWorks, Mode=OneWay}" />
                                         <Button
                                             Grid.Column="2"
                                             Style="{StaticResource StudioChipButtonStyle}"
@@ -1065,8 +1097,8 @@
                                                 </DropDownButton>
 
                                                 <ToggleButton
-                                                    Height="30"
-                                                    Padding="10,0"
+                                                    MinHeight="30"
+                                                    Padding="10,2"
                                                     FontSize="12"
                                                     VerticalAlignment="Center"
                                                     IsChecked="{x:Bind ViewModel.ScenesTempoNullPassthrough, Mode=TwoWay}"
@@ -1075,8 +1107,8 @@
 
                                                 <Button
                                                     Style="{StaticResource StudioChipButtonStyle}"
-                                                    Height="30"
-                                                    Padding="9,0"
+                                                    MinHeight="30"
+                                                    Padding="9,2"
                                                     VerticalAlignment="Center"
                                                     Visibility="{x:Bind ViewModel.HasAnyActiveStripFilter, Mode=OneWay}"
                                                     Command="{x:Bind ViewModel.ResetAllFiltersCommand}"
@@ -1305,8 +1337,8 @@
 
                                             <Button
                                                 Style="{StaticResource StudioChipButtonStyle}"
-                                                Height="30"
-                                                Padding="9,0"
+                                                MinHeight="30"
+                                                Padding="9,2"
                                                 VerticalAlignment="Center"
                                                 Visibility="{x:Bind ViewModel.HasAnyActiveStripFilter, Mode=OneWay}"
                                                 Command="{x:Bind ViewModel.ResetAllFiltersCommand}"
@@ -1438,7 +1470,7 @@
                                             <DataTemplate x:DataType="playlists:PlaylistSummary">
                                                 <Border
                                                     Width="296"
-                                                    Height="42"
+                                                    MinHeight="42"
                                                     Padding="12,6"
                                                     Background="{ThemeResource ZuneSurfaceElevatedBrush}"
                                                     BorderBrush="{ThemeResource ZuneHairlineBrush}"
@@ -1586,7 +1618,7 @@
                             </ListView>
 
                             <!-- A0) Two-Stage Classical Collection Hierarchy (Composer -> Work -> Recording -> Movement) -->
-                            <Grid x:Name="ClassicalCollectionPanel" Visibility="{x:Bind ViewModel.IsNavClassicalWorks, Mode=OneWay}">
+                            <Grid x:Name="ClassicalCollectionPanel" Visibility="{x:Bind ViewModel.IsClassicalComposerViewVisible, Mode=OneWay}">
                                 <!-- Stage 1: Minimalist Lowercase Composer Index -->
                                 <Grid Visibility="{x:Bind ViewModel.IsClassicalComposerIndexVisible, Mode=OneWay}">
                                     <Grid.RowDefinitions>
@@ -1599,21 +1631,30 @@
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
-                                            <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="all" Click="OnClassicalEraFilterClick" AutomationProperties.Name="all eras">
-                                                <TextBlock Text="all eras" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraAll), Mode=OneWay}" />
+                                            <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="composers" Click="OnClassicalSubModeClick" AutomationProperties.Name="composers view">
+                                                <TextBlock Text="composers" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalComposersMode), Mode=OneWay}" />
                                             </Button>
-                                            <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="baroque" Click="OnClassicalEraFilterClick" AutomationProperties.Name="baroque">
-                                                <TextBlock Text="baroque" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraBaroque), Mode=OneWay}" />
+                                            <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="ensembles" Click="OnClassicalSubModeClick" AutomationProperties.Name="ensembles view">
+                                                <TextBlock Text="ensembles" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.ShowClassicalEnsembles), Mode=OneWay}" />
                                             </Button>
-                                            <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="classical" Click="OnClassicalEraFilterClick" AutomationProperties.Name="classical">
-                                                <TextBlock Text="classical" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraClassical), Mode=OneWay}" />
-                                            </Button>
-                                            <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="romantic" Click="OnClassicalEraFilterClick" AutomationProperties.Name="romantic">
-                                                <TextBlock Text="romantic" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraRomantic), Mode=OneWay}" />
-                                            </Button>
-                                            <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="modern" Click="OnClassicalEraFilterClick" AutomationProperties.Name="modern">
-                                                <TextBlock Text="modern" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraModern), Mode=OneWay}" />
-                                            </Button>
+                                            <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center" Visibility="{x:Bind ViewModel.IsClassicalComposersMode, Mode=OneWay}">
+                                                <Border Width="1" Height="14" Background="{ThemeResource ZuneHairlineBrush}" />
+                                                <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="all" Click="OnClassicalEraFilterClick" AutomationProperties.Name="all eras">
+                                                    <TextBlock Text="all eras" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraAll), Mode=OneWay}" />
+                                                </Button>
+                                                <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="baroque" Click="OnClassicalEraFilterClick" AutomationProperties.Name="baroque">
+                                                    <TextBlock Text="baroque" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraBaroque), Mode=OneWay}" />
+                                                </Button>
+                                                <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="classical" Click="OnClassicalEraFilterClick" AutomationProperties.Name="classical">
+                                                    <TextBlock Text="classical" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraClassical), Mode=OneWay}" />
+                                                </Button>
+                                                <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="romantic" Click="OnClassicalEraFilterClick" AutomationProperties.Name="romantic">
+                                                    <TextBlock Text="romantic" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraRomantic), Mode=OneWay}" />
+                                                </Button>
+                                                <Button Background="Transparent" BorderThickness="0" Padding="0,2" Tag="modern" Click="OnClassicalEraFilterClick" AutomationProperties.Name="modern">
+                                                    <TextBlock Text="modern" FontSize="13" FontWeight="SemiBold" Foreground="{x:Bind models:ClassicalUiPalette.PickAccentOrMuted(ViewModel.IsClassicalEraModern), Mode=OneWay}" />
+                                                </Button>
+                                            </StackPanel>
                                         </StackPanel>
                                         <Button
                                             Grid.Column="1"
@@ -1622,7 +1663,7 @@
                                             Padding="8,4"
                                             Click="OnOpenClassicalJumpMatrixClick"
                                             AutomationProperties.Name="打开 Metro 时期与首字母跳转矩阵">
-                                            <TextBlock Text="era · a–z" FontSize="13" FontWeight="SemiBold" Foreground="#FF0099" />
+                                            <TextBlock Text="{x:Bind ViewModel.ClassicalJumpButtonText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentInkBrush}" />
                                         </Button>
                                     </Grid>
 
@@ -1660,7 +1701,7 @@
                                                         Height="44"
                                                         CornerRadius="0"
                                                         Visibility="{x:Bind HasLocalPortrait}"
-                                                        Background="#161616">
+                                                        Background="{ThemeResource ZuneSurfaceElevatedBrush}">
                                                         <Image Source="{x:Bind PortraitBitmap}" Stretch="UniformToFill" />
                                                     </Border>
                                                     <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
@@ -1677,14 +1718,18 @@
                                                             Foreground="{ThemeResource ZuneInkSecondaryBrush}"
                                                             TextTrimming="CharacterEllipsis" />
                                                     </StackPanel>
-                                                    <Border
+                                                    <Button
                                                         Grid.Column="2"
                                                         Background="Transparent"
+                                                        BorderThickness="0"
+                                                        MinWidth="28"
+                                                        MinHeight="28"
                                                         Padding="8,4"
-                                                        Tapped="OnOpenClassicalJumpMatrixTapped"
+                                                        Click="OnOpenClassicalJumpMatrixClick"
+                                                        AutomationProperties.Name="打开 Metro 首字母跳转矩阵"
                                                         VerticalAlignment="Center">
                                                         <TextBlock x:Phase="1" Text="{x:Bind InitialLowercase}" FontSize="12" Foreground="{ThemeResource ZuneInkTertiaryBrush}" />
-                                                    </Border>
+                                                    </Button>
                                                 </Grid>
                                             </DataTemplate>
                                         </ListView.ItemTemplate>
@@ -1811,7 +1856,7 @@
                                                                     Text="{x:Bind VersionCountLabel}"
                                                                     FontSize="12"
                                                                     FontWeight="SemiBold"
-                                                                    Foreground="#FF0099"
+                                                                    Foreground="{ThemeResource ZuneAccentInkBrush}"
                                                                     VerticalAlignment="Center" />
                                                                 <Button
                                                                     Grid.Column="3"
@@ -1833,7 +1878,7 @@
                                                                     Click="OnPlayClassicalWorkClick"
                                                                     AutomationProperties.Name="按顺序连播整部作品"
                                                                     ToolTipService.ToolTip="按顺序连播整部作品">
-                                                                    <FontIcon Glyph="&#xE768;" FontSize="13" Foreground="#FF0099" />
+                                                                    <FontIcon Glyph="&#xE768;" FontSize="13" Foreground="{ThemeResource ZuneAccentInkBrush}" />
                                                                 </Button>
                                                             </Grid>
                                                         </Border>
@@ -1872,6 +1917,13 @@
                                                                 </ItemsRepeater.Layout>
                                                                 <ItemsRepeater.ItemTemplate>
                                                                     <DataTemplate x:DataType="models:ClassicalMovementViewItem">
+                                                                        <ContentControl
+                                                                            IsTabStop="True"
+                                                                            HorizontalAlignment="Stretch"
+                                                                            HorizontalContentAlignment="Stretch"
+                                                                            Tag="{x:Bind}"
+                                                                            KeyDown="OnClassicalMovementKeyDown"
+                                                                            AutomationProperties.Name="{x:Bind DisplayTitle}">
                                                                         <Border
                                                                             DataContext="{x:Bind}"
                                                                             Tag="{x:Bind}"
@@ -1946,15 +1998,18 @@
                                                                                     Grid.Column="4"
                                                                                     Background="Transparent"
                                                                                     BorderThickness="0"
-                                                                                    Padding="6,2"
+                                                                                    MinWidth="28"
+                                                                                    MinHeight="28"
+                                                                                    Padding="6,4"
                                                                                     Tag="{x:Bind}"
                                                                                     Click="OnPlayClassicalMovementClick"
                                                                                     AutomationProperties.Name="从此乐章开始顺序连播"
                                                                                     ToolTipService.ToolTip="从此乐章开始顺序连播">
-                                                                                    <FontIcon Glyph="&#xE768;" FontSize="11" Foreground="#FF0099" />
+                                                                                    <FontIcon Glyph="&#xE768;" FontSize="11" Foreground="{ThemeResource ZuneAccentInkBrush}" />
                                                                                 </Button>
                                                                             </Grid>
                                                                         </Border>
+                                                                        </ContentControl>
                                                                     </DataTemplate>
                                                                 </ItemsRepeater.ItemTemplate>
                                                             </ItemsRepeater>
@@ -1966,9 +2021,9 @@
                                     </ScrollViewer>
                                 </Grid>
 
-                                <!-- Full-Bleed #000000 0dp Metro Era & A-Z Jump Matrix Overlay -->
+                                <!-- Full-Bleed Dual-Field 0dp Metro Era & A-Z Jump Matrix Overlay -->
                                 <Grid
-                                    Background="#000000"
+                                    Background="{ThemeResource ZuneCanvasBrush}"
                                     Visibility="{x:Bind ViewModel.IsClassicalJumpMatrixOpen, Mode=OneWay}"
                                     Padding="28">
                                     <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -1978,13 +2033,13 @@
                                                     <ColumnDefinition Width="*" />
                                                     <ColumnDefinition Width="Auto" />
                                                 </Grid.ColumnDefinitions>
-                                                <TextBlock Grid.Column="0" Text="composers · era &amp; a–z" FontSize="22" FontWeight="Light" Foreground="White" />
-                                                <Button Grid.Column="1" Background="Transparent" BorderThickness="0" Click="OnCloseClassicalJumpMatrixClick" Padding="8,4">
-                                                    <TextBlock Text="close" FontSize="13" Foreground="#FF0099" />
+                                                <TextBlock Grid.Column="0" Text="{x:Bind ViewModel.ClassicalJumpMatrixHeader, Mode=OneWay}" FontSize="22" FontWeight="Light" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                <Button Grid.Column="1" Background="Transparent" BorderThickness="0" Click="OnCloseClassicalJumpMatrixClick" Padding="8,4" AutomationProperties.Name="关闭时期与首字母跳转矩阵">
+                                                    <TextBlock Text="close" FontSize="13" Foreground="{ThemeResource ZuneAccentInkBrush}" />
                                                 </Button>
                                             </Grid>
 
-                                            <ItemsRepeater ItemsSource="{x:Bind ViewModel.ClassicalJumpEraTiles, Mode=OneWay}">
+                                            <ItemsRepeater ItemsSource="{x:Bind ViewModel.ClassicalJumpEraTiles, Mode=OneWay}" Visibility="{x:Bind ViewModel.IsClassicalComposersMode, Mode=OneWay}">
                                                 <ItemsRepeater.Layout>
                                                     <UniformGridLayout MinItemWidth="112" MinItemHeight="44" MinRowSpacing="6" MinColumnSpacing="6" ItemsStretch="Fill" />
                                                 </ItemsRepeater.Layout>
@@ -1994,13 +2049,13 @@
                                                             DataContext="{x:Bind}"
                                                             Tag="{x:Bind}"
                                                             Background="{x:Bind models:ClassicalUiPalette.PickEraTileBackground(IsSelected), Mode=OneWay}"
-                                                            BorderBrush="#333333"
+                                                            BorderBrush="{ThemeResource ZuneHairlineBrush}"
                                                             BorderThickness="1"
                                                             CornerRadius="0"
                                                             HorizontalAlignment="Stretch"
                                                             VerticalAlignment="Stretch"
                                                             Click="OnClassicalJumpEraTileClick">
-                                                            <TextBlock Text="{x:Bind Key}" FontSize="13" Foreground="White" />
+                                                            <TextBlock Text="{x:Bind Key}" FontSize="13" Foreground="{x:Bind models:ClassicalUiPalette.PickEraText(IsSelected), Mode=OneWay}" />
                                                         </Button>
                                                     </DataTemplate>
                                                 </ItemsRepeater.ItemTemplate>
@@ -2016,7 +2071,7 @@
                                                             DataContext="{x:Bind}"
                                                             Tag="{x:Bind}"
                                                             Background="{x:Bind models:ClassicalUiPalette.PickMatrixTileBackground(IsAvailable), Mode=OneWay}"
-                                                            BorderBrush="#282828"
+                                                            BorderBrush="{ThemeResource ZuneHairlineBrush}"
                                                             BorderThickness="1"
                                                             CornerRadius="0"
                                                             IsEnabled="{x:Bind IsAvailable, Mode=OneWay}"
@@ -2216,6 +2271,7 @@
                                                     <StackPanel Grid.Column="0" Spacing="4">
                                                         <TextBlock Text="本机局域网服务地址（同一 Wi-Fi 下的手机可自动发现或手动填写）" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
                                                         <TextBlock Text="{x:Bind ViewModel.LanHostUrlsText, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneInkPrimaryBrush}" IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                                        <TextBlock Text="{x:Bind ViewModel.LanSyncTransferText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneAccentInkBrush}" TextWrapping="Wrap" />
                                                         <TextBlock Text="提示：首次开启时请在 Windows 防火墙弹窗允许专用网络通信（端口 45820）" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
                                                     </StackPanel>
                                                     <StackPanel Grid.Column="1" Spacing="2" HorizontalAlignment="Right" VerticalAlignment="Center">
@@ -2360,11 +2416,14 @@
                                                     <Grid.RowDefinitions>
                                                         <RowDefinition Height="Auto" />
                                                         <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
                                                     </Grid.RowDefinitions>
                                                     <ToggleSwitch Grid.Row="0" Grid.Column="0" Header="锁定 DAC 硬件设置" IsOn="{x:Bind ViewModel.IsDacHardwareLocked, Mode=TwoWay}" />
                                                     <ToggleSwitch Grid.Row="0" Grid.Column="1" Header="WASAPI 独占" IsOn="{x:Bind ViewModel.PreferWasapiExclusive, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.IsDacHardwareUnlocked, Mode=OneWay}" />
                                                     <ToggleSwitch Grid.Row="1" Grid.Column="0" Header="ISO 226 等响度补偿" IsOn="{x:Bind ViewModel.IsIso226Enabled, Mode=TwoWay}" />
                                                     <ToggleSwitch Grid.Row="1" Grid.Column="1" Header="24-bit TPDF 抖动" IsOn="{x:Bind ViewModel.IsTpdfDitherEnabled, Mode=TwoWay}" />
+                                                    <ToggleSwitch Grid.Row="2" Grid.Column="0" Header="Bit-Perfect 独占时锁定 0 dB 硬件直通音量" IsOn="{x:Bind ViewModel.LockVolumeOnBitPerfect, Mode=TwoWay}" />
+                                                    <ToggleSwitch Grid.Row="2" Grid.Column="1" Header="按输出设备独立记忆音量（防爆音）" IsOn="{x:Bind ViewModel.RememberVolumePerEndpoint, Mode=TwoWay}" />
                                                 </Grid>
 
                                                 <ComboBox
@@ -2383,10 +2442,26 @@
                                                     <TextBlock Text="{x:Bind ViewModel.FirImpulseFileName, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" VerticalAlignment="Center" />
                                                 </StackPanel>
 
-                                                <StackPanel Spacing="4" MaxWidth="420">
-                                                    <TextBlock Text="数字衰减精调 (dB，与播放栏音量同步)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
-                                                    <Slider Minimum="-60" Maximum="0" StepFrequency="0.5" Value="{x:Bind ViewModel.VolumeAttenuationDb, Mode=TwoWay}" AutomationProperties.Name="数字衰减 (dB)" />
-                                                </StackPanel>
+                                                <Grid ColumnSpacing="24">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Grid.Column="0" Spacing="4">
+                                                        <Grid>
+                                                            <TextBlock Text="数字衰减精调 (dB，与播放栏音量同步)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind FormatDb(ViewModel.VolumeAttenuationDb), Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                        </Grid>
+                                                        <Slider Minimum="-60" Maximum="0" StepFrequency="0.5" Value="{x:Bind ViewModel.VolumeAttenuationDb, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.IsSoftwareVolumeControlEnabled, Mode=OneWay}" Tag="Volume" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="数字衰减 (dB)" />
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="1" Spacing="4">
+                                                        <Grid>
+                                                            <TextBlock Text="FIR 卷积干湿比 (Dry/Wet)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind ViewModel.FirDryWetPercentDisplay, Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                        </Grid>
+                                                        <Slider Minimum="0" Maximum="1" StepFrequency="0.05" Value="{x:Bind ViewModel.FirDryWetMix, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.HasFirImpulse, Mode=OneWay}" AutomationProperties.Name="FIR 干湿比" />
+                                                    </StackPanel>
+                                                </Grid>
 
                                                 <TextBlock Text="{x:Bind ViewModel.SignalPathSummary, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneStatusSuccessBrush}" TextWrapping="Wrap" />
                                                 <TextBlock Text="{x:Bind ViewModel.SystemApoWarningText, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneStatusWarnBrush}" Visibility="{x:Bind ViewModel.HasSystemApoConflict, Mode=OneWay}" />
@@ -2414,21 +2489,32 @@
                                                     <Button Style="{StaticResource StudioChipButtonStyle}" Content="归零 10 段 EQ" Command="{x:Bind ViewModel.ResetTenBandEqCommand}" />
                                                 </StackPanel>
 
+                                                <Border Background="{ThemeResource ZuneSurfaceElevatedBrush}" BorderBrush="{ThemeResource ZuneHairlineBrush}" BorderThickness="1" Padding="8,6">
+                                                    <Grid RowSpacing="4">
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto" />
+                                                            <RowDefinition Height="96" />
+                                                        </Grid.RowDefinitions>
+                                                        <TextBlock Grid.Row="0" Text="复合频响曲线（实线：Layer A · 虚线：Layer A+B 叠加 · 20 Hz – 20 kHz）" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                        <skia:SKXamlCanvas Grid.Row="1" x:Name="DspResponseCanvas" PaintSurface="OnPaintDspResponse" />
+                                                    </Grid>
+                                                </Border>
+
                                                 <Grid ColumnSpacing="8">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
                                                         <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
                                                     </Grid.ColumnDefinitions>
-                                                    <StackPanel Grid.Column="0" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand0Db, Mode=TwoWay}" AutomationProperties.Name="31 Hz" /><TextBlock Text="31" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand0Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="1" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand1Db, Mode=TwoWay}" AutomationProperties.Name="62 Hz" /><TextBlock Text="62" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand1Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="2" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand2Db, Mode=TwoWay}" AutomationProperties.Name="125 Hz" /><TextBlock Text="125" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand2Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="3" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand3Db, Mode=TwoWay}" AutomationProperties.Name="250 Hz" /><TextBlock Text="250" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand3Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="4" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand4Db, Mode=TwoWay}" AutomationProperties.Name="500 Hz" /><TextBlock Text="500" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand4Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="5" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand5Db, Mode=TwoWay}" AutomationProperties.Name="1k Hz" /><TextBlock Text="1k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand5Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="6" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand6Db, Mode=TwoWay}" AutomationProperties.Name="2k Hz" /><TextBlock Text="2k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand6Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="7" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand7Db, Mode=TwoWay}" AutomationProperties.Name="4k Hz" /><TextBlock Text="4k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand7Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="8" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand8Db, Mode=TwoWay}" AutomationProperties.Name="8k Hz" /><TextBlock Text="8k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand8Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
-                                                    <StackPanel Grid.Column="9" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand9Db, Mode=TwoWay}" AutomationProperties.Name="16k Hz" /><TextBlock Text="16k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand9Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="0" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand0Db, Mode=TwoWay}" Tag="Band0" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="31 Hz" /><TextBlock Text="31" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand0Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="1" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand1Db, Mode=TwoWay}" Tag="Band1" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="62 Hz" /><TextBlock Text="62" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand1Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="2" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand2Db, Mode=TwoWay}" Tag="Band2" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="125 Hz" /><TextBlock Text="125" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand2Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="3" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand3Db, Mode=TwoWay}" Tag="Band3" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="250 Hz" /><TextBlock Text="250" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand3Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="4" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand4Db, Mode=TwoWay}" Tag="Band4" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="500 Hz" /><TextBlock Text="500" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand4Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="5" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand5Db, Mode=TwoWay}" Tag="Band5" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="1k Hz" /><TextBlock Text="1k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand5Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="6" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand6Db, Mode=TwoWay}" Tag="Band6" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="2k Hz" /><TextBlock Text="2k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand6Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="7" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand7Db, Mode=TwoWay}" Tag="Band7" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="4k Hz" /><TextBlock Text="4k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand7Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="8" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand8Db, Mode=TwoWay}" Tag="Band8" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="8k Hz" /><TextBlock Text="8k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand8Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
+                                                    <StackPanel Grid.Column="9" HorizontalAlignment="Center" Spacing="2"><Slider Orientation="Vertical" Height="96" Minimum="-12" Maximum="12" StepFrequency="0.5" Value="{x:Bind ViewModel.EqBand9Db, Mode=TwoWay}" Tag="Band9" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="16k Hz" /><TextBlock Text="16k" FontSize="11" Foreground="{ThemeResource ZuneInkSecondaryBrush}" HorizontalAlignment="Center" /><TextBlock Text="{x:Bind FormatDb(ViewModel.EqBand9Db), Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneInkPrimaryBrush}" HorizontalAlignment="Center" /></StackPanel>
                                                 </Grid>
 
                                                 <Grid ColumnSpacing="24" RowSpacing="8">
@@ -2436,15 +2522,24 @@
                                                         <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
                                                     </Grid.ColumnDefinitions>
                                                     <StackPanel Grid.Column="0" Spacing="2">
-                                                        <TextBlock Text="DSP 前级增益 Preamp (dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
-                                                        <Slider Minimum="-15" Maximum="6" StepFrequency="0.5" Value="{x:Bind ViewModel.DspPreampDb, Mode=TwoWay}" AutomationProperties.Name="DSP Preamp" />
+                                                        <Grid>
+                                                            <TextBlock Text="DSP 前级增益 Preamp (dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind FormatDb(ViewModel.DspPreampDb), Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                        </Grid>
+                                                        <Slider Minimum="-15" Maximum="6" StepFrequency="0.5" Value="{x:Bind ViewModel.DspPreampDb, Mode=TwoWay}" Tag="Preamp" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="DSP Preamp" />
                                                     </StackPanel>
                                                     <StackPanel Grid.Column="1" Spacing="2">
-                                                        <TextBlock Text="左右声道平衡 (-L / +R dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
-                                                        <Slider Minimum="-6" Maximum="6" StepFrequency="0.5" Value="{x:Bind ViewModel.DspBalanceDb, Mode=TwoWay}" AutomationProperties.Name="左右声道平衡" />
+                                                        <Grid>
+                                                            <TextBlock Text="左右声道平衡 (-L / +R dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind FormatDb(ViewModel.DspBalanceDb), Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                        </Grid>
+                                                        <Slider Minimum="-6" Maximum="6" StepFrequency="0.5" Value="{x:Bind ViewModel.DspBalanceDb, Mode=TwoWay}" Tag="Balance" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="左右声道平衡" />
                                                     </StackPanel>
                                                     <StackPanel Grid.Column="2" Spacing="2">
-                                                        <TextBlock Text="Crossfeed 馈送强度 (dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                        <Grid>
+                                                            <TextBlock Text="Crossfeed 馈送强度 (dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind FormatDb(ViewModel.CrossfeedFeedDb), Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                        </Grid>
                                                         <Slider Minimum="1.5" Maximum="9.5" StepFrequency="0.5" Value="{x:Bind ViewModel.CrossfeedFeedDb, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.IsCrossfeedEnabled, Mode=OneWay}" AutomationProperties.Name="Crossfeed 馈送" />
                                                     </StackPanel>
                                                 </Grid>
@@ -2455,7 +2550,7 @@
                                                     <ToggleSwitch Header="防削波限幅器 (-0.2 dBFS)" IsOn="{x:Bind ViewModel.IsLimiterEnabled, Mode=TwoWay}" />
                                                 </StackPanel>
 
-                                                <Border Margin="0,6,0,0" Padding="12" CornerRadius="6" BorderThickness="1" BorderBrush="{ThemeResource ZuneHairlineBrush}">
+                                                <Border Margin="0,6,0,0" Padding="12" CornerRadius="0" BorderThickness="1" BorderBrush="{ThemeResource ZuneHairlineBrush}">
                                                     <StackPanel Spacing="10">
                                                         <Grid ColumnSpacing="12">
                                                             <Grid.ColumnDefinitions>
@@ -2548,12 +2643,18 @@
                                                         <ComboBoxItem Content="关闭 (Off)" Tag="off" />
                                                     </ComboBox>
                                                     <StackPanel Grid.Column="1" Spacing="2">
-                                                        <TextBlock Text="含 RG 标签 PreAmp (dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
-                                                        <Slider Minimum="-15" Maximum="15" StepFrequency="0.5" Value="{x:Bind ViewModel.ReplayGainPreAmpWithTagDb, Mode=TwoWay}" AutomationProperties.Name="有标签 PreAmp" />
+                                                        <Grid>
+                                                            <TextBlock Text="含 RG 标签 PreAmp (dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind FormatDb(ViewModel.ReplayGainPreAmpWithTagDb), Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                        </Grid>
+                                                        <Slider Minimum="-15" Maximum="15" StepFrequency="0.5" Value="{x:Bind ViewModel.ReplayGainPreAmpWithTagDb, Mode=TwoWay}" Tag="RgWithTag" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="有标签 PreAmp" />
                                                     </StackPanel>
                                                     <StackPanel Grid.Column="2" Spacing="2">
-                                                        <TextBlock Text="无 RG 标签 PreAmp (dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
-                                                        <Slider Minimum="-15" Maximum="15" StepFrequency="0.5" Value="{x:Bind ViewModel.ReplayGainPreAmpWithoutTagDb, Mode=TwoWay}" AutomationProperties.Name="无标签 PreAmp" />
+                                                        <Grid>
+                                                            <TextBlock Text="无 RG 标签 PreAmp (dB)" FontSize="12" Foreground="{ThemeResource ZuneInkSecondaryBrush}" />
+                                                            <TextBlock HorizontalAlignment="Right" Text="{x:Bind FormatDb(ViewModel.ReplayGainPreAmpWithoutTagDb), Mode=OneWay}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                                                        </Grid>
+                                                        <Slider Minimum="-15" Maximum="15" StepFrequency="0.5" Value="{x:Bind ViewModel.ReplayGainPreAmpWithoutTagDb, Mode=TwoWay}" Tag="RgWithoutTag" DoubleTapped="OnDspSliderDoubleTapped" AutomationProperties.Name="无标签 PreAmp" />
                                                     </StackPanel>
                                                 </Grid>
 
@@ -2854,32 +2955,46 @@
 
                                     <StackPanel Grid.Row="1" Spacing="8" Visibility="{x:Bind ViewModel.IsNowPlayingBookletTab, Mode=OneWay}">
                                         <StackPanel Orientation="Horizontal" Spacing="8">
-                                            <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="上一页" Click="OnBookletPrevClick" />
-                                            <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="下一页" Click="OnBookletNextClick" />
-                                            <TextBlock x:Name="NowPlayingBookletStatusText" Text="数字册页" FontSize="12" Foreground="{ThemeResource ZuneAccentBrush}" VerticalAlignment="Center" />
+                                            <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="上一页" Click="OnPlayingBookletPrevClick" AutomationProperties.Name="在播画册上一页" />
+                                            <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="下一页" Click="OnPlayingBookletNextClick" AutomationProperties.Name="在播画册下一页" />
+                                            <Button Style="{StaticResource ZuneFlatButtonStyle}" Content="剧场缩放" Click="OnOpenPlayingBookletTheaterClick" AutomationProperties.Name="打开在播数字册页剧场缩放阅读器" />
+                                            <TextBlock x:Name="NowPlayingBookletStatusText" Text="数字册页" FontSize="12" Foreground="{ThemeResource ZuneAccentInkBrush}" VerticalAlignment="Center" />
                                         </StackPanel>
-                                        <Image x:Name="NowPlayingBookletImage" MaxHeight="380" Stretch="Uniform" />
+                                        <ScrollViewer
+                                            MaxHeight="380"
+                                            ZoomMode="Enabled"
+                                            MinZoomFactor="1.0"
+                                            MaxZoomFactor="4.0"
+                                            HorizontalScrollBarVisibility="Auto"
+                                            VerticalScrollBarVisibility="Auto">
+                                            <Image x:Name="NowPlayingBookletImage" Stretch="Uniform" />
+                                        </ScrollViewer>
                                     </StackPanel>
 
                                     <ScrollViewer Grid.Row="1" Visibility="{x:Bind ViewModel.IsNowPlayingAlternatesTab, Mode=OneWay}">
-                                        <ItemsRepeater ItemsSource="{x:Bind ViewModel.AlternateRecordings, Mode=OneWay}">
-                                            <ItemsRepeater.Layout>
-                                                <StackLayout Spacing="6" />
-                                            </ItemsRepeater.Layout>
-                                            <ItemsRepeater.ItemTemplate>
-                                                <DataTemplate x:DataType="models:TrackItem">
-                                                    <Button
-                                                        HorizontalAlignment="Stretch"
-                                                        HorizontalContentAlignment="Left"
-                                                        Style="{StaticResource ZuneFlatButtonStyle}"
-                                                        Tag="{x:Bind TrackUid}"
-                                                        Click="OnSwitchAlternateRecordingClick"
-                                                        AutomationProperties.Name="{x:Bind AlternateVersionLabel}">
-                                                        <TextBlock Text="{x:Bind AlternateVersionLabel}" FontSize="12" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextWrapping="Wrap" />
-                                                    </Button>
-                                                </DataTemplate>
-                                            </ItemsRepeater.ItemTemplate>
-                                        </ItemsRepeater>
+                                        <StackPanel Spacing="6">
+                                            <Border Background="{ThemeResource ZuneAccentSubtleBrush}" BorderBrush="{ThemeResource ZuneAccentInkBrush}" BorderThickness="1" Padding="8,5" Visibility="{x:Bind NonEmptyVisibility(ViewModel.CurrentRecordingVersionLabel), Mode=OneWay}">
+                                                <TextBlock Text="{x:Bind ViewModel.CurrentRecordingVersionLabel, Mode=OneWay}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentInkBrush}" TextWrapping="Wrap" />
+                                            </Border>
+                                            <ItemsRepeater ItemsSource="{x:Bind ViewModel.AlternateRecordings, Mode=OneWay}">
+                                                <ItemsRepeater.Layout>
+                                                    <StackLayout Spacing="6" />
+                                                </ItemsRepeater.Layout>
+                                                <ItemsRepeater.ItemTemplate>
+                                                    <DataTemplate x:DataType="models:TrackItem">
+                                                        <Button
+                                                            HorizontalAlignment="Stretch"
+                                                            HorizontalContentAlignment="Left"
+                                                            Style="{StaticResource ZuneFlatButtonStyle}"
+                                                            Tag="{x:Bind TrackUid}"
+                                                            Click="OnSwitchAlternateRecordingClick"
+                                                            AutomationProperties.Name="{x:Bind AlternateVersionLabel}">
+                                                            <TextBlock Text="{x:Bind AlternateVersionLabel}" FontSize="12" Foreground="{ThemeResource ZuneInkPrimaryBrush}" TextWrapping="Wrap" />
+                                                        </Button>
+                                                    </DataTemplate>
+                                                </ItemsRepeater.ItemTemplate>
+                                            </ItemsRepeater>
+                                        </StackPanel>
                                     </ScrollViewer>
                                 </Grid>
                             </Border>
@@ -3108,6 +3223,14 @@
                                         </StackPanel>
                                     </Expander>
 
+                                    <CheckBox
+                                        x:Name="InlineBatchClearEmptyCheckBox"
+                                        Content="批处理时将留空栏位写入清空（或输入 __clear__）"
+                                        FontSize="12"
+                                        Visibility="Collapsed"
+                                        Checked="OnInlineBatchClearCheckedChanged"
+                                        Unchecked="OnInlineBatchClearCheckedChanged" />
+
                                     <Grid ColumnSpacing="8">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
@@ -3143,7 +3266,10 @@
                             </StackPanel>
 
                             <StackPanel Spacing="6" Visibility="{x:Bind ViewModel.HasAlternateRecordings, Mode=OneWay}">
-                                <TextBlock Text="同乐章多录音版本 · 原位 A/B 切换" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentBrush}" />
+                                <TextBlock Text="同乐章多录音版本 · 原位 A/B 切换" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentInkBrush}" />
+                                <Border Background="{ThemeResource ZuneAccentSubtleBrush}" BorderBrush="{ThemeResource ZuneAccentInkBrush}" BorderThickness="1" Padding="8,5" Visibility="{x:Bind NonEmptyVisibility(ViewModel.CurrentRecordingVersionLabel), Mode=OneWay}">
+                                    <TextBlock Text="{x:Bind ViewModel.CurrentRecordingVersionLabel, Mode=OneWay}" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource ZuneAccentInkBrush}" TextWrapping="Wrap" />
+                                </Border>
                                 <ItemsRepeater ItemsSource="{x:Bind ViewModel.AlternateRecordings, Mode=OneWay}">
                                     <ItemsRepeater.Layout>
                                         <StackLayout Spacing="4" />
@@ -3208,7 +3334,7 @@
             Padding="16,6">
             <Grid ColumnSpacing="14">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="320" />
+                    <ColumnDefinition x:Name="TransportInfoColumn" Width="320" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
@@ -3216,7 +3342,7 @@
                 </Grid.ColumnDefinitions>
 
                 <!-- Now Playing Artwork + Clickable Info + Heart Love -->
-                <Grid Grid.Column="0" Width="312" ColumnSpacing="10" VerticalAlignment="Center">
+                <Grid x:Name="TransportInfoGrid" Grid.Column="0" Width="312" ColumnSpacing="10" VerticalAlignment="Center">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="46" />
                         <ColumnDefinition Width="*" />
@@ -3348,6 +3474,23 @@
                                 IsHitTestVisible="False"
                                 PaintSurface="OnPaintWaveform" />
                         </Border>
+                        <Border
+                            x:Name="SeekHoverTimePill"
+                            Visibility="Collapsed"
+                            IsHitTestVisible="False"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Top"
+                            Margin="0,-24,0,0"
+                            Padding="6,2"
+                            Background="{ThemeResource ZuneSurfaceElevatedBrush}"
+                            BorderBrush="{ThemeResource ZuneAccentInkBrush}"
+                            BorderThickness="1">
+                            <TextBlock
+                                x:Name="SeekHoverTimeText"
+                                FontSize="11"
+                                FontFamily="Cascadia Mono, Consolas, Segoe UI"
+                                Foreground="{ThemeResource ZuneInkPrimaryBrush}" />
+                        </Border>
                         <Slider
                             x:Name="SeekSlider"
                             Minimum="0"
@@ -3360,6 +3503,8 @@
                             IsThumbToolTipEnabled="True"
                             ThumbToolTipValueConverter="{StaticResource SecondsToClockConverter}"
                             ValueChanged="OnSeekSliderValueChanged"
+                            PointerMoved="OnSeekSliderPointerMoved"
+                            PointerExited="OnSeekSliderPointerExited"
                             AutomationProperties.Name="播放进度（秒）"
                             ToolTipService.ToolTip="拖动或用方向键定位播放进度（←/→ 5 秒，PgUp/PgDn 30 秒）">
                             <Slider.Resources>
@@ -3538,6 +3683,7 @@
                                         <Button Content="清除 FIR" Command="{x:Bind ViewModel.ClearFirImpulseCommand}" />
                                     </StackPanel>
                                     <ToggleSwitch Header="24-bit TPDF 抖动" IsOn="{x:Bind ViewModel.IsTpdfDitherEnabled, Mode=TwoWay}" />
+                                    <ToggleSwitch Header="Bit-Perfect 独占锁定 0 dB 直通" IsOn="{x:Bind ViewModel.LockVolumeOnBitPerfect, Mode=TwoWay}" />
                                     <ToggleSwitch Header="流派 + 人声自动内容 EQ (串联叠加)" IsOn="{x:Bind ViewModel.IsAutoEqEnabled, Mode=TwoWay}" />
                                     <TextBlock Text="{x:Bind ViewModel.ActiveAutoEqBadge, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource ZuneAccentBrush}" TextWrapping="Wrap" />
                                     <TextBlock Text="{x:Bind ViewModel.SignalPathSummary, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource ZuneStatusSuccessBrush}" TextWrapping="Wrap" />
@@ -3582,6 +3728,22 @@
                                        Visibility="{x:Bind ViewModel.IsSleepTimerActive, Mode=OneWay}" />
                         </StackPanel>
                     </Button>
+                    <Button
+                        Padding="6,4"
+                        MinWidth="28"
+                        MinHeight="28"
+                        Background="Transparent"
+                        BorderThickness="1"
+                        BorderBrush="{ThemeResource ZuneAccentInkBrush}"
+                        Visibility="{x:Bind ViewModel.IsVolumeLockedByBitPerfect, Mode=OneWay}"
+                        Command="{x:Bind ViewModel.UnlockBitPerfectVolumeCommand}"
+                        AutomationProperties.Name="Bit-Perfect 0 dB 音量锁定中，点击解锁"
+                        ToolTipService.ToolTip="Bit-Perfect 0.0 dB 硬件直通锁已启用（点击解锁软件音量）">
+                        <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE72E;" FontSize="12" Foreground="{ThemeResource ZuneAccentInkBrush}" />
+                            <TextBlock Text="0 dB" FontSize="11" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource ZuneAccentInkBrush}" />
+                        </StackPanel>
+                    </Button>
                     <ToggleButton
                         Width="34"
                         Height="34"
@@ -3589,11 +3751,13 @@
                         Background="Transparent"
                         BorderThickness="0"
                         IsChecked="{x:Bind ViewModel.IsMuted, Mode=TwoWay}"
+                        IsEnabled="{x:Bind ViewModel.IsSoftwareVolumeControlEnabled, Mode=OneWay}"
                         AutomationProperties.Name="静音"
                         ToolTipService.ToolTip="{x:Bind ViewModel.VolumeToolTip, Mode=OneWay}">
                         <FontIcon Glyph="{x:Bind VolumeGlyph(ViewModel.IsMuted, ViewModel.VolumePercent), Mode=OneWay}" FontSize="15" />
                     </ToggleButton>
                     <Slider
+                        x:Name="TransportVolumeSlider"
                         Width="104"
                         Minimum="0"
                         Maximum="100"
@@ -3602,6 +3766,7 @@
                         LargeChange="10"
                         VerticalAlignment="Center"
                         Value="{x:Bind ViewModel.VolumePercent, Mode=TwoWay}"
+                        IsEnabled="{x:Bind ViewModel.IsSoftwareVolumeControlEnabled, Mode=OneWay}"
                         AutomationProperties.Name="音量（百分比）"
                         ToolTipService.ToolTip="{x:Bind ViewModel.VolumeToolTip, Mode=OneWay}" />
                 </StackPanel>

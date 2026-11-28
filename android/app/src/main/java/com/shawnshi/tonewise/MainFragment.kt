@@ -159,8 +159,12 @@ class MainFragment :
         )
 
         if (queueSheetBehavior != null) {
-            // In portrait mode, set up click listeners on the stacked sheets.
+            // Keep Queue hidden until opened via Now Playing utility pill (no bottom duplicate peek bar).
             L.d("Configuring stacked bottom sheets")
+            queueSheetBehavior.apply {
+                isDraggable = false
+                state = BackportBottomSheetBehavior.STATE_HIDDEN
+            }
             unlikelyToBeNull(binding.queueHandleWrapper).setOnClickListener {
                 playbackModel.openQueue()
             }
@@ -384,10 +388,14 @@ class MainFragment :
             binding.queueFragment.alpha = queueInRatio
 
             if (playbackModel.song.value != null) {
-                // Playback sheet intercepts queue sheet touch events, prevent that from
-                // occurring by disabling dragging whenever the queue sheet is expanded.
-                playbackSheetBehavior.isDraggable =
-                    queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_COLLAPSED
+                val queueClosed =
+                    queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_HIDDEN ||
+                        queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_COLLAPSED
+                // Playback sheet intercepts queue sheet touch events; disable playback drag while Queue is open,
+                // and keep Queue non-draggable while hidden so edge swipes do not resurrect an unwanted peek bar.
+                playbackSheetBehavior.isDraggable = queueClosed
+                queueSheetBehavior.isDraggable =
+                    !queueClosed && playbackSheetBehavior.state == BackportBottomSheetBehavior.STATE_EXPANDED
             }
         } else {
             // No queue sheet, fade normally based on the playback sheet
@@ -403,10 +411,15 @@ class MainFragment :
         // Prevent interactions when the playback panel fully fades out.
         binding.playbackPanelFragment.isInvisible = binding.playbackPanelFragment.alpha == 0f
 
+        val queueSheetAlpha =
+            if (queueSheetBehavior != null) {
+                max(queueSheetBehavior.calculateSlideOffset(), 0f) * playbackInRatio
+            } else {
+                playbackInRatio
+            }
         binding.queueSheet.apply {
-            // Queue sheet (not queue content) should fade out with the playback panel.
-            alpha = playbackInRatio
-            // Prevent interactions when the queue sheet fully fades out.
+            // Hide queue sheet completely when collapsed/hidden so it neither shows a peek bar nor steals touches.
+            alpha = queueSheetAlpha
             binding.queueSheet.isInvisible = alpha == 0f
         }
 
@@ -572,7 +585,8 @@ class MainFragment :
         val page = homeModel.panoramaPage.value
         val pivot = homeModel.collectionPivot.value
         val hideForHub =
-            page == 2 ||
+            page == 0 ||
+                page == 2 ||
                 (page == 1 && pivot == CollectionPivot.CLASSICAL)
         return binding.exploreNavHost.findNavController().currentDestination?.id != R.id.home_fragment ||
             sheetRising == true ||
@@ -665,10 +679,11 @@ class MainFragment :
             playbackSheetBehavior.state == BackportBottomSheetBehavior.STATE_EXPANDED &&
                 queueSheetBehavior.targetState == BackportBottomSheetBehavior.STATE_EXPANDED
         ) {
-            // Queue sheet and playback sheet is expanded, close the queue sheet so the
-            // playback panel can shown.
-            L.d("Collapsing queue sheet")
-            queueSheetBehavior.state = BackportBottomSheetBehavior.STATE_COLLAPSED
+            // Queue sheet and playback sheet is expanded, hide the queue sheet so the
+            // playback panel can be shown cleanly.
+            L.d("Hiding queue sheet")
+            queueSheetBehavior.isDraggable = false
+            queueSheetBehavior.state = BackportBottomSheetBehavior.STATE_HIDDEN
         }
     }
 
@@ -678,11 +693,12 @@ class MainFragment :
             binding.playbackSheet.coordinatorLayoutBehavior as PlaybackBottomSheetBehavior
         if (playbackSheetBehavior.targetState == BackportBottomSheetBehavior.STATE_EXPANDED) {
             // Playback sheet (and possibly queue) needs to be collapsed.
-            L.d("Collapsing playback and queue sheets")
+            L.d("Collapsing playback and hiding queue sheets")
             val queueSheetBehavior =
                 binding.queueSheet.coordinatorLayoutBehavior as QueueBottomSheetBehavior?
             playbackSheetBehavior.state = BackportBottomSheetBehavior.STATE_COLLAPSED
-            queueSheetBehavior?.state = BackportBottomSheetBehavior.STATE_COLLAPSED
+            queueSheetBehavior?.isDraggable = false
+            queueSheetBehavior?.state = BackportBottomSheetBehavior.STATE_HIDDEN
         }
     }
 
@@ -694,9 +710,10 @@ class MainFragment :
             (binding.queueSheet.coordinatorLayoutBehavior ?: return) as QueueBottomSheetBehavior
         if (
             playbackSheetBehavior.state == BackportBottomSheetBehavior.STATE_EXPANDED &&
-                queueSheetBehavior.targetState == BackportBottomSheetBehavior.STATE_COLLAPSED
+                queueSheetBehavior.targetState != BackportBottomSheetBehavior.STATE_EXPANDED
         ) {
-            // Playback sheet is expanded and queue sheet is collapsed, we can expand it.
+            // Playback sheet is expanded and queue sheet is hidden/collapsed, expand it.
+            queueSheetBehavior.isDraggable = true
             queueSheetBehavior.state = BackportBottomSheetBehavior.STATE_EXPANDED
         }
     }
@@ -709,8 +726,10 @@ class MainFragment :
             L.d("Unhiding and enabling playback sheet")
             val queueSheetBehavior =
                 binding.queueSheet.coordinatorLayoutBehavior as QueueBottomSheetBehavior?
-            // Queue sheet behavior is either collapsed or expanded, no hiding needed
-            queueSheetBehavior?.isDraggable = true
+            queueSheetBehavior?.apply {
+                isDraggable = false
+                state = BackportBottomSheetBehavior.STATE_HIDDEN
+            }
             playbackSheetBehavior.apply {
                 // Make sure the view is draggable, at least until the draw checks kick in.
                 isDraggable = true
@@ -732,7 +751,7 @@ class MainFragment :
             // Make both bottom sheets non-draggable so the user can't halt the hiding event.
             queueSheetBehavior?.apply {
                 isDraggable = false
-                state = BackportBottomSheetBehavior.STATE_COLLAPSED
+                state = BackportBottomSheetBehavior.STATE_HIDDEN
             }
 
             playbackSheetBehavior.apply {
@@ -749,6 +768,7 @@ class MainFragment :
         override fun handleOnBackStarted(backEvent: BackEventCompat) {
             if (queueSheetShown()) {
                 unlikelyToBeNull(queueSheetBehavior).startBackProgress(backEvent)
+                return
             }
 
             if (playbackSheetShown()) {

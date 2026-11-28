@@ -362,10 +362,27 @@ public sealed partial class DeskClockWidgetWindow : Window
         var saved = restorePlacement ? ViewModel.GetDeskClockWindowPlacement() : default;
         if (restorePlacement && saved.Width is > 320 && saved.Height is > 160)
         {
-            AppWindow.ResizeClient(new SizeInt32(saved.Width.Value, saved.Height.Value));
+            int targetW = saved.Width.Value;
+            int targetH = saved.Height.Value;
+            int targetX = saved.X ?? 120;
+            int targetY = saved.Y ?? 120;
+            try
+            {
+                var displayArea = DisplayArea.GetFromRect(
+                    new RectInt32(targetX, targetY, targetW, targetH),
+                    DisplayAreaFallback.Primary);
+                var workArea = displayArea.WorkArea;
+                targetW = Math.Clamp(targetW, 320, Math.Max(320, workArea.Width));
+                targetH = Math.Clamp(targetH, 160, Math.Max(160, workArea.Height));
+                targetX = Math.Clamp(targetX, workArea.X, Math.Max(workArea.X, workArea.X + workArea.Width - targetW));
+                targetY = Math.Clamp(targetY, workArea.Y, Math.Max(workArea.Y, workArea.Y + workArea.Height - targetH));
+            }
+            catch { }
+
+            AppWindow.ResizeClient(new SizeInt32(targetW, targetH));
             if (saved.X.HasValue && saved.Y.HasValue)
             {
-                try { AppWindow.Move(new PointInt32(saved.X.Value, saved.Y.Value)); } catch { }
+                try { AppWindow.Move(new PointInt32(targetX, targetY)); } catch { }
             }
         }
         else

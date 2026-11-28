@@ -226,6 +226,18 @@ public sealed partial class MainWindow : Window
                 e.Handled = true;
                 return;
             }
+            if (ViewModel.IsNavClassicalWorks && ViewModel.IsClassicalJumpMatrixOpen)
+            {
+                ViewModel.CloseClassicalJumpMatrix();
+                e.Handled = true;
+                return;
+            }
+            if (ViewModel.IsNavClassicalWorks && ViewModel.IsClassicalComposerDetailOpen)
+            {
+                ViewModel.CloseClassicalComposerDetail();
+                e.Handled = true;
+                return;
+            }
             if (TrackListView is not null && (TrackListView.SelectedItems.Count > 0 || ViewModel.IsMultiSelectMode))
             {
                 TrackListView.SelectedItems.Clear();
@@ -282,15 +294,19 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private bool IsTextInputFocused()
+    private bool IsTextInputFocused() => IsInteractiveInputFocused(includeComboBox: false);
+
+    private bool IsInteractiveInputFocused(bool includeComboBox = true)
     {
         if (RootWorkbench?.XamlRoot is null) return false;
         object? focused = FocusManager.GetFocusedElement(RootWorkbench.XamlRoot);
-        if (focused is TextBox or PasswordBox or RichEditBox or AutoSuggestBox or NumberBox)
+        if (focused is TextBox or PasswordBox or RichEditBox or AutoSuggestBox or NumberBox
+            || (includeComboBox && focused is ComboBox))
             return true;
         for (var cur = focused as DependencyObject; cur is not null; cur = VisualTreeHelper.GetParent(cur))
         {
-            if (cur is TextBox or PasswordBox or RichEditBox or AutoSuggestBox or NumberBox)
+            if (cur is TextBox or PasswordBox or RichEditBox or AutoSuggestBox or NumberBox
+                || (includeComboBox && cur is ComboBox))
                 return true;
         }
         return false;
@@ -400,6 +416,7 @@ public sealed partial class MainWindow : Window
 
     private void OnRootWorkbenchSizeChanged(object sender, SizeChangedEventArgs e)
     {
+        UpdateTransportAndCaptionForWidth(e.NewSize.Width);
         if (InspectorSplitView is null) return;
         var mode = e.NewSize.Width >= 1160 ? SplitViewDisplayMode.Inline : SplitViewDisplayMode.Overlay;
         if (InspectorSplitView.DisplayMode != mode)
@@ -1082,7 +1099,7 @@ public sealed partial class MainWindow : Window
 
     private void OnOpenLexiconTagShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (FocusManager.GetFocusedElement(RootWorkbench.XamlRoot) is TextBox or PasswordBox or RichEditBox)
+        if (IsInteractiveInputFocused())
             return;
 
         args.Handled = true;
@@ -1091,7 +1108,7 @@ public sealed partial class MainWindow : Window
 
     private void OnF2BasicMetadataShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (FocusManager.GetFocusedElement(RootWorkbench.XamlRoot) is TextBox or PasswordBox or RichEditBox)
+        if (IsInteractiveInputFocused())
             return;
 
         args.Handled = true;

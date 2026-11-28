@@ -177,6 +177,7 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
         collect(homeModel.chooseMusicLocations.flow, ::handleChooseFolders)
         collect(homeModel.requestSortDialog.flow, ::handleSortDialog)
         collectImmediately(homeModel.currentTabType, ::updateCurrentTab)
+        collectImmediately(homeModel.collectionPivot, ::updateCurrentPivot)
         collect(detailModel.toShow.flow, ::handleShow)
         collect(listModel.menu.flow, ::handleMenu)
         collectImmediately(listModel.selected, ::updateSelection)
@@ -236,12 +237,19 @@ class HomeFragment : SelectionFragment<FragmentHomeBinding>() {
         updateLiftTarget(requireBinding(), tabType)
     }
 
+    private fun updateCurrentPivot(pivot: com.shawnshi.tonewise.home.collection.CollectionPivot) {
+        updateLiftTarget(requireBinding(), homeModel.currentTabType.value, pivot)
+    }
+
     private fun updateLiftTarget(
         binding: FragmentHomeBinding,
         tabType: MusicType = homeModel.currentTabType.value,
+        pivot: com.shawnshi.tonewise.home.collection.CollectionPivot = homeModel.collectionPivot.value,
     ) {
         binding.homeAppbar.liftOnScrollTargetViewId =
-            if (homeModel.panoramaPage.value != 1) {
+            if (homeModel.panoramaPage.value != 1 ||
+                pivot == com.shawnshi.tonewise.home.collection.CollectionPivot.CLASSICAL
+            ) {
                 android.view.View.NO_ID
             } else {
                 when (tabType) {

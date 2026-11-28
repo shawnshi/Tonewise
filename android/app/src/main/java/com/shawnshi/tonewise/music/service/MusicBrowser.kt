@@ -142,11 +142,13 @@ private constructor(
         val library = musicRepository.library ?: return mutableListOf()
         val items =
             SearchEngine.Items(
-                library.songs,
-                library.albums,
-                library.artists,
-                library.genres,
-                library.playlists,
+                songs = library.songs,
+                albums = library.albums,
+                artists = library.artists,
+                genres = library.genres,
+                playlists = library.playlists,
+                composers = musicRepository.composers,
+                conductors = musicRepository.conductors,
             )
         return searchEngine.search(items, query).toMediaItems()
     }
@@ -161,6 +163,12 @@ private constructor(
         }
         if (artists != null) {
             music.addAll(artists.map { it.toMediaItem(context, header(R.string.lbl_artists)) })
+        }
+        if (composers != null) {
+            music.addAll(composers.map { it.toMediaItem(context, header(R.string.lbl_composers)) })
+        }
+        if (conductors != null) {
+            music.addAll(conductors.map { it.toMediaItem(context, header(R.string.lbl_conductors)) })
         }
         if (genres != null) {
             music.addAll(genres.map { it.toMediaItem(context, header(R.string.lbl_genres)) })
@@ -186,18 +194,30 @@ private constructor(
     }
 
     private fun getCategoryMediaItems(node: TabNode, maxTabs: Int): List<MediaItem> {
-        val tabs = CollectionPivot.DEFAULT_PIVOTS.mapNotNull { it.musicType }
+        val rootNodes: List<TabNode> = buildList {
+            add(TabNode.Quickplay)
+            for (pivot in CollectionPivot.DEFAULT_PIVOTS) {
+                when (pivot) {
+                    CollectionPivot.CLASSICAL -> add(TabNode.Home(MusicType.COMPOSERS))
+                    else -> pivot.musicType?.let { add(TabNode.Home(it)) }
+                }
+            }
+            add(TabNode.Home(MusicType.SCENES))
+        }
         return when (node) {
             is TabNode.Root -> {
-                if (maxTabs < tabs.size) {
-                    tabs.take(maxTabs - 1).map { TabNode.Home(it).toMediaItem(context) } +
+                if (maxTabs < rootNodes.size) {
+                    rootNodes.take(maxTabs - 1).map { it.toMediaItem(context) } +
                         TabNode.More.toMediaItem(context)
                 } else {
-                    tabs.map { TabNode.Home(it).toMediaItem(context) }
+                    rootNodes.map { it.toMediaItem(context) }
                 }
             }
             is TabNode.More -> {
-                tabs.drop(maxTabs - 1).map { TabNode.Home(it).toMediaItem(context) }
+                rootNodes.drop(maxTabs - 1).map { it.toMediaItem(context) }
+            }
+            is TabNode.Quickplay -> {
+                homeGenerator.songs().take(50).map { it.toMediaItem(context) }
             }
             is TabNode.Home ->
                 // homeGenerator returns emptyLists
@@ -209,7 +229,7 @@ private constructor(
                     MusicType.CONDUCTORS -> homeGenerator.conductors().map { it.toMediaItem(context) }
                     MusicType.GENRES -> homeGenerator.genres().map { it.toMediaItem(context) }
                     MusicType.PLAYLISTS -> homeGenerator.playlists().map { it.toMediaItem(context) }
-                    MusicType.SCENES -> emptyList()
+                    MusicType.SCENES -> homeGenerator.playlists().take(25).map { it.toMediaItem(context) }
                 }
         }
     }

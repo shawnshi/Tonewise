@@ -12,10 +12,14 @@ import com.shawnshi.tonewise.home.quickplay.QuickplayPinCodec
 import com.shawnshi.tonewise.home.quickplay.QuickplayPinKind
 import com.shawnshi.tonewise.home.quickplay.QuickplayPinRecord
 import com.shawnshi.tonewise.home.quickplay.QuickplayTrackCandidate
+import com.shawnshi.tonewise.music.ClassicalMetadataEngine
 import com.shawnshi.tonewise.music.ClassicalWork
+import com.shawnshi.tonewise.music.FocusFilterLabels
 import com.shawnshi.tonewise.music.MusicType
 import com.shawnshi.tonewise.playback.ClassicalPlaybackActions
+import com.shawnshi.tonewise.playback.state.ClassicalSessionShuffleLock
 import com.shawnshi.tonewise.sync.AutoDjEngine
+import com.shawnshi.tonewise.sync.LastFmRepository
 import com.shawnshi.tonewise.sync.SceneRuleEvaluator
 import com.shawnshi.tonewise.sync.SessionSlotItem
 import com.shawnshi.tonewise.sync.SessionSlotStore
@@ -218,7 +222,7 @@ class ZuneMobileUiUpgradeTest {
                     "android/app/src/main/java/com/shawnshi/tonewise/home/quickplay/QuickplayFragment.kt",
                 )
                 .readText(Charsets.UTF_8)
-        assertFalse(quickplaySrc.contains("sec_slots"))
+        assertTrue(quickplaySrc.contains("sec_slots"))
         assertTrue(quickplaySrc.contains("sections.newlyAdded.chunked(2)"))
 
         val drawerSrc =
@@ -227,7 +231,8 @@ class ZuneMobileUiUpgradeTest {
         assertTrue(drawerSrc.contains("ScenesAndSyncDialog"))
         assertTrue(drawerSrc.contains("FocusFilterDialog"))
         assertTrue(drawerSrc.contains("lbl_rescan_started"))
-        assertFalse(drawerSrc.contains("DeskClockDialog"))
+        assertTrue(drawerSrc.contains("DeskClockDialog"))
+        assertTrue(drawerSrc.contains("DspControlDialog"))
         assertFalse(drawerSrc.contains("\"search\""))
         assertFalse(drawerSrc.contains("\"sleep timer\""))
 
@@ -236,7 +241,7 @@ class ZuneMobileUiUpgradeTest {
                 .readText(Charsets.UTF_8)
         assertTrue(autoDjHubSrc.contains("\"scenes\""))
         assertFalse(autoDjHubSrc.contains("\"5d presets\""))
-        assertFalse(autoDjHubSrc.contains("FocusFilterDialog"))
+        assertTrue(autoDjHubSrc.contains("FocusTriStateMatrix"))
         assertFalse(autoDjHubSrc.contains("ScenesAndSyncDialog"))
 
         val personalizeXml =
@@ -515,11 +520,11 @@ class ZuneMobileUiUpgradeTest {
             File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/sync/ScenesAndSyncDialog.kt")
                 .readText(Charsets.UTF_8)
         assertTrue(syncSrc.contains("showUnpairConfirm"))
-        assertTrue(syncSrc.contains("slotPendingOverwrite"))
-        val restoreIdx = syncSrc.indexOf("onRestoreSlot =")
-        val onSyncIdx = syncSrc.indexOf("onSyncUrl =")
-        assertTrue(restoreIdx > 0 && onSyncIdx > restoreIdx)
-        assertFalse("Restoring slot must not rewrite playlist file on disk", syncSrc.substring(restoreIdx, onSyncIdx).contains("scheduleM3u8WriteBack"))
+        assertFalse("Sync dialog must not render removed queue slots section", syncSrc.contains("slotPendingOverwrite"))
+        assertFalse("Sync dialog must not contain slot restore action", syncSrc.contains("onRestoreSlot ="))
+        val tapIdx = quickplaySrc.indexOf("private fun handleTapRelaySlot")
+        assertTrue(tapIdx > 0)
+        assertFalse("Restoring slot must not rewrite playlist file on disk", quickplaySrc.substring(tapIdx).contains("scheduleM3u8WriteBack"))
     }
 
     @Test
@@ -746,5 +751,139 @@ class ZuneMobileUiUpgradeTest {
                 xml.contains("app:backgroundTint=\"#66000000\""),
             )
         }
+    }
+
+    @Test
+    fun androidP0ThroughP3_Contrast_Labels_ClassicalParity_ShuffleLock_AndEcosystemGuardsHold() {
+        val ink = ZuneColorMath.clampAccentInkForTheme(0xFFFF1E7A.toInt(), isDarkSurface = true)
+        val elevatedContrast = ZuneColorMath.contrastRatio(ink, ZuneColorMath.ELEVATED_DARK_SURFACE)
+        assertTrue("Dark accent ink contrast on #1C1C1C >= 4.5 (was $elevatedContrast)", elevatedContrast >= 4.5)
+
+        val focusKeys =
+            listOf("focus", "coding", "instrumental", "low", "very slow", "calm_relaxed", "energy_asc", "unknown")
+        for (k in focusKeys) {
+            assertNotNull("Missing FocusFilterLabels mapping for $k", FocusFilterLabels.labelResForKey(k))
+        }
+
+        assertEquals(42, ClassicalMetadataEngine.parseRomanNumeral("XLII"))
+        assertEquals(99, ClassicalMetadataEngine.parseRomanNumeral("XCIX"))
+        assertNull(ClassicalMetadataEngine.parseRomanNumeral("XXXX"))
+        assertEquals("XCIX", ClassicalMetadataEngine.formatRomanNumeral(99))
+        assertEquals("Vaughan Williams", ClassicalMetadataEngine.shortSurname("Ralph Vaughan Williams"))
+        assertEquals("de Falla", ClassicalMetadataEngine.shortSurname("Manuel de Falla"))
+        assertEquals("谭盾", ClassicalMetadataEngine.shortSurname("谭盾"))
+        assertEquals("陈其钢", ClassicalMetadataEngine.shortSurname("陈 其钢"))
+        assertEquals("Beethoven", ClassicalMetadataEngine.shortSurname("Ludwig van Beethoven"))
+
+        val shuffleLock = ClassicalSessionShuffleLock()
+        assertFalse(
+            shuffleLock.resolveForNewPlayback(
+                currentShuffleEnabled = true,
+                commandShuffled = false,
+                suppressGlobalShuffle = true,
+                restoreGlobalShuffleOnUnlock = false,
+            )
+        )
+        assertTrue(shuffleLock.isLocked)
+        assertTrue(
+            shuffleLock.resolveForNewPlayback(
+                currentShuffleEnabled = false,
+                commandShuffled = false,
+                suppressGlobalShuffle = false,
+                restoreGlobalShuffleOnUnlock = true,
+            )
+        )
+        assertFalse(shuffleLock.isLocked)
+
+        assertFalse(
+            shuffleLock.resolveForNewPlayback(
+                currentShuffleEnabled = true,
+                commandShuffled = false,
+                suppressGlobalShuffle = true,
+                restoreGlobalShuffleOnUnlock = false,
+            )
+        )
+        assertFalse(
+            shuffleLock.resolveForNewPlayback(
+                currentShuffleEnabled = false,
+                commandShuffled = false,
+                suppressGlobalShuffle = false,
+                restoreGlobalShuffleOnUnlock = false,
+            )
+        )
+
+        val repoRoot = findRepoRoot()
+        val mediaSessionSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/playback/service/MediaSessionHolder.kt")
+                .readText(Charsets.UTF_8)
+        val widgetSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/widgets/WidgetProvider.kt")
+                .readText(Charsets.UTF_8)
+        val widgetDefaultXml =
+            File(repoRoot, "android/app/src/main/res/layout/widget_default.xml")
+                .readText(Charsets.UTF_8)
+        val manifestXml =
+            File(repoRoot, "android/app/src/main/AndroidManifest.xml")
+                .readText(Charsets.UTF_8)
+        val browserSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/music/service/MusicBrowser.kt")
+                .readText(Charsets.UTF_8)
+        val sliderSrc =
+            File(repoRoot, "android/app/src/main/java/com/google/android/material/slider/WavySlider.kt")
+                .readText(Charsets.UTF_8)
+
+        assertTrue(mediaSessionSrc.contains("ic_tonewise_24"))
+        assertTrue(mediaSessionSrc.contains("formatClassicalNowPlaying"))
+        assertTrue(widgetSrc.contains("formatClassicalNowPlaying"))
+        assertTrue(widgetSrc.contains("private fun useRoundedRemoteViews(uiSettings: UISettings) = uiSettings.roundMode"))
+        assertTrue(widgetDefaultXml.contains("ic_tonewise_24"))
+        assertTrue(manifestXml.contains("ic_tonewise_24"))
+        assertTrue(browserSrc.contains("TabNode.Quickplay"))
+        assertTrue(browserSrc.contains("MusicType.SCENES"))
+        assertTrue(sliderSrc.contains("setSystemGestureExclusionRects"))
+        assertTrue(sliderSrc.contains("0.25×"))
+
+        val queueBehaviorSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/playback/queue/QueueBottomSheetBehavior.kt")
+                .readText(Charsets.UTF_8)
+        assertTrue(queueBehaviorSrc.contains("isHideable = true"))
+        assertTrue(queueBehaviorSrc.contains("skipCollapsed = true"))
+        assertTrue(queueBehaviorSrc.contains("peekHeight = 0"))
+
+        val syncDialogSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/sync/ScenesAndSyncDialog.kt")
+                .readText(Charsets.UTF_8)
+        assertFalse(syncDialogSrc.contains("lbl_handoff_slots"))
+        assertFalse(syncDialogSrc.contains("lbl_save_slot_1"))
+
+        val quickplaySrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/home/quickplay/QuickplayFragment.kt")
+                .readText(Charsets.UTF_8)
+        assertTrue(quickplaySrc.contains("presetScenes"))
+        assertTrue(quickplaySrc.contains("generateAutoDjPlaylist"))
+
+        val lastFmSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/sync/LastFmRepository.kt")
+                .readText(Charsets.UTF_8)
+        assertTrue(lastFmSrc.contains("fun updateScrobblePreferences("))
+        assertTrue(lastFmSrc.contains("JSONObject(postForm(LASTFM_API_URL, body))"))
+        assertNull(
+            LastFmRepository.validateCredentialsFormat(
+                "0123456789abcdef0123456789abcdef",
+                "fedcba9876543210fedcba9876543210",
+            )
+        )
+        assertNotNull(
+            LastFmRepository.validateCredentialsFormat(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef0123456789abcdef",
+            )
+        )
+        assertNotNull(
+            LastFmRepository.validateCredentialsFormat(
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                "fedcba9876543210fedcba9876543210",
+            )
+        )
     }
 }

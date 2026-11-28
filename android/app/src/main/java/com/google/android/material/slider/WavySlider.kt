@@ -29,13 +29,16 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PathMeasure
 import android.graphics.PointF
+import android.graphics.Rect
 import android.graphics.RectF
 import android.util.AttributeSet
+import android.view.MotionEvent
 import android.view.View
 import androidx.annotation.Px
 import androidx.core.content.res.getDimensionPixelSizeOrThrow
 import androidx.core.content.withStyledAttributes
 import androidx.core.graphics.withSave
+import androidx.core.view.ViewCompat
 import androidx.core.view.isVisible
 import androidx.dynamicanimation.animation.FloatValueHolder
 import androidx.dynamicanimation.animation.SpringAnimation
@@ -89,6 +92,17 @@ constructor(
     private var waveformEnvelope: FloatArray? = null
     private var rectilinearMode = false
     private val waveformBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val dragTooltipBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val dragTooltipTextPaint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            isFakeBoldText = true
+        }
+    var dragTooltipFormatter: ((Float) -> String)? = null
+    private var isScrubbing = false
+    private var scrubStartY = 0f
+    private var lastTouchX = 0f
+    private var fineScrubActive = false
 
     private var waveTransitionAnimation: SpringAnimation? = null
     private var currentAmplitudeFraction = MIN_VISIBLE_WAVE_FRACTION
@@ -211,6 +225,71 @@ constructor(
         ensurePhaseTickerState()
     }
 
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        val w = right - left
+        val h = bottom - top
+        if (w > 0 && h > 0) {
+            ViewCompat.setSystemGestureExclusionRects(this, listOf(Rect(0, 0, w, h)))
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!isEnabled) {
+            isScrubbing = false
+            fineScrubActive = false
+            return super.onTouchEvent(event)
+        }
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                scrubStartY = event.y
+                lastTouchX = event.x
+                isScrubbing = true
+                fineScrubActive = false
+                invalidate()
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val fineThresholdPx = 48f * resources.displayMetrics.density
+                val dy = abs(event.y - scrubStartY)
+                if (!fineScrubActive && dy > fineThresholdPx) {
+                    fineScrubActive = true
+                    lastTouchX = event.x
+                }
+                if (fineScrubActive && trackWidth > 0 && valueTo > valueFrom) {
+                    val dx = event.x - lastTouchX
+                    lastTouchX = event.x
+                    val deltaVal = (dx * 0.25f / trackWidth.toFloat()) * (valueTo - valueFrom)
+                    value = (value + deltaVal).coerceIn(valueFrom, valueTo)
+                    invalidate()
+                    return true
+                } else {
+                    lastTouchX = event.x
+                }
+            }
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_CANCEL -> {
+                val wasFine = fineScrubActive
+                isScrubbing = false
+                fineScrubActive = false
+                invalidate()
+                if (wasFine && trackWidth > 0 && valueTo > valueFrom) {
+                    val frac = ((value - valueFrom) / max(EPSILON, valueTo - valueFrom)).coerceIn(0f, 1f)
+                    val visualFrac = if (layoutDirection == LAYOUT_DIRECTION_RTL) 1f - frac else frac
+                    val synthX = trackSidePadding.toFloat() + visualFrac * trackWidth.toFloat()
+                    val synth = MotionEvent.obtain(event)
+                    synth.setLocation(synthX, event.y)
+                    return try {
+                        super.onTouchEvent(synth)
+                    } finally {
+                        synth.recycle()
+                    }
+                }
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+
     override fun setTrackActiveTintList(trackColor: ColorStateList) {
         tmpTrackTintList = trackColor
         if (!linearActiveTrackSuppressed) {
@@ -327,6 +406,7 @@ constructor(
                 trackLength,
                 progressFraction,
             )
+            drawDragTooltipPill(canvas, trackLength, progressFraction)
             return
         }
 
@@ -416,6 +496,7 @@ constructor(
             amplitudeFraction = rampedAmplitudeFraction,
             phaseFraction = phaseFraction,
         )
+        drawDragTooltipPill(canvas, trackLength, progressFraction)
     }
 
     private fun drawTrack(
@@ -813,6 +894,40 @@ constructor(
         } else {
             canvas.drawRoundRect(patchRect, playheadHalfW, playheadHalfW, waveformBarPaint)
         }
+    }
+
+    private fun drawDragTooltipPill(
+        canvas: Canvas,
+        trackLength: Float,
+        progressFraction: Float,
+    ) {
+        if (!isScrubbing) return
+        val baseLabel = dragTooltipFormatter?.invoke(value)?.takeIf { it.isNotBlank() } ?: return
+        val label = if (fineScrubActive) "$baseLabel · 0.25×" else baseLabel
+        val density = resources.displayMetrics.density
+        val textSizePx = 11f * density
+        dragTooltipTextPaint.textSize = textSizePx
+        dragTooltipTextPaint.color = Color.WHITE
+        dragTooltipBgPaint.color = Color.argb(235, 20, 20, 20)
+        val textW = dragTooltipTextPaint.measureText(label)
+        val pillW = textW + 12f * density
+        val pillH = 18f * density
+        val isRtl = layoutDirection == LAYOUT_DIRECTION_RTL
+        val anchorX =
+            trackSidePadding.toFloat() +
+                if (isRtl) (1f - progressFraction) * trackLength else progressFraction * trackLength
+        val left = (anchorX - pillW / 2f).coerceIn(2f * density, max(2f * density, width - pillW - 2f * density))
+        val top = 2f * density
+        patchRect.set(left, top, left + pillW, top + pillH)
+        if (rectilinearMode) {
+            canvas.drawRect(patchRect, dragTooltipBgPaint)
+        } else {
+            val r = pillH / 2f
+            canvas.drawRoundRect(patchRect, r, r, dragTooltipBgPaint)
+        }
+        val fm = dragTooltipTextPaint.fontMetrics
+        val textY = top + (pillH - fm.ascent - fm.descent) / 2f
+        canvas.drawText(label, left + pillW / 2f, textY, dragTooltipTextPaint)
     }
 
     /** Switches waveform bars and playhead to 0dp rectilinear Zune geometry when true. */

@@ -33,6 +33,10 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +49,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -53,15 +58,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
@@ -364,10 +376,21 @@ private fun BookletPdfSheet(
     loading: Boolean,
     resolved: ResolvedBooklet?,
 ) {
-    var pageIndex by remember(resolved) { mutableIntStateOf(0) }
+    var pageIndex by rememberSaveable(resolved?.displayName) { mutableIntStateOf(0) }
     var pageCount by remember(resolved) { mutableIntStateOf(0) }
+    var zoom by rememberSaveable(resolved?.displayName) { mutableFloatStateOf(1f) }
+    var panX by remember { mutableFloatStateOf(0f) }
+    var panY by remember { mutableFloatStateOf(0f) }
+    var warmPaperMode by rememberSaveable { mutableStateOf(false) }
+    val highResZoom = zoom > 1.5f
     var renderedPage by remember(resolved) { mutableStateOf<ImageBitmap?>(null) }
     var renderer by remember(resolved) { mutableStateOf<PdfRenderer?>(null) }
+
+    LaunchedEffect(pageIndex, resolved?.displayName) {
+        zoom = 1f
+        panX = 0f
+        panY = 0f
+    }
 
     val pdfExecutor = remember {
         Executors.newSingleThreadExecutor { runnable ->
@@ -385,22 +408,38 @@ private fun BookletPdfSheet(
 
     DisposableEffect(resolved) {
         var activeRenderer: PdfRenderer? = null
+        var disposed = false
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
         val handle = resolved
         if (handle != null) {
             pdfExecutor.execute {
+                if (disposed) {
+                    handle.closeQuietly()
+                    return@execute
+                }
                 val created = runCatching { PdfRenderer(handle.pfd) }.getOrNull()
                 if (created != null) {
-                    activeRenderer = created
-                    renderer = created
+                    if (disposed) {
+                        runCatching { created.close() }
+                    } else {
+                        activeRenderer = created
+                        mainHandler.post {
+                            if (!disposed) {
+                                renderer = created
+                            }
+                        }
+                    }
                 } else {
                     handle.closeQuietly()
                 }
             }
         }
         onDispose {
-            val toClose = activeRenderer ?: renderer
+            disposed = true
             renderer = null
             pdfExecutor.execute {
+                val toClose = activeRenderer
+                activeRenderer = null
                 if (toClose != null) {
                     runCatching { toClose.close() }
                 } else {
@@ -410,7 +449,7 @@ private fun BookletPdfSheet(
         }
     }
 
-    LaunchedEffect(renderer, pageIndex) {
+    LaunchedEffect(renderer, pageIndex, highResZoom) {
         val active = renderer
         if (active == null) {
             pageCount = 0
@@ -419,19 +458,20 @@ private fun BookletPdfSheet(
         }
         val (count, bmp) =
             withContext(pdfDispatcher) {
-                if (active.pageCount <= 0) {
-                    0 to null
-                } else {
-                    val clamped = pageIndex.coerceIn(0, active.pageCount - 1)
-                    val rendered =
-                        runCatching {
+                runCatching {
+                        val totalPages = active.pageCount
+                        if (totalPages <= 0) {
+                            0 to null
+                        } else {
+                            val clamped = pageIndex.coerceIn(0, totalPages - 1)
+                            val rendered =
                                 active.openPage(clamped).use { page ->
-                                    val targetWidth = 1080
+                                    val targetWidth = if (highResZoom) 2160 else 1080
                                     val targetHeight =
                                         ((page.height.toFloat() / page.width.coerceAtLeast(1)) *
                                                 targetWidth)
                                             .toInt()
-                                            .coerceIn(480, 2400)
+                                            .coerceIn(480, 4096)
                                     val bitmap =
                                         Bitmap.createBitmap(
                                             targetWidth,
@@ -447,12 +487,15 @@ private fun BookletPdfSheet(
                                     )
                                     bitmap.asImageBitmap()
                                 }
-                            }
-                            .getOrNull()
-                    active.pageCount to rendered
-                }
+                            totalPages to rendered
+                        }
+                    }
+                    .getOrElse { 0 to null }
             }
         pageCount = count
+        if (count > 0 && pageIndex >= count) {
+            pageIndex = count - 1
+        }
         renderedPage = bmp
     }
 
@@ -498,22 +541,115 @@ private fun BookletPdfSheet(
                     )
                 }
             } else {
-                Text(
-                    text = "${resolved?.displayName ?: "booklet.pdf"} · ${stringResource(R.string.fmt_booklet_page, pageIndex + 1, pageCount)}",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                val warmFilter =
+                    remember(warmPaperMode) {
+                        if (!warmPaperMode) {
+                            null
+                        } else {
+                            ColorFilter.colorMatrix(
+                                ColorMatrix(
+                                    floatArrayOf(
+                                        0.92f, 0f, 0f, 0f, 8f,
+                                        0f, 0.88f, 0f, 0f, 4f,
+                                        0f, 0f, 0.76f, 0f, 0f,
+                                        0f, 0f, 0f, 0.94f, 0f,
+                                    )
+                                )
+                            )
+                        }
+                    }
 
-                Image(
-                    bitmap = renderedPage!!,
-                    contentDescription = stringResource(R.string.lbl_booklet_pdf),
-                    contentScale = ContentScale.FillWidth,
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "${resolved?.displayName ?: "booklet.pdf"} · ${stringResource(R.string.fmt_booklet_page, pageIndex + 1, pageCount)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontFamily = FontFamily.Monospace,
+                        color = com.shawnshi.tonewise.ui.LocalTonewiseAccentInk.current,
+                        modifier = Modifier.weight(1f),
+                    )
+                    FilterChip(
+                        selected = warmPaperMode,
+                        onClick = { warmPaperMode = !warmPaperMode },
+                        label = { Text(stringResource(R.string.lbl_booklet_warm_paper)) },
+                    )
+                }
+
+                Box(
                     modifier =
                         Modifier.fillMaxWidth()
                             .heightIn(max = 460.dp)
-                            .clip(MaterialTheme.shapes.small),
-                )
+                            .clip(MaterialTheme.shapes.small)
+                            .clipToBounds()
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                            .pointerInput(pageCount, zoom) {
+                                var dragAccum = 0f
+                                detectHorizontalDragGestures(
+                                    onHorizontalDrag = { _, dragAmount ->
+                                        if (zoom <= 1.05f) {
+                                            dragAccum += dragAmount
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        if (zoom <= 1.05f) {
+                                            if (dragAccum <= -80f && pageIndex + 1 < pageCount) {
+                                                pageIndex++
+                                            } else if (dragAccum >= 80f && pageIndex > 0) {
+                                                pageIndex--
+                                            }
+                                        }
+                                        dragAccum = 0f
+                                    },
+                                )
+                            }
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onDoubleTap = {
+                                        if (zoom > 1.05f) {
+                                            zoom = 1f
+                                            panX = 0f
+                                            panY = 0f
+                                        } else {
+                                            zoom = 2.2f
+                                        }
+                                    }
+                                )
+                            }
+                            .pointerInput(Unit) {
+                                detectTransformGestures { _, pan, gestureZoom, _ ->
+                                    val nextZoom = (zoom * gestureZoom).coerceIn(1f, 4f)
+                                    zoom = nextZoom
+                                    if (nextZoom <= 1.02f) {
+                                        panX = 0f
+                                        panY = 0f
+                                    } else {
+                                        val maxPanX = (size.width * (nextZoom - 1f)) * 0.5f
+                                        val maxPanY = (size.height * (nextZoom - 1f)) * 0.5f
+                                        panX = (panX + pan.x).coerceIn(-maxPanX, maxPanX)
+                                        panY = (panY + pan.y).coerceIn(-maxPanY, maxPanY)
+                                    }
+                                }
+                            },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        bitmap = renderedPage!!,
+                        contentDescription = stringResource(R.string.lbl_booklet_pdf),
+                        contentScale = ContentScale.FillWidth,
+                        colorFilter = warmFilter,
+                        modifier =
+                            Modifier.fillMaxWidth()
+                                .graphicsLayer {
+                                    scaleX = zoom
+                                    scaleY = zoom
+                                    translationX = panX
+                                    translationY = panY
+                                },
+                    )
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -525,6 +661,20 @@ private fun BookletPdfSheet(
                         modifier = Modifier.weight(1f),
                     ) {
                         Text(stringResource(R.string.lbl_booklet_prev))
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (zoom > 1.05f) {
+                                zoom = 1f
+                                panX = 0f
+                                panY = 0f
+                            } else {
+                                zoom = 2.2f
+                            }
+                        },
+                        modifier = Modifier.weight(0.6f),
+                    ) {
+                        Text(String.format(java.util.Locale.US, "%.1fx", zoom))
                     }
                     OutlinedButton(
                         onClick = { if (pageIndex + 1 < pageCount) pageIndex++ },

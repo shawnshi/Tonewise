@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -77,7 +78,9 @@ import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.sync.AutoDjEngine
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SceneBanner
+import com.shawnshi.tonewise.sync.SessionSlotItem
 import com.shawnshi.tonewise.sync.SessionSlotStore
+import com.shawnshi.tonewise.ui.LocalTonewiseAccentInk
 import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.ui.UISettings
@@ -117,9 +120,28 @@ class QuickplayFragment : Fragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val pins by quickplayPinStore.pins.collectAsStateWithLifecycle()
+                val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
+                val scenes by lanSyncRepository.scenes.collectAsStateWithLifecycle()
+                val activeSlotIndex by sessionSlotStore.activeSlotIndex.collectAsStateWithLifecycle()
+                val activeSceneLabel by sessionSlotStore.activeSceneLabel.collectAsStateWithLifecycle()
                 val libraryRevision by musicRepository.libraryRevision.collectAsStateWithLifecycle()
                 val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
                 val sections by homeModel.quickplaySections.collectAsStateWithLifecycle()
+                val presetScenes =
+                    remember(scenes) {
+                        scenes.filterNot { it.id == "44444444-4444-4444-8444-444444444444" }.take(5)
+                    }
+                val sceneCounts by
+                    androidx.compose.runtime.produceState<Map<String, Int>>(
+                        initialValue = emptyMap(),
+                        presetScenes,
+                        libraryRevision,
+                    ) {
+                        value =
+                            withContext(Dispatchers.Default) {
+                                lanSyncRepository.countSongsForScenes(presetScenes)
+                            }
+                    }
 
                 TonewiseComposeTheme(
                     roundMode = uiSettings.roundMode,
@@ -127,6 +149,10 @@ class QuickplayFragment : Fragment() {
                 ) {
                     QuickplayContent(
                         pins = pins,
+                        slots = slots,
+                        presetScenes = presetScenes,
+                        sceneCounts = sceneCounts,
+                        activeSlotIndex = activeSlotIndex,
                         sections = sections,
                         libraryRevision = libraryRevision,
                         resolveCoverAlbum = { albumUid ->
@@ -138,6 +164,19 @@ class QuickplayFragment : Fragment() {
                         onUnpin = { pin ->
                             quickplayPinStore.removePin(pin.kind, pin.id)
                             requireContext().showToast(R.string.lng_unpinned_quickplay)
+                        },
+                        onTapSlot = { slotIdx, existing, presetScene ->
+                            handleTapRelaySlot(
+                                slotIndex = slotIdx,
+                                activeSlotIndex = activeSlotIndex,
+                                activeSceneLabel = activeSceneLabel,
+                                slots = slots,
+                                existing = existing,
+                                presetScene = presetScene,
+                            )
+                        },
+                        onLongPressSlot = { slotIdx ->
+                            saveCurrentQueueToSlot(slotIdx, activeSceneLabel, activate = true)
                         },
                         onTapAlbumSummary = { summary ->
                             val lib = musicRepository.library
@@ -235,18 +274,149 @@ class QuickplayFragment : Fragment() {
             }
         }
     }
+
+    private fun saveCurrentQueueToSlot(
+        slotIndex: Int,
+        sceneLabel: String,
+        showFeedback: Boolean = true,
+        activate: Boolean = true,
+    ) {
+        val pagerQueue = playbackModel.pagerQueue.value
+        val snapshotSongs = pagerQueue.queue.toList()
+        if (snapshotSongs.isEmpty()) {
+            if (showFeedback) {
+                requireContext().showToast(R.string.lbl_slot_empty_queue)
+            }
+            return
+        }
+        val title =
+            sceneLabel
+                .takeUnless { it.equals("Default", ignoreCase = true) || it.isBlank() }
+                ?: playbackModel.song.value?.name?.raw
+                ?: getString(R.string.fmt_queue_slot, slotIndex)
+        val curIdx = pagerQueue.index
+        val posMs = playbackModel.positionDs.value * 100L
+        val nowMs = System.currentTimeMillis()
+        val feedbackText = getString(R.string.fmt_scene_switched_slot, slotIndex, title)
+        viewLifecycleOwner.lifecycleScope.launch {
+            val canonicalUids = lanSyncRepository.resolveCanonicalTrackUids(snapshotSongs)
+            sessionSlotStore.saveSlot(
+                SessionSlotItem(
+                    slotIndex = slotIndex,
+                    name = title,
+                    sceneId = null,
+                    updatedAtMs = nowMs,
+                    queueTrackUids = canonicalUids,
+                    currentIndex = curIdx,
+                    positionMs = posMs,
+                ),
+                activate = activate,
+            )
+            lanSyncRepository.scheduleM3u8WriteBack(title, snapshotSongs)
+            if (showFeedback && isAdded) {
+                Toast.makeText(requireContext(), feedbackText, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun handleTapRelaySlot(
+        slotIndex: Int,
+        activeSlotIndex: Int,
+        activeSceneLabel: String,
+        slots: List<SessionSlotItem>,
+        existing: SessionSlotItem?,
+        presetScene: SceneBanner?,
+    ) {
+        val outgoingPopulated =
+            SessionSlotStore.isSlotPopulated(slots.firstOrNull { it.slotIndex == activeSlotIndex })
+        if (slotIndex == activeSlotIndex) {
+            if (existing != null && existing.queueTrackUids.isNotEmpty()) {
+                saveCurrentQueueToSlot(slotIndex, activeSceneLabel, showFeedback = true, activate = true)
+                return
+            }
+        } else if (outgoingPopulated) {
+            saveCurrentQueueToSlot(activeSlotIndex, activeSceneLabel, showFeedback = false, activate = false)
+        }
+        if (existing == null || existing.queueTrackUids.isEmpty()) {
+            if (presetScene != null) {
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val (_, ordered) =
+                        withContext(Dispatchers.Default) {
+                            lanSyncRepository.generateAutoDjPlaylist(
+                                scene = presetScene,
+                                targetCount = AutoDjEngine.DEFAULT_TARGET_COUNT,
+                            )
+                        }
+                    if (!isAdded) return@launch
+                    if (ordered.isEmpty()) {
+                        requireContext().showToast(R.string.lbl_scene_no_matches)
+                        return@launch
+                    }
+                    val canonicalUids = lanSyncRepository.resolveCanonicalTrackUids(ordered)
+                    sessionSlotStore.saveSlot(
+                        SessionSlotItem(
+                            slotIndex = slotIndex,
+                            name = presetScene.title,
+                            sceneId = presetScene.id,
+                            updatedAtMs = System.currentTimeMillis(),
+                            queueTrackUids = canonicalUids,
+                            currentIndex = 0,
+                            positionMs = 0L,
+                        ),
+                        activate = true,
+                    )
+                    playbackModel.play(ordered)
+                    Toast.makeText(
+                            requireContext(),
+                            getString(R.string.fmt_scene_switched_slot, slotIndex, presetScene.title),
+                            Toast.LENGTH_SHORT,
+                        )
+                        .show()
+                }
+            } else {
+                saveCurrentQueueToSlot(slotIndex, activeSceneLabel, showFeedback = true, activate = true)
+            }
+            return
+        }
+        viewLifecycleOwner.lifecycleScope.launch {
+            val resolved = lanSyncRepository.resolveSlotSongs(existing)
+            if (!isAdded) return@launch
+            if (resolved.isEmpty()) {
+                requireContext().showToast(R.string.lbl_scene_no_matches)
+                return@launch
+            }
+            sessionSlotStore.setActiveScene(existing.name, slotIndex)
+            playbackModel.restoreSessionQueue(
+                songs = resolved,
+                index = existing.currentIndex.coerceIn(0, resolved.lastIndex),
+                positionMs = existing.positionMs,
+            )
+            Toast.makeText(
+                    requireContext(),
+                    getString(R.string.fmt_scene_switched_slot, slotIndex, existing.name),
+                    Toast.LENGTH_SHORT,
+                )
+                .show()
+        }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun QuickplayContent(
     pins: List<QuickplayPinRecord>,
+    slots: List<SessionSlotItem>,
+    presetScenes: List<SceneBanner>,
+    sceneCounts: Map<String, Int>,
+    activeSlotIndex: Int,
     sections: QuickplaySections,
     libraryRevision: Long,
     resolveCoverAlbum: (String) -> Album?,
     resolvePinCoverTarget: (QuickplayPinRecord) -> Any?,
     onTapPin: (QuickplayPinRecord) -> Unit,
     onUnpin: (QuickplayPinRecord) -> Unit,
+    onTapSlot: (Int, SessionSlotItem?, SceneBanner?) -> Unit,
+    onLongPressSlot: (Int) -> Unit,
     onTapAlbumSummary: (QuickplayAlbumSummary) -> Unit,
     onLongPressAlbumSummary: (QuickplayAlbumSummary) -> Unit,
     onLaunchRediscovery: () -> Unit,
@@ -364,6 +534,77 @@ private fun QuickplayContent(
                                         Spacer(modifier = Modifier.weight(1f))
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            item(key = "sec_slots") {
+                val accentInk = LocalTonewiseAccentInk.current
+                Column {
+                    ZuneSectionTitle(stringResource(R.string.lbl_hub_relay_slots))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LazyRow(
+                        modifier = Modifier.nestedScroll(horizontalRowNestedLock),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(count = 5, key = { idx -> "slot_${idx + 1}" }) { idx ->
+                            val slotIdx = idx + 1
+                            val existing = slots.firstOrNull { it.slotIndex == slotIdx }
+                            val presetScene =
+                                existing?.sceneId?.let { sid ->
+                                    presetScenes.firstOrNull {
+                                        it.id.equals(sid, ignoreCase = true) ||
+                                            it.title.startsWith(sid, ignoreCase = true)
+                                    }
+                                } ?: presetScenes.getOrNull(idx)
+                            val isActive = activeSlotIndex == slotIdx
+                            val hasTracks = existing != null && existing.queueTrackUids.isNotEmpty()
+                            Column(
+                                modifier =
+                                    Modifier.width(124.dp)
+                                        .border(
+                                            width = 1.dp,
+                                            color =
+                                                if (isActive) accentInk
+                                                else MaterialTheme.colorScheme.outlineVariant,
+                                        )
+                                        .background(
+                                            if (isActive) accentInk.copy(alpha = 0.14f)
+                                            else MaterialTheme.colorScheme.surfaceContainer
+                                        )
+                                        .combinedClickable(
+                                            onClick = { onTapSlot(slotIdx, existing, presetScene) },
+                                            onLongClick = { onLongPressSlot(slotIdx) },
+                                        )
+                                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.fmt_queue_slot, slotIdx),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isActive) accentInk else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    text =
+                                        if (hasTracks) existing.name
+                                        else presetScene?.title ?: existing?.name ?: stringResource(R.string.lbl_slot_empty),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text =
+                                        if (hasTracks) "${existing.queueTrackUids.size} tracks"
+                                        else if (presetScene != null) "${sceneCounts[presetScene.id] ?: 0} tracks"
+                                        else stringResource(R.string.lbl_save_current_slot),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
                             }
                         }
                     }

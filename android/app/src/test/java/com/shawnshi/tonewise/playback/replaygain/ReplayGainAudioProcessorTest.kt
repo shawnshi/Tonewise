@@ -456,6 +456,8 @@ class ReplayGainAudioProcessorTest {
         override val floatOutput = true
         override val usbBitPerfect = true
 
+        override fun setUsbBitPerfect(enabled: Boolean) {}
+
         override fun migrate() {}
 
         override fun registerListener(listener: PlaybackSettings.Listener) {}
@@ -474,6 +476,7 @@ class ReplayGainAudioProcessorTest {
         override val queue: List<Song>
             get() = listOfNotNull(currentSong)
         override val index = 0
+        override val isClassicalShuffleLocked = false
         override val currentAudioSessionId: Int? = null
 
         override fun addListener(listener: PlaybackStateManager.Listener) {}

@@ -105,10 +105,10 @@ constructor(context: Context, attrs: AttributeSet? = null, @AttrRes defStyleAttr
         // Roll some custom code for finding our scrolling view. This can be anything as long as
         // it updates this layout in it's onNestedPreScroll call.
         if (scrollingChild == null) {
-            if (liftOnScrollTargetViewId != ResourcesCompat.ID_NULL) {
+            if (liftOnScrollTargetViewId != ResourcesCompat.ID_NULL &&
+                liftOnScrollTargetViewId != android.view.View.NO_ID
+            ) {
                 scrollingChild = (parent as ViewGroup).findViewById(liftOnScrollTargetViewId)
-            } else {
-                error("liftOnScrollTargetViewId was not specified")
             }
         }
 

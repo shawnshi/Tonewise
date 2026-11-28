@@ -42,6 +42,7 @@ import com.shawnshi.tonewise.home.quickplay.QuickplaySectionsCodec
 import com.shawnshi.tonewise.home.quickplay.QuickplayTrackCandidate
 import com.shawnshi.tonewise.home.quickplay.primaryCoverIdForTarget
 import com.shawnshi.tonewise.home.quickplay.prominentAlbumCoverId
+import com.shawnshi.tonewise.sync.FocusFilterSpec
 import com.shawnshi.tonewise.sync.SyncKvEntity
 import com.shawnshi.tonewise.sync.TonewiseSyncDatabase
 import com.shawnshi.tonewise.list.ListSettings
@@ -353,6 +354,18 @@ constructor(
     private val _panoramaPage = MutableStateFlow(0)
     /** Active Zune Level-1 Panorama hub index (0=quickplay, 1=collection, 2=autodj). */
     val panoramaPage: StateFlow<Int> = _panoramaPage
+
+    private val _focusFilterSpec = MutableStateFlow(FocusFilterSpec())
+    /** Persistent 5D Focus Funnel filter shared across AutoDJ hub and FocusFilterDialog. */
+    val focusFilterSpec: StateFlow<FocusFilterSpec> = _focusFilterSpec
+
+    fun updateFocusFilterSpec(spec: FocusFilterSpec) {
+        _focusFilterSpec.value = spec
+    }
+
+    fun resetFocusFilterSpec() {
+        _focusFilterSpec.value = FocusFilterSpec()
+    }
 
     val requestSortDialog: Event<MusicType>
         field = MutableEvent<MusicType>()

@@ -19,17 +19,22 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,13 +60,20 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.shawnshi.tonewise.R
+import com.shawnshi.tonewise.home.HomeViewModel
+import com.shawnshi.tonewise.home.focus.FocusTriStateMatrix
 import com.shawnshi.tonewise.music.MusicViewModel
+import com.shawnshi.tonewise.music.resolve
+import com.shawnshi.tonewise.music.resolveNames
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.playback.formatDurationMs
 import com.shawnshi.tonewise.sync.AutoDjEngine
+import com.shawnshi.tonewise.sync.FocusFilterSpec
 import com.shawnshi.tonewise.sync.LanSyncRepository
 import com.shawnshi.tonewise.sync.SceneBanner
 import com.shawnshi.tonewise.sync.SessionSlotStore
 import com.shawnshi.tonewise.ui.DynamicAccentController
+import com.shawnshi.tonewise.ui.LocalTonewiseAccentInk
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
@@ -70,6 +82,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.oxycblt.musikr.Song
 
 /**
  * Zune Panorama Level-1 `autodj` hub providing direct 1-tap access to time-aware 50-track
@@ -84,6 +97,7 @@ class AutoDjHubFragment : Fragment() {
 
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val musicModel: MusicViewModel by activityViewModels()
+    private val homeModel: HomeViewModel by activityViewModels()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -97,6 +111,8 @@ class AutoDjHubFragment : Fragment() {
                 val activeSceneLabel by sessionSlotStore.activeSceneLabel.collectAsStateWithLifecycle()
                 val indexingState by musicModel.indexingState.collectAsStateWithLifecycle()
                 val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
+                val pendingMutations by lanSyncRepository.pendingMutationCount.collectAsStateWithLifecycle()
+                val focusSpec by homeModel.focusFilterSpec.collectAsStateWithLifecycle()
                 val scope = rememberCoroutineScope()
                 var generatingKey by remember { mutableStateOf<String?>(null) }
                 var summaryText by remember { mutableStateOf<String?>(null) }
@@ -112,6 +128,19 @@ class AutoDjHubFragment : Fragment() {
                         value =
                             withContext(Dispatchers.Default) {
                                 lanSyncRepository.countSongsForScenes(scenes)
+                            }
+                    }
+
+                val focusMatchedSongs by
+                    produceState<List<Song>>(
+                        initialValue = emptyList(),
+                        focusSpec,
+                        indexingState,
+                        pendingMutations,
+                    ) {
+                        value =
+                            withContext(Dispatchers.Default) {
+                                lanSyncRepository.matchSongsByFocus(focusSpec, null)
                             }
                     }
 
@@ -229,7 +258,7 @@ class AutoDjHubFragment : Fragment() {
                                                 Box(
                                                     modifier =
                                                         Modifier.weight(1f)
-                                                            .height(88.dp)
+                                                            .heightIn(min = 88.dp)
                                                             .background(
                                                                 if (isActive) {
                                                                     MaterialTheme.colorScheme.primary
@@ -287,6 +316,135 @@ class AutoDjHubFragment : Fragment() {
                                             if (pair.size == 1) {
                                                 Spacer(modifier = Modifier.weight(1f))
                                             }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Option B: Inline 5D Focus Funnel + Live Matched Preview Queue
+                            item(key = "inline_focus_funnel") {
+                                val accentInk = LocalTonewiseAccentInk.current
+                                val orderedMatches =
+                                    remember(focusMatchedSongs, focusSpec.sortArc) {
+                                        if (focusSpec.sortArc == "work_shuffle") {
+                                            lanSyncRepository.orderSongsWorkShuffle(focusMatchedSongs)
+                                        } else {
+                                            focusMatchedSongs
+                                        }
+                                    }
+                                Column(
+                                    modifier =
+                                        Modifier.fillMaxWidth()
+                                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                                            .padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = stringResource(R.string.lbl_focus_inline_funnel),
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = accentInk,
+                                        )
+                                        TextButton(
+                                            onClick = { homeModel.resetFocusFilterSpec() },
+                                            enabled = !focusSpec.isEmpty || focusSpec.sortArc != "flat",
+                                        ) {
+                                            Text(stringResource(R.string.lbl_focus_reset))
+                                        }
+                                    }
+
+                                    FocusTriStateMatrix(
+                                        spec = focusSpec,
+                                        onSpecChange = { homeModel.updateFocusFilterSpec(it) },
+                                    )
+
+                                    HorizontalDivider()
+
+                                    Text(
+                                        text = stringResource(R.string.lbl_focus_preview_queue, orderedMatches.size),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+
+                                    for (song in orderedMatches.take(6)) {
+                                        Row(
+                                            modifier =
+                                                Modifier.fillMaxWidth()
+                                                    .defaultMinSize(minHeight = 48.dp)
+                                                    .clickable {
+                                                        val label = context.getString(R.string.lbl_focus_filter)
+                                                        sessionSlotStore.setActiveScene(label)
+                                                        playbackModel.play(listOf(song) + orderedMatches.filter { it.uid != song.uid })
+                                                    }
+                                                    .padding(vertical = 6.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                                Text(
+                                                    text = song.name.resolve(context),
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                Text(
+                                                    text = song.artists.resolveNames(context),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
+                                            Text(
+                                                text = song.durationMs.formatDurationMs(true),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                if (orderedMatches.isEmpty()) {
+                                                    requireContext().showToast(R.string.lbl_scene_no_matches)
+                                                } else {
+                                                    playbackModel.addToQueue(orderedMatches)
+                                                    requireContext().showToast(R.string.lng_queue_added)
+                                                }
+                                            },
+                                            enabled = orderedMatches.isNotEmpty(),
+                                            shape = RectangleShape,
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Text(stringResource(R.string.lbl_focus_queue_add, orderedMatches.size))
+                                        }
+                                        Button(
+                                            onClick = {
+                                                if (orderedMatches.isEmpty()) {
+                                                    requireContext().showToast(R.string.lbl_scene_no_matches)
+                                                } else {
+                                                    val label = context.getString(R.string.lbl_focus_filter)
+                                                    sessionSlotStore.setActiveScene(label)
+                                                    lanSyncRepository.scheduleM3u8WriteBack(label, orderedMatches)
+                                                    playbackModel.play(orderedMatches)
+                                                }
+                                            },
+                                            enabled = orderedMatches.isNotEmpty(),
+                                            shape = RectangleShape,
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Text(stringResource(R.string.fmt_dj_play_matches, orderedMatches.size))
                                         }
                                     }
                                 }

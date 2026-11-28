@@ -130,6 +130,7 @@ public sealed partial class MainViewModel
         _engine.SetFirImpulseFile(null);
         _firImpulseFilePath = null;
         FirImpulseFileName = "FIR: 未加载";
+        OnPropertyChanged(nameof(HasFirImpulse));
         SaveUserSettings();
     }
 
@@ -138,7 +139,150 @@ public sealed partial class MainViewModel
         _engine.SetFirImpulseFile(wavPath, FirDryWetMix);
         _firImpulseFilePath = wavPath;
         FirImpulseFileName = $"FIR: {Path.GetFileName(wavPath)}";
+        OnPropertyChanged(nameof(HasFirImpulse));
         SaveUserSettings();
+    }
+
+    public bool HasCustomBuiltInEqDraft =>
+        !_usingExternalEqFile
+        && IsDspEnabled
+        && string.Equals(DspPresetId, "Custom", StringComparison.OrdinalIgnoreCase);
+
+    public event Action? DspCurveChanged;
+
+    [RelayCommand]
+    private void ResetDspParameter(string? parameterKey)
+    {
+        switch (parameterKey)
+        {
+            case "Preamp": DspPreampDb = 0.0; break;
+            case "Balance": DspBalanceDb = 0.0; break;
+            case "Volume":
+                if (IsSoftwareVolumeControlEnabled) VolumeAttenuationDb = 0.0;
+                break;
+            case "RgWithTag": ReplayGainPreAmpWithTagDb = 0.0; break;
+            case "RgWithoutTag": ReplayGainPreAmpWithoutTagDb = 0.0; break;
+            case "Band0": EqBand0Db = 0.0; break;
+            case "Band1": EqBand1Db = 0.0; break;
+            case "Band2": EqBand2Db = 0.0; break;
+            case "Band3": EqBand3Db = 0.0; break;
+            case "Band4": EqBand4Db = 0.0; break;
+            case "Band5": EqBand5Db = 0.0; break;
+            case "Band6": EqBand6Db = 0.0; break;
+            case "Band7": EqBand7Db = 0.0; break;
+            case "Band8": EqBand8Db = 0.0; break;
+            case "Band9": EqBand9Db = 0.0; break;
+        }
+    }
+
+    public (double[] FreqsHz, double[] LayerADb, double[] CombinedDb) GetDspFrequencyResponseCurve(int bins = 96)
+    {
+        double[] freqs = new double[bins];
+        double[] layerADb = new double[bins];
+        double[] combinedDb = new double[bins];
+        double fMin = 20.0;
+        double fMax = 20000.0;
+        for (int i = 0; i < bins; i++)
+        {
+            double frac = bins > 1 ? (double)i / (bins - 1) : 0.0;
+            freqs[i] = fMin * Math.Pow(fMax / fMin, frac);
+        }
+
+        var extDsp = BuildCurrentExtendedDspConfig();
+        var layerA = _usingExternalEqFile
+            ? _eqProfile
+            : (extDsp.Enabled ? extDsp.ToEqualizerApoProfile() : null);
+        var (composed, _) = ComposeActiveDspProfile(extDsp, layerA, _activeAutoEqResolution);
+
+        EvaluateProfileCurve(layerA, freqs, layerADb);
+        EvaluateProfileCurve(composed, freqs, combinedDb);
+        return (freqs, layerADb, combinedDb);
+    }
+
+    private static void EvaluateProfileCurve(EqualizerApoProfile? profile, double[] freqs, double[] outDb)
+    {
+        if (profile is null)
+        {
+            Array.Clear(outDb);
+            return;
+        }
+
+        const double fs = 48000.0;
+        var coeffs = new (double b0, double b1, double b2, double a1, double a2)[profile.Filters.Count];
+        for (int idx = 0; idx < profile.Filters.Count; idx++)
+        {
+            var spec = profile.Filters[idx];
+            double fc = Math.Clamp(spec.FrequencyHz, 10.0, fs * 0.49);
+            double w0 = 2.0 * Math.PI * fc / fs;
+            double cosW0 = Math.Cos(w0);
+            double sinW0 = Math.Sin(w0);
+            double q = Math.Max(spec.Q, 0.05);
+            double alpha = sinW0 / (2.0 * q);
+            double a = Math.Pow(10.0, spec.GainDb / 40.0);
+
+            double b0, b1, b2, a0, a1, a2;
+            switch (spec.Kind)
+            {
+                case BiquadKind.Peaking:
+                    b0 = 1.0 + alpha * a; b1 = -2.0 * cosW0; b2 = 1.0 - alpha * a;
+                    a0 = 1.0 + alpha / a; a1 = -2.0 * cosW0; a2 = 1.0 - alpha / a;
+                    break;
+                case BiquadKind.LowShelf:
+                {
+                    double t = 2.0 * Math.Sqrt(a) * alpha;
+                    b0 = a * ((a + 1.0) - (a - 1.0) * cosW0 + t);
+                    b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosW0);
+                    b2 = a * ((a + 1.0) - (a - 1.0) * cosW0 - t);
+                    a0 = (a + 1.0) + (a - 1.0) * cosW0 + t;
+                    a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosW0);
+                    a2 = (a + 1.0) + (a - 1.0) * cosW0 - t;
+                    break;
+                }
+                case BiquadKind.HighShelf:
+                {
+                    double t = 2.0 * Math.Sqrt(a) * alpha;
+                    b0 = a * ((a + 1.0) + (a - 1.0) * cosW0 + t);
+                    b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosW0);
+                    b2 = a * ((a + 1.0) + (a - 1.0) * cosW0 - t);
+                    a0 = (a + 1.0) - (a - 1.0) * cosW0 + t;
+                    a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosW0);
+                    a2 = (a + 1.0) - (a - 1.0) * cosW0 - t;
+                    break;
+                }
+                case BiquadKind.LowPass:
+                    b0 = (1.0 - cosW0) / 2.0; b1 = 1.0 - cosW0; b2 = b0;
+                    a0 = 1.0 + alpha; a1 = -2.0 * cosW0; a2 = 1.0 - alpha;
+                    break;
+                case BiquadKind.HighPass:
+                    b0 = (1.0 + cosW0) / 2.0; b1 = -(1.0 + cosW0); b2 = b0;
+                    a0 = 1.0 + alpha; a1 = -2.0 * cosW0; a2 = 1.0 - alpha;
+                    break;
+                default:
+                    b0 = 1.0; b1 = 0.0; b2 = 0.0; a0 = 1.0; a1 = 0.0; a2 = 0.0;
+                    break;
+            }
+            coeffs[idx] = (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+        }
+
+        for (int i = 0; i < freqs.Length; i++)
+        {
+            double w = 2.0 * Math.PI * freqs[i] / fs;
+            double cosW = Math.Cos(w);
+            double sinW = Math.Sin(w);
+            double cos2W = Math.Cos(2.0 * w);
+            double sin2W = Math.Sin(2.0 * w);
+            double totalDb = profile.PreampDb;
+            foreach (var (b0, b1, b2, a1, a2) in coeffs)
+            {
+                double numRe = b0 + b1 * cosW + b2 * cos2W;
+                double numIm = -(b1 * sinW + b2 * sin2W);
+                double denRe = 1.0 + a1 * cosW + a2 * cos2W;
+                double denIm = -(a1 * sinW + a2 * sin2W);
+                double magSq = (numRe * numRe + numIm * numIm) / Math.Max(1e-18, denRe * denRe + denIm * denIm);
+                totalDb += 10.0 * Math.Log10(Math.Max(1e-9, magSq));
+            }
+            outDb[i] = Math.Clamp(totalDb, -24.0, 24.0);
+        }
     }
 
     private string GetCurrentDspProfileKey()
@@ -359,6 +503,11 @@ public sealed partial class MainViewModel
 
     private void UpdateVolumeToolTip()
     {
+        if (IsVolumeLockedByBitPerfect)
+        {
+            VolumeToolTip = "Bit-Perfect 0.0 dB 硬件直通锁已启用（点击锁标可解锁软件音量）";
+            return;
+        }
         VolumeToolTip = IsMuted
             ? "已静音 (点击取消静音)"
             : $"音量 {VolumePercent:0}% ({VolumeAttenuationDb:0.0} dB 数字衰减)";
@@ -432,6 +581,7 @@ public sealed partial class MainViewModel
         );
         UpdateAutoEqBadge();
         PushAcousticPipeline();
+        DspCurveChanged?.Invoke();
     }
 
     private void PushAcousticPipeline()

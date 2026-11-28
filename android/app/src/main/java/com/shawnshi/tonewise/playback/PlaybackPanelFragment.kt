@@ -55,12 +55,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentPlaybackPanelBinding
+import com.shawnshi.tonewise.detail.BookletPdfDialog
 import com.shawnshi.tonewise.detail.DetailViewModel
+import com.shawnshi.tonewise.detail.WorkRecordingsDialog
 import com.shawnshi.tonewise.list.ListViewModel
 import com.shawnshi.tonewise.music.ClassicalMetadataEngine
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
+import com.shawnshi.tonewise.playback.audio.SignalPathDialog
+import com.shawnshi.tonewise.playback.audio.SignalPathState
 import com.shawnshi.tonewise.playback.dsp.DspControlDialog
 import com.shawnshi.tonewise.playback.persist.PlayCountRepository
 import com.shawnshi.tonewise.playback.queue.QueueViewModel
@@ -124,6 +128,9 @@ class PlaybackPanelFragment :
     private var creditLayoutListener: View.OnLayoutChangeListener? = null
     private var defaultPlayPauseBgTint: ColorStateList? = null
     private var defaultPlayPauseIconTint: ColorStateList? = null
+    private var isCurrentSongClassical: Boolean = false
+    private var isMovementTitleExpanded: Boolean = false
+    private var lastBoundSongUid: String? = null
 
     override fun onCreateBinding(inflater: LayoutInflater) =
         FragmentPlaybackPanelBinding.inflate(inflater)
@@ -183,11 +190,11 @@ class PlaybackPanelFragment :
         defaultArtistTextColors = binding.playbackArtist.textColors
         binding.playbackSong.apply {
             isSelected = false
-            setOnClickListener { navigateToCurrentSong() }
+            setOnClickListener { handleLine1Click() }
         }
         binding.playbackArtist.apply {
             isSelected = false
-            setOnClickListener { navigateToCurrentArtist() }
+            setOnClickListener { handleLine2Click() }
         }
         binding.playbackAlbum.apply {
             isSelected = false
@@ -195,7 +202,7 @@ class PlaybackPanelFragment :
         }
         binding.playbackMeta.apply {
             isSelected = false
-            setOnClickListener { playbackModel.song.value?.let(detailModel::showSong) }
+            setOnClickListener { handleLine3Click() }
             val listener =
                 View.OnLayoutChangeListener { _, left, _, right, _, _, _, _, _ ->
                     if (pendingCreditTiers.isNotEmpty() && right - left > 0) {
@@ -205,6 +212,18 @@ class PlaybackPanelFragment :
             addOnLayoutChangeListener(listener)
             creditLayoutListener = listener
         }
+
+        binding.playbackBitPerfectBadge?.setOnClickListener { openSignalPathDialog() }
+        binding.playbackActionRecordings?.setOnClickListener { openCurrentRecordingsDialog() }
+        binding.playbackActionBooklet?.setOnClickListener { openBookletPdfDialog() }
+        binding.playbackActionDsp?.apply {
+            setOnClickListener { openDspControlDialog() }
+            setOnLongClickListener {
+                openSignalPathDialog()
+                true
+            }
+        }
+        binding.playbackActionQueue?.setOnClickListener { playbackModel.openQueue() }
 
         binding.playbackSeekBar?.apply {
             listener = this@PlaybackPanelFragment
@@ -265,6 +284,8 @@ class PlaybackPanelFragment :
         collectImmediately(playbackModel.repeatMode, ::updateRepeat)
         collectImmediately(playbackModel.isPlaying, ::updatePlaying)
         collectImmediately(playbackModel.isShuffled, ::updateShuffled)
+        collectImmediately(playbackModel.isClassicalShuffleLocked, ::updateClassicalShuffleLockBadge)
+        collectImmediately(playbackModel.signalPath, ::updateSignalPathBadges)
         collectImmediately(playbackModel.pagerQueue, ::updatePager)
         collectImmediately(playbackModel.isPlaybackSheetExpanded, ::updateSheetExpanded)
         collectImmediately(dynamicAccentController.activeAccentArgb, ::applyDynamicAccent)
@@ -391,6 +412,12 @@ class PlaybackPanelFragment :
                 composers = song.composers,
                 title = rawTitle,
             )
+        val songUidStr = song.uid.toString()
+        if (lastBoundSongUid != songUidStr) {
+            lastBoundSongUid = songUidStr
+            isMovementTitleExpanded = false
+        }
+        isCurrentSongClassical = isSongClassical
 
         binding.playbackComposer.isVisible = false
         binding.playbackAlbum.isVisible = false
@@ -425,8 +452,8 @@ class PlaybackPanelFragment :
                 typeface = Typeface.DEFAULT
                 textSize = 14f
                 setTextColor(binding.playbackSong.textColors)
-                isSingleLine = true
-                maxLines = 1
+                isSingleLine = false
+                maxLines = if (isMovementTitleExpanded) 3 else 1
                 ellipsize = TextUtils.TruncateAt.END
                 isSelected = false
                 text = formatted.line2
@@ -485,6 +512,15 @@ class PlaybackPanelFragment :
             }
         }
         updateLoveButton(song)
+        val classicalWork = if (isSongClassical) musicRepository.findWorkForSong(song) else null
+        val recCount = classicalWork?.recordings?.size ?: 0
+        binding.playbackActionRecordings?.apply {
+            isVisible = recCount > 1
+            if (recCount > 1) {
+                text = getString(R.string.fmt_classical_recordings_pill, recCount)
+            }
+        }
+        updateStatusBadgesVisibility()
         binding.playbackVinylView.submitCover(imageLoader, song.cover, viewLifecycleOwner.lifecycleScope)
         binding.playbackSeekBar?.durationDs = song.durationMs.msToDs()
         refreshMosaicBackdrop()
@@ -497,7 +533,7 @@ class PlaybackPanelFragment :
         b.playbackVinylView.isVisible = vinylMode
         b.playbackPager.visibility = if (vinylMode) View.INVISIBLE else View.VISIBLE
         b.playbackPager.isUserInputEnabled = !vinylMode
-        val activeColor =
+        val rawAccent =
             if (uiSettings.enableDynamicCoverAccent) {
                 dynamicAccentController.activeAccentArgb.value
             } else {
@@ -507,15 +543,21 @@ class PlaybackPanelFragment :
                 androidx.appcompat.R.attr.colorPrimary,
                 if (requireContext().isNight) Color.WHITE else Color.BLACK,
             )
+        val activeInk = ZuneColorMath.clampAccentInkForTheme(rawAccent, requireContext().isNight)
         val inactiveColor =
             MaterialColors.getColor(
                 b.playbackStageToggle,
                 MaterialR.attr.colorOnSurfaceVariant,
                 if (requireContext().isNight) Color.LTGRAY else Color.DKGRAY,
             )
+        b.playbackStageToggle.setIconResource(
+            if (vinylMode) R.drawable.ic_song_24 else R.drawable.ic_album_24
+        )
+        b.playbackStageToggle.contentDescription =
+            getString(if (vinylMode) R.string.desc_toggle_cover_mode else R.string.desc_toggle_vinyl_mode)
         b.playbackStageToggle.iconTint =
-            ColorStateList.valueOf(if (vinylMode) activeColor else inactiveColor)
-        b.playbackStageToggle.alpha = if (vinylMode) 1.0f else 0.78f
+            ColorStateList.valueOf(if (vinylMode) activeInk else inactiveColor)
+        b.playbackStageToggle.alpha = if (vinylMode) 1.0f else 0.85f
     }
 
     private fun applyBackdropStyle() {
@@ -708,7 +750,36 @@ class PlaybackPanelFragment :
         requireBinding().playbackShuffle.isChecked = isShuffled
     }
 
+    private fun updateClassicalShuffleLockBadge(locked: Boolean) {
+        val b = binding ?: return
+        b.playbackShuffleLockBadge?.isVisible = locked
+        updateStatusBadgesVisibility()
+    }
+
+    private fun updateSignalPathBadges(state: SignalPathState) {
+        val b = binding ?: return
+        b.playbackBitPerfectBadge?.isVisible = state.dspBypassed
+        b.playbackActionDsp?.text =
+            if (state.dspBypassed) {
+                getString(R.string.lbl_badge_bit_perfect)
+            } else {
+                getString(R.string.lbl_now_playing_dsp)
+            }
+        updateStatusBadgesVisibility()
+    }
+
+    private fun updateStatusBadgesVisibility() {
+        val b = binding ?: return
+        val anyVisible =
+            (b.playbackBitPerfectBadge?.isVisible == true) ||
+                (b.playbackShuffleLockBadge?.isVisible == true) ||
+                (b.playbackActionRecordings?.isVisible == true)
+        b.playbackStatusBadges?.isVisible = anyVisible
+    }
+
     private fun updatePager(queue: PagerQueue) {
+        requireBinding().playbackActionQueue?.text =
+            getString(R.string.fmt_now_playing_queue_count, queue.queue.size)
         // Right now there's easily 140ms of frame skipping when going next/prev. This is primarily
         // the fault of specifically the nested bottom sheet UI setup, which is intractable to
         // optimize. If I don't do multiple remeasures/relayouts on every slightest state
@@ -786,6 +857,71 @@ class PlaybackPanelFragment :
             } else {
                 binding.playbackPager.setCurrentItem(command.scroll, false)
             }
+        }
+    }
+
+    private fun handleLine1Click() {
+        val song = playbackModel.song.value ?: return
+        if (isCurrentSongClassical) {
+            val composer = ClassicalPlaybackActions.resolvePrimaryCredit(song.composers)
+            if (composer != null) {
+                detailModel.showComposer(composer)
+            } else {
+                detailModel.showAlbum(song)
+            }
+        } else {
+            detailModel.showAlbum(song)
+        }
+    }
+
+    private fun handleLine2Click() {
+        val song = playbackModel.song.value ?: return
+        if (isCurrentSongClassical) {
+            isMovementTitleExpanded = !isMovementTitleExpanded
+            binding?.playbackArtist?.maxLines = if (isMovementTitleExpanded) 3 else 1
+        } else {
+            detailModel.showArtist(song)
+        }
+    }
+
+    private fun handleLine3Click() {
+        val song = playbackModel.song.value ?: return
+        if (isCurrentSongClassical) {
+            val conductor = ClassicalPlaybackActions.resolvePrimaryCredit(song.conductors)
+            if (conductor != null) {
+                detailModel.showConductor(conductor)
+            } else {
+                detailModel.showArtist(song)
+            }
+        } else {
+            detailModel.showAlbum(song.album)
+        }
+    }
+
+    private fun openBookletPdfDialog() {
+        if (parentFragmentManager.findFragmentByTag(BookletPdfDialog.TAG) == null) {
+            BookletPdfDialog.newInstance().show(parentFragmentManager, BookletPdfDialog.TAG)
+        }
+    }
+
+    private fun openDspControlDialog() {
+        if (parentFragmentManager.findFragmentByTag(DspControlDialog.TAG) == null) {
+            DspControlDialog.newInstance().show(parentFragmentManager, DspControlDialog.TAG)
+        }
+    }
+
+    private fun openSignalPathDialog() {
+        if (parentFragmentManager.findFragmentByTag(SignalPathDialog.TAG) == null) {
+            SignalPathDialog.newInstance().show(parentFragmentManager, SignalPathDialog.TAG)
+        }
+    }
+
+    private fun openCurrentRecordingsDialog() {
+        val song = playbackModel.song.value ?: return
+        val work = musicRepository.findWorkForSong(song) ?: return
+        if (parentFragmentManager.findFragmentByTag(WorkRecordingsDialog.TAG) == null) {
+            WorkRecordingsDialog.newInstance(work.key)
+                .show(parentFragmentManager, WorkRecordingsDialog.TAG)
         }
     }
 

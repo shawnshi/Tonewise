@@ -55,6 +55,15 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public BulkObservableCollection<EntityGroupItem> CurrentEntityGroups { get; } = [];
     public ObservableCollection<string> SearchSuggestions { get; } = [];
     public ObservableCollection<string> BreadcrumbItems { get; } = [];
+
+    [ObservableProperty]
+    private string _breadcrumbTrail = "";
+
+    [ObservableProperty]
+    private string _lanSyncTransferText = "Wi-Fi 局域网传输空闲（与 USB 同步进度独立显示）";
+
+    [ObservableProperty]
+    private bool _isLanSyncTransferring;
     public ObservableCollection<PairedDeviceViewItem> PairedDevices { get; } = [];
     public ObservableCollection<SyncOutboxViewItem> SyncOutboxItems { get; } = [];
     public ObservableCollection<QuickplayTileItem> QuickplayPins { get; } = [];
@@ -264,6 +273,33 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isDacHardwareUnlocked = true;
+
+    [ObservableProperty]
+    private bool _lockVolumeOnBitPerfect = true;
+
+    [ObservableProperty]
+    private bool _rememberVolumePerEndpoint = true;
+
+    [ObservableProperty]
+    private bool _isVolumeLockedByBitPerfect;
+
+    [ObservableProperty]
+    private bool _isSoftwareVolumeControlEnabled = true;
+
+    [ObservableProperty]
+    private bool _isEndpointVolumeSafetyPromptVisible;
+
+    [ObservableProperty]
+    private string _endpointVolumeSafetyPromptText = "";
+
+    private readonly Dictionary<string, double> _endpointVolumesDb = new(StringComparer.OrdinalIgnoreCase);
+    private double? _pendingRestoreEndpointVolumeDb;
+    private string? _pendingRestoreEndpointKey;
+    private int? _mainWindowX;
+    private int? _mainWindowY;
+    private int? _mainWindowWidth;
+    private int? _mainWindowHeight;
+    private bool _mainWindowMaximized;
 
     [ObservableProperty]
     private string _currentTrackSpecsSubline = "";
@@ -590,6 +626,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _hasAlternateRecordings;
 
+    public string CurrentRecordingVersionLabel => CurrentTrack?.AlternateVersionLabel ?? "";
+
     [ObservableProperty]
     private string _currentBiographySummary = "选择曲目后显示本地百科传记。";
 
@@ -772,6 +810,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _showClassicalEnsembles;
+
+    [ObservableProperty]
+    private bool _isClassicalComposerViewVisible;
+
+    public bool IsClassicalComposersMode => !ShowClassicalEnsembles;
 
     [ObservableProperty]
     private bool _isNowPlayingQueueOpen = true;
@@ -1048,6 +1091,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                         : (state.GainMatchedBypass
                             ? $"Gain-Matched A/B Bypass (RG/Preamp {state.EffectivePreampDb:+0.0;-0.0;0.0} dB)"
                             : $"64-bit DSP ({state.BiquadCount} PEQ, FIR {state.FirTapCount} taps, Crossfeed={(state.CrossfeedActive ? "On" : "Off")}, ISO226={(state.Iso226Active ? "On" : "Off")}, Limiter={(state.LimiterActive ? "On" : "Off")}, TPDF={(state.TpdfDitherActive ? "24b" : "Off")}, Preamp {state.EffectivePreampDb:+0.0;-0.0;0.0} dB)"));
+                RefreshBitPerfectVolumeLockState(engineExclusiveHint: state.IsExclusive);
             }
             if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
                 _uiContext.Post(_ => ApplyState(), null);
@@ -1109,6 +1153,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         try
         {
             PreferWasapiExclusive = saved.PreferWasapiExclusive;
+            LockVolumeOnBitPerfect = saved.LockVolumeOnBitPerfect;
+            RememberVolumePerEndpoint = saved.RememberVolumePerEndpoint;
+            _endpointVolumesDb.Clear();
+            foreach (var kv in DesktopSettingsStore.DeserializeEndpointVolumes(saved.EndpointVolumesJson))
+            {
+                _endpointVolumesDb[kv.Key] = kv.Value;
+            }
+            _mainWindowX = saved.MainWindowX;
+            _mainWindowY = saved.MainWindowY;
+            _mainWindowWidth = saved.MainWindowWidth;
+            _mainWindowHeight = saved.MainWindowHeight;
+            _mainWindowMaximized = saved.MainWindowMaximized;
             IsIso226Enabled = saved.IsIso226Enabled;
             VolumeAttenuationDb = saved.VolumeAttenuationDb;
             IsTpdfDitherEnabled = saved.IsTpdfDitherEnabled;
@@ -1161,6 +1217,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             IsDacHardwareLocked = saved.IsDacHardwareLocked;
 
             LoadDspConfigForCurrentEndpoint(fallbackAutoFileRoot: null);
+
+            if (RememberVolumePerEndpoint)
+            {
+                string epKey = string.IsNullOrWhiteSpace(SelectedEndpoint?.Id) ? "__default__" : SelectedEndpoint.Id!;
+                if (_endpointVolumesDb.TryGetValue(epKey, out double savedEpDb))
+                {
+                    VolumeAttenuationDb = savedEpDb;
+                }
+            }
+            RefreshBitPerfectVolumeLockState();
 
             if (!string.IsNullOrWhiteSpace(saved.ActiveEqFilePath) && File.Exists(saved.ActiveEqFilePath))
             {
@@ -1269,7 +1335,15 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             AllowAdbForeignDeleteFallback: AllowAdbForeignDeleteFallback,
             CustomAdbPath: _customAdbPath,
             EnableDynamicCoverAccent: EnableDynamicCoverAccent,
-            AutoEqPolicyJson: SyncHostServer.SerializeAutoEqPolicy(_autoEqPolicy));
+            AutoEqPolicyJson: SyncHostServer.SerializeAutoEqPolicy(_autoEqPolicy),
+            LockVolumeOnBitPerfect: LockVolumeOnBitPerfect,
+            RememberVolumePerEndpoint: RememberVolumePerEndpoint,
+            EndpointVolumesJson: DesktopSettingsStore.SerializeEndpointVolumes(_endpointVolumesDb),
+            MainWindowX: _mainWindowX,
+            MainWindowY: _mainWindowY,
+            MainWindowWidth: _mainWindowWidth,
+            MainWindowHeight: _mainWindowHeight,
+            MainWindowMaximized: _mainWindowMaximized);
 
         try
         {
@@ -1283,6 +1357,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public (int? X, int? Y, int? Width, int? Height, bool AlwaysOnTop) GetDeskClockWindowPlacement() =>
         (_deskClockX, _deskClockY, _deskClockWidth, _deskClockHeight, _deskClockAlwaysOnTop);
+
+    public (int? X, int? Y, int? Width, int? Height, bool Maximized) GetMainWindowPlacement() =>
+        (_mainWindowX, _mainWindowY, _mainWindowWidth, _mainWindowHeight, _mainWindowMaximized);
+
+    public void SaveMainWindowPlacement(int x, int y, int width, int height, bool maximized)
+    {
+        _mainWindowX = x;
+        _mainWindowY = y;
+        _mainWindowWidth = width;
+        _mainWindowHeight = height;
+        _mainWindowMaximized = maximized;
+        SaveUserSettings();
+    }
 
     public void SaveDeskClockWindowPlacement(int x, int y, int width, int height, bool alwaysOnTop)
     {
@@ -1383,8 +1470,27 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         if (!_suppressSettingsSave && !_suppressDspSync)
         {
+            RefreshBitPerfectVolumeLockState();
             PushEnginePreferences();
             ReopenCurrentOutputAtCurrentPosition();
+        }
+        SaveUserSettings();
+    }
+    partial void OnLockVolumeOnBitPerfectChanged(bool value)
+    {
+        RefreshBitPerfectVolumeLockState();
+        if (!_suppressSettingsSave && !_suppressDspSync)
+        {
+            PushEnginePreferences();
+        }
+        SaveUserSettings();
+    }
+    partial void OnRememberVolumePerEndpointChanged(bool value)
+    {
+        if (value && !IsVolumeLockedByBitPerfect)
+        {
+            string curKey = string.IsNullOrWhiteSpace(SelectedEndpoint?.Id) ? "__default__" : SelectedEndpoint.Id!;
+            _endpointVolumesDb[curKey] = Math.Round(Math.Clamp(VolumeAttenuationDb, -80.0, 0.0), 1);
         }
         SaveUserSettings();
     }
@@ -1396,8 +1502,20 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         if (!_suppressDspSync)
         {
+            string prevKey = string.IsNullOrWhiteSpace(_appliedEngineEndpointId) ? "__default__" : _appliedEngineEndpointId!;
+            double prevDb = VolumeAttenuationDb;
             bool endpointChanged = !string.Equals(_appliedEngineEndpointId, value?.Id, StringComparison.Ordinal);
+            if (endpointChanged && RememberVolumePerEndpoint && !IsVolumeLockedByBitPerfect)
+            {
+                _endpointVolumesDb[prevKey] = Math.Round(Math.Clamp(prevDb, -80.0, 0.0), 1);
+            }
+
             LoadDspConfigForCurrentEndpoint(_store.MusicRoot);
+            if (endpointChanged)
+            {
+                ApplyEndpointVolumeWithSafetyClamp(value, prevDb);
+            }
+            RefreshBitPerfectVolumeLockState();
             PushEnginePreferences();
             if (endpointChanged)
             {
@@ -1405,6 +1523,107 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             }
         }
         SaveUserSettings();
+    }
+
+    private void ApplyEndpointVolumeWithSafetyClamp(AudioOutputEndpoint? targetEndpoint, double prevDb)
+    {
+        IsEndpointVolumeSafetyPromptVisible = false;
+        _pendingRestoreEndpointVolumeDb = null;
+        _pendingRestoreEndpointKey = null;
+
+        if (!RememberVolumePerEndpoint || IsVolumeLockedByBitPerfect)
+        {
+            return;
+        }
+
+        string newKey = string.IsNullOrWhiteSpace(targetEndpoint?.Id) ? "__default__" : targetEndpoint.Id!;
+        string friendly = string.IsNullOrWhiteSpace(targetEndpoint?.FriendlyName) ? "默认输出设备" : targetEndpoint.FriendlyName;
+        bool prevSuppress = _suppressSettingsSave;
+        _suppressSettingsSave = true;
+        try
+        {
+            if (_endpointVolumesDb.TryGetValue(newKey, out double savedDb))
+            {
+                if (savedDb > -12.0 && prevDb < -12.0)
+                {
+                    VolumeAttenuationDb = -12.0;
+                    _pendingRestoreEndpointVolumeDb = savedDb;
+                    _pendingRestoreEndpointKey = newKey;
+                    EndpointVolumeSafetyPromptText = $"已切换至「{friendly}」：记忆音量 {savedDb:0.0} dB 接近满幅，已先安全限幅至 -12.0 dB。";
+                    IsEndpointVolumeSafetyPromptVisible = true;
+                }
+                else
+                {
+                    VolumeAttenuationDb = savedDb;
+                }
+            }
+            else if (prevDb > -12.0)
+            {
+                VolumeAttenuationDb = -12.0;
+                _pendingRestoreEndpointVolumeDb = prevDb;
+                _pendingRestoreEndpointKey = newKey;
+                EndpointVolumeSafetyPromptText = $"首次切换至「{friendly}」：已安全衰减至 -12.0 dB 以防满幅爆音。";
+                IsEndpointVolumeSafetyPromptVisible = true;
+            }
+        }
+        finally
+        {
+            _suppressSettingsSave = prevSuppress;
+        }
+    }
+
+    public void RefreshBitPerfectVolumeLockState(bool? engineExclusiveHint = null)
+    {
+        bool exclusiveTarget = PreferWasapiExclusive || (engineExclusiveHint ?? _engine.CurrentSignalPath.IsExclusive);
+        bool locked = LockVolumeOnBitPerfect && exclusiveTarget;
+        IsVolumeLockedByBitPerfect = locked;
+        IsSoftwareVolumeControlEnabled = !locked;
+        if (locked)
+        {
+            bool prevSup = _suppressSettingsSave;
+            _suppressSettingsSave = true;
+            try
+            {
+                if (IsMuted) IsMuted = false;
+                if (Math.Abs(VolumeAttenuationDb) > 0.01) VolumeAttenuationDb = 0.0;
+            }
+            finally
+            {
+                _suppressSettingsSave = prevSup;
+            }
+        }
+        UpdateVolumeToolTip();
+    }
+
+    [RelayCommand]
+    private void UnlockBitPerfectVolume()
+    {
+        LockVolumeOnBitPerfect = false;
+        Notify("已解锁 Bit-Perfect 0 dB 硬件直通音量锁，软件衰减将启用 24-bit TPDF 抖动。", "info");
+    }
+
+    [RelayCommand]
+    private void ConfirmRestoreEndpointVolume()
+    {
+        if (_pendingRestoreEndpointVolumeDb is double targetDb)
+        {
+            string curKey = string.IsNullOrWhiteSpace(SelectedEndpoint?.Id) ? "__default__" : SelectedEndpoint.Id!;
+            if (_pendingRestoreEndpointKey is null || string.Equals(curKey, _pendingRestoreEndpointKey, StringComparison.OrdinalIgnoreCase))
+            {
+                VolumeAttenuationDb = targetDb;
+            }
+        }
+        IsEndpointVolumeSafetyPromptVisible = false;
+        _pendingRestoreEndpointVolumeDb = null;
+        _pendingRestoreEndpointKey = null;
+    }
+
+    [RelayCommand]
+    private void DismissEndpointVolumeSafetyPrompt()
+    {
+        IsEndpointVolumeSafetyPromptVisible = false;
+        _pendingRestoreEndpointVolumeDb = null;
+        _pendingRestoreEndpointKey = null;
     }
 
     private void ScheduleEndpointRefresh()
@@ -1528,6 +1747,26 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
     partial void OnVolumeAttenuationDbChanged(double value)
     {
+        if (IsVolumeLockedByBitPerfect && Math.Abs(value) > 0.01)
+        {
+            bool prevSup = _suppressSettingsSave;
+            _suppressSettingsSave = true;
+            try
+            {
+                VolumeAttenuationDb = 0.0;
+            }
+            finally
+            {
+                _suppressSettingsSave = prevSup;
+            }
+            UpdateVolumeToolTip();
+            return;
+        }
+        if (!_suppressSettingsSave && RememberVolumePerEndpoint && !IsVolumeLockedByBitPerfect)
+        {
+            string curKey = string.IsNullOrWhiteSpace(SelectedEndpoint?.Id) ? "__default__" : SelectedEndpoint.Id!;
+            _endpointVolumesDb[curKey] = Math.Round(Math.Clamp(value, -80.0, 0.0), 1);
+        }
         PushAcousticPipeline();
         SyncVolumePercentFromDb(value);
         SaveUserSettings();
@@ -1536,6 +1775,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     partial void OnVolumePercentChanged(double value)
     {
         if (_syncingVolume) return;
+        if (IsVolumeLockedByBitPerfect)
+        {
+            SyncVolumePercentFromDb(0.0);
+            return;
+        }
         double pct = Math.Clamp(value, 0.0, 100.0);
         double db = pct <= 0.0 ? -80.0 : Math.Clamp(40.0 * Math.Log10(pct / 100.0), -80.0, 0.0);
         _syncingVolume = true;
@@ -1552,6 +1796,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     partial void OnIsMutedChanged(bool value)
     {
+        if (IsVolumeLockedByBitPerfect && value)
+        {
+            IsMuted = false;
+            return;
+        }
         _engine.IsMuted = value;
         UpdateVolumeToolTip();
     }
@@ -1688,9 +1937,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
     partial void OnFirDryWetMixChanged(double value)
     {
+        OnPropertyChanged(nameof(FirDryWetPercentDisplay));
         PushAcousticPipeline();
         SaveUserSettings();
     }
+
+    public string FirDryWetPercentDisplay => $"{Math.Round(FirDryWetMix * 100.0):0}%";
+    public bool HasFirImpulse => !string.IsNullOrWhiteSpace(_firImpulseFilePath);
 
     partial void OnIsPlayingChanged(bool value)
     {

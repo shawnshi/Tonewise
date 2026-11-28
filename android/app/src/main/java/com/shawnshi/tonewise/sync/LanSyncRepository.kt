@@ -1495,6 +1495,20 @@ constructor(
                         }
                     }
 
+                    if (!lastFmRepository.state.value.hasValidApiSession) {
+                        when (val lfmRes = fetchPairedLastFmSession()) {
+                            is PairedLastFmSessionResult.Available -> {
+                                lastFmRepository.importPairedDesktopSession(
+                                    username = lfmRes.username,
+                                    apiKey = lfmRes.apiKey,
+                                    sharedSecret = lfmRes.sharedSecret,
+                                    sessionKey = lfmRes.sessionKey,
+                                )
+                            }
+                            is PairedLastFmSessionResult.Error -> Unit
+                        }
+                    }
+
                     // Playlists sync strictly one-way PC -> Phone via v2 outbox; phone playlists are never synced back to PC.
                     val effectiveOutboxPlaylists = ArrayList<OutboxPlaylistDto>(outbox.playlists.size)
                     for (pl in outbox.playlists) {

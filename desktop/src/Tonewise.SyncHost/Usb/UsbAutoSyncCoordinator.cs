@@ -494,6 +494,11 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
 
     private void OnHostSyncSessionProgressChanged(SyncSessionProgressReport report)
     {
+        if (!string.IsNullOrWhiteSpace(report.Transport)
+            && !string.Equals(report.Transport, "usb", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
         if (report.PendingLargePruneCount > 0 && !report.IsRunning)
         {
             UpdateState(s => s with

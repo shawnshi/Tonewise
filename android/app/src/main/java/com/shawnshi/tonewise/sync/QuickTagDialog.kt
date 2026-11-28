@@ -45,6 +45,7 @@ import com.google.android.material.bottomsheet.BackportBottomSheetDialogFragment
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
+import com.shawnshi.tonewise.music.FocusFilterLabels
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.music.resolveNames
@@ -221,6 +222,7 @@ private fun QuickTagSheet(
                 ) {
                     for (sc in listOf("focus", "coding", "relax", "energy", "pop")) {
                         val selected = sc in scenes
+                        val label = FocusFilterLabels.labelResForKey(sc)?.let { stringResource(it) } ?: sc
                         FilterChip(
                             selected = selected,
                             onClick = {
@@ -228,7 +230,7 @@ private fun QuickTagSheet(
                                 scenes = next
                                 onMutate(song, "dj_scene", next.joinToString("; "))
                             },
-                            label = { Text(sc) },
+                            label = { Text(label) },
                         )
                     }
                 }
@@ -240,13 +242,14 @@ private fun QuickTagSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     for (vc in listOf("instrumental", "vocal", "unknown")) {
+                        val label = FocusFilterLabels.labelResForKey(vc)?.let { stringResource(it) } ?: vc
                         FilterChip(
                             selected = vocals == vc,
                             onClick = {
                                 vocals = vc
                                 onMutate(song, "dj_vocals", vc)
                             },
-                            label = { Text(vc) },
+                            label = { Text(label) },
                         )
                     }
                 }
@@ -258,13 +261,14 @@ private fun QuickTagSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     for (en in listOf("low", "medium", "high", "unknown")) {
+                        val label = FocusFilterLabels.labelResForKey(en)?.let { stringResource(it) } ?: en
                         FilterChip(
                             selected = energy == en,
                             onClick = {
                                 energy = en
                                 onMutate(song, "dj_energy", en)
                             },
-                            label = { Text(en) },
+                            label = { Text(label) },
                         )
                     }
                 }
@@ -277,6 +281,7 @@ private fun QuickTagSheet(
                 ) {
                     for (tp in listOf("Very Slow", "Slow", "Moderate", "Fast", "Very Fast")) {
                         val selected = tempo.equals(tp, ignoreCase = true)
+                        val label = FocusFilterLabels.labelResForKey(tp)?.let { stringResource(it) } ?: tp
                         FilterChip(
                             selected = selected,
                             onClick = {
@@ -284,7 +289,7 @@ private fun QuickTagSheet(
                                 tempo = next
                                 onMutate(song, "tempo_bucket", next)
                             },
-                            label = { Text(tp) },
+                            label = { Text(label) },
                         )
                     }
                 }
@@ -304,6 +309,7 @@ private fun QuickTagSheet(
                             "high_tension",
                         )) {
                         val selected = cluster in moods
+                        val label = FocusFilterLabels.labelResForKey(cluster)?.let { stringResource(it) } ?: cluster
                         FilterChip(
                             selected = selected,
                             onClick = {
@@ -311,7 +317,7 @@ private fun QuickTagSheet(
                                 moods = next
                                 onMutate(song, "mood", next.joinToString("; "))
                             },
-                            label = { Text(cluster) },
+                            label = { Text(label) },
                         )
                     }
                 }

@@ -86,10 +86,7 @@ import com.shawnshi.tonewise.util.showToast
 
 @AndroidEntryPoint
 class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
-    private val playbackModel: PlaybackViewModel by activityViewModels()
     @Inject lateinit var lanSyncRepository: LanSyncRepository
-    @Inject lateinit var sessionSlotStore: SessionSlotStore
-    @Inject lateinit var musicRepository: MusicRepository
     @Inject lateinit var lastFmRepository: LastFmRepository
     @Inject lateinit var uiSettings: UISettings
     @Inject lateinit var dynamicAccentController: DynamicAccentController
@@ -116,7 +113,6 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                 val pairedHost by lanSyncRepository.pairedHost.collectAsStateWithLifecycle()
                 val syncStatus by lanSyncRepository.syncStatus.collectAsStateWithLifecycle()
                 val syncProgress by lanSyncRepository.syncProgress.collectAsStateWithLifecycle()
-                val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
                 val lastFmState by lastFmRepository.state.collectAsStateWithLifecycle()
                 val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
 
@@ -130,58 +126,14 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                         syncStatus = syncStatus,
                         syncProgress = syncProgress,
                         hasWritableMusicSafGrant = lanSyncRepository.hasWritableMusicSafGrant,
-                        sessionSlots = slots,
                         lastFmState = lastFmState,
                         onPairHost = { url, code -> lanSyncRepository.pairWithHost(url, code) },
                         onUnpairHost = { lanSyncRepository.unpairHost() },
-                        onSaveSlot = { slotIndex ->
-                            val queue = playbackModel.pagerQueue.value
-                            val snapshotSongs = queue.queue.toList()
-                            if (snapshotSongs.isEmpty()) {
-                                requireContext().showToast(R.string.lbl_slot_empty_queue)
-                            } else {
-                                val title =
-                                    playbackModel.song.value?.name?.raw ?: "Session #$slotIndex"
-                                val curIdx = queue.index
-                                val posMs = playbackModel.positionDs.value * 100L
-                                val nowMs = System.currentTimeMillis()
-                                viewLifecycleOwner.lifecycleScope.launch {
-                                    val canonicalUids =
-                                        lanSyncRepository.resolveCanonicalTrackUids(snapshotSongs)
-                                    sessionSlotStore.saveSlot(
-                                        SessionSlotItem(
-                                            slotIndex = slotIndex,
-                                            name = title,
-                                            sceneId = null,
-                                            updatedAtMs = nowMs,
-                                            queueTrackUids = canonicalUids,
-                                            currentIndex = curIdx,
-                                            positionMs = posMs,
-                                        )
-                                    )
-                                    lanSyncRepository.scheduleM3u8WriteBack(title, snapshotSongs)
-                                }
-                            }
-                        },
-                        onRestoreSlot = { slot ->
-                            viewLifecycleOwner.lifecycleScope.launch {
-                                val resolved = lanSyncRepository.resolveSlotSongs(slot)
-                                if (!isAdded) return@launch
-                                if (resolved.isNotEmpty()) {
-                                    sessionSlotStore.setActiveScene(slot.name, slot.slotIndex)
-                                    playbackModel.restoreSessionQueue(
-                                        songs = resolved,
-                                        index = slot.currentIndex.coerceIn(0, resolved.lastIndex),
-                                        positionMs = slot.positionMs,
-                                    )
-                                    dismiss()
-                                } else {
-                                    requireContext().showToast(R.string.lbl_scene_no_matches)
-                                }
-                            }
-                        },
                         onSyncUrl = { url -> lanSyncRepository.startSync(url) },
                         onCancelSync = { lanSyncRepository.cancelSync() },
+                        onUpdateLastFmPreferences = { apiEnabled, broadcastEnabled ->
+                            lastFmRepository.updateScrobblePreferences(apiEnabled, broadcastEnabled)
+                        },
                         onSaveLastFm = { apiEnabled, broadcastEnabled, key, secret, user, sk ->
                             lastFmRepository.updateConfig(
                                 apiEnabled = apiEnabled,
@@ -266,14 +218,12 @@ private fun SyncHubSheet(
     syncStatus: String,
     syncProgress: SyncProgressState,
     hasWritableMusicSafGrant: Boolean,
-    sessionSlots: List<SessionSlotItem>,
     lastFmState: LastFmState,
     onPairHost: suspend (String, String) -> Boolean,
     onUnpairHost: () -> Unit,
-    onSaveSlot: (Int) -> Unit,
-    onRestoreSlot: (SessionSlotItem) -> Unit,
     onSyncUrl: (String) -> Unit,
     onCancelSync: () -> Unit,
+    onUpdateLastFmPreferences: (Boolean, Boolean) -> Unit,
     onSaveLastFm: (Boolean, Boolean, String, String, String, String) -> Unit,
     onAuthLastFm: suspend (String, String, String, String) -> Boolean,
     onStartLastFmBrowserAuth: suspend (String, String) -> Unit,
@@ -302,7 +252,6 @@ private fun SyncHubSheet(
     var pairingCode by remember { mutableStateOf("") }
     var showRepairPanel by remember(pairedHost) { mutableStateOf(pairedHost == null) }
     var showUnpairConfirm by remember { mutableStateOf(false) }
-    var slotPendingOverwrite by remember { mutableStateOf<Pair<Int, SessionSlotItem>?>(null) }
     var apiEnabled by remember(lastFmState.apiEnabled) { mutableStateOf(lastFmState.apiEnabled) }
     var broadcastEnabled by remember(lastFmState.broadcastEnabled) {
         mutableStateOf(lastFmState.broadcastEnabled)
@@ -352,30 +301,6 @@ private fun SyncHubSheet(
         )
     }
 
-    if (slotPendingOverwrite != null) {
-        val (slotIdx, existingSlot) = slotPendingOverwrite!!
-        AlertDialog(
-            onDismissRequest = { slotPendingOverwrite = null },
-            title = { Text(stringResource(R.string.lbl_save_current_slot)) },
-            text = { Text("#$slotIdx · ${existingSlot.name}") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        slotPendingOverwrite = null
-                        onSaveSlot(slotIdx)
-                    }
-                ) {
-                    Text(stringResource(android.R.string.ok))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { slotPendingOverwrite = null }) {
-                    Text(stringResource(android.R.string.cancel))
-                }
-            },
-        )
-    }
-
     Surface(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface) {
         Column(
             modifier =
@@ -391,63 +316,7 @@ private fun SyncHubSheet(
                 fontWeight = FontWeight.SemiBold,
             )
 
-            // 1. 5-Slot Persistent Queues & Handoff
-            Text(
-                text = stringResource(R.string.lbl_handoff_slots),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                for (slotIdx in 1..5) {
-                    val existing = sessionSlots.firstOrNull { it.slotIndex == slotIdx }
-                    val populated = SessionSlotStore.isSlotPopulated(existing)
-                    OutlinedButton(
-                        modifier = Modifier.weight(1f),
-                        onClick = {
-                            if (populated && existing != null) {
-                                onRestoreSlot(existing)
-                            } else {
-                                onSaveSlot(slotIdx)
-                            }
-                        },
-                    ) {
-                        Text(text = if (populated) "▶$slotIdx" else "+$slotIdx")
-                    }
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                val slot1 = sessionSlots.firstOrNull { it.slotIndex == 1 }
-                OutlinedButton(
-                    modifier = Modifier.weight(1f),
-                    onClick = {
-                        if (slot1 != null && SessionSlotStore.isSlotPopulated(slot1)) {
-                            slotPendingOverwrite = 1 to slot1
-                        } else {
-                            onSaveSlot(1)
-                        }
-                    },
-                ) {
-                    Text(text = stringResource(R.string.lbl_save_slot_1))
-                }
-                if (slot1 != null) {
-                    Text(
-                        modifier = Modifier.weight(1.5f).align(Alignment.CenterVertically),
-                        text = "${slot1.name} (${slot1.positionMs / 1000}s)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            HorizontalDivider()
-
-            // 2. Last.fm Scrobble & Local Play History Sync (1-tap Browser Auth + PC Sync + collapsed Advanced)
+            // 1. Last.fm Scrobble & Local Play History Sync (1-tap Browser Auth + PC Sync + collapsed Advanced)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -521,7 +390,7 @@ private fun SyncHubSheet(
                         checked = apiEnabled,
                         onCheckedChange = { checked ->
                             apiEnabled = checked
-                            onSaveLastFm(checked, broadcastEnabled, apiKey, sharedSecret, username, sessionKey)
+                            onUpdateLastFmPreferences(checked, broadcastEnabled)
                         },
                     )
                 }
@@ -539,7 +408,7 @@ private fun SyncHubSheet(
                         checked = broadcastEnabled,
                         onCheckedChange = { checked ->
                             broadcastEnabled = checked
-                            onSaveLastFm(apiEnabled, checked, apiKey, sharedSecret, username, sessionKey)
+                            onUpdateLastFmPreferences(apiEnabled, checked)
                         },
                     )
                 }

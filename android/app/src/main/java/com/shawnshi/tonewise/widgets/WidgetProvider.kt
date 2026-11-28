@@ -376,8 +376,44 @@ class WidgetProvider : AppWidgetProvider() {
         state: WidgetComponent.PlaybackState,
     ): RemoteViews {
         setupCover(context, state)
-        setTextViewText(R.id.widget_song, state.song.name.resolve(context))
-        setTextViewText(R.id.widget_artist, state.song.artists.resolveNames(context))
+        val song = state.song
+        val rawTitle = song.name.resolve(context)
+        val rawArtist = song.artists.resolveNames(context)
+        val genreName = (song.genres.firstOrNull()?.name as? org.oxycblt.musikr.tag.Name.Known)?.raw
+        val isClassical =
+            com.shawnshi.tonewise.music.ClassicalMetadataEngine.isClassicalTrack(
+                genre = genreName,
+                work = song.workName,
+                composer = song.composers.firstOrNull(),
+                conductor = song.conductors.firstOrNull(),
+                title = rawTitle,
+            )
+        val (displayTitle, displayArtist) =
+            if (isClassical && (!song.workName.isNullOrBlank() || song.composers.isNotEmpty())) {
+                val formatted =
+                    com.shawnshi.tonewise.music.ClassicalMetadataEngine.formatClassicalNowPlaying(
+                        rawTitle = rawTitle,
+                        explicitWork = song.workName,
+                        explicitMovement = song.movementName,
+                        explicitMovementNumber = song.movementNumber,
+                        album = song.album.name.resolve(context),
+                        composers = song.composers,
+                        artists = song.artists.map { it.name.resolve(context) },
+                        conductors = song.conductors,
+                        year = song.date?.year,
+                    )
+                val albumTitle = song.album.name.resolve(context)
+                val title =
+                    formatted.line2.takeIf { it.isNotBlank() && it != albumTitle }?.let {
+                        "${formatted.line1} · $it"
+                    } ?: formatted.line1.ifBlank { rawTitle }
+                val credit = formatted.line3Tiers.firstOrNull { it.isNotBlank() } ?: rawArtist
+                title to credit
+            } else {
+                rawTitle to rawArtist
+            }
+        setTextViewText(R.id.widget_song, displayTitle)
+        setTextViewText(R.id.widget_artist, displayArtist)
         return this
     }
 
@@ -492,8 +528,7 @@ class WidgetProvider : AppWidgetProvider() {
         return this
     }
 
-    private fun useRoundedRemoteViews(uiSettings: UISettings) =
-        uiSettings.roundMode || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    private fun useRoundedRemoteViews(uiSettings: UISettings) = uiSettings.roundMode
 
     private fun canDisplayWaferCover(uiSettings: UISettings) =
         // We cannot display album covers in the wafer-style widget when round mode is enabled

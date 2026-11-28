@@ -214,78 +214,7 @@ public static class ClassicalHierarchyBuilder
         foreach (var kv in byWorkKey)
         {
             var (workTitle, composer, genre, items) = kv.Value;
-            var recMap = new Dictionary<string, List<(ClassicalTrackSeed<TTrack> Seed, ParsedWorkMovement Parsed)>>(StringComparer.OrdinalIgnoreCase);
-            foreach (var item in items)
-            {
-                string scope = buildRecordingScope(item.Seed.Album, item.Seed.ConductorsDisplay);
-                if (!recMap.TryGetValue(scope, out var list))
-                {
-                    list = [];
-                    recMap[scope] = list;
-                }
-                list.Add(item);
-            }
-
-            var recordings = new List<ClassicalRecordingNode<TTrack>>(recMap.Count);
-            foreach (var recKv in recMap)
-            {
-                var ordered = recKv.Value
-                    .OrderBy(x => x.Seed.DiscNumber > 0 ? x.Seed.DiscNumber : int.MaxValue)
-                    .ThenBy(x => x.Parsed.MovementNumber ?? int.MaxValue)
-                    .ThenBy(x => x.Seed.TrackNumber > 0 ? x.Seed.TrackNumber : int.MaxValue)
-                    .ThenBy(x => x.Seed.Title, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                var first = ordered[0].Seed;
-                string conductorLabel = string.Join(", ", ordered
-                    .SelectMany(x => SplitPerformersCached(x.Seed.ConductorsDisplay))
-                    .Distinct(StringComparer.OrdinalIgnoreCase));
-                string ensembleLabel = string.Join(", ", ordered
-                    .SelectMany(x => SplitPerformersCached(x.Seed.ArtistsDisplay))
-                    .Distinct(StringComparer.OrdinalIgnoreCase));
-                int? year = ordered.Select(x => x.Seed.Year).Where(y => y is > 0).Min();
-
-                string who = !string.IsNullOrWhiteSpace(conductorLabel)
-                    ? conductorLabel
-                    : (!string.IsNullOrWhiteSpace(ensembleLabel) ? ensembleLabel : first.Album);
-                var badgeParts = new List<string>(2);
-                if (!string.IsNullOrWhiteSpace(who)) badgeParts.Add(ClassicalMetadataEngine.ShortSurname(who));
-                if (year is > 0) badgeParts.Add(year.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                string badgeLabel = string.Join(" · ", badgeParts).ToLowerInvariant();
-                if (string.IsNullOrEmpty(badgeLabel)) badgeLabel = first.Album.ToLowerInvariant();
-
-                var movements = new List<ClassicalMovementNode<TTrack>>(ordered.Count);
-                for (int i = 0; i < ordered.Count; i++)
-                {
-                    var (seed, parsed) = ordered[i];
-                    int num = parsed.MovementNumber ?? (i + 1);
-                    string roman = $"{ClassicalMetadataEngine.FormatRomanNumeral(num)}.";
-                    string displayTitle = !string.IsNullOrWhiteSpace(parsed.Movement) ? parsed.Movement : seed.Title;
-                    movements.Add(new ClassicalMovementNode<TTrack>(
-                        Index: i,
-                        RomanNumeral: roman,
-                        DisplayTitle: displayTitle,
-                        DurationDisplay: FormatDuration(seed.DurationMs),
-                        TrackUid: seed.TrackUid,
-                        Track: seed.Track));
-                }
-
-                recordings.Add(new ClassicalRecordingNode<TTrack>(
-                    ScopeKey: recKv.Key,
-                    BadgeLabel: badgeLabel,
-                    ConductorLabel: conductorLabel,
-                    EnsembleLabel: ensembleLabel,
-                    Year: year,
-                    Movements: movements));
-            }
-
-            recordings.Sort((a, b) =>
-            {
-                int yrCmp = (a.Year ?? int.MaxValue).CompareTo(b.Year ?? int.MaxValue);
-                if (yrCmp != 0) return yrCmp;
-                return StringComparer.OrdinalIgnoreCase.Compare(a.BadgeLabel, b.BadgeLabel);
-            });
-
+            var recordings = BuildRecordings(items, buildRecordingScope, SplitPerformersCached);
             string form = ClassicalMetadataEngine.ClassifyWorkForm(workTitle, genre);
             string versionLabel = recordings.Count > 1 ? $"{recordings.Count} versions" : "1 version";
             var workNode = new ClassicalWorkNode<TTrack>(
@@ -329,6 +258,289 @@ public static class ClassicalHierarchyBuilder
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Builds an equivalent two-stage classical hierarchy keyed by performing ensemble or soloist,
+    /// stripping non-classical tracks and composer credits mistakenly tagged as track artists.
+    /// </summary>
+    public static IReadOnlyList<ClassicalComposerNode<TTrack>> BuildByEnsemble<TTrack>(
+        IEnumerable<ClassicalTrackSeed<TTrack>> tracks,
+        Func<string?, IReadOnlyList<string>> splitComposers,
+        Func<string?, IReadOnlyList<string>> splitPerformers,
+        Func<string, string, string> buildRecordingScope,
+        IEnumerable<string>? portraitDirectories = null)
+    {
+        var composerSplitCache = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        IReadOnlyList<string> SplitComposersCached(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return [];
+            if (!composerSplitCache.TryGetValue(raw, out var cached))
+            {
+                cached = splitComposers(raw);
+                composerSplitCache[raw] = cached;
+            }
+            return cached;
+        }
+
+        var performerSplitCache = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        IReadOnlyList<string> SplitPerformersCached(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return [];
+            if (!performerSplitCache.TryGetValue(raw, out var cached))
+            {
+                cached = splitPerformers(raw);
+                performerSplitCache[raw] = cached;
+            }
+            return cached;
+        }
+
+        var byEnsembleWorkKey = new Dictionary<string, (
+            string Ensemble,
+            string WorkKey,
+            string WorkTitle,
+            string Composer,
+            string? Genre,
+            List<(ClassicalTrackSeed<TTrack> Seed, ParsedWorkMovement Parsed)> Items)>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var seed in tracks)
+        {
+            var composers = SplitComposersCached(seed.ComposersDisplay);
+            string? firstComposer = composers.FirstOrDefault();
+            var conductors = SplitPerformersCached(seed.ConductorsDisplay);
+            string? firstConductor = conductors.FirstOrDefault();
+
+            if (!ClassicalMetadataEngine.IsClassicalTrack(
+                    seed.Genre,
+                    seed.WorkName,
+                    firstComposer,
+                    firstConductor,
+                    seed.Title))
+            {
+                continue;
+            }
+
+            var performers = SplitPerformersCached(seed.ArtistsDisplay);
+            if (performers.Count == 0) continue;
+
+            var composerKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string c in composers)
+            {
+                string trimmedC = c.Trim();
+                if (trimmedC.Length > 0)
+                {
+                    composerKeys.Add(trimmedC);
+                    string surname = ClassicalMetadataEngine.ShortSurname(trimmedC);
+                    if (!string.IsNullOrWhiteSpace(surname))
+                    {
+                        composerKeys.Add(surname);
+                    }
+                }
+            }
+
+            var nonComposerPerformers = new List<string>(performers.Count);
+            foreach (string rawPerf in performers)
+            {
+                string p = rawPerf.Trim();
+                if (p.Length == 0) continue;
+                bool isComposerCredit = composerKeys.Contains(p)
+                    || (composers.Count > 0
+                        && composerKeys.Contains(ClassicalMetadataEngine.ShortSurname(p))
+                        && !string.IsNullOrEmpty(ClassicalMetadataEngine.ClassifyComposerEra(p, null)))
+                    || !string.IsNullOrEmpty(ClassicalMetadataEngine.ClassifyComposerEra(p, null));
+                if (!isComposerCredit)
+                {
+                    nonComposerPerformers.Add(p);
+                }
+            }
+            if (nonComposerPerformers.Count == 0) continue;
+
+            List<string> survivingEnsembles;
+            if (conductors.Count > 0)
+            {
+                var conductorSet = new HashSet<string>(
+                    conductors.Select(c => c.Trim()).Where(c => c.Length > 0),
+                    StringComparer.OrdinalIgnoreCase);
+                var withoutConductors = nonComposerPerformers.Where(p => !conductorSet.Contains(p)).ToList();
+                survivingEnsembles = withoutConductors.Count > 0 ? withoutConductors : nonComposerPerformers;
+            }
+            else
+            {
+                survivingEnsembles = nonComposerPerformers;
+            }
+
+            var parsed = ClassicalMetadataEngine.SplitWorkAndMovement(
+                seed.Title,
+                seed.WorkName,
+                seed.MovementName,
+                seed.MovementNumber);
+            string workTitle = !string.IsNullOrWhiteSpace(parsed.Work)
+                ? parsed.Work
+                : (!string.IsNullOrWhiteSpace(seed.Title) ? seed.Title : seed.Album);
+            workTitle = workTitle.Trim();
+            if (workTitle.Length == 0) continue;
+
+            string composer = !string.IsNullOrWhiteSpace(firstComposer) ? firstComposer.Trim() : "Unknown";
+            string workKey = $"{composer.ToLowerInvariant()}::{workTitle.ToLowerInvariant()}";
+
+            var seenPerformer = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string ensemble in survivingEnsembles)
+            {
+                if (!seenPerformer.Add(ensemble)) continue;
+                string bucketKey = $"{ensemble.ToLowerInvariant()}||{workKey}";
+                if (!byEnsembleWorkKey.TryGetValue(bucketKey, out var bucket))
+                {
+                    bucket = (ensemble, workKey, workTitle, composer, seed.Genre, []);
+                    byEnsembleWorkKey[bucketKey] = bucket;
+                }
+                bucket.Items.Add((seed, parsed));
+            }
+        }
+
+        var worksByEnsemble = new Dictionary<string, (string EnsembleName, List<ClassicalWorkNode<TTrack>> Works)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in byEnsembleWorkKey)
+        {
+            var (ensemble, workKey, workTitle, composer, genre, items) = kv.Value;
+            var recordings = BuildRecordings(items, buildRecordingScope, SplitPerformersCached);
+            string form = ClassicalMetadataEngine.ClassifyWorkForm(workTitle, genre);
+            string versionLabel = recordings.Count > 1 ? $"{recordings.Count} versions" : "1 version";
+
+            string displayWorkTitle = workTitle;
+            if (!string.Equals(composer, "Unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                string shortComposer = ClassicalMetadataEngine.ShortSurname(composer);
+                bool alreadyAttributed = (!string.IsNullOrWhiteSpace(shortComposer)
+                        && workTitle.StartsWith(shortComposer, StringComparison.OrdinalIgnoreCase))
+                    || workTitle.StartsWith(composer, StringComparison.OrdinalIgnoreCase);
+                if (!alreadyAttributed && !string.IsNullOrWhiteSpace(shortComposer))
+                {
+                    displayWorkTitle = $"{shortComposer} — {workTitle}";
+                }
+            }
+
+            var workNode = new ClassicalWorkNode<TTrack>(
+                Key: $"{ensemble.ToLowerInvariant()}::{workKey}",
+                WorkTitle: displayWorkTitle,
+                ComposerName: composer,
+                Form: form,
+                VersionCountLabel: versionLabel,
+                Recordings: recordings);
+
+            if (!worksByEnsemble.TryGetValue(ensemble, out var entry))
+            {
+                entry = (ensemble, []);
+                worksByEnsemble[ensemble] = entry;
+            }
+            entry.Works.Add(workNode);
+        }
+
+        var result = new List<ClassicalComposerNode<TTrack>>(worksByEnsemble.Count);
+        foreach (var kv in worksByEnsemble.OrderBy(k => k.Value.EnsembleName, StringComparer.OrdinalIgnoreCase))
+        {
+            string ensembleName = kv.Value.EnsembleName;
+            var sortedWorks = kv.Value.Works.OrderBy(w => w.WorkTitle, StringComparer.OrdinalIgnoreCase).ToList();
+            int composerCount = sortedWorks
+                .Select(w => w.ComposerName)
+                .Where(c => !string.IsNullOrWhiteSpace(c) && !string.Equals(c, "Unknown", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+            int totalRecs = sortedWorks.Sum(w => Math.Max(1, w.Recordings.Count));
+            string statsLine = composerCount > 0
+                ? $"{composerCount} composers · {sortedWorks.Count} works · {totalRecs} recordings"
+                : $"{sortedWorks.Count} works · {totalRecs} recordings";
+
+            result.Add(new ClassicalComposerNode<TTrack>(
+                ComposerName: ensembleName,
+                DisplayLowercase: ensembleName.ToLowerInvariant(),
+                Era: null,
+                Initial: NormalizeInitial(ensembleName),
+                WorkCount: sortedWorks.Count,
+                RecordingCount: totalRecs,
+                StatsLine: statsLine,
+                LocalPortraitPath: null,
+                Works: sortedWorks));
+        }
+
+        return result;
+    }
+
+    private static List<ClassicalRecordingNode<TTrack>> BuildRecordings<TTrack>(
+        List<(ClassicalTrackSeed<TTrack> Seed, ParsedWorkMovement Parsed)> items,
+        Func<string, string, string> buildRecordingScope,
+        Func<string?, IReadOnlyList<string>> splitPerformersCached)
+    {
+        var recMap = new Dictionary<string, List<(ClassicalTrackSeed<TTrack> Seed, ParsedWorkMovement Parsed)>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in items)
+        {
+            string scope = buildRecordingScope(item.Seed.Album, item.Seed.ConductorsDisplay);
+            if (!recMap.TryGetValue(scope, out var list))
+            {
+                list = [];
+                recMap[scope] = list;
+            }
+            list.Add(item);
+        }
+
+        var recordings = new List<ClassicalRecordingNode<TTrack>>(recMap.Count);
+        foreach (var recKv in recMap)
+        {
+            var ordered = recKv.Value
+                .OrderBy(x => x.Seed.DiscNumber > 0 ? x.Seed.DiscNumber : int.MaxValue)
+                .ThenBy(x => x.Parsed.MovementNumber ?? int.MaxValue)
+                .ThenBy(x => x.Seed.TrackNumber > 0 ? x.Seed.TrackNumber : int.MaxValue)
+                .ThenBy(x => x.Seed.Title, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var first = ordered[0].Seed;
+            string conductorLabel = string.Join(", ", ordered
+                .SelectMany(x => splitPerformersCached(x.Seed.ConductorsDisplay))
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+            string ensembleLabel = string.Join(", ", ordered
+                .SelectMany(x => splitPerformersCached(x.Seed.ArtistsDisplay))
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+            int? year = ordered.Select(x => x.Seed.Year).Where(y => y is > 0).Min();
+
+            string who = !string.IsNullOrWhiteSpace(conductorLabel)
+                ? conductorLabel
+                : (!string.IsNullOrWhiteSpace(ensembleLabel) ? ensembleLabel : first.Album);
+            var badgeParts = new List<string>(2);
+            if (!string.IsNullOrWhiteSpace(who)) badgeParts.Add(ClassicalMetadataEngine.ShortSurname(who));
+            if (year is > 0) badgeParts.Add(year.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            string badgeLabel = string.Join(" · ", badgeParts).ToLowerInvariant();
+            if (string.IsNullOrEmpty(badgeLabel)) badgeLabel = first.Album.ToLowerInvariant();
+
+            var movements = new List<ClassicalMovementNode<TTrack>>(ordered.Count);
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                var (seed, parsed) = ordered[i];
+                int num = parsed.MovementNumber ?? (i + 1);
+                string roman = $"{ClassicalMetadataEngine.FormatRomanNumeral(num)}.";
+                string displayTitle = !string.IsNullOrWhiteSpace(parsed.Movement) ? parsed.Movement : seed.Title;
+                movements.Add(new ClassicalMovementNode<TTrack>(
+                    Index: i,
+                    RomanNumeral: roman,
+                    DisplayTitle: displayTitle,
+                    DurationDisplay: FormatDuration(seed.DurationMs),
+                    TrackUid: seed.TrackUid,
+                    Track: seed.Track));
+            }
+
+            recordings.Add(new ClassicalRecordingNode<TTrack>(
+                ScopeKey: recKv.Key,
+                BadgeLabel: badgeLabel,
+                ConductorLabel: conductorLabel,
+                EnsembleLabel: ensembleLabel,
+                Year: year,
+                Movements: movements));
+        }
+
+        recordings.Sort((a, b) =>
+        {
+            int yrCmp = (a.Year ?? int.MaxValue).CompareTo(b.Year ?? int.MaxValue);
+            if (yrCmp != 0) return yrCmp;
+            return StringComparer.OrdinalIgnoreCase.Compare(a.BadgeLabel, b.BadgeLabel);
+        });
+        return recordings;
     }
 
     public static IReadOnlyList<ClassicalComposerNode<TTrack>> FilterByEra<TTrack>(

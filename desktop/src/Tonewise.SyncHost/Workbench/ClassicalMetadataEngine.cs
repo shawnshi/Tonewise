@@ -144,7 +144,7 @@ public static class ClassicalMetadataEngine
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
         string s = raw.Trim().ToUpperInvariant();
-        if (s.Length == 0 || s.Any(c => c is not ('I' or 'V' or 'X'))) return null;
+        if (s.Length == 0 || s.Any(c => c is not ('I' or 'V' or 'X' or 'L' or 'C'))) return null;
 
         int total = 0;
         int prev = 0;
@@ -155,6 +155,8 @@ public static class ClassicalMetadataEngine
                 'I' => 1,
                 'V' => 5,
                 'X' => 10,
+                'L' => 50,
+                'C' => 100,
                 _ => 0,
             };
             if (val == 0) return null;
@@ -165,14 +167,14 @@ public static class ClassicalMetadataEngine
                 prev = val;
             }
         }
-        if (total is <= 0 or > 39) return null;
+        if (total is <= 0 or > 99) return null;
         return string.Equals(FormatRomanNumeral(total), s, StringComparison.Ordinal) ? total : null;
     }
 
     public static string FormatRomanNumeral(int n)
     {
-        if (n is <= 0 or > 39) return n.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        ReadOnlySpan<string> tens = ["", "X", "XX", "XXX"];
+        if (n is <= 0 or > 99) return n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        ReadOnlySpan<string> tens = ["", "X", "XX", "XXX", "XL", "L", "LX", "LXX", "LXXX", "XC"];
         ReadOnlySpan<string> ones = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX"];
         return tens[n / 10] + ones[n % 10];
     }
@@ -183,7 +185,7 @@ public static class ClassicalMetadataEngine
         if (trimmed.Length == 0) return (null, "");
 
         int firstNonRoman = 0;
-        while (firstNonRoman < trimmed.Length && char.ToUpperInvariant(trimmed[firstNonRoman]) is 'I' or 'V' or 'X')
+        while (firstNonRoman < trimmed.Length && char.ToUpperInvariant(trimmed[firstNonRoman]) is 'I' or 'V' or 'X' or 'L' or 'C')
         {
             firstNonRoman++;
         }
@@ -463,12 +465,37 @@ public static class ClassicalMetadataEngine
         return outName;
     }
 
+    private static bool IsCjkChar(char c) =>
+        c is (>= '\u4E00' and <= '\u9FFF')
+            or (>= '\u3400' and <= '\u4DBF')
+            or (>= '\u3040' and <= '\u30FF')
+            or (>= '\uAC00' and <= '\uD7AF');
+
     public static string ShortSurname(string? name)
     {
         string trimmed = (name ?? "").Trim();
         if (trimmed.Length == 0) return "";
+        int commaIdx = trimmed.IndexOf(',');
+        if (commaIdx > 0)
+        {
+            string beforeComma = trimmed[..commaIdx].Trim();
+            if (beforeComma.Length > 0) return beforeComma;
+        }
         string[] parts = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length > 0 ? parts[^1] : trimmed;
+        if (parts.Length == 0) return trimmed;
+        if (parts.All(p => p.Length > 0 && p.All(IsCjkChar)))
+        {
+            return string.Concat(parts);
+        }
+        if (parts.Length >= 2)
+        {
+            string prev = parts[^2].ToLowerInvariant();
+            if (prev is "vaughan" or "de" or "di" or "da" or "del" or "della" or "dos" or "das" or "du" or "la" or "le" or "saint" or "st.")
+            {
+                return $"{parts[^2]} {parts[^1]}";
+            }
+        }
+        return parts[^1];
     }
 
     public static IReadOnlyList<string> BuildClassicalCreditTiers(

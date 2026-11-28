@@ -149,6 +149,7 @@ constructor(
     private val syncMutex = Mutex()
     private val authExchangeMutex = Mutex()
     @Volatile private var lastConsumedAuthToken: String? = null
+    @Volatile private var lastSyncApiErrorHint: String? = null
     private val dbInitLock = Any()
     private val dbPersistLock = Any()
     @Volatile private var dbLoaded = false
@@ -233,6 +234,32 @@ constructor(
     }
 
     @Synchronized
+    fun updateScrobblePreferences(
+        apiEnabled: Boolean,
+        broadcastEnabled: Boolean,
+    ) {
+        prefs.edit {
+            putBoolean(KEY_API_ENABLED, apiEnabled)
+            putBoolean(KEY_BROADCAST_ENABLED, broadcastEnabled)
+        }
+        val current = _state.value
+        val msg =
+            when {
+                apiEnabled && current.hasValidApiSession ->
+                    "Last.fm API active (${current.username.ifEmpty { "session" }})"
+                broadcastEnabled -> "Android Scrobble broadcast active"
+                else -> "Last.fm sync paused"
+            }
+        _state.value = snapshotState(msg)
+        if (apiEnabled && current.hasValidApiSession) {
+            ioScope.launch {
+                flushPendingLoveOps()
+                flushPendingScrobbles()
+            }
+        }
+    }
+
+    @Synchronized
     fun updateConfig(
         apiEnabled: Boolean,
         broadcastEnabled: Boolean,
@@ -246,8 +273,10 @@ constructor(
         val cleanSecret = sharedSecret.trim()
         val cleanUser = username.trim()
         val cleanSk = sessionKey.trim()
+        val effectiveKey = cleanKey.ifBlank { BuildConfig.LASTFM_API_KEY.trim() }
+        val effectiveSecret = cleanSecret.ifBlank { BuildConfig.LASTFM_SHARED_SECRET.trim() }
         val hasValidSession =
-            cleanKey.isNotEmpty() && cleanSecret.isNotEmpty() && cleanSk.isNotEmpty()
+            effectiveKey.isNotEmpty() && effectiveSecret.isNotEmpty() && cleanSk.isNotEmpty()
         val effectiveApiEnabled =
             resolveAutoEnabledApiFlag(
                 requestedApiEnabled = apiEnabled,
@@ -488,9 +517,11 @@ constructor(
                     "token" to token,
                 )
             val sig = buildApiSignature(signed, cleanSecret)
-            val url =
-                "$LASTFM_API_URL?method=auth.getSession&api_key=${URLEncoder.encode(cleanKey, "UTF-8")}&token=${URLEncoder.encode(token, "UTF-8")}&api_sig=$sig&format=json"
-            val json = JSONObject(httpGetString(url))
+            val body = signed.toMutableMap().apply {
+                put("api_sig", sig)
+                put("format", "json")
+            }
+            val json = JSONObject(postForm(LASTFM_API_URL, body))
             val sessionObj = json.optJSONObject("session")
             val sk = sessionObj?.optString("key")?.takeIf { it.isNotBlank() }
             if (sk == null) {
@@ -498,8 +529,15 @@ constructor(
                 val msg = json.optString("message").ifBlank { "Session not authorized yet" }
                 val outcome = LastFmAuthCallbackParser.classifyAuthSessionErrorCode(code)
                 if (outcome != LastFmAuthExchangeOutcome.PENDING_UNCONFIRMED) {
-                    _state.value =
-                        snapshotState("Last.fm error${if (code > 0) " $code" else ""}: $msg")
+                    val hint =
+                        when (code) {
+                            13 ->
+                                "Last.fm error 13: Invalid method signature — verify 32-char Shared Secret or tap Import Session from Paired PC"
+                            4, 15 ->
+                                "Last.fm error $code: Authorization token expired — tap Connect with Last.fm again"
+                            else -> "Last.fm error${if (code > 0) " $code" else ""}: $msg"
+                        }
+                    _state.value = snapshotState(hint)
                 }
                 return outcome
             }
@@ -508,10 +546,12 @@ constructor(
                 remove(KEY_PENDING_AUTH_TOKEN)
                 remove(KEY_PENDING_AUTH_STARTED_MS)
             }
+            val builtInKey = BuildConfig.LASTFM_API_KEY.trim()
+            val builtInSecret = BuildConfig.LASTFM_SHARED_SECRET.trim()
             val persistKey =
-                if (cleanKey == BuildConfig.LASTFM_API_KEY.trim()) "" else cleanKey
+                if (builtInKey.isNotEmpty() && cleanKey == builtInKey) "" else cleanKey
             val persistSecret =
-                if (cleanSecret == BuildConfig.LASTFM_SHARED_SECRET.trim()) "" else cleanSecret
+                if (builtInSecret.isNotEmpty() && cleanSecret == builtInSecret) "" else cleanSecret
             updateConfig(
                 apiEnabled = true,
                 broadcastEnabled = _state.value.broadcastEnabled,
@@ -595,9 +635,11 @@ constructor(
                         "method" to "auth.getToken",
                     )
                 val sig = buildApiSignature(signed, cleanSecret)
-                val url =
-                    "$LASTFM_API_URL?method=auth.getToken&api_key=${URLEncoder.encode(cleanKey, "UTF-8")}&api_sig=$sig&format=json"
-                val json = JSONObject(httpGetString(url))
+                val body = signed.toMutableMap().apply {
+                    put("api_sig", sig)
+                    put("format", "json")
+                }
+                val json = JSONObject(postForm(LASTFM_API_URL, body))
                 val token = json.optString("token").takeIf { it.isNotBlank() }
                 if (token == null) {
                     val code = json.optInt("error", -1)
@@ -755,6 +797,7 @@ constructor(
         withContext(Dispatchers.IO) {
             syncMutex.withLock {
                 ensureDbLoaded()
+                lastSyncApiErrorHint = null
                 val songs = musicRepository.library?.songs.orEmpty()
                 val nowSec = System.currentTimeMillis() / 1000L
                 val initial = _state.value
@@ -869,13 +912,16 @@ constructor(
                         return@withLock pulledMatched + newlyQueued.size
                     }
                     val uploaded = flushPendingScrobbles()
+                    val apiErr = lastSyncApiErrorHint
                     if (uploaded == 0 && (pulledMatched > 0 || lovedMatched > 0 || totalPushedLoves > 0)) {
                         _state.value =
                             snapshotState(
                                 "Last.fm synced: ↑$totalPushedLoves loved · ↓$pulledMatched plays / $lovedMatched loved"
                             )
                     } else if (uploaded == 0 && totalPushedLoves == 0 && pulledMatched == 0 && lovedMatched == 0) {
-                        _state.value = snapshotState("No new local or cloud plays or loved tracks to sync")
+                        if (apiErr == null) {
+                            _state.value = snapshotState("No new local or cloud plays or loved tracks to sync")
+                        }
                     } else if (totalPushedLoves > 0) {
                         _state.value =
                             snapshotState(
@@ -895,7 +941,9 @@ constructor(
                         snapshotState("Pulled $pulledMatched cloud plays, $lovedMatched loved")
                     pulledMatched + totalPushedLoves
                 } else {
-                    _state.value = snapshotState("No new local or cloud plays to sync")
+                    if (lastSyncApiErrorHint == null) {
+                        _state.value = snapshotState("No new local or cloud plays to sync")
+                    }
                     0
                 }
             }
@@ -927,6 +975,16 @@ constructor(
                 httpGetString(
                     "$LASTFM_API_URL?method=user.getrecenttracks&user=$encodedUser&api_key=$encodedKey&limit=200&page=1$fromQuery&format=json"
                 )
+            runCatching { JSONObject(recentPage1Raw) }.getOrNull()?.let { recentRoot ->
+                if (recentRoot.has("error")) {
+                    val code = recentRoot.optInt("error", -1)
+                    val msg = recentRoot.optString("message", "API error $code")
+                    val hint = "Last.fm pull error${if (code > 0) " $code" else ""}: $msg"
+                    lastSyncApiErrorHint = hint
+                    _state.value = snapshotState(hint)
+                    return CloudPullOutcome(0, 0, emptySet(), lovedPullSucceeded = false)
+                }
+            }
             val recentTotalPages = parseTotalPages(recentPage1Raw, "recenttracks").coerceAtMost(MAX_RECENT_PAGES)
             val recentList = parseRecentTracksJson(recentPage1Raw).toMutableList()
             if (recentList.isNotEmpty() && recentTotalPages > 1) {
@@ -1271,6 +1329,7 @@ constructor(
                             "Last.fm love sync error 9: Session expired/invalid — re-authenticate via Browser Auth"
                         else -> "Last.fm love sync error${if (code > 0) " $code" else ""}: $msg"
                     }
+                lastSyncApiErrorHint = hint
                 _state.value = snapshotState(hint)
                 classifyLastFmErrorCode(code)
             } else {
@@ -1280,7 +1339,9 @@ constructor(
             throw ce
         } catch (e: Exception) {
             L.w(e, "Last.fm love push failed")
-            _state.value = snapshotState("Last.fm love push network error (kept pending): ${e.message}")
+            val errHint = "Last.fm love push network error (kept pending): ${e.message}"
+            lastSyncApiErrorHint = errHint
+            _state.value = snapshotState(errHint)
             SubmitOutcome.RETRY_LATER
         }
     }
@@ -1320,6 +1381,7 @@ constructor(
                         9 -> "Last.fm upload error 9: Session expired/invalid — re-authenticate via Browser Auth"
                         else -> "Last.fm upload error${if (code > 0) " $code" else ""}: $msg"
                     }
+                lastSyncApiErrorHint = hint
                 _state.value = snapshotState(hint)
                 classifyLastFmErrorCode(code)
             } else {
@@ -1329,7 +1391,9 @@ constructor(
             throw ce
         } catch (e: Exception) {
             L.w(e, "Last.fm batch scrobble failed")
-            _state.value = snapshotState("Last.fm network error (kept pending): ${e.message}")
+            val errHint = "Last.fm network error (kept pending): ${e.message}"
+            lastSyncApiErrorHint = errHint
+            _state.value = snapshotState(errHint)
             SubmitOutcome.RETRY_LATER
         }
     }
@@ -1647,14 +1711,25 @@ constructor(
             }
         }
 
+        private val HEX_32_REGEX = Regex("^[0-9a-fA-F]{32}$")
+
         fun validateCredentialsFormat(apiKey: String, sharedSecret: String): String? {
             val k = apiKey.trim()
             val s = sharedSecret.trim()
             if (k.length != 32) {
                 return "Invalid API Key length (${k.length} chars; expected 32-char hex from last.fm/api/account)"
             }
+            if (!HEX_32_REGEX.matches(k)) {
+                return "Invalid API Key format (expected 32-char hex from last.fm/api/account)"
+            }
             if (s.length != 32) {
                 return "Invalid Shared Secret length (${s.length} chars; expected 32-char hex from last.fm/api/account)"
+            }
+            if (!HEX_32_REGEX.matches(s)) {
+                return "Invalid Shared Secret format (expected 32-char hex from last.fm/api/account)"
+            }
+            if (k.equals(s, ignoreCase = true)) {
+                return "API Key and Shared Secret cannot be identical — paste Shared Secret from last.fm/api/account"
             }
             return null
         }
@@ -1802,7 +1877,7 @@ constructor(
                 append(secret)
             }
             val digest = MessageDigest.getInstance("MD5").digest(base.toByteArray(Charsets.UTF_8))
-            return digest.joinToString("") { "%02x".format(it) }
+            return digest.joinToString("") { "%02x".format(java.util.Locale.US, it) }
         }
     }
 }

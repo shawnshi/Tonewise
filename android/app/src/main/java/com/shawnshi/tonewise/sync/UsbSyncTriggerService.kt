@@ -308,7 +308,7 @@ class UsbSyncTriggerService : Service() {
 
         val builder =
             NotificationCompat.Builder(this, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_auxio_24)
+                .setSmallIcon(R.drawable.ic_tonewise_24)
                 .setContentTitle("Tonewise USB 自动同步")
                 .setContentText(text)
                 .setContentIntent(contentIntent)

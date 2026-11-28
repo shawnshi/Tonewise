@@ -20,6 +20,7 @@
             <SolidColorBrush x:Key="ZuneInkTertiaryBrush" Color="#888888" />
             <SolidColorBrush x:Key="ZuneInkOnAccentBrush" Color="#FFFFFF" />
             <SolidColorBrush x:Key="ZuneAccentBrush" Color="#E5006B" />
+            <SolidColorBrush x:Key="ZuneAccentInkBrush" Color="#FF5C9E" />
             <SolidColorBrush x:Key="ZuneAccentSubtleBrush" Color="#26E5006B" />
             <SolidColorBrush x:Key="ZuneHairlineBrush" Color="#292929" />
             <SolidColorBrush x:Key="ZuneBorderControlBrush" Color="#737373" />
@@ -37,9 +38,10 @@
             <SolidColorBrush x:Key="ZuneTransportBrush" Color="#FAFAFA" />
             <SolidColorBrush x:Key="ZuneInkPrimaryBrush" Color="#000000" />
             <SolidColorBrush x:Key="ZuneInkSecondaryBrush" Color="#525252" />
-            <SolidColorBrush x:Key="ZuneInkTertiaryBrush" Color="#6E6E6E" />
+            <SolidColorBrush x:Key="ZuneInkTertiaryBrush" Color="#595959" />
             <SolidColorBrush x:Key="ZuneInkOnAccentBrush" Color="#FFFFFF" />
             <SolidColorBrush x:Key="ZuneAccentBrush" Color="#C20052" />
+            <SolidColorBrush x:Key="ZuneAccentInkBrush" Color="#C20052" />
             <SolidColorBrush x:Key="ZuneAccentSubtleBrush" Color="#1CC20052" />
             <SolidColorBrush x:Key="ZuneHairlineBrush" Color="#DCDCDC" />
             <SolidColorBrush x:Key="ZuneBorderControlBrush" Color="#737373" />
@@ -52,7 +54,7 @@
         <ResourceDictionary x:Key="HighContrast">
             <SolidColorBrush x:Key="ZuneCanvasBrush" Color="{ThemeResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="ZuneSurfaceSubtleBrush" Color="{ThemeResource SystemColorWindowColor}" />
-            <SolidColorBrush x:Key="ZuneSurfaceHoverBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="ZuneSurfaceHoverBrush" Color="{ThemeResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="ZuneSurfaceElevatedBrush" Color="{ThemeResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="ZuneTransportBrush" Color="{ThemeResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="ZuneInkPrimaryBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
@@ -60,7 +62,8 @@
             <SolidColorBrush x:Key="ZuneInkTertiaryBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="ZuneInkOnAccentBrush" Color="{ThemeResource SystemColorHighlightTextColor}" />
             <SolidColorBrush x:Key="ZuneAccentBrush" Color="{ThemeResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="ZuneAccentSubtleBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="ZuneAccentInkBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="ZuneAccentSubtleBrush" Color="{ThemeResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="ZuneHairlineBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="ZuneBorderControlBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="ZuneStatusSuccessBrush" Color="{ThemeResource SystemColorWindowTextColor}" />

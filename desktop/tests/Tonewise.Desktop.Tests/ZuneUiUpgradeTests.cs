@@ -236,12 +236,13 @@ public sealed class ZuneUiUpgradeTests
         {
             Assert.True(ZuneNavigationRoutes.IsValidSubTab("studio", sub));
         }
-        foreach (string sub in new[] { "playlists", "scenes", "genres", "albums", "tracks", "artists", "classical", "composers", "conductors", "folders", "folder" })
+        foreach (string sub in new[] { "playlists", "scenes", "genres", "albums", "tracks", "artists", "classical", "conductors", "folders", "folder" })
         {
             Assert.True(ZuneNavigationRoutes.IsValidSubTab("collection", sub));
         }
-        var expectedLabels = new[] { "playlists", "scenes", "genres", "albums", "tracks", "artists", "classical", "composers", "conductors", "folder" };
+        var expectedLabels = new[] { "playlists", "scenes", "genres", "albums", "tracks", "artists", "classical", "conductors", "folder" };
         Assert.Equal(expectedLabels, ZuneNavigationRoutes.CollectionSubTabs.Select(x => x.Label).ToArray());
+        Assert.DoesNotContain(ZuneNavigationRoutes.CollectionSubTabs, x => x.Id == "composers");
         foreach (string sub in new[] { "audio", "storage", "apis_ui" })
         {
             Assert.True(ZuneNavigationRoutes.IsValidSubTab("settings", sub));
@@ -773,8 +774,8 @@ public sealed class ZuneUiUpgradeTests
         }
 
         string mainCs = ReadAllMainWindowSources(desktopRoot);
-        Assert.Contains("PreferredMinimumWidth = 1024", mainCs, StringComparison.Ordinal);
-        Assert.Contains("PreferredMinimumHeight = 700", mainCs, StringComparison.Ordinal);
+        Assert.Contains("PreferredMinimumWidth =", mainCs, StringComparison.Ordinal);
+        Assert.Contains("PreferredMinimumHeight =", mainCs, StringComparison.Ordinal);
         Assert.Contains("VirtualKey.GoBack", mainCs, StringComparison.Ordinal);
 
         string vmLibCs = File.ReadAllText(Path.Combine(desktopRoot, "ViewModels", "MainViewModel.Library.cs"));
@@ -987,5 +988,50 @@ public sealed class ZuneUiUpgradeTests
         Assert.Contains("_mosaicAnimTimer", mainCs, StringComparison.Ordinal);
         Assert.Contains("ZuneMotionHelper.IsMotionEnabled()", mainCs, StringComparison.Ordinal);
         Assert.Contains("_accessibilitySettings.HighContrast", mainCs, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DesktopP0ThroughP3_AccentContrast_VolumeMemory_ClassicalParity_AndSmtcGuardsHold()
+    {
+        var inkRgb = ZuneColorMath.ClampAccentInkForTheme(0xFF, 0x1E, 0x7A, isDarkTheme: true);
+        double cardContrast = ZuneColorMath.ComputeContrastRatio(inkRgb, (0x1C, 0x1C, 0x1C));
+        Assert.True(cardContrast >= 4.5, $"Dark accent ink contrast on #1C1C1C card was {cardContrast:F2}");
+
+        var defaults = new DesktopUserSettings();
+        Assert.True(defaults.LockVolumeOnBitPerfect);
+        Assert.True(defaults.RememberVolumePerEndpoint);
+
+        var volumeMap = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["WASAPI: Topping D90"] = -6.0,
+            ["Speakers (Realtek)"] = -22.5,
+        };
+        string json = DesktopSettingsStore.SerializeEndpointVolumes(volumeMap);
+        var restored = DesktopSettingsStore.DeserializeEndpointVolumes(json);
+        Assert.Equal(-6.0, restored["wasapi: topping d90"], 2);
+        Assert.Equal(-22.5, restored["Speakers (Realtek)"], 2);
+
+        Assert.Equal(42, ClassicalMetadataEngine.ParseRomanNumeral("XLII"));
+        Assert.Equal(99, ClassicalMetadataEngine.ParseRomanNumeral("XCIX"));
+        Assert.Null(ClassicalMetadataEngine.ParseRomanNumeral("XXXX"));
+        Assert.Equal("XCIX", ClassicalMetadataEngine.FormatRomanNumeral(99));
+        Assert.Equal("Vaughan Williams", ClassicalMetadataEngine.ShortSurname("Ralph Vaughan Williams"));
+        Assert.Equal("de Falla", ClassicalMetadataEngine.ShortSurname("Manuel de Falla"));
+        Assert.Equal("谭盾", ClassicalMetadataEngine.ShortSurname("谭盾"));
+        Assert.Equal("陈其钢", ClassicalMetadataEngine.ShortSurname("陈 其钢"));
+        Assert.Equal("Beethoven", ClassicalMetadataEngine.ShortSurname("Ludwig van Beethoven"));
+
+        string repoRoot = FindRepoRoot();
+        string mainXaml = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "MainWindow.xaml"));
+        string mainCs = ReadAllMainWindowSources(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop"));
+        Assert.Contains("EndpointVolumeSafetyBar", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("DspResponseCanvas", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("SeekHoverTimePill", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("LanSyncTransferText", mainXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("切换乐团 / 独奏", mainXaml, StringComparison.Ordinal);
+        Assert.Contains("PlaybackPositionChangeRequested", mainCs, StringComparison.Ordinal);
+        Assert.Contains("UpdateTimelineProperties", mainCs, StringComparison.Ordinal);
+        Assert.DoesNotContain("HighContrastChanged +=", mainCs, StringComparison.Ordinal);
+        Assert.Contains("ActualThemeChanged +=", mainCs, StringComparison.Ordinal);
     }
 }

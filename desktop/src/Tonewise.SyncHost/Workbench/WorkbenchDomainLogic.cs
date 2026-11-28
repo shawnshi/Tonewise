@@ -1077,7 +1077,15 @@ public sealed record DesktopUserSettings(
     bool AllowAdbForeignDeleteFallback = false,
     string? CustomAdbPath = null,
     bool EnableDynamicCoverAccent = false,
-    string? AutoEqPolicyJson = null
+    string? AutoEqPolicyJson = null,
+    bool LockVolumeOnBitPerfect = true,
+    bool RememberVolumePerEndpoint = true,
+    string? EndpointVolumesJson = null,
+    int? MainWindowX = null,
+    int? MainWindowY = null,
+    int? MainWindowWidth = null,
+    int? MainWindowHeight = null,
+    bool MainWindowMaximized = false
 );
 
 public static class DesktopSettingsStore
@@ -1126,6 +1134,38 @@ public static class DesktopSettingsStore
         string tmp = path + ".tmp." + Guid.NewGuid().ToString("N")[..6];
         File.WriteAllText(tmp, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         File.Move(tmp, path, overwrite: true);
+    }
+
+    public static string SerializeEndpointVolumes(IReadOnlyDictionary<string, double> volumes)
+    {
+        var sanitized = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, db) in volumes)
+        {
+            if (string.IsNullOrWhiteSpace(key) || double.IsNaN(db) || double.IsInfinity(db)) continue;
+            sanitized[key] = Math.Round(Math.Clamp(db, -80.0, 0.0), 1);
+        }
+        return JsonSerializer.Serialize(sanitized, JsonOptions);
+    }
+
+    public static Dictionary<string, double> DeserializeEndpointVolumes(string? json)
+    {
+        var result = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(json)) return result;
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<Dictionary<string, double>>(json, JsonOptions);
+            if (parsed is null) return result;
+            foreach (var (key, db) in parsed)
+            {
+                if (string.IsNullOrWhiteSpace(key) || double.IsNaN(db) || double.IsInfinity(db)) continue;
+                result[key] = Math.Round(Math.Clamp(db, -80.0, 0.0), 1);
+            }
+        }
+        catch
+        {
+            // Return empty map on corrupt JSON
+        }
+        return result;
     }
 }
 

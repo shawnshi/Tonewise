@@ -44,10 +44,14 @@ public sealed partial class MainWindow : Window
     private DeskClockWidgetWindow? _oledWidget;
     private MediaPlayer? _smtcPlayer;
     private SystemMediaTransportControls? _smtc;
+    private DateTime _lastSmtcTimelineUpdateUtc = DateTime.MinValue;
 
     private PdfDocument? _bookletDoc;
     private string? _loadedBookletPath;
     private int _bookletPageIndex;
+    private PdfDocument? _playingBookletDoc;
+    private string? _loadedPlayingBookletPath;
+    private int _playingBookletPageIndex;
     private CancellationTokenSource? _folderLoadCts;
 
     private readonly DispatcherTimer _notificationTimer;
@@ -87,7 +91,12 @@ public sealed partial class MainWindow : Window
     private DateTime _lastNowPlayingActivityUtc = DateTime.UtcNow;
     private bool _isNowPlayingChromeFaded;
     private bool _startupInitialized;
+    private bool _windowPlacementRestored;
+    private bool _confirmedCloseWithUnsavedDrafts;
     private bool _isWindowVisibleAndNotMinimized = true;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
     private bool _mirrorPruneConfirmArmed;
     private bool _suppressMirrorPruneConfirm;
     private Action? _pendingUndoAction;
@@ -95,6 +104,10 @@ public sealed partial class MainWindow : Window
     private CancellationTokenSource? _mosaicPrewarmCts;
     private CancellationTokenSource? _dynamicAccentCts;
     private (byte R, byte G, byte B) _currentAccentRgb = ZuneColorMath.DefaultDarkAccentRgb;
+    private (byte R, byte G, byte B) _currentAccentInkRgb = ZuneColorMath.DefaultDarkAccentInkRgb;
+    private readonly Windows.UI.ViewManagement.UISettings _uiSettings = new();
+    private bool _uiSettingsSubscribed;
+    private bool _isApplyingThemeFromSystemEvent;
 
     private static readonly SKColor InactiveBarColor = new(0x7A, 0x7A, 0x7A, 0x60);
     private readonly SKPaint _activeBarPaint = new() { Color = new SKColor(0xE5, 0x00, 0x6B), IsAntialias = false };
@@ -166,13 +179,27 @@ public sealed partial class MainWindow : Window
 
     public SolidColorBrush HeartForeground(bool isLoved)
     {
-        if (isLoved) return new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
+        if (_accessibilitySettings.HighContrast)
+        {
+            var ui = new Windows.UI.ViewManagement.UISettings();
+            return new SolidColorBrush(ui.GetColorValue(isLoved
+                ? Windows.UI.ViewManagement.UIColorType.Accent
+                : Windows.UI.ViewManagement.UIColorType.Foreground));
+        }
+        if (isLoved) return new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentInkRgb.R, _currentAccentInkRgb.G, _currentAccentInkRgb.B));
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
         return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x52, 0x52, 0x52) : Color.FromArgb(0xFF, 0xA3, 0xA3, 0xA3));
     }
 
     public SolidColorBrush FreezePillBackground(bool active)
     {
+        if (_accessibilitySettings.HighContrast)
+        {
+            var ui = new Windows.UI.ViewManagement.UISettings();
+            return new SolidColorBrush(ui.GetColorValue(active
+                ? Windows.UI.ViewManagement.UIColorType.Accent
+                : Windows.UI.ViewManagement.UIColorType.Background));
+        }
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
         if (active) return new SolidColorBrush(Color.FromArgb(0x28, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
         return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xF4, 0xF4, 0xF4) : Color.FromArgb(0xFF, 0x0D, 0x0D, 0x0D));
@@ -180,8 +207,15 @@ public sealed partial class MainWindow : Window
 
     public SolidColorBrush FreezePillBorder(bool active)
     {
+        if (_accessibilitySettings.HighContrast)
+        {
+            var ui = new Windows.UI.ViewManagement.UISettings();
+            return new SolidColorBrush(ui.GetColorValue(active
+                ? Windows.UI.ViewManagement.UIColorType.Accent
+                : Windows.UI.ViewManagement.UIColorType.Foreground));
+        }
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
-        if (active) return new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
+        if (active) return new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentInkRgb.R, _currentAccentInkRgb.G, _currentAccentInkRgb.B));
         return new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC) : Color.FromArgb(0xFF, 0x26, 0x26, 0x26));
     }
 
@@ -193,11 +227,18 @@ public sealed partial class MainWindow : Window
         TrySetObsidianBackdrop();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBarDragRegion);
-        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter overlapped)
+        UpdatePreferredMinimumSize();
+        RootWorkbench.Loaded += (_, _) =>
         {
-            overlapped.PreferredMinimumWidth = 1024;
-            overlapped.PreferredMinimumHeight = 700;
-        }
+            if (RootWorkbench.XamlRoot is not null)
+            {
+                RootWorkbench.XamlRoot.Changed += OnRootXamlChanged;
+            }
+            UpdatePreferredMinimumSize();
+            UpdateTitleBarLayoutInsets();
+        };
+        RootWorkbench.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(OnRootPointerPressedNavigation), handledEventsToo: true);
+        AppWindow.Closing += OnMainAppWindowClosing;
         try
         {
             AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
@@ -229,6 +270,7 @@ public sealed partial class MainWindow : Window
 
         ViewModel.SubTabsChanged += SyncSubSelectorBarItems;
         ViewModel.NavigationSettled += OnViewModelNavigationSettled;
+        ViewModel.DspCurveChanged += () => DispatcherQueue?.TryEnqueue(() => DspResponseCanvas?.Invalidate());
         ViewModel.PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(MainViewModel.SignalPurityColorHex))
@@ -246,6 +288,7 @@ public sealed partial class MainWindow : Window
                 UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
                 UpdateCoverArtImage(NowPlayingCoverImage, ViewModel.CurrentTrack?.CoverArtPath, decodeWidth: 360);
                 _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
+                _ = LoadPlayingBookletForTrackAsync(ViewModel.CurrentTrack);
             }
             else if (args.PropertyName == nameof(MainViewModel.EnableDynamicCoverAccent))
             {
@@ -254,6 +297,7 @@ public sealed partial class MainWindow : Window
             else if (args.PropertyName == nameof(MainViewModel.InspectedTrack))
             {
                 UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
+                _ = LoadBookletForTrackAsync(ViewModel.InspectedTrack);
                 var selected =
                     ViewModel.IsNavClassicalWorks && ViewModel.IsClassicalComposerDetailOpen
                         ? ViewModel.GetSelectedClassicalTracks()
@@ -322,7 +366,8 @@ public sealed partial class MainWindow : Window
                 RefreshQueuePlayingHighlights();
                 await ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
                 await UpdateSmtcMetadataAsync(ViewModel.CurrentTrack);
-                await LoadBookletForTrackAsync(track);
+                await LoadPlayingBookletForTrackAsync(ViewModel.CurrentTrack);
+                await LoadBookletForTrackAsync(ViewModel.InspectedTrack);
                 UpdateMainWindowTimers();
                 if (ViewModel.IsNowPlayingViewVisible)
                 {
@@ -380,6 +425,8 @@ public sealed partial class MainWindow : Window
             UpdateCoverArtImage(NowPlayingCoverImage, ViewModel.CurrentTrack?.CoverArtPath, decodeWidth: 360);
             UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
             SyncInlineInspectorTargets(ViewModel.InspectedTrack is null ? [] : [ViewModel.InspectedTrack]);
+            _ = LoadPlayingBookletForTrackAsync(ViewModel.CurrentTrack);
+            _ = LoadBookletForTrackAsync(ViewModel.InspectedTrack);
             _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
             if (ViewModel.IsNowPlayingViewVisible)
             {
@@ -400,6 +447,9 @@ public sealed partial class MainWindow : Window
                 InitializeSmtc();
                 InitializeGlobalHotkeys();
                 ViewModel.RestoreSavedSettingsAndLibrary();
+                RestoreMainWindowPlacementIfSaved();
+                UpdatePreferredMinimumSize();
+                UpdateTitleBarLayoutInsets();
                 _mirrorPruneConfirmArmed = true;
                 ApplyAppTheme();
                 ApplyInspectorState();
@@ -411,6 +461,10 @@ public sealed partial class MainWindow : Window
         {
             ViewModel.RefreshProgress();
             SyncSeekSliderFromEngine();
+            if (ViewModel.IsPlaying)
+            {
+                SyncSmtcTimeline(force: false);
+            }
             if (ViewModel.IsPlaying && ViewModel.CurrentWaveform is not null)
             {
                 double progress = ViewModel.PlaybackProgress;
@@ -422,11 +476,43 @@ public sealed partial class MainWindow : Window
             }
         };
         AppWindow.Changed += OnMainAppWindowChanged;
+        // Unpackaged WinUI 3 threads have no CoreWindow, so AccessibilitySettings.HighContrastChanged throws 0x80070490.
+        RootWorkbench.ActualThemeChanged += OnRootActualThemeChanged;
+        try
+        {
+            _uiSettings.ColorValuesChanged += OnSystemColorValuesChanged;
+            _uiSettingsSubscribed = true;
+        }
+        catch
+        {
+            _uiSettingsSubscribed = false;
+        }
         UpdateMainWindowTimers();
 
         Closed += (_, _) =>
         {
             AppWindow.Changed -= OnMainAppWindowChanged;
+            AppWindow.Closing -= OnMainAppWindowClosing;
+            if (RootWorkbench is not null)
+            {
+                RootWorkbench.ActualThemeChanged -= OnRootActualThemeChanged;
+                if (RootWorkbench.XamlRoot is not null)
+                {
+                    RootWorkbench.XamlRoot.Changed -= OnRootXamlChanged;
+                }
+            }
+            if (_uiSettingsSubscribed)
+            {
+                try
+                {
+                    _uiSettings.ColorValuesChanged -= OnSystemColorValuesChanged;
+                }
+                catch
+                {
+                    // Ignore WinRT unsubscribe failures during window teardown
+                }
+                _uiSettingsSubscribed = false;
+            }
             _folderLoadCts?.Cancel();
             _folderLoadCts?.Dispose();
             _folderLoadCts = null;
@@ -445,14 +531,45 @@ public sealed partial class MainWindow : Window
             _globalHotkeys?.Dispose();
             _oledWidget?.Close();
             _smtcPlayer?.Dispose();
+            _activeBarPaint.Dispose();
+            _dialogGate.Dispose();
             ViewModel.Dispose();
         };
+    }
+
+    private void OnRootActualThemeChanged(FrameworkElement sender, object args) => ScheduleSystemThemeRefresh();
+
+    private void OnSystemColorValuesChanged(Windows.UI.ViewManagement.UISettings sender, object args) => ScheduleSystemThemeRefresh();
+
+    private void ScheduleSystemThemeRefresh()
+    {
+        if (_isApplyingThemeFromSystemEvent) return;
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            if (_isApplyingThemeFromSystemEvent) return;
+            _isApplyingThemeFromSystemEvent = true;
+            try
+            {
+                ApplyAppTheme();
+                UpdateMainWindowTimers();
+                WaveformCanvas?.Invalidate();
+                NowPlayingMosaicCanvas?.Invalidate();
+            }
+            finally
+            {
+                _isApplyingThemeFromSystemEvent = false;
+            }
+        });
     }
 
     private void OnMainAppWindowChanged(
         Microsoft.UI.Windowing.AppWindow sender,
         Microsoft.UI.Windowing.AppWindowChangedEventArgs args)
     {
+        if (_windowPlacementRestored && (args.DidPositionChange || args.DidSizeChange))
+        {
+            PersistMainWindowPlacement();
+        }
         bool minimized = (sender.Presenter as Microsoft.UI.Windowing.OverlappedPresenter)?.State
             == Microsoft.UI.Windowing.OverlappedPresenterState.Minimized;
         bool active = sender.IsVisible && !minimized;
@@ -464,6 +581,218 @@ public sealed partial class MainWindow : Window
             ViewModel.RefreshProgress();
             SyncSeekSliderFromEngine();
             WaveformCanvas?.Invalidate();
+        }
+    }
+
+    private double GetCurrentRasterScale()
+    {
+        if (RootWorkbench?.XamlRoot is { RasterizationScale: > 0 } xr)
+        {
+            return xr.RasterizationScale;
+        }
+        try
+        {
+            IntPtr hwnd = WindowNative.GetWindowHandle(this);
+            uint dpi = GetDpiForWindow(hwnd);
+            if (dpi >= 96u) return dpi / 96.0;
+        }
+        catch { }
+        return 1.0;
+    }
+
+    private void OnRootXamlChanged(XamlRoot sender, XamlRootChangedEventArgs args)
+    {
+        UpdatePreferredMinimumSize();
+        UpdateTitleBarLayoutInsets();
+    }
+
+    private void UpdatePreferredMinimumSize()
+    {
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter overlapped)
+        {
+            double scale = GetCurrentRasterScale();
+            overlapped.PreferredMinimumWidth = (int)Math.Round(900 * scale);
+            overlapped.PreferredMinimumHeight = (int)Math.Round(640 * scale);
+        }
+    }
+
+    private void UpdateTitleBarLayoutInsets()
+    {
+        double scale = GetCurrentRasterScale();
+        try
+        {
+            if (TitleBarRightInsetColumn is not null)
+            {
+                double insetEpx = AppWindow.TitleBar.RightInset / Math.Max(0.5, scale);
+                TitleBarRightInsetColumn.Width = new GridLength(Math.Max(138.0, Math.Ceiling(insetEpx)));
+            }
+            var captionRects = new List<Windows.Graphics.RectInt32>();
+            void TryAddCaptionRect(FrameworkElement? el)
+            {
+                if (el is null || el.ActualWidth <= 0 || el.ActualHeight <= 0) return;
+                var pt = el.TransformToVisual(null).TransformPoint(new Windows.Foundation.Point(0, 0));
+                captionRects.Add(new Windows.Graphics.RectInt32(
+                    (int)Math.Round(pt.X * scale),
+                    (int)Math.Round(pt.Y * scale),
+                    Math.Max(1, (int)Math.Round(el.ActualWidth * scale)),
+                    Math.Max(1, (int)Math.Round(el.ActualHeight * scale))));
+            }
+            TryAddCaptionRect(AppTitleBarDragRegion);
+            TryAddCaptionRect(PivotHeaderDragSpacer);
+            if (captionRects.Count > 0)
+            {
+                var nonClient = InputNonClientPointerSource.GetForWindowId(AppWindow.Id);
+                nonClient.SetRegionRects(NonClientRegionKind.Caption, captionRects.ToArray());
+            }
+        }
+        catch
+        {
+            // Fallback gracefully on older Windows App SDK hosts
+        }
+    }
+
+    private void UpdateTransportAndCaptionForWidth(double width)
+    {
+        UpdateTitleBarLayoutInsets();
+        bool compact = width > 0 && width < 1220;
+        if (TransportInfoColumn is not null)
+        {
+            TransportInfoColumn.Width = new GridLength(compact ? 240 : 320);
+        }
+        if (TransportInfoGrid is not null)
+        {
+            TransportInfoGrid.Width = compact ? 232 : 312;
+        }
+        if (TransportVolumeSlider is not null)
+        {
+            TransportVolumeSlider.Width = compact ? 80 : 104;
+        }
+    }
+
+    private void RestoreMainWindowPlacementIfSaved()
+    {
+        if (_windowPlacementRestored) return;
+        _windowPlacementRestored = true;
+        var saved = ViewModel.GetMainWindowPlacement();
+        if (saved.Width is > 600 && saved.Height is > 400)
+        {
+            int targetW = saved.Width.Value;
+            int targetH = saved.Height.Value;
+            int targetX = saved.X ?? 80;
+            int targetY = saved.Y ?? 80;
+            try
+            {
+                var displayArea = Microsoft.UI.Windowing.DisplayArea.GetFromRect(
+                    new Windows.Graphics.RectInt32(targetX, targetY, targetW, targetH),
+                    Microsoft.UI.Windowing.DisplayAreaFallback.Primary);
+                var workArea = displayArea.WorkArea;
+                targetW = Math.Clamp(targetW, 640, Math.Max(640, workArea.Width));
+                targetH = Math.Clamp(targetH, 480, Math.Max(480, workArea.Height));
+                targetX = Math.Clamp(targetX, workArea.X, Math.Max(workArea.X, workArea.X + workArea.Width - targetW));
+                targetY = Math.Clamp(targetY, workArea.Y, Math.Max(workArea.Y, workArea.Y + workArea.Height - targetH));
+            }
+            catch { }
+            try
+            {
+                AppWindow.Resize(new Windows.Graphics.SizeInt32(targetW, targetH));
+                if (saved.X.HasValue && saved.Y.HasValue)
+                {
+                    AppWindow.Move(new Windows.Graphics.PointInt32(targetX, targetY));
+                }
+                if (saved.Maximized && AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter ov)
+                {
+                    ov.Maximize();
+                }
+            }
+            catch { }
+        }
+    }
+
+    private void PersistMainWindowPlacement()
+    {
+        try
+        {
+            var ov = AppWindow.Presenter as Microsoft.UI.Windowing.OverlappedPresenter;
+            if (ov?.State == Microsoft.UI.Windowing.OverlappedPresenterState.Minimized) return;
+            bool maximized = ov?.State == Microsoft.UI.Windowing.OverlappedPresenterState.Maximized;
+            var pos = AppWindow.Position;
+            var size = AppWindow.Size;
+            if (maximized)
+            {
+                var prev = ViewModel.GetMainWindowPlacement();
+                if (prev.Width is > 600 && prev.Height is > 400)
+                {
+                    ViewModel.SaveMainWindowPlacement(prev.X ?? pos.X, prev.Y ?? pos.Y, prev.Width.Value, prev.Height.Value, true);
+                    return;
+                }
+            }
+            if (size.Width > 600 && size.Height > 400)
+            {
+                ViewModel.SaveMainWindowPlacement(pos.X, pos.Y, size.Width, size.Height, maximized);
+            }
+        }
+        catch { }
+    }
+
+    private void OnRootPointerPressedNavigation(object sender, PointerRoutedEventArgs e)
+    {
+        try
+        {
+            if (e.GetCurrentPoint(null).Properties.IsXButton1Pressed && ViewModel.CanNavigateBack)
+            {
+                ViewModel.GoBack();
+                e.Handled = true;
+            }
+        }
+        catch { }
+    }
+
+    private void OnSubPivotPointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        if (SubPivotScrollViewer is null) return;
+        int delta = e.GetCurrentPoint(SubPivotScrollViewer).Properties.MouseWheelDelta;
+        if (delta == 0) return;
+        SubPivotScrollViewer.ChangeView(SubPivotScrollViewer.HorizontalOffset - delta * 0.5, null, null);
+        e.Handled = true;
+    }
+
+    private async void OnMainAppWindowClosing(
+        Microsoft.UI.Windowing.AppWindow sender,
+        Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
+    {
+        if (_confirmedCloseWithUnsavedDrafts || (_inlineDirtyCount <= 0 && _inlineUnsavedDrafts.Count == 0))
+        {
+            PersistMainWindowPlacement();
+            return;
+        }
+        args.Cancel = true;
+        int draftCount = Math.Max(_inlineDirtyCount, 0) + _inlineUnsavedDrafts.Count;
+        var dialog = new ContentDialog
+        {
+            Title = "存在未保存的属性编辑草稿",
+            Content = $"当前共有 {draftCount} 处尚未写入标签库或文件的编辑草稿。退出前是否保存当前草稿？",
+            PrimaryButtonText = "保存并退出",
+            SecondaryButtonText = "放弃并退出",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RootWorkbench.XamlRoot,
+        };
+        var result = await ShowDialogSafeAsync(dialog);
+        if (result == ContentDialogResult.Primary)
+        {
+            await SaveInlineInspectorMetadataAsync();
+            _inlineUnsavedDrafts.Clear();
+            _confirmedCloseWithUnsavedDrafts = true;
+            PersistMainWindowPlacement();
+            Close();
+        }
+        else if (result == ContentDialogResult.Secondary)
+        {
+            _inlineUnsavedDrafts.Clear();
+            _inlineDirtyCount = 0;
+            _confirmedCloseWithUnsavedDrafts = true;
+            PersistMainWindowPlacement();
+            Close();
         }
     }
 
@@ -518,9 +847,17 @@ public sealed partial class MainWindow : Window
             _globalHotkeys = new Win32GlobalHotkeyService(hwnd);
             const uint mod = Win32GlobalHotkeyService.ModControl | Win32GlobalHotkeyService.ModAlt;
             // Ctrl+Alt+P -> Toggle Play/Pause; Ctrl+Alt+C -> Coding Scene; Ctrl+Alt+M -> Toggle OLED Widget
-            _globalHotkeys.TryRegister(1, mod, 0x50, () => DispatcherQueue.TryEnqueue(() => ViewModel.TogglePlayPauseCommand.Execute(null)));
-            _globalHotkeys.TryRegister(2, mod, 0x43, () => DispatcherQueue.TryEnqueue(() => ViewModel.ActivateCodingQuickSceneCommand.Execute(null)));
-            _globalHotkeys.TryRegister(3, mod, 0x4D, () => DispatcherQueue.TryEnqueue(ToggleOledWidget));
+            var failedHotkeys = new List<string>();
+            if (!_globalHotkeys.TryRegister(1, mod, 0x50, () => DispatcherQueue.TryEnqueue(() => ViewModel.TogglePlayPauseCommand.Execute(null))))
+                failedHotkeys.Add("Ctrl+Alt+P");
+            if (!_globalHotkeys.TryRegister(2, mod, 0x43, () => DispatcherQueue.TryEnqueue(() => ViewModel.ActivateCodingQuickSceneCommand.Execute(null))))
+                failedHotkeys.Add("Ctrl+Alt+C");
+            if (!_globalHotkeys.TryRegister(3, mod, 0x4D, () => DispatcherQueue.TryEnqueue(ToggleOledWidget)))
+                failedHotkeys.Add("Ctrl+Alt+M");
+            if (failedHotkeys.Count > 0)
+            {
+                ViewModel.Notify($"部分全局热键已被其他应用占用：{string.Join(" / ", failedHotkeys)}", "warning");
+            }
         }
         catch
         {
@@ -578,6 +915,10 @@ public sealed partial class MainWindow : Window
         AttachFlyoutThemeSync(LexiconTagMatrixFlyout);
         AttachFlyoutThemeSync(AcousticRackFlyout);
         AttachFlyoutThemeSync(PlaybackQueueFlyout);
+        var defaultRgb = isDark ? ZuneColorMath.DefaultDarkAccentRgb : ZuneColorMath.DefaultLightAccentRgb;
+        var defaultInkRgb = isDark ? ZuneColorMath.DefaultDarkAccentInkRgb : ZuneColorMath.DefaultLightAccentRgb;
+        var defaultOnRgb = ZuneColorMath.ContrastingOnColor(defaultRgb.R, defaultRgb.G, defaultRgb.B);
+        ClassicalUiPalette.ApplyTheme(!isDark, _accessibilitySettings.HighContrast, defaultRgb, defaultInkRgb, defaultOnRgb);
         _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
         SyncSubSelectorBarItems();
         RefreshDynamicAccentControls();
@@ -666,7 +1007,14 @@ public sealed partial class MainWindow : Window
     private void ApplyResolvedAccentRgb((byte R, byte G, byte B) rgb, bool isDark)
     {
         _currentAccentRgb = rgb;
+        var inkRgb = isDark
+            ? (ViewModel.EnableDynamicCoverAccent
+                ? ZuneColorMath.ClampAccentInkForTheme(rgb.R, rgb.G, rgb.B, isDarkTheme: true)
+                : ZuneColorMath.DefaultDarkAccentInkRgb)
+            : rgb;
+        _currentAccentInkRgb = inkRgb;
         var winColor = Color.FromArgb(0xFF, rgb.R, rgb.G, rgb.B);
+        var winInkColor = Color.FromArgb(0xFF, inkRgb.R, inkRgb.G, inkRgb.B);
         var onAccentRgb = ZuneColorMath.ContrastingOnColor(rgb.R, rgb.G, rgb.B);
         var onAccentColor = Color.FromArgb(0xFF, onAccentRgb.R, onAccentRgb.G, onAccentRgb.B);
         _activeBarPaint.Color = new SKColor(rgb.R, rgb.G, rgb.B);
@@ -680,6 +1028,8 @@ public sealed partial class MainWindow : Window
             {
                 if (darkDict.TryGetValue("ZuneAccentBrush", out object? darkBrush) && darkBrush is SolidColorBrush b)
                     b.Color = winColor;
+                if (darkDict.TryGetValue("ZuneAccentInkBrush", out object? darkInkBrush) && darkInkBrush is SolidColorBrush ib)
+                    ib.Color = winInkColor;
                 if (darkDict.TryGetValue("ZuneInkOnAccentBrush", out object? darkOnBrush) && darkOnBrush is SolidColorBrush ob)
                     ob.Color = onAccentColor;
                 if (darkDict.TryGetValue("ZuneAccentSubtleBrush", out object? darkSub) && darkSub is SolidColorBrush sb)
@@ -689,6 +1039,8 @@ public sealed partial class MainWindow : Window
             {
                 if (lightDict.TryGetValue("ZuneAccentBrush", out object? lightBrush) && lightBrush is SolidColorBrush b)
                     b.Color = winColor;
+                if (lightDict.TryGetValue("ZuneAccentInkBrush", out object? lightInkBrush) && lightInkBrush is SolidColorBrush ib)
+                    ib.Color = winInkColor;
                 if (lightDict.TryGetValue("ZuneInkOnAccentBrush", out object? lightOnBrush) && lightOnBrush is SolidColorBrush ob)
                     ob.Color = onAccentColor;
                 if (lightDict.TryGetValue("ZuneAccentSubtleBrush", out object? lightSub) && lightSub is SolidColorBrush sb)
@@ -699,10 +1051,16 @@ public sealed partial class MainWindow : Window
         {
             appAccent.Color = winColor;
         }
+        if (Application.Current.Resources.TryGetValue("ZuneAccentInkBrush", out object? appInkRes) && appInkRes is SolidColorBrush appAccentInk)
+        {
+            appAccentInk.Color = winInkColor;
+        }
         if (Application.Current.Resources.TryGetValue("ZuneInkOnAccentBrush", out object? appOnRes) && appOnRes is SolidColorBrush appOnAccent)
         {
             appOnAccent.Color = onAccentColor;
         }
+
+        ClassicalUiPalette.ApplyTheme(!isDark, _accessibilitySettings.HighContrast, rgb, inkRgb, onAccentRgb);
 
         try
         {
@@ -804,12 +1162,25 @@ public sealed partial class MainWindow : Window
     {
         if (InboxAuditChipsPanel is null || !ViewModel.IsInboxAuditDeckVisible) return;
         bool isLight = RootWorkbench?.ActualTheme == ElementTheme.Light;
-        var activeBg = new SolidColorBrush(Color.FromArgb(isLight ? (byte)0x1F : (byte)0x2E, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
-        var activeBorder = new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
-        var inactiveBg = new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xF5, 0xF5, 0xF5) : Color.FromArgb(0xFF, 0x1A, 0x1A, 0x1A));
-        var inactiveBorder = new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC) : Color.FromArgb(0xFF, 0x26, 0x26, 0x26));
-        var activeFg = new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x00, 0x00, 0x00) : Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
-        var inactiveFg = new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x22, 0x22, 0x22) : Color.FromArgb(0xFF, 0xD8, 0xD8, 0xD8));
+        var ui = _accessibilitySettings.HighContrast ? new Windows.UI.ViewManagement.UISettings() : null;
+        var activeBg = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent))
+            : new SolidColorBrush(Color.FromArgb(isLight ? (byte)0x1F : (byte)0x2E, _currentAccentRgb.R, _currentAccentRgb.G, _currentAccentRgb.B));
+        var activeBorder = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent))
+            : new SolidColorBrush(Color.FromArgb(0xFF, _currentAccentInkRgb.R, _currentAccentInkRgb.G, _currentAccentInkRgb.B));
+        var inactiveBg = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Background))
+            : new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xF5, 0xF5, 0xF5) : Color.FromArgb(0xFF, 0x1A, 0x1A, 0x1A));
+        var inactiveBorder = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground))
+            : new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC) : Color.FromArgb(0xFF, 0x26, 0x26, 0x26));
+        var activeFg = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Background))
+            : new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x00, 0x00, 0x00) : Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+        var inactiveFg = ui is not null
+            ? new SolidColorBrush(ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground))
+            : new SolidColorBrush(isLight ? Color.FromArgb(0xFF, 0x22, 0x22, 0x22) : Color.FromArgb(0xFF, 0xD8, 0xD8, 0xD8));
 
         foreach (var btn in InboxAuditChipsPanel.Children.OfType<Button>())
         {
@@ -890,9 +1261,53 @@ public sealed partial class MainWindow : Window
         if (ViewModel.PlaybackDurationSeconds <= 0) return;
         if (Math.Abs(e.NewValue - ViewModel.PlaybackPositionSeconds) < 0.75) return;
         ViewModel.SeekToSeconds(e.NewValue);
+        SyncSmtcTimeline(force: true);
+    }
+
+    private void OnSeekSliderPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (SeekHoverTimePill is null || SeekHoverTimeText is null || SeekSlider is null) return;
+        double dur = ViewModel.PlaybackDurationSeconds;
+        double w = SeekSlider.ActualWidth;
+        if (dur <= 0 || w <= 4)
+        {
+            SeekHoverTimePill.Visibility = Visibility.Collapsed;
+            return;
+        }
+        double x = Math.Clamp(e.GetCurrentPoint(SeekSlider).Position.X, 0.0, w);
+        double sec = Math.Clamp((x / w) * dur, 0.0, dur);
+        var span = TimeSpan.FromSeconds(sec);
+        SeekHoverTimeText.Text = span.TotalHours >= 1.0 ? span.ToString(@"h\:mm\:ss") : span.ToString(@"mm\:ss");
+        double leftMargin = Math.Clamp(x - 18.0, 0.0, Math.Max(0.0, w - 48.0));
+        SeekHoverTimePill.Margin = new Thickness(leftMargin, -24, 0, 0);
+        SeekHoverTimePill.Visibility = Visibility.Visible;
+    }
+
+    private void OnSeekSliderPointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (SeekHoverTimePill is not null)
+        {
+            SeekHoverTimePill.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void OnDspSliderDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string key })
+        {
+            ViewModel.ResetDspParameterCommand.Execute(key);
+        }
     }
 
     // ---------------- Two-Stage Classical Collection Hierarchy ----------------
+
+    private void OnClassicalSubModeClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string mode })
+        {
+            ViewModel.SetClassicalSubModeCommand.Execute(mode);
+        }
+    }
 
     private void OnClassicalEraFilterClick(object sender, RoutedEventArgs e)
     {
@@ -1090,6 +1505,17 @@ public sealed partial class MainWindow : Window
         if (ResolveClassicalBoundItem<ClassicalMovementViewItem>(sender) is { } mov)
         {
             ViewModel.PlayClassicalMovement(mov);
+        }
+    }
+
+    private void OnClassicalMovementKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if ((e.Key == VirtualKey.Enter || e.Key == VirtualKey.Space)
+            && !IsInteractiveInputFocused()
+            && ResolveClassicalBoundItem<ClassicalMovementViewItem>(sender) is { } mov)
+        {
+            ViewModel.PlayClassicalMovement(mov);
+            e.Handled = true;
         }
     }
 

@@ -247,10 +247,24 @@ public sealed class ClassicalHierarchyAndQueueTests
         Assert.True(swFilter.Elapsed.TotalMilliseconds < 100.0, $"Expected 1000 era filter calls < 100ms, actual={swFilter.Elapsed.TotalMilliseconds:F2}ms");
     }
 
+    private static string FindRepoRoot()
+    {
+        string? dir = AppContext.BaseDirectory;
+        while (!string.IsNullOrEmpty(dir))
+        {
+            if (File.Exists(Path.Combine(dir, "desktop", "Tonewise.sln")))
+            {
+                return dir;
+            }
+            dir = Directory.GetParent(dir)?.FullName;
+        }
+        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    }
+
     [Fact]
     public void ClassicalAllErasButton_AndStartupThemePreload_RegressionGuardsHold()
     {
-        string repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", ".."));
+        string repoRoot = FindRepoRoot();
         string xaml = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "MainWindow.xaml"));
         string xamlCs = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "MainWindow.xaml.cs"));
         string vmClassical = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "ViewModels", "MainViewModel.Classical.cs"));
@@ -264,5 +278,81 @@ public sealed class ClassicalHierarchyAndQueueTests
         int preloadIdx = xamlCs.IndexOf("PreloadInitialAppTheme", StringComparison.Ordinal);
         int initIdx = xamlCs.IndexOf("InitializeComponent();", StringComparison.Ordinal);
         Assert.True(preloadIdx > 0 && preloadIdx < initIdx, "PreloadInitialAppTheme must execute before InitializeComponent()");
+    }
+
+    [Fact]
+    public void BuildByEnsemble_FiltersPopAndComposers_AndUnifiesClassicalPanelRouting()
+    {
+        var seeds = new[]
+        {
+            new ClassicalTrackSeed<string>(
+                Track: "b1", TrackUid: "b1",
+                Title: "Piano Concerto No. 3 in C minor, Op. 37: I. Allegro con brio",
+                Album: "Beethoven Piano Concertos",
+                ArtistsDisplay: "Ludwig van Beethoven, Martha Argerich, Wiener Philharmoniker",
+                ComposersDisplay: "Ludwig van Beethoven",
+                ConductorsDisplay: "Claudio Abbado",
+                WorkName: "Piano Concerto No. 3 in C minor, Op. 37",
+                MovementName: "Allegro con brio",
+                MovementNumber: 1,
+                DiscNumber: 1, TrackNumber: 1, Year: 1995, Genre: "Classical", DurationMs: 900_000),
+            new ClassicalTrackSeed<string>(
+                Track: "j1", TrackUid: "j1",
+                Title: "夜曲",
+                Album: "十一月的萧邦",
+                ArtistsDisplay: "周杰伦",
+                ComposersDisplay: "周杰伦",
+                ConductorsDisplay: "",
+                WorkName: "十一月的萧邦组曲",
+                MovementName: "",
+                MovementNumber: null,
+                DiscNumber: 1, TrackNumber: 1, Year: 2005, Genre: "Mandopop", DurationMs: 225_000),
+            new ClassicalTrackSeed<string>(
+                Track: "r1", TrackUid: "r1",
+                Title: "Wish You Were Here",
+                Album: "Wish You Were Here",
+                ArtistsDisplay: "Pink Floyd",
+                ComposersDisplay: "David Gilmour",
+                ConductorsDisplay: "",
+                WorkName: "Shine On",
+                MovementName: "",
+                MovementNumber: null,
+                DiscNumber: 1, TrackNumber: 4, Year: 1975, Genre: "Progressive Rock", DurationMs: 334_000),
+            new ClassicalTrackSeed<string>(
+                Track: "p1", TrackUid: "p1",
+                Title: "Anti-Hero",
+                Album: "Midnights",
+                ArtistsDisplay: "Taylor Swift",
+                ComposersDisplay: "Taylor Swift",
+                ConductorsDisplay: "",
+                WorkName: "Midnights Act I",
+                MovementName: "",
+                MovementNumber: null,
+                DiscNumber: 1, TrackNumber: 3, Year: 2022, Genre: "Pop", DurationMs: 200_000),
+        };
+
+        var ensembles = ClassicalHierarchyBuilder.BuildByEnsemble(
+            seeds,
+            ArtistEntitySplitter.SplitComposers,
+            ArtistEntitySplitter.SplitPerformers,
+            (album, cond) => WorkAwareShuffleEngine.BuildAlbumScope(album, cond),
+            []);
+
+        var names = ensembles.Select(e => e.ComposerName).ToList();
+        Assert.Contains("Martha Argerich", names);
+        Assert.Contains("Vienna Philharmonic", names);
+        Assert.DoesNotContain("Ludwig van Beethoven", names);
+        Assert.DoesNotContain("周杰伦", names);
+        Assert.DoesNotContain("Pink Floyd", names);
+        Assert.DoesNotContain("Taylor Swift", names);
+
+        var argerich = ensembles.Single(e => e.ComposerName == "Martha Argerich");
+        Assert.Equal("Beethoven — Piano Concerto No. 3 in C minor, Op. 37", argerich.Works.Single().WorkTitle);
+        Assert.Contains("1 composers · 1 works · 1 recordings", argerich.StatsLine);
+
+        string repoRoot = FindRepoRoot();
+        string vmLib = File.ReadAllText(Path.Combine(repoRoot, "desktop", "src", "Tonewise.Desktop", "ViewModels", "MainViewModel.Library.cs"));
+        Assert.Contains("IsClassicalComposerViewVisible = IsNavClassicalWorks;", vmLib, StringComparison.Ordinal);
+        Assert.Contains("IsEntityBrowserVisible = entityMode && !IsNavClassicalWorks;", vmLib, StringComparison.Ordinal);
     }
 }

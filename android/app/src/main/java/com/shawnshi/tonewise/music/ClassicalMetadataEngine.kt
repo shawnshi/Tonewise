@@ -227,7 +227,9 @@ object ClassicalMetadataEngine {
 
     fun parseRomanNumeral(raw: String?): Int? {
         val s = raw?.trim()?.uppercase(Locale.ROOT).orEmpty()
-        if (s.isEmpty() || s.any { it != 'I' && it != 'V' && it != 'X' }) return null
+        if (s.isEmpty() || s.any { it != 'I' && it != 'V' && it != 'X' && it != 'L' && it != 'C' }) {
+            return null
+        }
         var total = 0
         var prev = 0
         for (i in s.length - 1 downTo 0) {
@@ -235,6 +237,8 @@ object ClassicalMetadataEngine {
                 'I' -> 1
                 'V' -> 5
                 'X' -> 10
+                'L' -> 50
+                'C' -> 100
                 else -> return null
             }
             if (valNum < prev) {
@@ -244,13 +248,13 @@ object ClassicalMetadataEngine {
                 prev = valNum
             }
         }
-        if (total !in 1..39) return null
+        if (total !in 1..99) return null
         return if (formatRomanNumeral(total) == s) total else null
     }
 
     fun formatRomanNumeral(n: Int): String {
-        if (n !in 1..39) return n.toString()
-        val tens = arrayOf("", "X", "XX", "XXX")
+        if (n !in 1..99) return n.toString()
+        val tens = arrayOf("", "X", "XX", "XXX", "XL", "L", "LX", "LXX", "LXXX", "XC")
         val ones = arrayOf("", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX")
         return tens[n / 10] + ones[n % 10]
     }
@@ -260,7 +264,7 @@ object ClassicalMetadataEngine {
         if (trimmed.isEmpty()) return null to ""
 
         var firstNonRoman = 0
-        while (firstNonRoman < trimmed.length && trimmed[firstNonRoman].uppercaseChar() in charArrayOf('I', 'V', 'X')) {
+        while (firstNonRoman < trimmed.length && trimmed[firstNonRoman].uppercaseChar() in charArrayOf('I', 'V', 'X', 'L', 'C')) {
             firstNonRoman++
         }
         if (firstNonRoman in 1 until trimmed.length) {
@@ -476,11 +480,38 @@ object ClassicalMetadataEngine {
         return out
     }
 
+    private fun isCjkChar(c: Char): Boolean {
+        val code = c.code
+        return code in 0x4E00..0x9FFF ||
+            code in 0x3400..0x4DBF ||
+            code in 0x3040..0x30FF ||
+            code in 0xAC00..0xD7AF
+    }
+
     fun shortSurname(name: String?): String {
         val trimmed = name?.trim().orEmpty()
         if (trimmed.isEmpty()) return ""
-        return trimmed.split(Regex("\\s+")).lastOrNull()?.takeIf { it.isNotEmpty() } ?: trimmed
+        val commaIdx = trimmed.indexOf(',')
+        if (commaIdx > 0) {
+            val beforeComma = trimmed.substring(0, commaIdx).trim()
+            if (beforeComma.isNotEmpty()) return beforeComma
+        }
+        val parts = trimmed.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return trimmed
+        if (parts.all { p -> p.all(::isCjkChar) }) {
+            return parts.joinToString("")
+        }
+        if (parts.size >= 2) {
+            val prev = parts[parts.size - 2].lowercase(Locale.ROOT)
+            if (prev in COMPOUND_SURNAME_PREFIXES) {
+                return "${parts[parts.size - 2]} ${parts.last()}"
+            }
+        }
+        return parts.last()
     }
+
+    private val COMPOUND_SURNAME_PREFIXES =
+        setOf("vaughan", "de", "di", "da", "del", "della", "dos", "das", "du", "la", "le", "saint", "st.")
 
     fun buildClassicalCreditTiers(
         composer: String?,

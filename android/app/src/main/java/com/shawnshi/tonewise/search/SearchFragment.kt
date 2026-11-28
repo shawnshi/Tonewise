@@ -159,6 +159,8 @@ class SearchFragment : ListFragment<Music, FragmentSearchBinding>() {
         binding.searchFilterSongs.isChecked = MusicType.SONGS in filters
         binding.searchFilterAlbums.isChecked = MusicType.ALBUMS in filters
         binding.searchFilterArtists.isChecked = MusicType.ARTISTS in filters
+        binding.searchFilterComposers.isChecked = MusicType.COMPOSERS in filters
+        binding.searchFilterConductors.isChecked = MusicType.CONDUCTORS in filters
         binding.searchFilterGenres.isChecked = MusicType.GENRES in filters
         binding.searchFilterPlaylists.isChecked = MusicType.PLAYLISTS in filters
         binding.searchFilters.apply {
@@ -169,6 +171,8 @@ class SearchFragment : ListFragment<Music, FragmentSearchBinding>() {
                             R.id.search_filter_songs -> MusicType.SONGS
                             R.id.search_filter_albums -> MusicType.ALBUMS
                             R.id.search_filter_artists -> MusicType.ARTISTS
+                            R.id.search_filter_composers -> MusicType.COMPOSERS
+                            R.id.search_filter_conductors -> MusicType.CONDUCTORS
                             R.id.search_filter_genres -> MusicType.GENRES
                             R.id.search_filter_playlists -> MusicType.PLAYLISTS
                             else -> null

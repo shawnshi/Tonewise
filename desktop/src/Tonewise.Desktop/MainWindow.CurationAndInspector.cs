@@ -1084,6 +1084,11 @@ public sealed partial class MainWindow : Window
         InlineSceneBox.IsEnabled = editable;
         InlineMoodBox.IsEnabled = editable;
         InlineRatingControl.IsEnabled = editable;
+        if (InlineBatchClearEmptyCheckBox is not null)
+        {
+            InlineBatchClearEmptyCheckBox.Visibility = batch ? Visibility.Visible : Visibility.Collapsed;
+            InlineBatchClearEmptyCheckBox.IsChecked = false;
+        }
         if (InlineFetchBasicInfoButton is not null) InlineFetchBasicInfoButton.IsEnabled = editable;
         if (InlineFetch5DTagsButton is not null) InlineFetch5DTagsButton.IsEnabled = editable;
 
@@ -1262,6 +1267,11 @@ public sealed partial class MainWindow : Window
         if (!_syncingInlineEditor) UpdateInlineDirtyState();
     }
 
+    private void OnInlineBatchClearCheckedChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_syncingInlineEditor) UpdateInlineDirtyState();
+    }
+
     private void OnInspectorEditorKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key == VirtualKey.Escape && _inlineDirtyCount > 0)
@@ -1359,6 +1369,7 @@ public sealed partial class MainWindow : Window
         if (targets.Count == 0) return updates;
 
         bool isSingle = targets.Count == 1;
+        bool allowBatchClear = InlineBatchClearEmptyCheckBox?.IsChecked == true;
         var first = targets[0];
 
         void TextField(TextBox box, Func<TrackItem, string> selector, string key)
@@ -1369,10 +1380,16 @@ public sealed partial class MainWindow : Window
                 if (v != selector(first).Trim()) updates[key] = v;
                 return;
             }
+            if (string.Equals(v, "__clear__", StringComparison.OrdinalIgnoreCase))
+            {
+                updates[key] = "";
+                return;
+            }
             string? shared = GetSharedValue(targets, selector);
             if (shared is not null)
             {
-                if (v != shared && !string.IsNullOrWhiteSpace(v)) updates[key] = v;
+                if (v != shared && (!string.IsNullOrWhiteSpace(v) || (allowBatchClear && !string.IsNullOrEmpty(shared))))
+                    updates[key] = v;
             }
             else if (!string.IsNullOrWhiteSpace(v))
             {
@@ -1456,24 +1473,30 @@ public sealed partial class MainWindow : Window
         }
 
         string sceneText = NormalizeTagList(InlineSceneBox.Text ?? "");
+        bool sceneExplicitClear = !isSingle && string.Equals((InlineSceneBox.Text ?? "").Trim(), "__clear__", StringComparison.OrdinalIgnoreCase);
         string? origSceneShared = isSingle
             ? NormalizeTagList(string.Join("; ", first.DjScene))
             : GetSharedValue(targets, t => NormalizeTagList(string.Join("; ", t.DjScene)));
         bool sceneChanged = isSingle
             ? sceneText != (origSceneShared ?? "")
-            : (origSceneShared is not null ? (sceneText != origSceneShared && !string.IsNullOrWhiteSpace(sceneText)) : !string.IsNullOrWhiteSpace(sceneText));
+            : (sceneExplicitClear || (origSceneShared is not null
+                ? (sceneText != origSceneShared && (!string.IsNullOrWhiteSpace(sceneText) || (allowBatchClear && !string.IsNullOrEmpty(origSceneShared))))
+                : !string.IsNullOrWhiteSpace(sceneText)));
         if (sceneChanged)
-            updates["dj_scene_json"] = string.IsNullOrWhiteSpace(sceneText) ? null : sceneText;
+            updates["dj_scene_json"] = (sceneExplicitClear || string.IsNullOrWhiteSpace(sceneText)) ? null : sceneText;
 
         string moodText = NormalizeTagList(InlineMoodBox.Text ?? "");
+        bool moodExplicitClear = !isSingle && string.Equals((InlineMoodBox.Text ?? "").Trim(), "__clear__", StringComparison.OrdinalIgnoreCase);
         string? origMoodShared = isSingle
             ? NormalizeTagList(string.Join("; ", first.Moods))
             : GetSharedValue(targets, t => NormalizeTagList(string.Join("; ", t.Moods)));
         bool moodChanged = isSingle
             ? moodText != (origMoodShared ?? "")
-            : (origMoodShared is not null ? (moodText != origMoodShared && !string.IsNullOrWhiteSpace(moodText)) : !string.IsNullOrWhiteSpace(moodText));
+            : (moodExplicitClear || (origMoodShared is not null
+                ? (moodText != origMoodShared && (!string.IsNullOrWhiteSpace(moodText) || (allowBatchClear && !string.IsNullOrEmpty(origMoodShared))))
+                : !string.IsNullOrWhiteSpace(moodText)));
         if (moodChanged)
-            updates["mood_json"] = string.IsNullOrWhiteSpace(moodText) ? null : moodText;
+            updates["mood_json"] = (moodExplicitClear || string.IsNullOrWhiteSpace(moodText)) ? null : moodText;
 
         double ratingValue = InlineRatingControl.Value;
         int newRating = ratingValue < 1 ? 0 : (int)Math.Round(Math.Clamp(ratingValue, 1, 5));

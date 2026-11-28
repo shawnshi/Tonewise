@@ -89,6 +89,7 @@ import com.shawnshi.tonewise.music.resolve
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.playback.formatDurationMs
 import com.shawnshi.tonewise.ui.DynamicAccentController
+import com.shawnshi.tonewise.ui.LocalTonewiseAccentInk
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
@@ -99,8 +100,6 @@ import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-private val ZUNE_MAGENTA = Color(0xFFFF0099)
 
 /**
  * Two-stage classical collection hub:
@@ -274,6 +273,8 @@ private fun ClassicalHierarchyContent(
 
     val jumpHint = stringResource(R.string.desc_classical_jump_hint)
     val pinActionLabel = stringResource(R.string.desc_classical_pin_action)
+    val accentInk = LocalTonewiseAccentInk.current
+    val accentFill = MaterialTheme.colorScheme.primary
 
     SideEffect {
         onShowJumpMatrixChange(showJumpMatrix)
@@ -310,31 +311,31 @@ private fun ClassicalHierarchyContent(
                             Text(
                                 text = stringResource(R.string.lbl_classical_all_eras),
                                 style = MaterialTheme.typography.labelLarge,
-                                color = if (selectedEraFilter == null) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = if (selectedEraFilter == null) accentInk else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier =
-                                    Modifier.defaultMinSize(minHeight = 36.dp)
+                                    Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                         .clickable { selectedEraFilter = null }
-                                        .padding(vertical = 8.dp),
+                                        .padding(horizontal = 4.dp, vertical = 14.dp),
                             )
                             for (era in ClassicalHierarchyLogic.ERA_KEYS) {
                                 val eraLabel = eraDisplayLabel(era)
                                 Text(
                                     text = eraLabel,
                                     style = MaterialTheme.typography.labelLarge,
-                                    color = if (selectedEraFilter == era) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color = if (selectedEraFilter == era) accentInk else MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier =
-                                        Modifier.defaultMinSize(minHeight = 36.dp)
+                                        Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                             .clickable {
                                                 selectedEraFilter = if (selectedEraFilter == era) null else era
                                             }
-                                            .padding(vertical = 8.dp),
+                                            .padding(horizontal = 4.dp, vertical = 14.dp),
                                 )
                             }
                         }
 
                         Box(
                             modifier =
-                                Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 40.dp)
+                                Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                     .semantics { contentDescription = jumpHint }
                                     .clickable(onClickLabel = jumpHint) { onShowJumpMatrixChange(true) }
                                     .padding(horizontal = 8.dp),
@@ -343,7 +344,7 @@ private fun ClassicalHierarchyContent(
                             Text(
                                 text = "a–z",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = ZUNE_MAGENTA,
+                                color = accentInk,
                             )
                         }
                     }
@@ -411,9 +412,9 @@ private fun ClassicalHierarchyContent(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
                                     modifier =
-                                        Modifier.defaultMinSize(minWidth = 36.dp, minHeight = 36.dp)
+                                        Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                             .clickable(onClickLabel = jumpHint) { onShowJumpMatrixChange(true) }
-                                            .padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
+                                            .padding(start = 12.dp, top = 14.dp, bottom = 14.dp),
                                 )
                             }
                         }
@@ -478,11 +479,11 @@ private fun ClassicalHierarchyContent(
                                 text = formDisplayLabel(formKey),
                                 fontSize = 14.sp,
                                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                color = if (active) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = if (active) accentInk else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier =
-                                    Modifier.defaultMinSize(minHeight = 36.dp)
+                                    Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                         .clickable { selectedFormFilter = formKey }
-                                        .padding(vertical = 6.dp),
+                                        .padding(vertical = 12.dp),
                             )
                         }
                     }
@@ -540,7 +541,7 @@ private fun ClassicalHierarchyContent(
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Box(
                                                 modifier =
-                                                    Modifier.defaultMinSize(minWidth = 44.dp, minHeight = 40.dp)
+                                                    Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                                         .semantics { contentDescription = recBrowseDesc }
                                                         .clickable(onClickLabel = recBrowseDesc) {
                                                             if (work.recordings.size > 1) {
@@ -554,13 +555,13 @@ private fun ClassicalHierarchyContent(
                                                 Text(
                                                     text = versionLabel,
                                                     style = MaterialTheme.typography.labelMedium,
-                                                    color = ZUNE_MAGENTA,
+                                                    color = accentInk,
                                                 )
                                             }
                                             Spacer(modifier = Modifier.width(8.dp))
                                             Box(
                                                 modifier =
-                                                    Modifier.defaultMinSize(minWidth = 40.dp, minHeight = 40.dp)
+                                                    Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                                         .clickable {
                                                             selectedRec?.let { onPlayRecording(it, 0) }
                                                         },
@@ -569,7 +570,7 @@ private fun ClassicalHierarchyContent(
                                                 Icon(
                                                     painter = painterResource(R.drawable.ic_play_24),
                                                     contentDescription = stringResource(R.string.desc_classical_play_whole_work),
-                                                    tint = ZUNE_MAGENTA,
+                                                    tint = accentInk,
                                                     modifier = Modifier.size(20.dp),
                                                 )
                                             }
@@ -592,22 +593,24 @@ private fun ClassicalHierarchyContent(
                                                         .ifEmpty { rec.album.name.resolve(context).lowercase(Locale.ROOT) }
                                                 Box(
                                                     modifier =
-                                                        Modifier.border(
-                                                            width = 1.dp,
-                                                            color = if (recActive) ZUNE_MAGENTA else MaterialTheme.colorScheme.outlineVariant,
-                                                        )
+                                                        Modifier.defaultMinSize(minHeight = 48.dp)
+                                                            .border(
+                                                                width = 1.dp,
+                                                                color = if (recActive) accentInk else MaterialTheme.colorScheme.outlineVariant,
+                                                            )
                                                             .background(
-                                                                if (recActive) ZUNE_MAGENTA.copy(alpha = 0.14f) else Color.Transparent
+                                                                if (recActive) accentInk.copy(alpha = 0.14f) else Color.Transparent
                                                             )
                                                             .clickable {
                                                                 selectedRecordingIdx[work.key] = idx
                                                             }
-                                                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                                                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                                                    contentAlignment = Alignment.Center,
                                                 ) {
                                                     Text(
                                                         text = badgeText,
                                                         style = MaterialTheme.typography.labelSmall,
-                                                        color = if (recActive) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        color = if (recActive) accentInk else MaterialTheme.colorScheme.onSurfaceVariant,
                                                         maxLines = 1,
                                                     )
                                                 }
@@ -633,9 +636,9 @@ private fun ClassicalHierarchyContent(
                                         Row(
                                             modifier =
                                                 Modifier.fillMaxWidth()
-                                                    .defaultMinSize(minHeight = 44.dp)
+                                                    .defaultMinSize(minHeight = 48.dp)
                                                     .clickable { onPlayRecording(selectedRec, moveIdx) }
-                                                    .padding(start = 16.dp, top = 6.dp, bottom = 6.dp),
+                                                    .padding(start = 16.dp, top = 8.dp, bottom = 8.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
                                             Text(
@@ -644,13 +647,13 @@ private fun ClassicalHierarchyContent(
                                                     MaterialTheme.typography.bodySmall.merge(
                                                         TextStyle(fontFeatureSettings = "tnum")
                                                     ),
-                                                color = if (isPlayingMvt) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                color = if (isPlayingMvt) accentInk else MaterialTheme.colorScheme.onSurfaceVariant,
                                                 modifier = Modifier.width(34.dp),
                                             )
                                             Text(
                                                 text = moveTitle,
                                                 style = MaterialTheme.typography.bodyMedium,
-                                                color = if (isPlayingMvt) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurface,
+                                                color = if (isPlayingMvt) accentInk else MaterialTheme.colorScheme.onSurface,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                                 modifier = Modifier.weight(1f).padding(end = 10.dp),
@@ -661,7 +664,7 @@ private fun ClassicalHierarchyContent(
                                                     MaterialTheme.typography.labelSmall.merge(
                                                         TextStyle(fontFeatureSettings = "tnum")
                                                     ),
-                                                color = if (isPlayingMvt) ZUNE_MAGENTA else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                color = if (isPlayingMvt) accentInk else MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                         }
                                     }
@@ -672,12 +675,12 @@ private fun ClassicalHierarchyContent(
                 }
             }
 
-            // Full-screen pure #000000 0dp Metro Era + A–Z Jump Matrix
+            // Full-screen themed 0dp Metro Era + A–Z Jump Matrix
             if (showJumpMatrix) {
                 Box(
                     modifier =
                         Modifier.fillMaxSize()
-                            .background(Color(0xFF000000))
+                            .background(MaterialTheme.colorScheme.background.copy(alpha = 0.96f))
                             .clickable { onShowJumpMatrixChange(false) }
                             .padding(24.dp),
                     contentAlignment = Alignment.Center,
@@ -691,7 +694,7 @@ private fun ClassicalHierarchyContent(
                             text = stringResource(R.string.lbl_composers_az),
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Light,
-                            color = Color.White,
+                            color = MaterialTheme.colorScheme.onBackground,
                             modifier = Modifier.padding(bottom = 8.dp),
                         )
 
@@ -705,9 +708,9 @@ private fun ClassicalHierarchyContent(
                                 Box(
                                     modifier =
                                         Modifier.weight(1f)
-                                            .height(42.dp)
-                                            .background(if (eraActive) ZUNE_MAGENTA else Color(0xFF141414))
-                                            .border(1.dp, if (eraActive) ZUNE_MAGENTA else Color(0xFF333333))
+                                            .defaultMinSize(minHeight = 48.dp)
+                                            .background(if (eraActive) accentFill else MaterialTheme.colorScheme.surfaceContainer)
+                                            .border(1.dp, if (eraActive) accentFill else MaterialTheme.colorScheme.outline)
                                             .clickable {
                                                 selectedEraFilter = if (selectedEraFilter == era) null else era
                                                 onSelectComposer(null)
@@ -718,7 +721,7 @@ private fun ClassicalHierarchyContent(
                                     Text(
                                         text = era,
                                         fontSize = 12.sp,
-                                        color = Color.White,
+                                        color = if (eraActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
                                         maxLines = 1,
                                     )
                                 }
@@ -738,11 +741,11 @@ private fun ClassicalHierarchyContent(
                                             Modifier.weight(1f)
                                                 .aspectRatio(1f)
                                                 .background(
-                                                    if (available) ZUNE_MAGENTA else Color(0xFF0F0F0F)
+                                                    if (available) accentFill else MaterialTheme.colorScheme.surfaceContainerLow
                                                 )
                                                 .border(
                                                     1.dp,
-                                                    if (available) ZUNE_MAGENTA else Color(0xFF282828),
+                                                    if (available) accentFill else MaterialTheme.colorScheme.outlineVariant,
                                                 )
                                                 .clickable(enabled = available) {
                                                     onSelectComposer(null)
@@ -761,7 +764,12 @@ private fun ClassicalHierarchyContent(
                                             text = key.lowercase(Locale.ROOT),
                                             fontSize = 18.sp,
                                             fontWeight = FontWeight.Light,
-                                            color = if (available) Color.White else Color(0xFF555555),
+                                            color =
+                                                if (available) {
+                                                    MaterialTheme.colorScheme.onPrimary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                                                },
                                         )
                                     }
                                 }

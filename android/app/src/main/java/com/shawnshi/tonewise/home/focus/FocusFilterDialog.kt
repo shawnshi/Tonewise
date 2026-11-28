@@ -51,6 +51,8 @@ import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.R
+import com.shawnshi.tonewise.home.HomeViewModel
+import com.shawnshi.tonewise.music.FocusFilterLabels
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.sync.FocusFilterSpec
@@ -75,6 +77,7 @@ class FocusFilterDialog : BackportBottomSheetDialogFragment() {
     @Inject lateinit var dynamicAccentController: DynamicAccentController
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val musicModel: MusicViewModel by activityViewModels()
+    private val homeModel: HomeViewModel by activityViewModels()
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -90,7 +93,16 @@ class FocusFilterDialog : BackportBottomSheetDialogFragment() {
                 val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
                 val pendingMutations by
                     lanSyncRepository.pendingMutationCount.collectAsStateWithLifecycle()
-                var spec by remember { mutableStateOf(FocusFilterSpec()) }
+                val persistentSpec by homeModel.focusFilterSpec.collectAsStateWithLifecycle()
+                var scopedSpec by remember { mutableStateOf(FocusFilterSpec()) }
+                val spec = if (scopedUids == null) persistentSpec else scopedSpec
+                val onSpecChange: (FocusFilterSpec) -> Unit = { updated ->
+                    if (scopedUids == null) {
+                        homeModel.updateFocusFilterSpec(updated)
+                    } else {
+                        scopedSpec = updated
+                    }
+                }
 
                 val matchedSongs by
                     produceState<List<Song>>(
@@ -114,7 +126,7 @@ class FocusFilterDialog : BackportBottomSheetDialogFragment() {
                         scopeTitle = scopeTitle,
                         spec = spec,
                         matchedCount = matchedSongs.size,
-                        onSpecChange = { spec = it },
+                        onSpecChange = onSpecChange,
                         onPlayMatched = {
                             if (matchedSongs.isEmpty()) {
                                 requireContext().showToast(R.string.lbl_scene_no_matches)
@@ -336,10 +348,11 @@ internal fun FocusTriStateMatrix(
                         "rediscovery_90d",
                         "work_shuffle",
                     )) {
+                    val arcLabel = FocusFilterLabels.labelResForKey(arc)?.let { stringResource(it) } ?: arc
                     FilterChip(
                         selected = spec.sortArc == arc,
                         onClick = { onSpecChange(spec.copy(sortArc = arc)) },
-                        label = { Text(arc) },
+                        label = { Text(arcLabel) },
                     )
                 }
             }
@@ -381,11 +394,12 @@ private fun FocusTriStateFacetRow(
                         FocusPillState.INCLUDE -> "+ "
                         FocusPillState.EXCLUDE -> "- "
                     }
+                val localizedOpt = FocusFilterLabels.labelResForKey(opt)?.let { stringResource(it) } ?: opt
                 FilterChip(
                     selected = st != FocusPillState.NONE,
                     onClick = { onToggle(opt) },
                     colors = chipColors,
-                    label = { Text("$prefix$opt") },
+                    label = { Text("$prefix$localizedOpt") },
                 )
             }
         }

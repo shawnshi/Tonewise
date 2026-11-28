@@ -287,10 +287,13 @@ public sealed partial class MainViewModel
             StopPairingCodeRefreshTimer();
             existing.SyncStateChanged -= OnSyncHostStateChanged;
             existing.AutoEqPolicyUpdated -= OnSyncHostAutoEqPolicyUpdated;
+            existing.SyncSessionProgressChanged -= OnLanSyncSessionProgressChanged;
             await existing.DisposeAsync();
             LanSyncStatus = "局域网同步服务：未开启";
             LanHostUrlsText = "服务启动后将显示本机局域网地址（端口 45820）";
             LanPairingCode = "------";
+            IsLanSyncTransferring = false;
+            LanSyncTransferText = "Wi-Fi 局域网传输空闲（与 USB 同步进度独立显示）";
             return;
         }
         _lanSyncManuallyStopped = false;
@@ -320,6 +323,7 @@ public sealed partial class MainViewModel
             SyncAutoEqPolicyWithLibraryRoot();
             host.SyncStateChanged += OnSyncHostStateChanged;
             host.AutoEqPolicyUpdated += OnSyncHostAutoEqPolicyUpdated;
+            host.SyncSessionProgressChanged += OnLanSyncSessionProgressChanged;
             int port = await host.StartAsync(45820, enableMdns: true);
             _syncHost = host;
             _usbCoordinator?.AttachHostEvents(host);
@@ -376,6 +380,7 @@ public sealed partial class MainViewModel
         {
             oldHost.SyncStateChanged -= OnSyncHostStateChanged;
             oldHost.AutoEqPolicyUpdated -= OnSyncHostAutoEqPolicyUpdated;
+            oldHost.SyncSessionProgressChanged -= OnLanSyncSessionProgressChanged;
             await oldHost.DisposeAsync().ConfigureAwait(false);
         }
         catch
@@ -400,11 +405,13 @@ public sealed partial class MainViewModel
             SyncAutoEqPolicyWithLibraryRoot();
             host.SyncStateChanged += OnSyncHostStateChanged;
             host.AutoEqPolicyUpdated += OnSyncHostAutoEqPolicyUpdated;
+            host.SyncSessionProgressChanged += OnLanSyncSessionProgressChanged;
             int port = await host.StartAsync(45820, enableMdns: true).ConfigureAwait(false);
             if (!string.Equals(_store.MusicRoot, newMusicRoot, StringComparison.OrdinalIgnoreCase))
             {
                 host.SyncStateChanged -= OnSyncHostStateChanged;
                 host.AutoEqPolicyUpdated -= OnSyncHostAutoEqPolicyUpdated;
+                host.SyncSessionProgressChanged -= OnLanSyncSessionProgressChanged;
                 await host.DisposeAsync().ConfigureAwait(false);
                 return;
             }
@@ -499,6 +506,38 @@ public sealed partial class MainViewModel
             _uiContext.Post(_ => ApplyAsync(), null);
         else
             ApplyAsync();
+    }
+
+    private void OnLanSyncSessionProgressChanged(SyncSessionProgressReport report)
+    {
+        if (string.Equals(report.Transport, "usb", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        void Apply()
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            if (report.IsRunning)
+            {
+                IsLanSyncTransferring = true;
+                string trackPart = string.IsNullOrWhiteSpace(report.CurrentTrackTitle) ? "" : $" · {report.CurrentTrackTitle}";
+                string countPart = report.TotalTracks > 0 ? $" ({report.CompletedTracks}/{report.TotalTracks})" : "";
+                LanSyncTransferText = $"Wi-Fi 同步中：{report.Phase ?? "传输"}{countPart}{trackPart}";
+            }
+            else
+            {
+                IsLanSyncTransferring = false;
+                LanSyncTransferText = !string.IsNullOrWhiteSpace(report.ErrorMessage)
+                    ? $"Wi-Fi 同步异常：{report.ErrorMessage}"
+                    : $"Wi-Fi 最近同步完成：新增 {report.AddedCount} · 更新 {report.UpdatedCount} · 跳过 {report.SkippedCount} · 删除 {report.DeletedCount}";
+            }
+        }
+
+        if (_uiContext is not null && SynchronizationContext.Current != _uiContext)
+            _uiContext.Post(_ => Apply(), null);
+        else
+            Apply();
     }
 
     public void RefreshLanSyncUiState()

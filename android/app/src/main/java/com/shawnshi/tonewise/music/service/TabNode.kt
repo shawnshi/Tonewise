@@ -45,6 +45,13 @@ sealed class TabNode {
         override val bitmapRes = R.drawable.ic_more_bitmap_24
     }
 
+    data object Quickplay : TabNode() {
+        override val id = "quickplay"
+        override val microId: String = "tq"
+        override val nameRes = R.string.lbl_hub_quickplay
+        override val bitmapRes = R.drawable.ic_song_bitmap_24
+    }
+
     data class Home(val type: MusicType) : TabNode() {
         override val id = "$ID/${type.intCode}"
         override val microId: String =
@@ -86,6 +93,7 @@ sealed class TabNode {
                 return when (str.getOrNull(1)) {
                     't' -> Root
                     'm' -> More
+                    'q' -> Quickplay
                     's' -> Home(MusicType.SONGS)
                     'a' -> Home(MusicType.ALBUMS)
                     'r' -> Home(MusicType.ARTISTS)
@@ -100,6 +108,7 @@ sealed class TabNode {
             return when {
                 str == Root.id -> Root
                 str == More.id -> More
+                str == Quickplay.id -> Quickplay
                 str.startsWith(Home.ID) -> {
                     val split = str.split("/")
                     if (split.size != 2) return null

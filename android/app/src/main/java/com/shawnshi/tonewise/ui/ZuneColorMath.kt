@@ -16,8 +16,10 @@ import kotlin.math.pow
  */
 object ZuneColorMath {
     const val DEFAULT_DARK_MAGENTA: Int = 0xFFE5006B.toInt()
+    const val DEFAULT_DARK_ACCENT_INK: Int = 0xFFFF5C9E.toInt()
     const val DEFAULT_LIGHT_MAGENTA: Int = 0xFFC20052.toInt()
     const val BLACK_SURFACE: Int = 0xFF000000.toInt()
+    const val ELEVATED_DARK_SURFACE: Int = 0xFF1C1C1C.toInt()
     const val WHITE_SURFACE: Int = 0xFFFFFFFF.toInt()
 
     fun red(argb: Int): Int = (argb ushr 16) and 0xFF
@@ -122,8 +124,32 @@ object ZuneColorMath {
         minContrast: Double = 4.5,
     ): Int {
         val surface = if (isDarkSurface) BLACK_SURFACE else WHITE_SURFACE
-        val hsl = rgbToHsl(seedArgb)
         val fallback = if (isDarkSurface) DEFAULT_DARK_MAGENTA else DEFAULT_LIGHT_MAGENTA
+        return clampAccentAgainstSurface(seedArgb, surface, fallback, isDarkSurface, minContrast)
+    }
+
+    /**
+     * Clamps [seedArgb] for readable accent text/icon ink against elevated dark surfaces
+     * (#1C1C1C) or light surfaces (#FFFFFF) at >= 4.55:1 contrast.
+     */
+    fun clampAccentInkForTheme(
+        seedArgb: Int,
+        isDarkSurface: Boolean,
+        minContrast: Double = 4.55,
+    ): Int {
+        val surface = if (isDarkSurface) ELEVATED_DARK_SURFACE else WHITE_SURFACE
+        val fallback = if (isDarkSurface) DEFAULT_DARK_ACCENT_INK else DEFAULT_LIGHT_MAGENTA
+        return clampAccentAgainstSurface(seedArgb, surface, fallback, isDarkSurface, minContrast)
+    }
+
+    private fun clampAccentAgainstSurface(
+        seedArgb: Int,
+        surface: Int,
+        fallback: Int,
+        isDarkSurface: Boolean,
+        minContrast: Double,
+    ): Int {
+        val hsl = rgbToHsl(seedArgb)
         if (hsl[1] < 0.14f) {
             return fallback
         }

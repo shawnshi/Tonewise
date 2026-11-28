@@ -28,17 +28,26 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
@@ -53,18 +62,35 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.material.bottomsheet.BackportBottomSheetDialogFragment
@@ -72,17 +98,28 @@ import dagger.hilt.android.AndroidEntryPoint
 import java.util.Locale
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
+import com.shawnshi.tonewise.playback.PlaybackSettings
 import com.shawnshi.tonewise.playback.PlaybackViewModel
 import com.shawnshi.tonewise.ui.DynamicAccentController
+import com.shawnshi.tonewise.ui.LocalTonewiseAccentInk
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
 import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.util.showToast
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.ln
+import kotlin.math.log10
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 @AndroidEntryPoint
 class DspControlDialog : BackportBottomSheetDialogFragment() {
     private val playbackModel: PlaybackViewModel by activityViewModels()
     @Inject lateinit var dspRepository: DspRepository
+    @Inject lateinit var playbackSettings: PlaybackSettings
     @Inject lateinit var uiSettings: UISettings
     @Inject lateinit var dynamicAccentController: DynamicAccentController
     private var equalizerLauncher: ActivityResultLauncher<Intent>? = null
@@ -107,6 +144,7 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val config by dspRepository.deviceConfig.collectAsStateWithLifecycle()
+                val effectiveConfig by dspRepository.config.collectAsStateWithLifecycle()
                 val autoEqPolicy by dspRepository.autoEqPolicy.collectAsStateWithLifecycle()
                 val activeAutoEq by dspRepository.activeContentResolution.collectAsStateWithLifecycle()
                 val profileLabel by dspRepository.activeProfileLabel.collectAsStateWithLifecycle()
@@ -120,11 +158,13 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
                 ) {
                     DspControlSheet(
                         config = config,
+                        effectiveConfig = effectiveConfig,
                         autoEqPolicy = autoEqPolicy,
                         activeAutoEq = activeAutoEq,
                         profileLabel = profileLabel,
                         isBitPerfect = signalPath.dspBypassed,
                         romHint = romHint,
+                        onDisableBitPerfect = { playbackSettings.setUsbBitPerfect(false) },
                         onUpdateConfig = { transform -> dspRepository.updateConfig(transform) },
                         onApplyPreset = { preset -> dspRepository.applyPreset(preset) },
                         onImportApo = { raw ->
@@ -169,11 +209,13 @@ class DspControlDialog : BackportBottomSheetDialogFragment() {
 @Composable
 private fun DspControlSheet(
     config: DspChainConfig,
+    effectiveConfig: DspChainConfig,
     autoEqPolicy: AutoEqPolicy,
     activeAutoEq: ResolvedAutoEq,
     profileLabel: String,
     isBitPerfect: Boolean,
     romHint: String?,
+    onDisableBitPerfect: () -> Unit,
     onUpdateConfig: ((DspChainConfig) -> DspChainConfig) -> Unit,
     onApplyPreset: (DspPresetId) -> Unit,
     onImportApo: (String) -> Int,
@@ -183,6 +225,8 @@ private fun DspControlSheet(
     onImportAutoEqRuleApo: (String, String, Boolean?) -> Int,
     onLaunchExternalEq: () -> Unit,
 ) {
+    val controlsEnabled = !isBitPerfect
+    val accentInk = LocalTonewiseAccentInk.current
     var showApoBox by remember { mutableStateOf(false) }
     var apoDraft by remember {
         mutableStateOf("Preamp: -4.5 dB\nFilter: ON LSC Fc 85 Hz Gain 4.5 dB Q 0.71")
@@ -212,22 +256,32 @@ private fun DspControlSheet(
             Text(
                 text = stringResource(R.string.fmt_dsp_device_profile, profileLabel),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
+                color = accentInk,
                 fontFamily = FontFamily.Monospace,
             )
 
             if (isBitPerfect) {
                 ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
-                    Text(
-                        text = stringResource(R.string.lbl_dsp_usb_bypass_notice),
-                        modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.tertiary,
-                    )
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = stringResource(R.string.lbl_dsp_usb_bypass_notice),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        OutlinedButton(
+                            onClick = onDisableBitPerfect,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(stringResource(R.string.lbl_dsp_disable_bit_perfect))
+                        }
+                    }
                 }
             }
 
-            if (romHint != null && config.enabled && !config.externalBridgeMode && !isBitPerfect) {
+            if (romHint != null && config.enabled && !config.externalBridgeMode && controlsEnabled) {
                 ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     Text(
                         text = romHint,
@@ -245,12 +299,14 @@ private fun DspControlSheet(
             ) {
                 FilterChip(
                     selected = !config.externalBridgeMode,
-                    onClick = { onUpdateConfig { it.copy(externalBridgeMode = false) } },
+                    enabled = controlsEnabled,
+                    onClick = { if (controlsEnabled) onUpdateConfig { it.copy(externalBridgeMode = false) } },
                     label = { Text(stringResource(R.string.lbl_dsp_mode_internal)) },
                 )
                 FilterChip(
                     selected = config.externalBridgeMode,
-                    onClick = { onUpdateConfig { it.copy(externalBridgeMode = true) } },
+                    enabled = controlsEnabled,
+                    onClick = { if (controlsEnabled) onUpdateConfig { it.copy(externalBridgeMode = true) } },
                     label = { Text(stringResource(R.string.lbl_dsp_mode_external)) },
                 )
             }
@@ -261,7 +317,11 @@ private fun DspControlSheet(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Button(onClick = onLaunchExternalEq, modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { if (controlsEnabled) onLaunchExternalEq() },
+                    enabled = controlsEnabled,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                     Text(stringResource(R.string.lbl_dsp_open_external_eq))
                 }
                 return@Column
@@ -276,7 +336,12 @@ private fun DspControlSheet(
                 Text(stringResource(R.string.lbl_dsp_master_enable), style = MaterialTheme.typography.bodyMedium)
                 Switch(
                     checked = config.enabled,
-                    onCheckedChange = { checked -> onUpdateConfig { it.copy(enabled = checked) } },
+                    enabled = controlsEnabled,
+                    onCheckedChange = { checked ->
+                        if (controlsEnabled) {
+                            onUpdateConfig { it.copy(enabled = checked) }
+                        }
+                    },
                 )
             }
 
@@ -288,9 +353,11 @@ private fun DspControlSheet(
                 Text(stringResource(R.string.lbl_dsp_gain_matched_ab), style = MaterialTheme.typography.bodyMedium)
                 Switch(
                     checked = config.gainMatchedBypass,
-                    enabled = config.enabled,
+                    enabled = controlsEnabled && config.enabled,
                     onCheckedChange = { checked ->
-                        onUpdateConfig { it.copy(gainMatchedBypass = checked) }
+                        if (controlsEnabled) {
+                            onUpdateConfig { it.copy(gainMatchedBypass = checked) }
+                        }
                     },
                 )
             }
@@ -310,7 +377,8 @@ private fun DspControlSheet(
                 for ((id, label) in presets) {
                     FilterChip(
                         selected = config.presetId == id,
-                        onClick = { onApplyPreset(id) },
+                        enabled = controlsEnabled,
+                        onClick = { if (controlsEnabled) onApplyPreset(id) },
                         label = { Text(label) },
                     )
                 }
@@ -330,12 +398,15 @@ private fun DspControlSheet(
             )
             Slider(
                 value = config.preampDb.toFloat(),
+                enabled = controlsEnabled,
                 onValueChange = { v ->
-                    onUpdateConfig {
-                        it.copy(
-                            presetId = DspPresetId.CUSTOM,
-                            preampDb = ((v * 2f).roundToInt() / 2.0),
-                        )
+                    if (controlsEnabled) {
+                        onUpdateConfig {
+                            it.copy(
+                                presetId = DspPresetId.CUSTOM,
+                                preampDb = ((v * 2f).roundToInt() / 2.0),
+                            )
+                        }
                     }
                 },
                 valueRange = -15f..6f,
@@ -343,26 +414,45 @@ private fun DspControlSheet(
 
             HorizontalDivider()
 
-            // Stage 2: 64-bit Biquad PEQ Bands
+            // Stage 2: 64-bit Biquad PEQ Console (Option B: Composite Curve + 10 Vertical Faders)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = stringResource(R.string.lbl_dsp_peq_title),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                OutlinedButton(onClick = { showApoBox = !showApoBox }) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.lbl_dsp_peq_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = accentInk,
+                    )
+                    Text(
+                        text = stringResource(R.string.lbl_dsp_double_tap_reset),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                OutlinedButton(
+                    onClick = { if (controlsEnabled) showApoBox = !showApoBox },
+                    enabled = controlsEnabled,
+                ) {
                     Text(stringResource(R.string.lbl_dsp_import_apo))
                 }
             }
 
+            FrequencyResponseCanvas(
+                layerAConfig = config,
+                effectiveConfig = effectiveConfig,
+                accentInk = accentInk,
+                active = controlsEnabled && config.enabled && !config.gainMatchedBypass,
+                modifier = Modifier.fillMaxWidth().height(132.dp),
+            )
+
             if (showApoBox) {
                 OutlinedTextField(
                     value = apoDraft,
-                    onValueChange = { apoDraft = it },
+                    onValueChange = { if (controlsEnabled) apoDraft = it },
+                    enabled = controlsEnabled,
                     label = { Text("EqualizerAPO .txt") },
                     minLines = 3,
                     maxLines = 6,
@@ -370,57 +460,48 @@ private fun DspControlSheet(
                 )
                 Button(
                     onClick = {
-                        onImportApo(apoDraft)
-                        showApoBox = false
+                        if (controlsEnabled) {
+                            onImportApo(apoDraft)
+                            showApoBox = false
+                        }
                     },
+                    enabled = controlsEnabled,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(stringResource(R.string.lbl_dsp_apply_apo))
                 }
             }
 
-            config.bands.take(10).forEachIndexed { idx, band ->
-                val freqLabel =
-                    if (band.freqHz >= 1000.0) {
-                        String.format(Locale.US, "%.1fk Hz", band.freqHz / 1000.0)
-                    } else {
-                        String.format(Locale.US, "%.0f Hz", band.freqHz)
-                    }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = "$freqLabel (${band.type.name.take(2)})",
-                        modifier = Modifier.weight(0.32f),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                    Slider(
-                        value = band.gainDb.toFloat(),
-                        onValueChange = { v ->
-                            val snapped = (v * 2f).roundToInt() / 2.0
-                            onUpdateConfig { cur ->
-                                val mutable = cur.bands.toMutableList()
-                                if (idx in mutable.indices) {
-                                    mutable[idx] = mutable[idx].copy(gainDb = snapped, enabled = true)
+            // 10-band vertical console
+            Row(
+                modifier =
+                    Modifier.fillMaxWidth()
+                        .height(188.dp)
+                        .alpha(if (controlsEnabled) 1f else 0.42f),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                config.bands.take(10).forEachIndexed { idx, band ->
+                    VerticalEqFader(
+                        band = band,
+                        enabled = controlsEnabled,
+                        accentInk = accentInk,
+                        onGainChange = { snapped ->
+                            if (controlsEnabled) {
+                                onUpdateConfig { cur ->
+                                    val mutable = cur.bands.toMutableList()
+                                    if (idx in mutable.indices) {
+                                        mutable[idx] = mutable[idx].copy(gainDb = snapped, enabled = true)
+                                    }
+                                    cur.copy(
+                                        presetId = DspPresetId.CUSTOM,
+                                        enabled = true,
+                                        bands = mutable,
+                                    )
                                 }
-                                cur.copy(
-                                    presetId = DspPresetId.CUSTOM,
-                                    enabled = true,
-                                    bands = mutable,
-                                )
                             }
                         },
-                        valueRange = -12f..12f,
-                        modifier = Modifier.weight(0.50f),
-                    )
-                    Text(
-                        text = String.format(Locale.US, "%+.1f", band.gainDb),
-                        modifier = Modifier.weight(0.18f),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
                     )
                 }
             }
@@ -436,13 +517,16 @@ private fun DspControlSheet(
                 Text(stringResource(R.string.lbl_dsp_crossfeed), style = MaterialTheme.typography.bodyMedium)
                 Switch(
                     checked = config.crossfeedEnabled,
+                    enabled = controlsEnabled,
                     onCheckedChange = { checked ->
-                        onUpdateConfig {
-                            it.copy(
-                                presetId = DspPresetId.CUSTOM,
-                                enabled = it.enabled || checked,
-                                crossfeedEnabled = checked,
-                            )
+                        if (controlsEnabled) {
+                            onUpdateConfig {
+                                it.copy(
+                                    presetId = DspPresetId.CUSTOM,
+                                    enabled = it.enabled || checked,
+                                    crossfeedEnabled = checked,
+                                )
+                            }
                         }
                     },
                 )
@@ -461,15 +545,21 @@ private fun DspControlSheet(
                 )
                 Slider(
                     value = config.crossfeedCutoffHz.toFloat(),
+                    enabled = controlsEnabled,
                     onValueChange = { v ->
-                        onUpdateConfig { it.copy(crossfeedCutoffHz = ((v / 25f).roundToInt() * 25.0)) }
+                        if (controlsEnabled) {
+                            onUpdateConfig { it.copy(crossfeedCutoffHz = ((v / 25f).roundToInt() * 25.0)) }
+                        }
                     },
                     valueRange = 500f..900f,
                 )
                 Slider(
                     value = config.crossfeedFeedDb.toFloat(),
+                    enabled = controlsEnabled,
                     onValueChange = { v ->
-                        onUpdateConfig { it.copy(crossfeedFeedDb = ((v * 2f).roundToInt() / 2.0)) }
+                        if (controlsEnabled) {
+                            onUpdateConfig { it.copy(crossfeedFeedDb = ((v * 2f).roundToInt() / 2.0)) }
+                        }
                     },
                     valueRange = 1.5f..9.5f,
                 )
@@ -489,12 +579,15 @@ private fun DspControlSheet(
             )
             Slider(
                 value = config.balanceDb.toFloat(),
+                enabled = controlsEnabled,
                 onValueChange = { v ->
-                    onUpdateConfig {
-                        it.copy(
-                            enabled = it.enabled || kotlin.math.abs(v) > 0.05f,
-                            balanceDb = (v * 10f).roundToInt() / 10.0,
-                        )
+                    if (controlsEnabled) {
+                        onUpdateConfig {
+                            it.copy(
+                                enabled = it.enabled || abs(v) > 0.05f,
+                                balanceDb = (v * 10f).roundToInt() / 10.0,
+                            )
+                        }
                     }
                 },
                 valueRange = -6f..6f,
@@ -505,17 +598,32 @@ private fun DspControlSheet(
             ) {
                 FilterChip(
                     selected = config.invertLeftPhase,
-                    onClick = { onUpdateConfig { it.copy(enabled = true, invertLeftPhase = !it.invertLeftPhase) } },
+                    enabled = controlsEnabled,
+                    onClick = {
+                        if (controlsEnabled) {
+                            onUpdateConfig { it.copy(enabled = true, invertLeftPhase = !it.invertLeftPhase) }
+                        }
+                    },
                     label = { Text("L 180°") },
                 )
                 FilterChip(
                     selected = config.invertRightPhase,
-                    onClick = { onUpdateConfig { it.copy(enabled = true, invertRightPhase = !it.invertRightPhase) } },
+                    enabled = controlsEnabled,
+                    onClick = {
+                        if (controlsEnabled) {
+                            onUpdateConfig { it.copy(enabled = true, invertRightPhase = !it.invertRightPhase) }
+                        }
+                    },
                     label = { Text("R 180°") },
                 )
                 FilterChip(
                     selected = config.monoFold,
-                    onClick = { onUpdateConfig { it.copy(enabled = true, monoFold = !it.monoFold) } },
+                    enabled = controlsEnabled,
+                    onClick = {
+                        if (controlsEnabled) {
+                            onUpdateConfig { it.copy(enabled = true, monoFold = !it.monoFold) }
+                        }
+                    },
                     label = { Text("Mono Fold") },
                 )
             }
@@ -529,8 +637,11 @@ private fun DspControlSheet(
                 Text(stringResource(R.string.lbl_dsp_limiter), style = MaterialTheme.typography.bodyMedium)
                 Switch(
                     checked = config.limiterEnabled,
+                    enabled = controlsEnabled,
                     onCheckedChange = { checked ->
-                        onUpdateConfig { it.copy(limiterEnabled = checked) }
+                        if (controlsEnabled) {
+                            onUpdateConfig { it.copy(limiterEnabled = checked) }
+                        }
                     },
                 )
             }
@@ -552,20 +663,21 @@ private fun DspControlSheet(
                             Text(
                                 text = stringResource(R.string.lbl_auto_eq_title),
                                 style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.primary,
+                                color = accentInk,
                             )
                             val activeBadgeText =
                                 when {
                                     isBitPerfect -> stringResource(R.string.lbl_dsp_usb_bypass_notice)
-                                    !autoEqPolicy.enabled -> "已关闭（手动设备层 Layer A 独立运行）"
-                                    !config.enabled -> "随内置 DSP 总开关旁路"
-                                    !activeAutoEq.applied -> "就绪（等待播放曲目）"
+                                    !autoEqPolicy.enabled -> stringResource(R.string.lbl_dsp_auto_eq_disabled)
+                                    !config.enabled -> stringResource(R.string.lbl_dsp_auto_eq_bypassed)
+                                    !activeAutoEq.applied -> stringResource(R.string.lbl_dsp_auto_eq_ready)
                                     !activeAutoEq.hasNonZeroEq && activeAutoEq.enableCrossfeed ->
                                         "${activeAutoEq.displayLabel} · Flat 0 dB + Crossfeed"
                                     !activeAutoEq.hasNonZeroEq -> "${activeAutoEq.displayLabel} · Flat 0 dB"
                                     activeAutoEq.enableCrossfeed ->
-                                        "${activeAutoEq.displayLabel} · 已叠加 EQ + Crossfeed"
-                                    else -> "${activeAutoEq.displayLabel} · 已叠加 EQ"
+                                        stringResource(R.string.fmt_dsp_auto_eq_eq_crossfeed, activeAutoEq.displayLabel)
+                                    else ->
+                                        stringResource(R.string.fmt_dsp_auto_eq_eq, activeAutoEq.displayLabel)
                                 }
                             Text(
                                 text = activeBadgeText,
@@ -575,8 +687,11 @@ private fun DspControlSheet(
                         }
                         Switch(
                             checked = autoEqPolicy.enabled,
+                            enabled = controlsEnabled,
                             onCheckedChange = { checked ->
-                                onUpdateAutoEqPolicy { it.copy(enabled = checked) }
+                                if (controlsEnabled) {
+                                    onUpdateAutoEqPolicy { it.copy(enabled = checked) }
+                                }
                             },
                         )
                     }
@@ -593,8 +708,11 @@ private fun DspControlSheet(
                         )
                         Switch(
                             checked = autoEqPolicy.classicalAutoCrossfeed,
+                            enabled = controlsEnabled,
                             onCheckedChange = { checked ->
-                                onUpdateAutoEqPolicy { it.copy(classicalAutoCrossfeed = checked) }
+                                if (controlsEnabled) {
+                                    onUpdateAutoEqPolicy { it.copy(classicalAutoCrossfeed = checked) }
+                                }
                             },
                         )
                     }
@@ -611,14 +729,18 @@ private fun DspControlSheet(
                         )
                         Switch(
                             checked = autoEqPolicy.lockWithinClassicalWork,
+                            enabled = controlsEnabled,
                             onCheckedChange = { checked ->
-                                onUpdateAutoEqPolicy { it.copy(lockWithinClassicalWork = checked) }
+                                if (controlsEnabled) {
+                                    onUpdateAutoEqPolicy { it.copy(lockWithinClassicalWork = checked) }
+                                }
                             },
                         )
                     }
 
                     OutlinedButton(
-                        onClick = { showRuleEditor = !showRuleEditor },
+                        onClick = { if (controlsEnabled) showRuleEditor = !showRuleEditor },
+                        enabled = controlsEnabled,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(stringResource(R.string.lbl_auto_eq_customize_rules))
@@ -632,7 +754,8 @@ private fun DspControlSheet(
                             for (g in AutoEqGenreFamily.entries) {
                                 FilterChip(
                                     selected = selectedGenre == g,
-                                    onClick = { selectedGenre = g },
+                                    enabled = controlsEnabled,
+                                    onClick = { if (controlsEnabled) selectedGenre = g },
                                     label = { Text(g.displayName) },
                                 )
                             }
@@ -645,7 +768,8 @@ private fun DspControlSheet(
                             for (v in AutoEqVocalClass.entries) {
                                 FilterChip(
                                     selected = selectedVocal == v,
-                                    onClick = { selectedVocal = v },
+                                    enabled = controlsEnabled,
+                                    onClick = { if (controlsEnabled) selectedVocal = v },
                                     label = { Text(v.displayName) },
                                 )
                             }
@@ -665,9 +789,14 @@ private fun DspControlSheet(
                         val crossOverride = customRule?.crossfeedOverride
 
                         Text(
-                            text = if (customRule != null) "已自定义规则：$slotKey" else "默认规则：$slotKey",
+                            text =
+                                if (customRule != null) {
+                                    stringResource(R.string.fmt_dsp_auto_eq_slot_custom, slotKey)
+                                } else {
+                                    stringResource(R.string.fmt_dsp_auto_eq_slot_default, slotKey)
+                                },
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = accentInk,
                         )
 
                         Row(
@@ -676,55 +805,59 @@ private fun DspControlSheet(
                         ) {
                             FilterChip(
                                 selected = crossOverride == null,
+                                enabled = controlsEnabled,
                                 onClick = {
-                                    onSaveAutoEqRule(
-                                        slotKey,
-                                        AutoEqRuleOverride(
-                                            preampDb = customRule?.preampDb ?: 0.0,
-                                            bands = slotBands,
-                                            crossfeedOverride = null,
-                                        ),
-                                    )
+                                    if (controlsEnabled) {
+                                        onSaveAutoEqRule(
+                                            slotKey,
+                                            AutoEqRuleOverride(
+                                                preampDb = customRule?.preampDb ?: 0.0,
+                                                bands = slotBands,
+                                                crossfeedOverride = null,
+                                            ),
+                                        )
+                                    }
                                 },
-                                label = { Text("Crossfeed: 自动") },
+                                label = { Text(stringResource(R.string.lbl_dsp_crossfeed_auto)) },
                             )
                             FilterChip(
                                 selected = crossOverride == true,
+                                enabled = controlsEnabled,
                                 onClick = {
-                                    onSaveAutoEqRule(
-                                        slotKey,
-                                        AutoEqRuleOverride(
-                                            preampDb = customRule?.preampDb ?: 0.0,
-                                            bands = slotBands,
-                                            crossfeedOverride = true,
-                                        ),
-                                    )
+                                    if (controlsEnabled) {
+                                        onSaveAutoEqRule(
+                                            slotKey,
+                                            AutoEqRuleOverride(
+                                                preampDb = customRule?.preampDb ?: 0.0,
+                                                bands = slotBands,
+                                                crossfeedOverride = true,
+                                            ),
+                                        )
+                                    }
                                 },
-                                label = { Text("强制开启") },
+                                label = { Text(stringResource(R.string.lbl_dsp_crossfeed_force_on)) },
                             )
                             FilterChip(
                                 selected = crossOverride == false,
+                                enabled = controlsEnabled,
                                 onClick = {
-                                    onSaveAutoEqRule(
-                                        slotKey,
-                                        AutoEqRuleOverride(
-                                            preampDb = customRule?.preampDb ?: 0.0,
-                                            bands = slotBands,
-                                            crossfeedOverride = false,
-                                        ),
-                                    )
+                                    if (controlsEnabled) {
+                                        onSaveAutoEqRule(
+                                            slotKey,
+                                            AutoEqRuleOverride(
+                                                preampDb = customRule?.preampDb ?: 0.0,
+                                                bands = slotBands,
+                                                crossfeedOverride = false,
+                                            ),
+                                        )
+                                    }
                                 },
-                                label = { Text("强制关闭") },
+                                label = { Text(stringResource(R.string.lbl_dsp_crossfeed_force_off)) },
                             )
                         }
 
                         slotBands.forEachIndexed { idx, band ->
-                            val freqLabel =
-                                if (band.freqHz >= 1000.0) {
-                                    String.format(Locale.US, "%.1fk Hz", band.freqHz / 1000.0)
-                                } else {
-                                    String.format(Locale.US, "%.0f Hz", band.freqHz)
-                                }
+                            val freqLabel = formatEqBandFreq(band.freqHz)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -738,20 +871,23 @@ private fun DspControlSheet(
                                 )
                                 Slider(
                                     value = band.gainDb.toFloat(),
+                                    enabled = controlsEnabled,
                                     onValueChange = { v ->
-                                        val snapped = (v * 2f).roundToInt() / 2.0
-                                        val mutable = slotBands.toMutableList()
-                                        if (idx in mutable.indices) {
-                                            mutable[idx] = mutable[idx].copy(gainDb = snapped, enabled = true)
+                                        if (controlsEnabled) {
+                                            val snapped = (v * 2f).roundToInt() / 2.0
+                                            val mutable = slotBands.toMutableList()
+                                            if (idx in mutable.indices) {
+                                                mutable[idx] = mutable[idx].copy(gainDb = snapped, enabled = true)
+                                            }
+                                            onSaveAutoEqRule(
+                                                slotKey,
+                                                AutoEqRuleOverride(
+                                                    preampDb = customRule?.preampDb ?: 0.0,
+                                                    bands = mutable,
+                                                    crossfeedOverride = crossOverride,
+                                                ),
+                                            )
                                         }
-                                        onSaveAutoEqRule(
-                                            slotKey,
-                                            AutoEqRuleOverride(
-                                                preampDb = customRule?.preampDb ?: 0.0,
-                                                bands = mutable,
-                                                crossfeedOverride = crossOverride,
-                                            ),
-                                        )
                                     },
                                     valueRange = -12f..12f,
                                     modifier = Modifier.weight(0.54f),
@@ -770,13 +906,15 @@ private fun DspControlSheet(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             OutlinedButton(
-                                onClick = { showRuleApoBox = !showRuleApoBox },
+                                onClick = { if (controlsEnabled) showRuleApoBox = !showRuleApoBox },
+                                enabled = controlsEnabled,
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text(stringResource(R.string.lbl_dsp_import_apo))
                             }
                             OutlinedButton(
-                                onClick = { onResetAutoEqRule(slotKey) },
+                                onClick = { if (controlsEnabled) onResetAutoEqRule(slotKey) },
+                                enabled = controlsEnabled,
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text(stringResource(R.string.lbl_auto_eq_reset_slot))
@@ -786,7 +924,8 @@ private fun DspControlSheet(
                         if (showRuleApoBox) {
                             OutlinedTextField(
                                 value = ruleApoDraft,
-                                onValueChange = { ruleApoDraft = it },
+                                onValueChange = { if (controlsEnabled) ruleApoDraft = it },
+                                enabled = controlsEnabled,
                                 label = { Text("EqualizerAPO .txt ($slotKey)") },
                                 minLines = 3,
                                 maxLines = 6,
@@ -794,9 +933,12 @@ private fun DspControlSheet(
                             )
                             Button(
                                 onClick = {
-                                    onImportAutoEqRuleApo(slotKey, ruleApoDraft, crossOverride)
-                                    showRuleApoBox = false
+                                    if (controlsEnabled) {
+                                        onImportAutoEqRuleApo(slotKey, ruleApoDraft, crossOverride)
+                                        showRuleApoBox = false
+                                    }
                                 },
+                                enabled = controlsEnabled,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Text(stringResource(R.string.lbl_dsp_apply_apo))
@@ -809,4 +951,345 @@ private fun DspControlSheet(
             Spacer(modifier = Modifier.height(6.dp))
         }
     }
+}
+
+private fun formatEqBandFreq(freqHz: Double): String =
+    when {
+        freqHz >= 1000.0 && freqHz % 1000.0 == 0.0 -> "${(freqHz / 1000.0).toInt()}k"
+        freqHz >= 1000.0 -> String.format(Locale.US, "%.1fk", freqHz / 1000.0)
+        else -> String.format(Locale.US, "%.0f", freqHz)
+    }
+
+@Composable
+private fun VerticalEqFader(
+    band: BiquadBand,
+    enabled: Boolean,
+    accentInk: Color,
+    onGainChange: (Double) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var trackHeightPx by remember { mutableIntStateOf(1) }
+    var currentGain by remember(band.gainDb) { mutableFloatStateOf(band.gainDb.toFloat()) }
+    val freqShort = remember(band.freqHz) { formatEqBandFreq(band.freqHz) }
+    val gainLabel = String.format(Locale.US, "%+.0f", band.gainDb)
+    val trackBg = MaterialTheme.colorScheme.surfaceContainerHigh
+    val borderColor = MaterialTheme.colorScheme.outlineVariant
+    val thumbColor = if (enabled && abs(band.gainDb) > 0.05) accentInk else MaterialTheme.colorScheme.onSurfaceVariant
+
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = gainLabel,
+            style = TextStyle(fontSize = 10.sp, fontFeatureSettings = "tnum"),
+            fontFamily = FontFamily.Monospace,
+            color = thumbColor,
+            maxLines = 1,
+        )
+
+        Box(
+            modifier =
+                Modifier.weight(1f)
+                    .fillMaxWidth()
+                    .background(trackBg)
+                    .border(1.dp, borderColor)
+                    .onSizeChanged { trackHeightPx = it.height.coerceAtLeast(1) }
+                    .semantics {
+                        contentDescription = "$freqShort Hz"
+                        stateDescription = String.format(Locale.US, "%+.1f dB", band.gainDb)
+                    }
+                    .pointerInput(enabled, band.freqHz) {
+                        if (!enabled) return@pointerInput
+                        detectTapGestures(
+                            onDoubleTap = { onGainChange(0.0) },
+                        )
+                    }
+                    .pointerInput(enabled, band.freqHz) {
+                        if (!enabled) return@pointerInput
+                        detectVerticalDragGestures(
+                            onDragStart = { currentGain = band.gainDb.toFloat() },
+                            onVerticalDrag = { change, dragAmount ->
+                                change.consume()
+                                val deltaDb = (-dragAmount / trackHeightPx.toFloat()) * 24f
+                                currentGain = (currentGain + deltaDb).coerceIn(-12f, 12f)
+                                val snapped = ((currentGain * 2f).roundToInt() / 2.0).coerceIn(-12.0, 12.0)
+                                onGainChange(snapped)
+                            },
+                        )
+                    },
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val centerY = size.height / 2f
+                drawLine(
+                    color = borderColor,
+                    start = Offset(0f, centerY),
+                    end = Offset(size.width, centerY),
+                    strokeWidth = 1.dp.toPx(),
+                )
+                val fraction = (band.gainDb.toFloat().coerceIn(-12f, 12f) / 12f)
+                val valueY = centerY - (fraction * (size.height * 0.44f))
+                val barTop = minOf(centerY, valueY)
+                val barHeight = abs(valueY - centerY).coerceAtLeast(1.dp.toPx())
+                drawRect(
+                    color = accentInk.copy(alpha = if (enabled) 0.34f else 0.14f),
+                    topLeft = Offset(2.dp.toPx(), barTop),
+                    size = androidx.compose.ui.geometry.Size(size.width - 4.dp.toPx(), barHeight),
+                )
+                drawLine(
+                    color = thumbColor,
+                    start = Offset(2.dp.toPx(), valueY),
+                    end = Offset(size.width - 2.dp.toPx(), valueY),
+                    strokeWidth = 2.5.dp.toPx(),
+                )
+            }
+        }
+
+        Text(
+            text = freqShort,
+            style = TextStyle(fontSize = 10.sp, fontFeatureSettings = "tnum"),
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun FrequencyResponseCanvas(
+    layerAConfig: DspChainConfig,
+    effectiveConfig: DspChainConfig,
+    accentInk: Color,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val surfaceColor = MaterialTheme.colorScheme.surfaceContainerLow
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    val layerAColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+    val curveColor = if (active) accentInk else MaterialTheme.colorScheme.onSurfaceVariant
+
+    val layerAPoints =
+        remember(layerAConfig.preampDb, layerAConfig.bands) {
+            evaluateCompositeResponseDb(layerAConfig.preampDb, layerAConfig.bands)
+        }
+    val combinedPoints =
+        remember(effectiveConfig.preampDb, effectiveConfig.bands) {
+            evaluateCompositeResponseDb(effectiveConfig.preampDb, effectiveConfig.bands)
+        }
+
+    Column(
+        modifier =
+            modifier
+                .background(surfaceColor)
+                .border(1.dp, gridColor)
+                .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = stringResource(R.string.lbl_dsp_eq_curve_title),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = stringResource(R.string.lbl_dsp_eq_layer_a),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = layerAColor,
+                )
+                Text(
+                    text = stringResource(R.string.lbl_dsp_eq_layer_ab),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = curveColor,
+                )
+            }
+        }
+
+        Canvas(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            val w = size.width
+            val h = size.height
+            if (w <= 0f || h <= 0f) return@Canvas
+
+            val maxDb = 15f
+            fun dbToY(db: Float): Float =
+                ((maxDb - db.coerceIn(-maxDb, maxDb)) / (2f * maxDb)) * h
+
+            // Horizontal dB lines: +12, +6, 0, -6, -12
+            for (dbGrid in listOf(12f, 6f, 0f, -6f, -12f)) {
+                val y = dbToY(dbGrid)
+                drawLine(
+                    color = if (dbGrid == 0f) gridColor else gridColor.copy(alpha = 0.45f),
+                    start = Offset(0f, y),
+                    end = Offset(w, y),
+                    strokeWidth = if (dbGrid == 0f) 1.2.dp.toPx() else 0.7.dp.toPx(),
+                )
+            }
+
+            // Vertical octave markers
+            val logMin = ln(20.0)
+            val logSpan = ln(20000.0) - logMin
+            for (hz in listOf(31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0)) {
+                val x = (((ln(hz) - logMin) / logSpan) * w).toFloat()
+                drawLine(
+                    color = gridColor.copy(alpha = 0.35f),
+                    start = Offset(x, 0f),
+                    end = Offset(x, h),
+                    strokeWidth = 0.6.dp.toPx(),
+                )
+            }
+
+            fun buildPath(points: FloatArray): Path {
+                val p = Path()
+                val last = (points.size - 1).coerceAtLeast(1)
+                for (i in points.indices) {
+                    val x = (i.toFloat() / last) * w
+                    val y = dbToY(points[i])
+                    if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
+                }
+                return p
+            }
+
+            // Layer A dashed baseline
+            val layerAPath = buildPath(layerAPoints)
+            drawPath(
+                path = layerAPath,
+                color = layerAColor,
+                style =
+                    Stroke(
+                        width = 1.3.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f),
+                    ),
+            )
+
+            // Combined Layer A + B solid response + fill toward 0 dB
+            val combinedPath = buildPath(combinedPoints)
+            val fillPath =
+                Path().apply {
+                    addPath(combinedPath)
+                    lineTo(w, dbToY(0f))
+                    lineTo(0f, dbToY(0f))
+                    close()
+                }
+            drawPath(
+                path = fillPath,
+                brush =
+                    Brush.verticalGradient(
+                        colors = listOf(curveColor.copy(alpha = 0.24f), curveColor.copy(alpha = 0.03f)),
+                    ),
+            )
+            drawPath(
+                path = combinedPath,
+                color = curveColor,
+                style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
+            )
+        }
+    }
+}
+
+private fun evaluateCompositeResponseDb(
+    preampDb: Double,
+    bands: List<BiquadBand>,
+    bins: Int = 96,
+    sampleRateHz: Double = 48000.0,
+): FloatArray {
+    val activeCoeffs =
+        bands.mapNotNull { b ->
+            if (!b.enabled) return@mapNotNull null
+            if (b.type != BiquadType.LOW_PASS && b.type != BiquadType.HIGH_PASS && abs(b.gainDb) <= 1e-4) {
+                return@mapNotNull null
+            }
+            computeRbjNormalizedCoeffs(b, sampleRateHz)
+        }
+
+    val out = FloatArray(bins)
+    val logMin = ln(20.0)
+    val logSpan = ln(20000.0) - logMin
+    for (i in 0 until bins) {
+        val freq = kotlin.math.exp(logMin + (i.toDouble() / (bins - 1).coerceAtLeast(1)) * logSpan)
+        val w = 2.0 * PI * freq.coerceIn(10.0, sampleRateHz * 0.49) / sampleRateHz
+        val cos1 = cos(w)
+        val sin1 = sin(w)
+        val cos2 = cos(2.0 * w)
+        val sin2 = sin(2.0 * w)
+        var totalDb = preampDb
+        for (c in activeCoeffs) {
+            val nr = c.b0 + c.b1 * cos1 + c.b2 * cos2
+            val ni = -(c.b1 * sin1 + c.b2 * sin2)
+            val dr = 1.0 + c.a1 * cos1 + c.a2 * cos2
+            val di = -(c.a1 * sin1 + c.a2 * sin2)
+            val magSq = ((nr * nr + ni * ni) / (dr * dr + di * di).coerceAtLeast(1e-24)).coerceAtLeast(1e-12)
+            totalDb += 10.0 * log10(magSq)
+        }
+        out[i] = totalDb.toFloat()
+    }
+    return out
+}
+
+private data class NormalizedBiquad(val b0: Double, val b1: Double, val b2: Double, val a1: Double, val a2: Double)
+
+private fun computeRbjNormalizedCoeffs(band: BiquadBand, sampleRateHz: Double): NormalizedBiquad {
+    val fc = band.freqHz.coerceIn(10.0, sampleRateHz * 0.49)
+    val w0 = 2.0 * PI * fc / sampleRateHz
+    val cosW0 = cos(w0)
+    val sinW0 = sin(w0)
+    val q = band.q.coerceIn(0.05, 30.0)
+    val alpha = sinW0 / (2.0 * q)
+    val a = 10.0.pow(band.gainDb.coerceIn(-24.0, 24.0) / 40.0)
+    val rb0: Double
+    val rb1: Double
+    val rb2: Double
+    val ra0: Double
+    val ra1: Double
+    val ra2: Double
+    when (band.type) {
+        BiquadType.PEAKING -> {
+            rb0 = 1.0 + alpha * a
+            rb1 = -2.0 * cosW0
+            rb2 = 1.0 - alpha * a
+            ra0 = 1.0 + alpha / a
+            ra1 = -2.0 * cosW0
+            ra2 = 1.0 - alpha / a
+        }
+        BiquadType.LOW_SHELF -> {
+            val t = 2.0 * sqrt(a) * alpha
+            rb0 = a * ((a + 1.0) - (a - 1.0) * cosW0 + t)
+            rb1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosW0)
+            rb2 = a * ((a + 1.0) - (a - 1.0) * cosW0 - t)
+            ra0 = (a + 1.0) + (a - 1.0) * cosW0 + t
+            ra1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosW0)
+            ra2 = (a + 1.0) + (a - 1.0) * cosW0 - t
+        }
+        BiquadType.HIGH_SHELF -> {
+            val t = 2.0 * sqrt(a) * alpha
+            rb0 = a * ((a + 1.0) + (a - 1.0) * cosW0 + t)
+            rb1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosW0)
+            rb2 = a * ((a + 1.0) + (a - 1.0) * cosW0 - t)
+            ra0 = (a + 1.0) - (a - 1.0) * cosW0 + t
+            ra1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosW0)
+            ra2 = (a + 1.0) - (a - 1.0) * cosW0 - t
+        }
+        BiquadType.LOW_PASS -> {
+            rb0 = (1.0 - cosW0) / 2.0
+            rb1 = 1.0 - cosW0
+            rb2 = (1.0 - cosW0) / 2.0
+            ra0 = 1.0 + alpha
+            ra1 = -2.0 * cosW0
+            ra2 = 1.0 - alpha
+        }
+        BiquadType.HIGH_PASS -> {
+            rb0 = (1.0 + cosW0) / 2.0
+            rb1 = -(1.0 + cosW0)
+            rb2 = (1.0 + cosW0) / 2.0
+            ra0 = 1.0 + alpha
+            ra1 = -2.0 * cosW0
+            ra2 = 1.0 - alpha
+        }
+    }
+    return NormalizedBiquad(rb0 / ra0, rb1 / ra0, rb2 / ra0, ra1 / ra0, ra2 / ra0)
 }

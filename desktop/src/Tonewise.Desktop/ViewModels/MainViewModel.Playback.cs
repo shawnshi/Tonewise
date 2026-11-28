@@ -532,7 +532,12 @@ public sealed partial class MainViewModel
         }
 
         PlayTrack(alternate, initialSeekFraction: ratio);
-        StatusMessage = $"已切换录音版本（乐章 {ratio:P0} 处）：{alternate.AlternateVersionLabel}";
+        double targetSeconds = alternate.DurationMs > 0
+            ? (alternate.DurationMs / 1000.0) * ratio
+            : PlaybackDurationSeconds * ratio;
+        var span = TimeSpan.FromSeconds(Math.Max(0, targetSeconds));
+        string syncClock = span.TotalHours >= 1.0 ? span.ToString(@"h\:mm\:ss") : span.ToString(@"mm\:ss");
+        StatusMessage = $"已切换录音版本（同步至 {syncClock} · {ratio:P0}）：{alternate.AlternateVersionLabel}";
     }
 
     private void UpdateClassicalAndBiographyPanel(TrackItem track)
@@ -554,7 +559,13 @@ public sealed partial class MainViewModel
             t => t.MovementNumber,
             t => WorkAwareShuffleEngine.BuildAlbumScope(t.Album, t.ConductorsDisplay)
         );
-        foreach (var alt in alts) AlternateRecordings.Add(alt);
+        foreach (var alt in alts
+            .OrderBy(t => t.AlternateVersionLabel, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(t => t.TrackUid, StringComparer.Ordinal))
+        {
+            AlternateRecordings.Add(alt);
+        }
+        OnPropertyChanged(nameof(CurrentRecordingVersionLabel));
         HasAlternateRecordings = AlternateRecordings.Count > 0;
 
         var enc = _store.GetEncyclopediaService();

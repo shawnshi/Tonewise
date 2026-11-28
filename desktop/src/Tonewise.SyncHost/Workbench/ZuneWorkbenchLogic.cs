@@ -44,9 +44,11 @@ public sealed record QuickplayCardSeed(
 public static class ZuneColorMath
 {
     public static readonly (byte R, byte G, byte B) DefaultDarkAccentRgb = (0xE5, 0x00, 0x6B);
+    public static readonly (byte R, byte G, byte B) DefaultDarkAccentInkRgb = (0xFF, 0x5C, 0x9E);
     public static readonly (byte R, byte G, byte B) DefaultLightAccentRgb = (0xC2, 0x00, 0x52);
 
     private static readonly (byte R, byte G, byte B) BlackRgb = (0x00, 0x00, 0x00);
+    private static readonly (byte R, byte G, byte B) DarkElevatedRgb = (0x1C, 0x1C, 0x1C);
     private static readonly (byte R, byte G, byte B) WhiteRgb = (0xFF, 0xFF, 0xFF);
 
     public static (byte R, byte G, byte B) ContrastingOnColor(byte r, byte g, byte b) =>
@@ -125,6 +127,48 @@ public static class ZuneColorMath
         return ComputeContrastRatio(best, bg) >= 4.5
             ? best
             : (isDarkTheme ? DefaultDarkAccentRgb : DefaultLightAccentRgb);
+    }
+
+    public static (byte R, byte G, byte B) ClampAccentInkForTheme(byte r, byte g, byte b, bool isDarkTheme)
+    {
+        if (!isDarkTheme)
+        {
+            return ClampAccentForTheme(r, g, b, isDarkTheme: false);
+        }
+
+        var (h, s, l) = RgbToHsl(r, g, b);
+        if (s < 0.18)
+        {
+            return DefaultDarkAccentInkRgb;
+        }
+
+        const double targetContrast = 4.55;
+        double clampedS = Math.Clamp(s, 0.45, 0.96);
+        double curL = Math.Clamp(l, 0.56, 0.88);
+        var candidate = HslToRgb(h, clampedS, curL);
+        if (ComputeContrastRatio(candidate, DarkElevatedRgb) >= targetContrast)
+        {
+            return candidate;
+        }
+
+        double lo = curL;
+        double hi = 0.96;
+        var best = DefaultDarkAccentInkRgb;
+        for (int i = 0; i < 20; i++)
+        {
+            double mid = (lo + hi) * 0.5;
+            var test = HslToRgb(h, clampedS, mid);
+            if (ComputeContrastRatio(test, DarkElevatedRgb) >= targetContrast)
+            {
+                best = test;
+                hi = mid;
+            }
+            else
+            {
+                lo = mid;
+            }
+        }
+        return ComputeContrastRatio(best, DarkElevatedRgb) >= 4.5 ? best : DefaultDarkAccentInkRgb;
     }
 
     public static (byte R, byte G, byte B)? SelectDominantVibrantRgb(ReadOnlySpan<(byte R, byte G, byte B)> pixels)
@@ -413,7 +457,6 @@ public static class ZuneNavigationRoutes
         ("tracks", "tracks"),
         ("artists", "artists"),
         ("classical", "classical"),
-        ("composers", "composers"),
         ("conductors", "conductors"),
         ("folders", "folder"),
     ];

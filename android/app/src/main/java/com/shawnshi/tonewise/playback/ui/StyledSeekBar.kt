@@ -55,6 +55,9 @@ constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
         binding.seekBarSlider.setLabelFormatter { value ->
             value.toLong().dsToSecs().formatDurationSecs(true)
         }
+        binding.seekBarSlider.dragTooltipFormatter = { value ->
+            value.toLong().dsToSecs().formatDurationSecs(true)
+        }
         binding.seekBarDuration.setOnClickListener {
             showRemainingTime = !showRemainingTime
             updateDurationLabel(positionDs)

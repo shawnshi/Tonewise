@@ -19,7 +19,9 @@
 package com.shawnshi.tonewise.playback
 
 import android.os.Bundle
+import android.view.GestureDetector
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Toast
 import androidx.core.view.doOnLayout
@@ -28,6 +30,7 @@ import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlin.math.abs
 import kotlinx.coroutines.launch
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentPlaybackBarBinding
@@ -72,11 +75,36 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
         super.onBindingCreated(binding, savedInstanceState)
 
         // --- UI SETUP ---
+        val swipeDetector =
+            GestureDetector(
+                requireContext(),
+                object : GestureDetector.SimpleOnGestureListener() {
+                    override fun onFling(
+                        e1: MotionEvent?,
+                        e2: MotionEvent,
+                        velocityX: Float,
+                        velocityY: Float,
+                    ): Boolean {
+                        val startX = e1?.x ?: return false
+                        val dx = e2.x - startX
+                        val dy = e2.y - (e1.y)
+                        if (abs(dx) > 96f && abs(dx) > abs(dy) * 1.4f && abs(velocityX) > 220f) {
+                            if (dx < 0f) playbackModel.next() else playbackModel.prev()
+                            return true
+                        }
+                        return false
+                    }
+                },
+            )
         binding.root.apply {
             setOnClickListener { playbackModel.openPlayback() }
             setOnLongClickListener {
                 playbackModel.song.value?.let(detailModel::showAlbum)
                 true
+            }
+            setOnTouchListener { _, event ->
+                swipeDetector.onTouchEvent(event)
+                false
             }
         }
 
@@ -88,9 +116,17 @@ class PlaybackBarFragment : ViewBindingFragment<FragmentPlaybackBarBinding>() {
 
         // Set up actions
         binding.playbackPlayPause.setOnClickListener { playbackModel.togglePlaying() }
-        binding.playbackAppbarMore.setOnClickListener {
-            if (parentFragmentManager.findFragmentByTag(ZuneAppBarDrawerSheet.TAG) == null) {
-                ZuneAppBarDrawerSheet().show(parentFragmentManager, ZuneAppBarDrawerSheet.TAG)
+        binding.playbackAppbarMore.apply {
+            contentDescription = getString(R.string.lbl_queue)
+            setOnClickListener {
+                playbackModel.openPlayback()
+                playbackModel.openQueue()
+            }
+            setOnLongClickListener {
+                if (parentFragmentManager.findFragmentByTag(ZuneAppBarDrawerSheet.TAG) == null) {
+                    ZuneAppBarDrawerSheet().show(parentFragmentManager, ZuneAppBarDrawerSheet.TAG)
+                }
+                true
             }
         }
         if (!uiSettings.roundMode) {

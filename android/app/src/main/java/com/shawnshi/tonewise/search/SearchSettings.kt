@@ -44,6 +44,8 @@ class SearchSettingsImpl @Inject constructor(@ApplicationContext context: Contex
             if (intCode and BIT_SONGS == BIT_SONGS) add(MusicType.SONGS)
             if (intCode and BIT_ALBUMS == BIT_ALBUMS) add(MusicType.ALBUMS)
             if (intCode and BIT_ARTISTS == BIT_ARTISTS) add(MusicType.ARTISTS)
+            if (intCode and BIT_COMPOSERS == BIT_COMPOSERS) add(MusicType.COMPOSERS)
+            if (intCode and BIT_CONDUCTORS == BIT_CONDUCTORS) add(MusicType.CONDUCTORS)
             if (intCode and BIT_GENRES == BIT_GENRES) add(MusicType.GENRES)
             if (intCode and BIT_PLAYLISTS == BIT_PLAYLISTS) add(MusicType.PLAYLISTS)
         }
@@ -52,6 +54,8 @@ class SearchSettingsImpl @Inject constructor(@ApplicationContext context: Contex
             if (MusicType.SONGS in value) intCode = intCode or BIT_SONGS
             if (MusicType.ALBUMS in value) intCode = intCode or BIT_ALBUMS
             if (MusicType.ARTISTS in value) intCode = intCode or BIT_ARTISTS
+            if (MusicType.COMPOSERS in value) intCode = intCode or BIT_COMPOSERS
+            if (MusicType.CONDUCTORS in value) intCode = intCode or BIT_CONDUCTORS
             if (MusicType.GENRES in value) intCode = intCode or BIT_GENRES
             if (MusicType.PLAYLISTS in value) intCode = intCode or BIT_PLAYLISTS
             sharedPreferences.edit { putInt(getString(R.string.set_key_search_filters), intCode) }
@@ -64,6 +68,8 @@ class SearchSettingsImpl @Inject constructor(@ApplicationContext context: Contex
                 MusicType.SONGS -> BIT_SONGS
                 MusicType.ALBUMS -> BIT_ALBUMS
                 MusicType.ARTISTS -> BIT_ARTISTS
+                MusicType.COMPOSERS -> BIT_COMPOSERS
+                MusicType.CONDUCTORS -> BIT_CONDUCTORS
                 MusicType.GENRES -> BIT_GENRES
                 MusicType.PLAYLISTS -> BIT_PLAYLISTS
                 else -> 0
@@ -73,10 +79,12 @@ class SearchSettingsImpl @Inject constructor(@ApplicationContext context: Contex
 
     private companion object {
         const val OLD_KEY_SEARCH_FILTER = "KEY_SEARCH_FILTER"
-        const val BIT_SONGS = 0b00001
-        const val BIT_ALBUMS = 0b00010
-        const val BIT_ARTISTS = 0b00100
-        const val BIT_GENRES = 0b01000
-        const val BIT_PLAYLISTS = 0b10000
+        const val BIT_SONGS = 0b0000001
+        const val BIT_ALBUMS = 0b0000010
+        const val BIT_ARTISTS = 0b0000100
+        const val BIT_GENRES = 0b0001000
+        const val BIT_PLAYLISTS = 0b0010000
+        const val BIT_COMPOSERS = 0b0100000
+        const val BIT_CONDUCTORS = 0b1000000
     }
 }

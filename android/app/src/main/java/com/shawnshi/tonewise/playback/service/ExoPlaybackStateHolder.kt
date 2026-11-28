@@ -155,6 +155,9 @@ class ExoPlaybackStateHolder(
     val wantsPlayback: Boolean
         get() = player.playWhenReady
 
+    override val isClassicalShuffleLocked: Boolean
+        get() = classicalShuffleLock.isLocked
+
     fun attach() {
         playbackManager.registerStateHolder(this)
         musicRepository.addUpdateListener(this)
@@ -561,6 +564,23 @@ class ExoPlaybackStateHolder(
         }
         updatePauseAtEndOfMediaItems()
         playbackManager.ack(this, ack)
+        deferSave()
+    }
+
+    override fun clearUpcoming() {
+        val rawQueue = resolveQueue()
+        val curIdx = rawQueue.resolveIndex()
+        val indices = player.unscrambleQueueIndices()
+        if (curIdx < 0 || curIdx >= indices.lastIndex) {
+            return
+        }
+        val toRemoveDescending =
+            (curIdx + 1 until indices.size).map { indices[it] }.sortedDescending()
+        for (trueIdx in toRemoveDescending) {
+            player.removeMediaItem(trueIdx)
+        }
+        updatePauseAtEndOfMediaItems()
+        playbackManager.ack(this, StateAck.QueueReordered)
         deferSave()
     }
 

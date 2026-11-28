@@ -5,11 +5,13 @@
 
 package com.shawnshi.tonewise.home.collection
 
+import android.annotation.SuppressLint
 import android.graphics.Typeface
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -50,12 +52,22 @@ class CollectionHubFragment : ViewBindingFragment<FragmentCollectionHubBinding>(
     override fun onCreateBinding(inflater: LayoutInflater) =
         FragmentCollectionHubBinding.inflate(inflater)
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun onBindingCreated(
         binding: FragmentCollectionHubBinding,
         savedInstanceState: Bundle?,
     ) {
         super.onBindingCreated(binding, savedInstanceState)
 
+        binding.collectionPivotScroll.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE ->
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+            }
+            false
+        }
         binding.collectionSortButton.setOnClickListener { homeModel.openSortForCurrentPivot() }
 
         collectImmediately(homeModel.visibleCollectionPivots) { pivots ->
@@ -152,24 +164,34 @@ class CollectionHubFragment : ViewBindingFragment<FragmentCollectionHubBinding>(
             }
         }
 
-        if (renderedPivot == pivot && childFragmentManager.findFragmentById(R.id.collection_fragment_container) != null) {
+        val targetTag = "pivot_${pivot.name}"
+        if (renderedPivot == pivot && childFragmentManager.findFragmentByTag(targetTag)?.isVisible == true) {
             return
         }
         renderedPivot = pivot
-        val fragment: Fragment =
-            when (pivot) {
-                CollectionPivot.ALBUMS -> AlbumListFragment()
-                CollectionPivot.TRACKS -> SongListFragment()
-                CollectionPivot.ARTISTS -> ArtistListFragment()
-                CollectionPivot.GENRES -> GenreListFragment()
-                CollectionPivot.CLASSICAL -> ClassicalHierarchyFragment()
-                CollectionPivot.COMPOSERS -> ComposerListFragment()
-                CollectionPivot.CONDUCTORS -> ConductorListFragment()
-                CollectionPivot.PLAYLISTS -> PlaylistListFragment()
+        val tx = childFragmentManager.beginTransaction()
+        for (existing in childFragmentManager.fragments) {
+            if (existing.tag != targetTag && existing.isVisible) {
+                tx.hide(existing)
             }
-        childFragmentManager
-            .beginTransaction()
-            .replace(R.id.collection_fragment_container, fragment, "pivot_${pivot.name}")
-            .commit()
+        }
+        val cached = childFragmentManager.findFragmentByTag(targetTag)
+        if (cached != null) {
+            tx.show(cached)
+        } else {
+            val fragment: Fragment =
+                when (pivot) {
+                    CollectionPivot.ALBUMS -> AlbumListFragment()
+                    CollectionPivot.TRACKS -> SongListFragment()
+                    CollectionPivot.ARTISTS -> ArtistListFragment()
+                    CollectionPivot.GENRES -> GenreListFragment()
+                    CollectionPivot.CLASSICAL -> ClassicalHierarchyFragment()
+                    CollectionPivot.COMPOSERS -> ComposerListFragment()
+                    CollectionPivot.CONDUCTORS -> ConductorListFragment()
+                    CollectionPivot.PLAYLISTS -> PlaylistListFragment()
+                }
+            tx.add(R.id.collection_fragment_container, fragment, targetTag)
+        }
+        tx.commitNowAllowingStateLoss()
     }
 }

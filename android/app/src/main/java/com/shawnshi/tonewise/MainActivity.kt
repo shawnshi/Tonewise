@@ -170,6 +170,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         startIntentAction(intent)
     }
 
@@ -244,6 +245,16 @@ class MainActivity : AppCompatActivity() {
                 val ok = lastFmRepository.handleBrowserAuthCallback(token)
                 if (ok) {
                     showToast(R.string.lbl_lastfm_connected_toast)
+                } else {
+                    val msg = lastFmRepository.state.value.statusMessage
+                    if (msg.isNotBlank()) {
+                        android.widget.Toast.makeText(
+                                this@MainActivity,
+                                msg,
+                                android.widget.Toast.LENGTH_LONG,
+                            )
+                            .show()
+                    }
                 }
             }
             return true

@@ -97,6 +97,26 @@
 
                 <com.google.android.material.chip.Chip
                     style="@style/Widget.Auxio.Chip.Filter"
+                    android:id="@+id/search_filter_composers"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:checkable="true"
+                    android:text="@string/lbl_composers" />
+
+                <com.google.android.material.chip.Chip
+                    style="@style/Widget.Auxio.Chip.Filter"
+                    android:id="@+id/search_filter_conductors"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:checkable="true"
+                    android:text="@string/lbl_conductors" />
+
+                <com.google.android.material.chip.Chip
+                    style="@style/Widget.Auxio.Chip.Filter"
                     android:id="@+id/search_filter_genres"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"

@@ -35,6 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.res.stringResource
@@ -47,19 +48,26 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.snackbar.Snackbar
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlin.math.min
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.shawnshi.tonewise.R
 import com.shawnshi.tonewise.databinding.FragmentQueueBinding
 import com.shawnshi.tonewise.list.EditClickListListener
 import com.shawnshi.tonewise.music.MusicRepository
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.sync.AutoDjEngine
 import com.shawnshi.tonewise.sync.LanSyncRepository
+import com.shawnshi.tonewise.sync.SceneBanner
 import com.shawnshi.tonewise.sync.SessionSlotItem
 import com.shawnshi.tonewise.sync.SessionSlotStore
+import com.shawnshi.tonewise.ui.DynamicAccentController
 import com.shawnshi.tonewise.ui.TonewiseComposeTheme
+import com.shawnshi.tonewise.ui.UISettings
 import com.shawnshi.tonewise.ui.ViewBindingFragment
 import com.shawnshi.tonewise.util.collectImmediately
 import com.shawnshi.tonewise.util.showToast
@@ -76,6 +84,8 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
     @Inject lateinit var sessionSlotStore: SessionSlotStore
     @Inject lateinit var musicRepository: MusicRepository
     @Inject lateinit var lanSyncRepository: LanSyncRepository
+    @Inject lateinit var uiSettings: UISettings
+    @Inject lateinit var dynamicAccentController: DynamicAccentController
     private val queueModel: QueueViewModel by viewModels()
     private val playbackModel: PlaybackViewModel by activityViewModels()
     private val queueAdapter = QueueAdapter(this)
@@ -91,19 +101,55 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 val slots by sessionSlotStore.slots.collectAsStateWithLifecycle()
+                val scenes by lanSyncRepository.scenes.collectAsStateWithLifecycle()
                 val activeSlotIndex by sessionSlotStore.activeSlotIndex.collectAsStateWithLifecycle()
                 val activeSceneLabel by
                     sessionSlotStore.activeSceneLabel.collectAsStateWithLifecycle()
+                val activeAccent by
+                    dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
+                val currentQueue by queueModel.queue.collectAsStateWithLifecycle()
+                val currentQueueIdx by queueModel.index.collectAsStateWithLifecycle()
+                val hasUpcoming = currentQueueIdx in 0 until currentQueue.lastIndex
+                val presetScenes =
+                    remember(scenes) {
+                        scenes.filterNot { it.id == "44444444-4444-4444-8444-444444444444" }.take(5)
+                    }
 
-                TonewiseComposeTheme {
+                TonewiseComposeTheme(
+                    roundMode = uiSettings.roundMode,
+                    dynamicAccentArgb = if (uiSettings.enableDynamicCoverAccent) activeAccent else null,
+                ) {
                     QueuePersistentSlotBar(
                         slots = slots,
+                        presetScenes = presetScenes,
                         activeSlotIndex = activeSlotIndex,
-                        onSelectSlot = { slotIdx, existing ->
-                            handleSlotChipClick(slotIdx, activeSlotIndex, activeSceneLabel, existing)
+                        hasUpcoming = hasUpcoming,
+                        onSelectSlot = { slotIdx, existing, presetScene ->
+                            handleSlotChipClick(
+                                targetSlotIndex = slotIdx,
+                                activeSlotIndex = activeSlotIndex,
+                                activeSceneLabel = activeSceneLabel,
+                                slots = slots,
+                                existing = existing,
+                                presetScene = presetScene,
+                            )
                         },
                         onSaveCurrent = {
                             saveCurrentQueueToSlot(activeSlotIndex, activeSceneLabel)
+                        },
+                        onClearUpcoming = {
+                            val cleared = queueModel.clearUpcoming()
+                            if (cleared.isNotEmpty()) {
+                                Snackbar.make(
+                                        requireBinding().root,
+                                        getString(R.string.lbl_queue_cleared_upcoming, cleared.size),
+                                        Snackbar.LENGTH_LONG,
+                                    )
+                                    .setAction(R.string.lbl_undo) {
+                                        queueModel.restoreUpcoming(cleared)
+                                    }
+                                    .show()
+                            }
                         },
                     )
                 }
@@ -246,21 +292,66 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
         targetSlotIndex: Int,
         activeSlotIndex: Int,
         activeSceneLabel: String,
+        slots: List<SessionSlotItem>,
         existing: SessionSlotItem?,
+        presetScene: SceneBanner?,
     ) {
+        val outgoingPopulated =
+            SessionSlotStore.isSlotPopulated(slots.firstOrNull { it.slotIndex == activeSlotIndex })
         if (targetSlotIndex == activeSlotIndex) {
-            saveCurrentQueueToSlot(targetSlotIndex, activeSceneLabel, showFeedback = true)
-            return
+            if (existing != null && existing.queueTrackUids.isNotEmpty()) {
+                saveCurrentQueueToSlot(targetSlotIndex, activeSceneLabel, showFeedback = true)
+                return
+            }
+        } else if (outgoingPopulated) {
+            // Snapshot only an already-populated outgoing slot before switching away.
+            saveCurrentQueueToSlot(
+                activeSlotIndex,
+                activeSceneLabel,
+                showFeedback = false,
+                activate = false,
+            )
         }
-        // Snapshot the outgoing active slot automatically before switching away.
-        saveCurrentQueueToSlot(
-            activeSlotIndex,
-            activeSceneLabel,
-            showFeedback = false,
-            activate = false,
-        )
         if (existing == null || existing.queueTrackUids.isEmpty()) {
-            saveCurrentQueueToSlot(targetSlotIndex, "Default", showFeedback = true)
+            if (presetScene != null) {
+                val appContext = requireContext().applicationContext
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val (_, ordered) =
+                        withContext(Dispatchers.Default) {
+                            lanSyncRepository.generateAutoDjPlaylist(
+                                scene = presetScene,
+                                targetCount = AutoDjEngine.DEFAULT_TARGET_COUNT,
+                            )
+                        }
+                    if (!isAdded) return@launch
+                    if (ordered.isEmpty()) {
+                        requireContext().showToast(R.string.lbl_scene_no_matches)
+                        return@launch
+                    }
+                    val canonicalUids = lanSyncRepository.resolveCanonicalTrackUids(ordered)
+                    sessionSlotStore.saveSlot(
+                        SessionSlotItem(
+                            slotIndex = targetSlotIndex,
+                            name = presetScene.title,
+                            sceneId = presetScene.id,
+                            updatedAtMs = System.currentTimeMillis(),
+                            queueTrackUids = canonicalUids,
+                            currentIndex = 0,
+                            positionMs = 0L,
+                        ),
+                        activate = true,
+                    )
+                    playbackModel.play(ordered)
+                    Toast.makeText(
+                            appContext,
+                            getString(R.string.fmt_scene_switched_slot, targetSlotIndex, presetScene.title),
+                            Toast.LENGTH_SHORT,
+                        )
+                        .show()
+                }
+            } else {
+                saveCurrentQueueToSlot(targetSlotIndex, "Default", showFeedback = true)
+            }
             return
         }
         viewLifecycleOwner.lifecycleScope.launch {
@@ -289,9 +380,12 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
 @Composable
 private fun QueuePersistentSlotBar(
     slots: List<SessionSlotItem>,
+    presetScenes: List<SceneBanner>,
     activeSlotIndex: Int,
-    onSelectSlot: (Int, SessionSlotItem?) -> Unit,
+    hasUpcoming: Boolean,
+    onSelectSlot: (Int, SessionSlotItem?, SceneBanner?) -> Unit,
     onSaveCurrent: () -> Unit,
+    onClearUpcoming: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -305,18 +399,29 @@ private fun QueuePersistentSlotBar(
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                for (slotIdx in 1..5) {
+                for (idx in 0 until 5) {
+                    val slotIdx = idx + 1
                     val existing = slots.firstOrNull { it.slotIndex == slotIdx }
+                    val presetScene =
+                        existing?.sceneId?.let { sid ->
+                            presetScenes.firstOrNull {
+                                it.id.equals(sid, ignoreCase = true) ||
+                                    it.title.startsWith(sid, ignoreCase = true)
+                            }
+                        } ?: presetScenes.getOrNull(idx)
                     val selected = activeSlotIndex == slotIdx
+                    val hasTracks = existing != null && existing.queueTrackUids.isNotEmpty()
                     val label =
-                        if (existing != null) {
+                        if (hasTracks) {
                             "#$slotIdx (${existing.queueTrackUids.size})"
+                        } else if (presetScene != null) {
+                            "#$slotIdx ${presetScene.title.substringBefore('·').trim()}"
                         } else {
                             "+ #$slotIdx"
                         }
                     FilterChip(
                         selected = selected,
-                        onClick = { onSelectSlot(slotIdx, existing) },
+                        onClick = { onSelectSlot(slotIdx, existing, presetScene) },
                         label = { Text(label) },
                     )
                 }
@@ -324,6 +429,12 @@ private fun QueuePersistentSlotBar(
                     onClick = onSaveCurrent,
                     label = { Text(stringResource(R.string.lbl_save_current_slot)) },
                 )
+                if (hasUpcoming) {
+                    AssistChip(
+                        onClick = onClearUpcoming,
+                        label = { Text(stringResource(R.string.lbl_queue_clear_upcoming)) },
+                    )
+                }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         }

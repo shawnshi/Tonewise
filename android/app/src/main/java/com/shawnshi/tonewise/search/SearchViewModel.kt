@@ -116,6 +116,10 @@ constructor(
                     songs = if (MusicType.SONGS in filters) library.songs else null,
                     albums = if (MusicType.ALBUMS in filters) library.albums else null,
                     artists = if (MusicType.ARTISTS in filters) library.artists else null,
+                    composers =
+                        if (MusicType.COMPOSERS in filters) musicRepository.composers else null,
+                    conductors =
+                        if (MusicType.CONDUCTORS in filters) musicRepository.conductors else null,
                     genres = if (MusicType.GENRES in filters) library.genres else null,
                     playlists = if (MusicType.PLAYLISTS in filters) library.playlists else null,
                 )
@@ -124,6 +128,8 @@ constructor(
                     songs = library.songs,
                     albums = library.albums,
                     artists = library.artists,
+                    composers = musicRepository.composers,
+                    conductors = musicRepository.conductors,
                     genres = library.genres,
                     playlists = library.playlists,
                 )
@@ -135,6 +141,24 @@ constructor(
             results.artists?.let {
                 L.d("Adding ${it.size} artists to search results")
                 val header = BasicHeader(R.string.lbl_artists)
+                add(header)
+                addAll(SORT.artists(it))
+            }
+            results.composers?.let {
+                L.d("Adding ${it.size} composers to search results")
+                val header = BasicHeader(R.string.lbl_composers)
+                if (isNotEmpty()) {
+                    add(PlainDivider(header))
+                }
+                add(header)
+                addAll(SORT.artists(it))
+            }
+            results.conductors?.let {
+                L.d("Adding ${it.size} conductors to search results")
+                val header = BasicHeader(R.string.lbl_conductors)
+                if (isNotEmpty()) {
+                    add(PlainDivider(header))
+                }
                 add(header)
                 addAll(SORT.artists(it))
             }

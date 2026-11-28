@@ -10,25 +10,85 @@ namespace Tonewise.Desktop.Models;
 
 public static class ClassicalUiPalette
 {
-    public static readonly Color ZuneMagentaColor = Color.FromArgb(0xFF, 0xFF, 0x00, 0x99);
-    public static readonly SolidColorBrush ZuneMagentaBrush = new(ZuneMagentaColor);
-    public static readonly SolidColorBrush MutedBrush = new(Color.FromArgb(0xCC, 0x9E, 0x9E, 0xA8));
-    public static readonly SolidColorBrush SubtleBorderBrush = new(Color.FromArgb(0x44, 0x80, 0x80, 0x90));
-    public static readonly SolidColorBrush MatrixTileActiveBrush = new(ZuneMagentaColor);
-    public static readonly SolidColorBrush MatrixTileIdleBrush = new(Color.FromArgb(0xFF, 0x16, 0x16, 0x16));
-    public static readonly SolidColorBrush MatrixTileDisabledBrush = new(Color.FromArgb(0xFF, 0x0B, 0x0B, 0x0B));
-    public static readonly SolidColorBrush WhiteBrush = new(Colors.White);
-    public static readonly SolidColorBrush DimTextBrush = new(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
-    public static readonly SolidColorBrush SelectionTintBrush = new(Color.FromArgb(0x22, 0xFF, 0x00, 0x99));
+    public static readonly SolidColorBrush AccentBrush = new(Color.FromArgb(0xFF, 0xE5, 0x00, 0x6B));
+    public static readonly SolidColorBrush AccentInkBrush = new(Color.FromArgb(0xFF, 0xFF, 0x5C, 0x9E));
+    public static readonly SolidColorBrush MutedBrush = new(Color.FromArgb(0xFF, 0xB5, 0xB5, 0xB5));
+    public static readonly SolidColorBrush SubtleBorderBrush = new(Color.FromArgb(0xFF, 0x29, 0x29, 0x29));
+    public static readonly SolidColorBrush MatrixTileActiveBrush = new(Color.FromArgb(0xFF, 0xE5, 0x00, 0x6B));
+    public static readonly SolidColorBrush MatrixTileIdleBrush = new(Color.FromArgb(0xFF, 0x15, 0x15, 0x15));
+    public static readonly SolidColorBrush MatrixTileDisabledBrush = new(Color.FromArgb(0xFF, 0x0E, 0x0E, 0x0E));
+    public static readonly SolidColorBrush PrimaryInkBrush = new(Colors.White);
+    public static readonly SolidColorBrush OnAccentInkBrush = new(Colors.White);
+    public static readonly SolidColorBrush DimTextBrush = new(Color.FromArgb(0xFF, 0x88, 0x88, 0x88));
+    public static readonly SolidColorBrush SelectionTintBrush = new(Color.FromArgb(0x26, 0xE5, 0x00, 0x6B));
     public static readonly SolidColorBrush TransparentBrush = new(Colors.Transparent);
 
-    public static Brush PickAccentOrMuted(bool active) => active ? ZuneMagentaBrush : MutedBrush;
-    public static Brush PickAccentOrSubtleBorder(bool active) => active ? ZuneMagentaBrush : SubtleBorderBrush;
+    public static void ApplyTheme(
+        bool isLight,
+        bool isHighContrast,
+        (byte R, byte G, byte B) accentRgb,
+        (byte R, byte G, byte B) accentInkRgb,
+        (byte R, byte G, byte B) onAccentRgb)
+    {
+        if (isHighContrast)
+        {
+            var ui = new Windows.UI.ViewManagement.UISettings();
+            var winBg = ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Background);
+            var winFg = ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
+            var hi = ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent);
+            AccentBrush.Color = hi;
+            AccentInkBrush.Color = hi;
+            MutedBrush.Color = winFg;
+            SubtleBorderBrush.Color = winFg;
+            MatrixTileActiveBrush.Color = hi;
+            MatrixTileIdleBrush.Color = winBg;
+            MatrixTileDisabledBrush.Color = winBg;
+            PrimaryInkBrush.Color = winFg;
+            OnAccentInkBrush.Color = winBg;
+            DimTextBrush.Color = winFg;
+            SelectionTintBrush.Color = winBg;
+            return;
+        }
+
+        var accentColor = Color.FromArgb(0xFF, accentRgb.R, accentRgb.G, accentRgb.B);
+        var accentInkColor = Color.FromArgb(0xFF, accentInkRgb.R, accentInkRgb.G, accentInkRgb.B);
+        var onAccentColor = Color.FromArgb(0xFF, onAccentRgb.R, onAccentRgb.G, onAccentRgb.B);
+
+        AccentBrush.Color = accentColor;
+        AccentInkBrush.Color = accentInkColor;
+        OnAccentInkBrush.Color = onAccentColor;
+        MatrixTileActiveBrush.Color = accentColor;
+
+        if (isLight)
+        {
+            MutedBrush.Color = Color.FromArgb(0xFF, 0x52, 0x52, 0x52);
+            SubtleBorderBrush.Color = Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC);
+            MatrixTileIdleBrush.Color = Color.FromArgb(0xFF, 0xEF, 0xEF, 0xEF);
+            MatrixTileDisabledBrush.Color = Color.FromArgb(0xFF, 0xF4, 0xF4, 0xF4);
+            PrimaryInkBrush.Color = Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
+            DimTextBrush.Color = Color.FromArgb(0xFF, 0x59, 0x59, 0x59);
+            SelectionTintBrush.Color = Color.FromArgb(0x1C, accentRgb.R, accentRgb.G, accentRgb.B);
+        }
+        else
+        {
+            MutedBrush.Color = Color.FromArgb(0xFF, 0xB5, 0xB5, 0xB5);
+            SubtleBorderBrush.Color = Color.FromArgb(0xFF, 0x29, 0x29, 0x29);
+            MatrixTileIdleBrush.Color = Color.FromArgb(0xFF, 0x15, 0x15, 0x15);
+            MatrixTileDisabledBrush.Color = Color.FromArgb(0xFF, 0x0E, 0x0E, 0x0E);
+            PrimaryInkBrush.Color = Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
+            DimTextBrush.Color = Color.FromArgb(0xFF, 0x88, 0x88, 0x88);
+            SelectionTintBrush.Color = Color.FromArgb(0x26, accentRgb.R, accentRgb.G, accentRgb.B);
+        }
+    }
+
+    public static Brush PickAccentOrMuted(bool active) => active ? AccentInkBrush : MutedBrush;
+    public static Brush PickAccentOrSubtleBorder(bool active) => active ? AccentInkBrush : SubtleBorderBrush;
     public static Brush PickSelectionBackground(bool selected) => selected ? SelectionTintBrush : TransparentBrush;
-    public static Brush PickSelectionBorder(bool selected) => selected ? ZuneMagentaBrush : TransparentBrush;
+    public static Brush PickSelectionBorder(bool selected) => selected ? AccentInkBrush : TransparentBrush;
     public static Brush PickMatrixTileBackground(bool activeOrAvailable) => activeOrAvailable ? MatrixTileActiveBrush : MatrixTileDisabledBrush;
     public static Brush PickEraTileBackground(bool active) => active ? MatrixTileActiveBrush : MatrixTileIdleBrush;
-    public static Brush PickMatrixText(bool activeOrAvailable) => activeOrAvailable ? WhiteBrush : DimTextBrush;
+    public static Brush PickEraText(bool active) => active ? OnAccentInkBrush : PrimaryInkBrush;
+    public static Brush PickMatrixText(bool activeOrAvailable) => activeOrAvailable ? OnAccentInkBrush : DimTextBrush;
 }
 
 public sealed class ClassicalComposerViewItem

@@ -16,7 +16,9 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalConfiguration
@@ -33,8 +35,12 @@ import com.google.android.material.R as MaterialR
 import com.google.android.material.color.MaterialColors
 import com.shawnshi.tonewise.R
 
+val LocalTonewiseAccentInk =
+    staticCompositionLocalOf { Color(ZuneColorMath.DEFAULT_DARK_ACCENT_INK) }
+
 private val TonewiseInterFontFamily =
     FontFamily(
+        Font(R.font.inter_regular, FontWeight.Light),
         Font(R.font.inter_regular, FontWeight.Normal),
         Font(R.font.inter_semibold, FontWeight.Medium),
         Font(R.font.inter_semibold, FontWeight.SemiBold),
@@ -347,11 +353,19 @@ fun TonewiseComposeTheme(
                 baseScheme
             }
         }
+    val isDark = ColorUtils.calculateLuminance(scheme.surface.toArgb()) < 0.5
+    val accentInk =
+        remember(scheme.primary, dynamicAccentArgb, isDark) {
+            val seedArgb = dynamicAccentArgb ?: scheme.primary.toArgb()
+            Color(ZuneColorMath.clampAccentInkForTheme(seedArgb, isDark))
+        }
     val shapes = if (roundMode) RoundedTonewiseShapes else RectilinearZuneShapes
-    MaterialTheme(
-        colorScheme = scheme,
-        typography = TonewiseComposeTypography,
-        shapes = shapes,
-        content = content,
-    )
+    CompositionLocalProvider(LocalTonewiseAccentInk provides accentInk) {
+        MaterialTheme(
+            colorScheme = scheme,
+            typography = TonewiseComposeTypography,
+            shapes = shapes,
+            content = content,
+        )
+    }
 }

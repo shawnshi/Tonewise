@@ -216,7 +216,7 @@
     <!-- As in music library -->
     <string name="lng_search_library">Search your library…</string>
     <string name="lng_tasker_start">
-        Starts Auxio using the previously saved state. If no saved state is available, all songs will be shuffled. Playback will start immediately.
+        Starts Tonewise using the previously saved state. If no saved state is available, all songs will be shuffled. Playback will start immediately.
         \n\nWARNING: Be careful controlling this service, if you close it and then try to use it again, you will probably crash the app.
     </string>
     <string name="lng_empty_songs">Your songs will show up here.</string>
@@ -581,6 +581,21 @@
     <string name="lbl_dsp_balance">L/R Channel Balance</string>
     <string name="lbl_dsp_limiter">Lookahead soft limiter (-0.2 dBFS)</string>
     <string name="lbl_dsp_open_console">Open 64-bit DSP &amp; EQ Console</string>
+    <string name="lbl_dsp_disable_bit_perfect">Disable USB Bit-Perfect</string>
+    <string name="lbl_dsp_eq_curve_title">Composite frequency response (Layer A + Layer B)</string>
+    <string name="lbl_dsp_eq_layer_a">Layer A</string>
+    <string name="lbl_dsp_eq_layer_ab">Combined A+B</string>
+    <string name="lbl_dsp_double_tap_reset">Double-tap any fader to reset 0.0 dB</string>
+    <string name="lbl_dsp_auto_eq_disabled">Disabled (Layer A device EQ active only)</string>
+    <string name="lbl_dsp_auto_eq_bypassed">Bypassed while internal 64-bit DSP is off</string>
+    <string name="lbl_dsp_auto_eq_ready">Ready (waiting for active track)</string>
+    <string name="fmt_dsp_auto_eq_eq">%1$s · EQ Overlay</string>
+    <string name="fmt_dsp_auto_eq_eq_crossfeed">%1$s · EQ + Crossfeed</string>
+    <string name="fmt_dsp_auto_eq_slot_custom">Custom rule: %s</string>
+    <string name="fmt_dsp_auto_eq_slot_default">Default rule: %s</string>
+    <string name="lbl_dsp_crossfeed_auto">Crossfeed: Auto</string>
+    <string name="lbl_dsp_crossfeed_force_on">Force On</string>
+    <string name="lbl_dsp_crossfeed_force_off">Force Off</string>
     <string name="lbl_auto_eq_title">Genre &amp; Vocal Auto-EQ (Layer B Cascade)</string>
     <string name="lbl_auto_eq_enable">Enable Genre + Vocal Auto-EQ</string>
     <string name="lbl_auto_eq_classical_crossfeed">Classical instrumental auto Crossfeed (Flat + Stage)</string>
@@ -602,6 +617,14 @@
     <string name="lbl_booklet_prev">Previous page</string>
     <string name="lbl_booklet_next">Next page</string>
     <string name="fmt_booklet_page">Page %1$d / %2$d</string>
+    <string name="lbl_booklet_warm_paper">Warm paper</string>
+    <string name="desc_booklet_zoom_reset">Reset zoom to 1x</string>
+    <string name="lbl_now_playing_booklet">Booklet</string>
+    <string name="lbl_now_playing_dsp">DSP</string>
+    <string name="fmt_now_playing_queue_count">Queue (%d)</string>
+    <string name="lbl_badge_bit_perfect">BIT_PERFECT</string>
+    <string name="lbl_badge_shuffle_lock">SHUFFLE LOCK</string>
+    <string name="desc_toggle_cover_mode">Switch to album cover view</string>
     <string name="lbl_desk_clock">OLED Desk Clock</string>
     <string name="lbl_open_desk_clock">Open OLED Desk Clock</string>
     <string name="lbl_clock_close">Exit Desk Clock</string>
@@ -718,4 +741,35 @@
     <string name="fmt_classical_composer_stats">%1$d works · %2$d recordings</string>
     <string name="desc_classical_back_composers">Back to composers</string>
     <string name="desc_classical_play_whole_work">Play whole work in order</string>
+    <string name="lbl_tag_scene_focus">Focus</string>
+    <string name="lbl_tag_scene_coding">Coding</string>
+    <string name="lbl_tag_scene_relax">Relax</string>
+    <string name="lbl_tag_scene_energy">Energy</string>
+    <string name="lbl_tag_scene_pop">Pop</string>
+    <string name="lbl_tag_vocals_instrumental">Instrumental</string>
+    <string name="lbl_tag_vocals_vocal">Vocal</string>
+    <string name="lbl_tag_energy_low">Low</string>
+    <string name="lbl_tag_energy_medium">Medium</string>
+    <string name="lbl_tag_energy_high">High</string>
+    <string name="lbl_tag_tempo_very_slow">Very Slow</string>
+    <string name="lbl_tag_tempo_slow">Slow</string>
+    <string name="lbl_tag_tempo_moderate">Moderate</string>
+    <string name="lbl_tag_tempo_fast">Fast</string>
+    <string name="lbl_tag_tempo_very_fast">Very Fast</string>
+    <string name="lbl_tag_mood_calm_relaxed">Calm &amp; Relaxed</string>
+    <string name="lbl_tag_mood_bright_joyful">Bright &amp; Joyful</string>
+    <string name="lbl_tag_mood_deep_introspective">Deep &amp; Introspective</string>
+    <string name="lbl_tag_mood_warm_romantic">Warm &amp; Romantic</string>
+    <string name="lbl_tag_mood_high_tension">High Tension</string>
+    <string name="lbl_tag_unknown">Unknown</string>
+    <string name="lbl_arc_flat">Default Order</string>
+    <string name="lbl_arc_energy_asc">Energy Ascending</string>
+    <string name="lbl_arc_energy_desc_sleep">Sleep Decay</string>
+    <string name="lbl_arc_rediscovery_90d">90d+ Rediscovery</string>
+    <string name="lbl_arc_work_shuffle">Classical Work Shuffle</string>
+    <string name="lbl_focus_preview_queue">Matched preview (%d tracks)</string>
+    <string name="lbl_focus_inline_funnel">5D Focus Funnel</string>
+    <string name="lbl_queue_clear_upcoming">Clear upcoming</string>
+    <string name="lbl_queue_cleared_upcoming">Cleared %d upcoming tracks</string>
+    <string name="lbl_undo">Undo</string>
 </resources>

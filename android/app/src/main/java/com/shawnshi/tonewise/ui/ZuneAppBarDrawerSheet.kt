@@ -44,6 +44,8 @@ import com.shawnshi.tonewise.home.HomeViewModel
 import com.shawnshi.tonewise.home.focus.FocusFilterDialog
 import com.shawnshi.tonewise.music.MusicViewModel
 import com.shawnshi.tonewise.playback.PlaybackViewModel
+import com.shawnshi.tonewise.playback.dsp.DspControlDialog
+import com.shawnshi.tonewise.playback.ui.clock.DeskClockDialog
 import com.shawnshi.tonewise.sync.ScenesAndSyncDialog
 import com.shawnshi.tonewise.util.showToast
 import dagger.hilt.android.AndroidEntryPoint
@@ -98,6 +100,20 @@ class ZuneAppBarDrawerSheet : BackportBottomSheetDialogFragment() {
                                 ScenesAndSyncDialog.newInstance().show(fm, ScenesAndSyncDialog.TAG)
                             }
                         },
+                        onOpenDspConsole = {
+                            val fm = parentFragmentManager
+                            dismissAllowingStateLoss()
+                            if (fm.findFragmentByTag(DspControlDialog.TAG) == null) {
+                                DspControlDialog.newInstance().show(fm, DspControlDialog.TAG)
+                            }
+                        },
+                        onOpenDeskClock = {
+                            val fm = parentFragmentManager
+                            dismissAllowingStateLoss()
+                            if (fm.findFragmentByTag(DeskClockDialog.TAG) == null) {
+                                DeskClockDialog.newInstance().show(fm, DeskClockDialog.TAG)
+                            }
+                        },
                         onRescanLibrary = {
                             musicModel.rescan()
                             requireContext().showToast(R.string.lbl_rescan_started)
@@ -129,6 +145,8 @@ private fun ZuneDrawerContent(
     onOpenNowPlaying: () -> Unit,
     onOpenFocusFilter: () -> Unit,
     onOpenSyncAndLastFm: () -> Unit,
+    onOpenDspConsole: () -> Unit,
+    onOpenDeskClock: () -> Unit,
     onRescanLibrary: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAbout: () -> Unit,
@@ -169,6 +187,16 @@ private fun ZuneDrawerContent(
                 label = "sync & last.fm",
                 subtitle = stringResource(R.string.lbl_sync_lastfm_drawer),
                 onClick = onOpenSyncAndLastFm,
+            )
+            ZuneDrawerItem(
+                label = "64-bit dsp",
+                subtitle = stringResource(R.string.lbl_now_playing_dsp),
+                onClick = onOpenDspConsole,
+            )
+            ZuneDrawerItem(
+                label = "oled clock",
+                subtitle = stringResource(R.string.lbl_desk_clock),
+                onClick = onOpenDeskClock,
             )
 
             HorizontalDivider(

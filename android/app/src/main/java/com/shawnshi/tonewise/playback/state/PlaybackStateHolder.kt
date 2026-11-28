@@ -51,6 +51,10 @@ interface PlaybackStateHolder {
     /** The current audio session ID of the audio player. */
     val audioSessionId: Int
 
+    /** Whether shuffle is currently locked by a classical work playback session. */
+    val isClassicalShuffleLocked: Boolean
+        get() = false
+
     /** Applies a completely new playback state to the holder. */
     fun newPlayback(command: PlaybackCommand)
 
@@ -121,6 +125,9 @@ interface PlaybackStateHolder {
      * @return The [Song] that was removed.
      */
     fun remove(at: Int, ack: StateAck.Remove)
+
+    /** Remove all upcoming songs after the currently playing index without interrupting playback. */
+    fun clearUpcoming() {}
 
     /**
      * Reorder the queue.

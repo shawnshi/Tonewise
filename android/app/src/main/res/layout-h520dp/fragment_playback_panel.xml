@@ -62,7 +62,7 @@
         android:layout_marginStart="@dimen/spacing_medium"
         android:layout_marginEnd="@dimen/spacing_medium"
         android:orientation="vertical"
-        app:layout_constraintBottom_toTopOf="@+id/playback_seek_bar"
+        app:layout_constraintBottom_toTopOf="@+id/playback_status_badges"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintHorizontal_bias="0.5"
         app:layout_constraintStart_toStartOf="parent"
@@ -131,6 +131,67 @@
 
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/playback_status_badges"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="@dimen/spacing_medium"
+        android:layout_marginEnd="@dimen/spacing_medium"
+        android:layout_marginTop="4dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/playback_seek_bar"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/playback_info_container">
+
+        <TextView
+            android:id="@+id/playback_bit_perfect_badge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_signal_pill"
+            android:clickable="true"
+            android:focusable="true"
+            android:fontFamily="monospace"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="3dp"
+            android:text="@string/lbl_badge_bit_perfect"
+            android:textColor="?attr/colorPrimary"
+            android:textSize="10.5sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/playback_shuffle_lock_badge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_signal_pill"
+            android:fontFamily="monospace"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="3dp"
+            android:text="@string/lbl_badge_shuffle_lock"
+            android:textColor="?attr/colorSecondary"
+            android:textSize="10.5sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/playback_action_recordings"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_signal_pill"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="3dp"
+            android:textColor="?attr/colorPrimary"
+            android:textSize="10.5sp"
+            android:visibility="gone"
+            tools:text="3 recordings ▸" />
+
+    </LinearLayout>
+
     <com.shawnshi.tonewise.playback.ui.StyledSeekBar
         android:id="@+id/playback_seek_bar"
         android:layout_width="match_parent"
@@ -139,7 +200,7 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintHorizontal_bias="0.0"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/playback_info_container" />
+        app:layout_constraintTop_toBottomOf="@+id/playback_status_badges" />
 
     <com.shawnshi.tonewise.playback.ui.ForcedLTRFrameLayout
         android:id="@+id/playback_controls_container"
@@ -235,10 +296,59 @@
             app:icon="@drawable/ic_heart_outline_24"
             app:materialSizeOverlay="@style/SizeOverlay.Material3Expressive.Button.IconButton.Small" />
 
-        <Space
+        <TextView
+            android:id="@+id/playback_action_booklet"
             android:layout_width="0dp"
-            android:layout_height="0dp"
-            android:layout_weight="1" />
+            android:layout_height="wrap_content"
+            android:layout_weight="0.95"
+            android:layout_marginHorizontal="3dp"
+            android:background="@drawable/bg_signal_pill"
+            android:clickable="true"
+            android:ellipsize="end"
+            android:focusable="true"
+            android:gravity="center"
+            android:maxLines="1"
+            android:minHeight="48dp"
+            android:paddingHorizontal="6dp"
+            android:text="@string/lbl_now_playing_booklet"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            android:textSize="11.5sp" />
+
+        <TextView
+            android:id="@+id/playback_action_dsp"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="0.75"
+            android:layout_marginHorizontal="3dp"
+            android:background="@drawable/bg_signal_pill"
+            android:clickable="true"
+            android:ellipsize="end"
+            android:focusable="true"
+            android:gravity="center"
+            android:maxLines="1"
+            android:minHeight="48dp"
+            android:paddingHorizontal="6dp"
+            android:text="@string/lbl_now_playing_dsp"
+            android:textColor="?attr/colorPrimary"
+            android:textSize="11.5sp" />
+
+        <TextView
+            android:id="@+id/playback_action_queue"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1.3"
+            android:layout_marginHorizontal="3dp"
+            android:background="@drawable/bg_signal_pill"
+            android:clickable="true"
+            android:ellipsize="end"
+            android:focusable="true"
+            android:gravity="center"
+            android:maxLines="1"
+            android:minHeight="48dp"
+            android:paddingHorizontal="6dp"
+            android:textColor="?attr/colorOnSurfaceVariant"
+            android:textSize="11.5sp"
+            tools:text="Queue (12)" />
 
         <com.shawnshi.tonewise.ui.RippleFixMaterialButton
             android:id="@+id/playback_stage_toggle"
