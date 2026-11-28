@@ -134,6 +134,26 @@
       "expected_work": "Symphony No. 9 in D minor, Op. 125",
       "expected_movement": "Presto",
       "expected_mvt_num": 4
+    },
+    {
+      "name": "explicit_work_with_roman_movement_suffix",
+      "raw_title": "Konzert für Violoncello und Streicher G-dur, RV 413: 1. Allegro",
+      "explicit_work": "Concerto for Cello in G major, RV 413: I. Allegro",
+      "explicit_movement": null,
+      "explicit_mvt_num": null,
+      "expected_work": "Concerto for Cello in G major, RV 413",
+      "expected_movement": "Allegro",
+      "expected_mvt_num": 1
+    },
+    {
+      "name": "explicit_work_with_non_movement_colon_preserved",
+      "raw_title": "Spring 2",
+      "explicit_work": "Recomposed by Max Richter: Vivaldi - The Four Seasons",
+      "explicit_movement": null,
+      "explicit_mvt_num": null,
+      "expected_work": "Recomposed by Max Richter: Vivaldi - The Four Seasons",
+      "expected_movement": "Spring 2",
+      "expected_mvt_num": null
     }
   ],
   "era_cases": [

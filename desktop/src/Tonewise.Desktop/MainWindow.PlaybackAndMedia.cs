@@ -40,9 +40,24 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            _smtcPlayer = new MediaPlayer();
-            _smtcPlayer.CommandManager.IsEnabled = false;
-            _smtc = _smtcPlayer.SystemMediaTransportControls;
+            IntPtr hwnd = WindowNative.GetWindowHandle(this);
+            if (hwnd != IntPtr.Zero)
+            {
+                try
+                {
+                    _smtc = SystemMediaTransportControlsInterop.GetForWindow(hwnd);
+                }
+                catch
+                {
+                    _smtc = null;
+                }
+            }
+            if (_smtc is null)
+            {
+                _smtcPlayer = new MediaPlayer();
+                _smtcPlayer.CommandManager.IsEnabled = false;
+                _smtc = _smtcPlayer.SystemMediaTransportControls;
+            }
             _smtc.IsEnabled = true;
             _smtc.IsPlayEnabled = true;
             _smtc.IsPauseEnabled = true;
@@ -970,7 +985,275 @@ public sealed partial class MainWindow : Window
             return;
         }
         bool isDark = RootWorkbench?.ActualTheme != ElementTheme.Light;
-        _mosaicRenderer.Render(e.Surface.Canvas, e.Info.Width, e.Info.Height, isDark, _currentAccentRgb);
+        if (ViewModel.IsNowPlayingVinylMode && ViewModel.VinylUseAmbientBackdrop)
+        {
+            _mosaicRenderer.RenderAmbientBackdrop(e.Surface.Canvas, e.Info.Width, e.Info.Height, isDark, _latestRawCoverSeedRgb);
+        }
+        else
+        {
+            _mosaicRenderer.Render(e.Surface.Canvas, e.Info.Width, e.Info.Height, isDark, _currentAccentRgb);
+        }
+    }
+
+    private void OnNowPlayingStageSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        SyncNowPlayingVinylHostSize();
+    }
+
+    private void SyncNowPlayingVinylHostSize()
+    {
+        double stageW = NowPlayingStage?.ActualWidth > 0 ? NowPlayingStage.ActualWidth : 1280.0;
+        double stageH = NowPlayingStage?.ActualHeight > 0 ? NowPlayingStage.ActualHeight : 640.0;
+
+        if (ViewModel.IsNowPlayingQueueOpen)
+        {
+            double leftW = Math.Max(360.0, stageW - 440.0);
+            double vinylH = Math.Clamp(Math.Min(stageH * 0.54, leftW * 0.44), 260.0, 380.0);
+            double vinylW = Math.Clamp(vinylH * 1.56, 390.0, Math.Min(580.0, leftW * 0.62));
+            if (NowPlayingVinylHost is not null)
+            {
+                NowPlayingVinylHost.Width = vinylW;
+                NowPlayingVinylHost.Height = vinylH;
+            }
+            if (NowPlayingCoverHost is not null)
+            {
+                double coverSide = Math.Clamp(Math.Min(stageH * 0.48, leftW * 0.36), 220.0, 310.0);
+                NowPlayingCoverHost.Width = coverSide;
+                NowPlayingCoverHost.Height = coverSide;
+            }
+            if (NowPlayingHeroGrid is not null)
+            {
+                NowPlayingHeroGrid.ColumnSpacing = 28;
+            }
+        }
+        else
+        {
+            double vinylSide = Math.Clamp(Math.Min(stageH * 0.74, stageW * 0.44), 340.0, 560.0);
+            if (NowPlayingVinylHost is not null)
+            {
+                NowPlayingVinylHost.Width = vinylSide;
+                NowPlayingVinylHost.Height = vinylSide;
+            }
+            if (NowPlayingCoverHost is not null)
+            {
+                double coverSide = Math.Clamp(Math.Min(stageH * 0.62, stageW * 0.34), 280.0, 420.0);
+                NowPlayingCoverHost.Width = coverSide;
+                NowPlayingCoverHost.Height = coverSide;
+            }
+            if (NowPlayingHeroGrid is not null)
+            {
+                NowPlayingHeroGrid.ColumnSpacing = stageW >= 1200.0 ? 56 : 36;
+            }
+        }
+
+        NowPlayingVinylCanvas?.Invalidate();
+    }
+
+    private void OnOpenNowPlayingPanelDirectTabClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string tab })
+        {
+            ViewModel.SetNowPlayingPanelTab(tab);
+            if (!ViewModel.IsNowPlayingQueueOpen)
+            {
+                ViewModel.IsNowPlayingQueueOpen = true;
+            }
+        }
+    }
+
+    private void OnPaintNowPlayingVinyl(object? sender, SKPaintSurfaceEventArgs e)
+    {
+        bool isDark = RootWorkbench?.ActualTheme != ElementTheme.Light;
+        float scale = (float)GetCurrentRasterScale();
+        var layoutMode = ViewModel.IsNowPlayingQueueOpen
+            ? VinylTurntableRenderer.VinylLayoutMode.HalfEjectedSleeve
+            : VinylTurntableRenderer.VinylLayoutMode.FullTurntable;
+        _vinylRenderer.Render(
+            e.Surface.Canvas,
+            e.Info.Width,
+            e.Info.Height,
+            scale,
+            layoutMode,
+            ViewModel.ResolvedVinylStyle,
+            _latestRawCoverSeedRgb,
+            isDark,
+            _accessibilitySettings.HighContrast);
+    }
+
+    private void SyncVinylRenderLoop()
+    {
+        bool motionEnabled = ZuneMotionHelper.IsMotionEnabled();
+        bool shouldRun = _isWindowVisibleAndNotMinimized
+            && ViewModel.IsNowPlayingViewVisible
+            && ViewModel.IsNowPlayingVinylMode
+            && !_accessibilitySettings.HighContrast
+            && _vinylRenderer.NeedsAnimation(ViewModel.IsPlaying, motionEnabled);
+
+        if (shouldRun)
+        {
+            if (!_isVinylRenderingSubscribed)
+            {
+                _lastVinylTickTimestamp = Stopwatch.GetTimestamp();
+                CompositionTarget.Rendering += OnVinylCompositionRendering;
+                _isVinylRenderingSubscribed = true;
+            }
+        }
+        else if (_isVinylRenderingSubscribed)
+        {
+            CompositionTarget.Rendering -= OnVinylCompositionRendering;
+            _isVinylRenderingSubscribed = false;
+        }
+    }
+
+    private void OnVinylCompositionRendering(object? sender, object e)
+    {
+        bool motionEnabled = ZuneMotionHelper.IsMotionEnabled();
+        if (!_isWindowVisibleAndNotMinimized
+            || !ViewModel.IsNowPlayingViewVisible
+            || !ViewModel.IsNowPlayingVinylMode
+            || _accessibilitySettings.HighContrast)
+        {
+            SyncVinylRenderLoop();
+            return;
+        }
+
+        long now = Stopwatch.GetTimestamp();
+        long prev = _lastVinylTickTimestamp;
+        _lastVinylTickTimestamp = now;
+        double dt = prev > 0 ? (double)(now - prev) / Stopwatch.Frequency : 0.016;
+
+        bool keepGoing = _vinylRenderer.AdvanceFrame(dt, ViewModel.IsPlaying, motionEnabled);
+        NowPlayingVinylCanvas?.Invalidate();
+        if (!keepGoing)
+        {
+            SyncVinylRenderLoop();
+        }
+    }
+
+    private void OnNowPlayingVinylTapped(object sender, TappedRoutedEventArgs e)
+    {
+        RestoreNowPlayingChrome();
+        ViewModel.TogglePlayPauseCommand.Execute(null);
+        SyncVinylRenderLoop();
+        e.Handled = true;
+    }
+
+    private void OnSelectVinylFinishClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuFlyoutItemBase { Tag: string styleKey })
+        {
+            ViewModel.SetVinylFinishStyleCommand.Execute(styleKey);
+        }
+    }
+
+    private void OnNowPlayingStagePointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!ViewModel.IsNowPlayingVinylMode || !ZuneMotionHelper.IsMotionEnabled() || _accessibilitySettings.HighContrast)
+        {
+            return;
+        }
+        if (NowPlayingStage is null || NowPlayingStage.ActualWidth <= 0 || NowPlayingStage.ActualHeight <= 0)
+        {
+            return;
+        }
+        var pt = e.GetCurrentPoint(NowPlayingStage).Position;
+        double nx = (pt.X / NowPlayingStage.ActualWidth) * 2.0 - 1.0;
+        double ny = (pt.Y / NowPlayingStage.ActualHeight) * 2.0 - 1.0;
+        _vinylRenderer.SetPointerParallaxTarget((float)VinylMaterialMath.ComputePointerParallaxDeg(nx, ny));
+        SyncVinylRenderLoop();
+    }
+
+    private void OnNowPlayingStagePointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        _vinylRenderer.ResetPointerParallax();
+        SyncVinylRenderLoop();
+    }
+
+    private async Task ApplyDynamicAccentFromCoverAsync(string? coverArtPath)
+    {
+        var prev = _dynamicAccentCts;
+        var cts = new CancellationTokenSource();
+        _dynamicAccentCts = cts;
+        CancellationToken token = cts.Token;
+        if (prev is not null)
+        {
+            try { prev.Cancel(); } catch (ObjectDisposedException) { }
+            prev.Dispose();
+        }
+
+        bool isDark = ResolveEffectiveIsDarkTheme();
+        (byte R, byte G, byte B) targetRgb = isDark
+            ? ZuneColorMath.DefaultDarkAccentRgb
+            : ZuneColorMath.DefaultLightAccentRgb;
+        (byte R, byte G, byte B)? rawSeed = null;
+
+        bool needCoverSample = ViewModel.EnableDynamicCoverAccent || ViewModel.IsNowPlayingVinylMode;
+        if (needCoverSample && !string.IsNullOrWhiteSpace(coverArtPath))
+        {
+            try
+            {
+                var (raw, clamped) = await Task.Run(() => ExtractCoverSeedAndClampedAccent(coverArtPath, isDark), token);
+                if (token.IsCancellationRequested || !ReferenceEquals(_dynamicAccentCts, cts))
+                {
+                    return;
+                }
+                rawSeed = raw;
+                if (ViewModel.EnableDynamicCoverAccent && clamped.HasValue)
+                {
+                    targetRgb = clamped.Value;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            catch
+            {
+                // Keep default Zune magenta fallback
+            }
+        }
+
+        if (token.IsCancellationRequested || !ReferenceEquals(_dynamicAccentCts, cts)) return;
+        _latestRawCoverSeedRgb = rawSeed;
+        ApplyResolvedAccentRgb(targetRgb, isDark);
+        NowPlayingVinylCanvas?.Invalidate();
+    }
+
+    internal static ((byte R, byte G, byte B)? RawSeed, (byte R, byte G, byte B)? ClampedAccent) ExtractCoverSeedAndClampedAccent(
+        string coverArtPath,
+        bool isDark)
+    {
+        if (!File.Exists(coverArtPath)) return (null, null);
+        using var raw = SKBitmap.Decode(coverArtPath);
+        if (raw is null || raw.Width <= 0 || raw.Height <= 0) return (null, null);
+
+        const int sampleDim = 24;
+        using var small = new SKBitmap(sampleDim, sampleDim, SKColorType.Bgra8888, SKAlphaType.Premul);
+        using (var canvas = new SKCanvas(small))
+        {
+            canvas.DrawBitmap(raw, new SKRect(0, 0, raw.Width, raw.Height), new SKRect(0, 0, sampleDim, sampleDim));
+        }
+
+        var pixels = new (byte R, byte G, byte B)[sampleDim * sampleDim];
+        int k = 0;
+        for (int y = 0; y < sampleDim; y++)
+        {
+            for (int x = 0; x < sampleDim; x++)
+            {
+                var px = small.GetPixel(x, y);
+                pixels[k++] = (px.Red, px.Green, px.Blue);
+            }
+        }
+
+        var dominant = ZuneColorMath.SelectDominantVibrantRgb(pixels);
+        var clamped = dominant is { } rgb
+            ? ZuneColorMath.ClampAccentForTheme(rgb.R, rgb.G, rgb.B, isDark)
+            : ((byte R, byte G, byte B)?)null;
+        return (dominant, clamped);
     }
 
     private void OnNowPlayingPointerActivity(object sender, PointerRoutedEventArgs e)

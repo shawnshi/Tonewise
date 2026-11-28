@@ -21,6 +21,7 @@ package com.shawnshi.tonewise.music
 import android.content.Context
 import android.content.Intent
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.Locale
 import java.util.UUID
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -719,119 +720,8 @@ constructor(
 
     private fun buildClassicalWorkIndex(
         lib: Library
-    ): Pair<Map<Music.UID, ClassicalWork>, List<ClassicalWork>> {
-        val songsByWorkKey = linkedMapOf<String, MutableList<Song>>()
-        val titleByWorkKey = mutableMapOf<String, String>()
-        val composerByWorkKey = mutableMapOf<String, String>()
-        val genreByWorkKey = mutableMapOf<String, String?>()
-        val fallbackMovementNumByUid = mutableMapOf<Music.UID, Int?>()
-
-        for (song in lib.songs) {
-            val rawTitle = (song.name as? Name.Known)?.raw.orEmpty()
-            val genreNames = song.genres.mapNotNull { (it.name as? Name.Known)?.raw }
-            val primaryGenre =
-                genreNames.firstOrNull { ClassicalMetadataEngine.isClassicalGenre(it) }
-                    ?: genreNames.firstOrNull { ClassicalMetadataEngine.isExplicitNonClassicalGenre(it) }
-                    ?: genreNames.firstOrNull()
-            val explicitComposer = song.composers.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
-            val explicitConductor = song.conductors.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
-            if (!ClassicalMetadataEngine.isClassicalTrack(
-                    genre = primaryGenre,
-                    work = song.workName,
-                    composer = explicitComposer,
-                    conductor = explicitConductor,
-                    title = rawTitle,
-                )
-            ) {
-                continue
-            }
-
-            val parsed =
-                ClassicalMetadataEngine.splitWorkAndMovement(
-                    rawTitle = rawTitle,
-                    explicitWork = song.workName,
-                    explicitMovement = song.movementName,
-                    explicitMovementNumber = song.movementNumber,
-                )
-            val rawWork =
-                parsed.work
-                    .ifBlank { rawTitle }
-                    .ifBlank { (song.album.name as? Name.Known)?.raw.orEmpty() }
-                    .trim()
-            if (rawWork.isEmpty()) continue
-
-            val composer =
-                explicitComposer
-                    ?: (song.album.artists.firstOrNull()?.name as? Name.Known)?.raw
-                    ?: (song.artists.firstOrNull()?.name as? Name.Known)?.raw
-                    ?: "Unknown"
-            val normalizedComposer = ClassicalMetadataEngine.normalizeComposerName(composer).ifBlank { composer }
-            val workKey =
-                song.musicBrainzWorkId?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
-                    ?: "${normalizedComposer.lowercase()}::${rawWork.lowercase()}"
-            titleByWorkKey.putIfAbsent(workKey, rawWork)
-            composerByWorkKey.putIfAbsent(workKey, composer)
-            genreByWorkKey.putIfAbsent(workKey, primaryGenre)
-            fallbackMovementNumByUid[song.uid] = parsed.movementNumber
-            songsByWorkKey.getOrPut(workKey) { mutableListOf() }.add(song)
-        }
-
-        val index = mutableMapOf<Music.UID, ClassicalWork>()
-        val uniqueWorks = ArrayList<ClassicalWork>(songsByWorkKey.size)
-        val movementCmp =
-            compareBy<Song>(
-                { it.disc?.number ?: 0 },
-                { it.movementNumber ?: fallbackMovementNumByUid[it.uid] ?: Int.MAX_VALUE },
-                { it.track ?: Int.MAX_VALUE },
-                { (it.name as? Name.Known)?.raw?.lowercase().orEmpty() },
-            )
-        for ((workKey, workSongs) in songsByWorkKey) {
-            val recordings =
-                workSongs
-                    .groupBy { ClassicalWorkKey.recordingScope(it) }
-                    .entries
-                    .map { (scopeKey, scopedSongs) ->
-                        val orderedMovements = scopedSongs.sortedWith(movementCmp)
-                        val first = orderedMovements.first()
-                        val conductors =
-                            orderedMovements.flatMap { it.conductors }.distinct().joinToString(", ")
-                        val artists =
-                            orderedMovements
-                                .flatMap { it.artists }
-                                .mapNotNull { (it.name as? Name.Known)?.raw }
-                                .distinct()
-                                .joinToString(", ")
-                        val year = orderedMovements.mapNotNull { it.date?.year }.minOrNull()
-                        WorkRecording(
-                            album = first.album,
-                            conductorLabel = conductors,
-                            ensembleLabel = artists,
-                            year = year,
-                            movements = orderedMovements,
-                            scopeKey = scopeKey,
-                        )
-                    }
-                    .sortedWith(compareBy<WorkRecording>({ it.year ?: Int.MAX_VALUE }, { it.album.name }, { it.conductorLabel }))
-
-            val resolvedWorkTitle = titleByWorkKey.getValue(workKey)
-            val resolvedComposer = composerByWorkKey.getValue(workKey)
-            val resolvedGenre = genreByWorkKey[workKey]
-            val classicalWork =
-                ClassicalWork(
-                    key = workKey,
-                    workTitle = resolvedWorkTitle,
-                    composerName = resolvedComposer,
-                    recordings = recordings,
-                    form = ClassicalMetadataEngine.classifyWorkForm(resolvedWorkTitle, resolvedGenre),
-                    era = ClassicalMetadataEngine.classifyComposerEra(resolvedComposer, resolvedGenre),
-                )
-            uniqueWorks.add(classicalWork)
-            for (song in workSongs) {
-                index[song.uid] = classicalWork
-            }
-        }
-        return index to uniqueWorks
-    }
+    ): Pair<Map<Music.UID, ClassicalWork>, List<ClassicalWork>> =
+        buildClassicalWorkIndex(lib.songs)
 
     private fun buildPersonArtist(
         role: PersonRole,
@@ -847,4 +737,118 @@ constructor(
             genres = songs.flatMap { it.genres }.distinct(),
             covers = CoverCollection.from(songs.mapNotNull { it.cover }),
         )
+}
+
+internal fun buildClassicalWorkIndex(
+    songs: Collection<Song>
+): Pair<Map<Music.UID, ClassicalWork>, List<ClassicalWork>> {
+    val songsByWorkKey = linkedMapOf<String, MutableList<Song>>()
+    val titleByWorkKey = mutableMapOf<String, String>()
+    val composerByWorkKey = mutableMapOf<String, String>()
+    val genreByWorkKey = mutableMapOf<String, String?>()
+    val fallbackMovementNumByUid = mutableMapOf<Music.UID, Int?>()
+
+    for (song in songs) {
+        val rawTitle = (song.name as? Name.Known)?.raw.orEmpty()
+        val genreNames = song.genres.mapNotNull { (it.name as? Name.Known)?.raw }
+        val primaryGenre =
+            genreNames.firstOrNull { ClassicalMetadataEngine.isClassicalGenre(it) }
+                ?: genreNames.firstOrNull { ClassicalMetadataEngine.isExplicitNonClassicalGenre(it) }
+                ?: genreNames.firstOrNull()
+        val explicitComposer = song.composers.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+        val explicitConductor = song.conductors.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+        if (!ClassicalMetadataEngine.isClassicalTrack(
+                genre = primaryGenre,
+                work = song.workName,
+                composer = explicitComposer,
+                conductor = explicitConductor,
+                title = rawTitle,
+            )
+        ) {
+            continue
+        }
+
+        val parsed =
+            ClassicalMetadataEngine.splitWorkAndMovement(
+                rawTitle = rawTitle,
+                explicitWork = song.workName,
+                explicitMovement = song.movementName,
+                explicitMovementNumber = song.movementNumber,
+            )
+        val rawWork =
+            parsed.work
+                .ifBlank { rawTitle }
+                .ifBlank { (song.album.name as? Name.Known)?.raw.orEmpty() }
+                .trim()
+        if (rawWork.isEmpty()) continue
+
+        val composer =
+            explicitComposer
+                ?: (song.artists.firstOrNull()?.name as? Name.Known)?.raw
+                ?: (song.album.artists.firstOrNull()?.name as? Name.Known)?.raw
+                ?: "Unknown"
+        val normalizedComposer = ClassicalMetadataEngine.normalizeComposerName(composer).ifBlank { composer }
+        val workKey = "${normalizedComposer.lowercase(Locale.ROOT)}::${rawWork.lowercase(Locale.ROOT)}"
+        titleByWorkKey.putIfAbsent(workKey, rawWork)
+        composerByWorkKey.putIfAbsent(workKey, normalizedComposer)
+        genreByWorkKey.putIfAbsent(workKey, primaryGenre)
+        fallbackMovementNumByUid[song.uid] = parsed.movementNumber
+        songsByWorkKey.getOrPut(workKey) { mutableListOf() }.add(song)
+    }
+
+    val index = mutableMapOf<Music.UID, ClassicalWork>()
+    val uniqueWorks = ArrayList<ClassicalWork>(songsByWorkKey.size)
+    val movementCmp =
+        compareBy<Song>(
+            { it.disc?.number ?: 0 },
+            { it.movementNumber ?: fallbackMovementNumByUid[it.uid] ?: Int.MAX_VALUE },
+            { it.track ?: Int.MAX_VALUE },
+            { (it.name as? Name.Known)?.raw?.lowercase(Locale.ROOT).orEmpty() },
+        )
+    for ((workKey, workSongs) in songsByWorkKey) {
+        val recordings =
+            workSongs
+                .groupBy { ClassicalWorkKey.recordingScope(it) }
+                .entries
+                .map { (scopeKey, scopedSongs) ->
+                    val orderedMovements = scopedSongs.sortedWith(movementCmp)
+                    val first = orderedMovements.first()
+                    val conductors =
+                        orderedMovements.flatMap { it.conductors }.distinct().joinToString(", ")
+                    val artists =
+                        orderedMovements
+                            .flatMap { it.artists }
+                            .mapNotNull { (it.name as? Name.Known)?.raw }
+                            .distinct()
+                            .joinToString(", ")
+                    val year = orderedMovements.mapNotNull { it.date?.year }.minOrNull()
+                    WorkRecording(
+                        album = first.album,
+                        conductorLabel = conductors,
+                        ensembleLabel = artists,
+                        year = year,
+                        movements = orderedMovements,
+                        scopeKey = scopeKey,
+                    )
+                }
+                .sortedWith(compareBy<WorkRecording>({ it.year ?: Int.MAX_VALUE }, { it.album.name }, { it.conductorLabel }))
+
+        val resolvedWorkTitle = titleByWorkKey.getValue(workKey)
+        val resolvedComposer = composerByWorkKey.getValue(workKey)
+        val resolvedGenre = genreByWorkKey[workKey]
+        val classicalWork =
+            ClassicalWork(
+                key = workKey,
+                workTitle = resolvedWorkTitle,
+                composerName = resolvedComposer,
+                recordings = recordings,
+                form = ClassicalMetadataEngine.classifyWorkForm(resolvedWorkTitle, resolvedGenre),
+                era = ClassicalMetadataEngine.classifyComposerEra(resolvedComposer, resolvedGenre),
+            )
+        uniqueWorks.add(classicalWork)
+        for (song in workSongs) {
+            index[song.uid] = classicalWork
+        }
+    }
+    return index to uniqueWorks
 }

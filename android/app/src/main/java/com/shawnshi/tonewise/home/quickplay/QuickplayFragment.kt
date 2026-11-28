@@ -38,6 +38,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -131,6 +132,13 @@ class QuickplayFragment : Fragment() {
                     remember(scenes) {
                         scenes.filterNot { it.id == "44444444-4444-4444-8444-444444444444" }.take(5)
                     }
+                LaunchedEffect(presetScenes, libraryRevision) {
+                    if (presetScenes.isNotEmpty() && !musicRepository.library?.songs.isNullOrEmpty()) {
+                        withContext(Dispatchers.Default) {
+                            lanSyncRepository.ensurePresetRelaySlotsSeeded()
+                        }
+                    }
+                }
                 val sceneCounts by
                     androidx.compose.runtime.produceState<Map<String, Int>>(
                         initialValue = emptyMap(),
@@ -327,14 +335,13 @@ class QuickplayFragment : Fragment() {
         existing: SessionSlotItem?,
         presetScene: SceneBanner?,
     ) {
-        val outgoingPopulated =
-            SessionSlotStore.isSlotPopulated(slots.firstOrNull { it.slotIndex == activeSlotIndex })
-        if (slotIndex == activeSlotIndex) {
-            if (existing != null && existing.queueTrackUids.isNotEmpty()) {
-                saveCurrentQueueToSlot(slotIndex, activeSceneLabel, showFeedback = true, activate = true)
-                return
-            }
-        } else if (outgoingPopulated) {
+        val outgoingSlot = slots.firstOrNull { it.slotIndex == activeSlotIndex }
+        val shouldSnapshotOutgoing =
+            slotIndex != activeSlotIndex &&
+                outgoingSlot != null &&
+                SessionSlotStore.isSlotPopulated(outgoingSlot) &&
+                activeSceneLabel.equals(outgoingSlot.name, ignoreCase = true)
+        if (shouldSnapshotOutgoing) {
             saveCurrentQueueToSlot(activeSlotIndex, activeSceneLabel, showFeedback = false, activate = false)
         }
         if (existing == null || existing.queueTrackUids.isEmpty()) {
@@ -599,8 +606,13 @@ private fun QuickplayContent(
                                 Text(
                                     text =
                                         if (hasTracks) "${existing.queueTrackUids.size} tracks"
-                                        else if (presetScene != null) "${sceneCounts[presetScene.id] ?: 0} tracks"
-                                        else stringResource(R.string.lbl_save_current_slot),
+                                        else if (presetScene != null) {
+                                            val rawCount = sceneCounts[presetScene.id] ?: 0
+                                            val targetCount = minOf(rawCount, AutoDjEngine.DEFAULT_TARGET_COUNT)
+                                            if (targetCount > 0) "Auto DJ · $targetCount tracks" else "Auto DJ"
+                                        } else {
+                                            stringResource(R.string.lbl_save_current_slot)
+                                        },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,

@@ -25,6 +25,7 @@ import androidx.core.content.edit
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import com.shawnshi.tonewise.R
+import com.shawnshi.tonewise.playback.ui.VinylStyle
 import com.shawnshi.tonewise.settings.Settings
 import com.shawnshi.tonewise.ui.accent.Accent
 import timber.log.Timber as L
@@ -47,6 +48,8 @@ interface UISettings : Settings<UISettings.Listener> {
     val enableDynamicCoverAccent: Boolean
     /** Whether Now Playing displays the vinyl turntable stage instead of the cover pager. */
     var playbackVinylMode: Boolean
+    /** Selected surface finish for [com.shawnshi.tonewise.playback.ui.VinylTurntableView]. */
+    var playbackVinylStyle: VinylStyle
     /** Whether Now Playing uses a soft cover-derived radial glow instead of the album mosaic. */
     val useAmbientPlaybackBackdrop: Boolean
 
@@ -55,6 +58,8 @@ interface UISettings : Settings<UISettings.Listener> {
         fun onRoundModeChanged()
         /** Called when [enableDynamicCoverAccent] changes. */
         fun onDynamicCoverAccentChanged() {}
+        /** Called when [playbackVinylStyle] changes. */
+        fun onVinylStyleChanged() {}
         /** Called when [useAmbientPlaybackBackdrop] changes. */
         fun onPlaybackBackdropChanged() {}
     }
@@ -107,6 +112,21 @@ class UISettingsImpl @Inject constructor(@ApplicationContext context: Context) :
             }
         }
 
+    override var playbackVinylStyle: VinylStyle
+        get() =
+            VinylStyle.fromIntCode(
+                sharedPreferences.getInt(
+                    getString(R.string.set_key_playback_vinyl_style),
+                    VinylStyle.DEFAULT.intCode,
+                )
+            )
+        set(value) {
+            sharedPreferences.edit {
+                putInt(getString(R.string.set_key_playback_vinyl_style), value.intCode)
+                apply()
+            }
+        }
+
     override val useAmbientPlaybackBackdrop: Boolean
         get() =
             sharedPreferences.getBoolean(
@@ -141,6 +161,9 @@ class UISettingsImpl @Inject constructor(@ApplicationContext context: Context) :
         } else if (key == getString(R.string.set_key_dynamic_cover_accent)) {
             L.d("Dispatching dynamic cover accent setting change")
             listener.onDynamicCoverAccentChanged()
+        } else if (key == getString(R.string.set_key_playback_vinyl_style)) {
+            L.d("Dispatching vinyl style setting change")
+            listener.onVinylStyleChanged()
         } else if (key == getString(R.string.set_key_playback_ambient_backdrop)) {
             L.d("Dispatching playback ambient backdrop setting change")
             listener.onPlaybackBackdropChanged()

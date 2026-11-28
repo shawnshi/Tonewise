@@ -94,6 +94,7 @@ class MainFragment :
     private var selectionBackCallback: SelectionBackPressedCallback? = null
     private var speedDialBackCallback: SpeedDialBackPressedCallback? = null
     private var navigationListener: DialogAwareNavigationListener? = null
+    private var queueSheetCallback: BackportBottomSheetBehavior.BottomSheetCallback? = null
     private var lastInsets: WindowInsets? = null
     private var elevationNormal = 0f
     private var normalCornerSize = 0f
@@ -164,6 +165,18 @@ class MainFragment :
             queueSheetBehavior.apply {
                 isDraggable = false
                 state = BackportBottomSheetBehavior.STATE_HIDDEN
+                val cb =
+                    object : BackportBottomSheetBehavior.BottomSheetCallback() {
+                        override fun onStateChanged(bottomSheet: android.view.View, newState: Int) {
+                            binding.playbackSheet.postInvalidateOnAnimation()
+                        }
+
+                        override fun onSlide(bottomSheet: android.view.View, slideOffset: Float) {
+                            binding.playbackSheet.postInvalidateOnAnimation()
+                        }
+                    }
+                addBottomSheetCallback(cb)
+                queueSheetCallback = cb
             }
             unlikelyToBeNull(binding.queueHandleWrapper).setOnClickListener {
                 playbackModel.openQueue()
@@ -279,6 +292,11 @@ class MainFragment :
 
     override fun onDestroyBinding(binding: FragmentMainBinding) {
         super.onDestroyBinding(binding)
+        queueSheetCallback?.let { cb ->
+            (binding.queueSheet.coordinatorLayoutBehavior as? QueueBottomSheetBehavior)
+                ?.removeBottomSheetCallback(cb)
+        }
+        queueSheetCallback = null
         speedDialBackCallback = null
         sheetBackCallback = null
         detailBackCallback = null
@@ -365,8 +383,16 @@ class MainFragment :
         binding.exploreNavHost.isInvisible = playbackLastStretchRatio == 1f
         binding.playbackSheet.translationZ = (1 - playbackLastStretchRatio) * elevationNormal
 
+        val rawQueueOffset = queueSheetBehavior?.calculateSlideOffset() ?: -1f
+        val queueRatio = if (rawQueueOffset.isFinite()) max(rawQueueOffset, 0f) else 0f
+        val queueExpandingOrOpen =
+            queueSheetBehavior != null &&
+                (queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_EXPANDED ||
+                    queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_DRAGGING ||
+                    queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_SETTLING ||
+                    queueSheetBehavior.targetState == BackportBottomSheetBehavior.STATE_EXPANDED)
+
         if (queueSheetBehavior != null) {
-            val queueRatio = max(queueSheetBehavior.calculateSlideOffset(), 0f)
             val queueInRatio = max(queueRatio - 0.5f, 0f) * 2
 
             val queueMaxXScaleDelta = maxScaleXDistance / binding.queueSheet.width
@@ -389,8 +415,9 @@ class MainFragment :
 
             if (playbackModel.song.value != null) {
                 val queueClosed =
-                    queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_HIDDEN ||
-                        queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_COLLAPSED
+                    (queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_HIDDEN ||
+                        queueSheetBehavior.state == BackportBottomSheetBehavior.STATE_COLLAPSED) &&
+                        queueSheetBehavior.targetState != BackportBottomSheetBehavior.STATE_EXPANDED
                 // Playback sheet intercepts queue sheet touch events; disable playback drag while Queue is open,
                 // and keep Queue non-draggable while hidden so edge swipes do not resurrect an unwanted peek bar.
                 playbackSheetBehavior.isDraggable = queueClosed
@@ -413,14 +440,15 @@ class MainFragment :
 
         val queueSheetAlpha =
             if (queueSheetBehavior != null) {
-                max(queueSheetBehavior.calculateSlideOffset(), 0f) * playbackInRatio
+                queueRatio * playbackInRatio
             } else {
                 playbackInRatio
             }
         binding.queueSheet.apply {
-            // Hide queue sheet completely when collapsed/hidden so it neither shows a peek bar nor steals touches.
-            alpha = queueSheetAlpha
-            binding.queueSheet.isInvisible = alpha == 0f
+            // Hide queue sheet completely when settled collapsed/hidden so it neither shows a peek bar nor steals touches,
+            // while keeping it VISIBLE while expanding so ViewDragHelper/CoordinatorLayout layout passes settle cleanly.
+            alpha = if (queueSheetAlpha.isFinite()) queueSheetAlpha else 0f
+            isInvisible = !queueExpandingOrOpen && alpha == 0f
         }
 
         // Prevent interactions when the queue content fully fades out.
@@ -712,9 +740,11 @@ class MainFragment :
             playbackSheetBehavior.state == BackportBottomSheetBehavior.STATE_EXPANDED &&
                 queueSheetBehavior.targetState != BackportBottomSheetBehavior.STATE_EXPANDED
         ) {
-            // Playback sheet is expanded and queue sheet is hidden/collapsed, expand it.
+            // Playback sheet is expanded and queue sheet is hidden/collapsed, make it visible before expanding.
+            binding.queueSheet.isInvisible = false
             queueSheetBehavior.isDraggable = true
             queueSheetBehavior.state = BackportBottomSheetBehavior.STATE_EXPANDED
+            binding.playbackSheet.postInvalidateOnAnimation()
         }
     }
 

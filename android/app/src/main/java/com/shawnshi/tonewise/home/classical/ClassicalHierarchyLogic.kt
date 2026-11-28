@@ -61,11 +61,18 @@ object ClassicalHierarchyLogic {
         portraitDirs: List<File> = emptyList(),
     ): List<ClassicalComposerGroup> {
         if (works.isEmpty()) return emptyList()
-        return works
-            .groupBy { it.composerName.trim().ifEmpty { "Unknown" } }
-            .entries
-            .sortedBy { it.key.lowercase(Locale.ROOT) }
-            .map { (composer, composerWorks) ->
+        val grouped = LinkedHashMap<String, Pair<String, MutableList<ClassicalWork>>>()
+        for (work in works) {
+            val rawComposer = work.composerName.trim().ifEmpty { "Unknown" }
+            val normalized = ClassicalMetadataEngine.normalizeComposerName(rawComposer).ifBlank { rawComposer }
+            val key = normalized.lowercase(Locale.ROOT)
+            val bucket = grouped.getOrPut(key) { normalized to ArrayList() }
+            bucket.second.add(work)
+        }
+        return grouped.entries
+            .sortedBy { it.key }
+            .map { (_, pair) ->
+                val (composer, composerWorks) = pair
                 val sortedWorks = composerWorks.sortedBy { it.workTitle.lowercase(Locale.ROOT) }
                 val era =
                     sortedWorks.firstNotNullOfOrNull { it.era }

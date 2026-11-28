@@ -281,6 +281,20 @@ public sealed partial class MainWindow : Window
                 ViewModel.TogglePlayPauseCommand.Execute(null);
                 e.Handled = true;
             }
+            return;
+        }
+
+        if (ViewModel.IsNowPlayingViewVisible && !ctrl && !alt && e.Key == VirtualKey.V)
+        {
+            if (shift)
+            {
+                ViewModel.CycleVinylFinishStyleCommand.Execute(null);
+            }
+            else
+            {
+                ViewModel.ToggleNowPlayingStageModeCommand.Execute(null);
+            }
+            e.Handled = true;
         }
     }
 

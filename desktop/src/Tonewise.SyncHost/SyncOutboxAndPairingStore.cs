@@ -91,7 +91,7 @@ public sealed record CatalogEntry(
     [property: JsonPropertyName("total_bytes")] long TotalBytes
 );
 
-public sealed record OutboxSummary(int ItemCount, int TrackCount, long TotalBytes, int DuplicateTrackCount = 0);
+public sealed record OutboxSummary(int ItemCount, int TrackCount, long TotalBytes, int DuplicateTrackCount = 0, int MissingSourceCount = 0);
 
 public enum PairAttemptStatus
 {
@@ -624,6 +624,62 @@ public sealed partial class SyncOutboxAndPairingStore
                 return true;
             }
             return false;
+        }
+    }
+
+    public int RemovePlaylistOutboxItemsByName(string playlistName)
+    {
+        string target = (playlistName ?? "").Trim();
+        if (target.Length == 0) return 0;
+        lock (_gate)
+        {
+            var items = LoadOutboxUnlocked();
+            int removed = items.RemoveAll(i =>
+                string.Equals(i.Kind, "playlist", StringComparison.OrdinalIgnoreCase)
+                && string.Equals((i.TargetKey ?? "").Trim(), target, StringComparison.OrdinalIgnoreCase));
+            if (removed > 0)
+            {
+                SaveOutboxUnlocked(items);
+            }
+            return removed;
+        }
+    }
+
+    public IReadOnlyList<string> PruneMissingPlaylistOutboxItems()
+    {
+        if (!Directory.Exists(_musicRoot)) return [];
+        string playlistsDir = PlaylistStore.GetPlaylistsDirectory(_musicRoot);
+        if (!Directory.Exists(playlistsDir)) return [];
+
+        var headers = ListPlaylistFileHeaders(_musicRoot);
+        var validNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var h in headers)
+        {
+            if (!string.IsNullOrWhiteSpace(h.Name)) validNames.Add(h.Name.Trim());
+            if (!string.IsNullOrWhiteSpace(h.BaseName)) validNames.Add(h.BaseName.Trim());
+        }
+
+        lock (_gate)
+        {
+            var items = LoadOutboxUnlocked();
+            var removedTargets = new List<string>();
+            for (int i = items.Count - 1; i >= 0; i--)
+            {
+                var item = items[i];
+                if (!string.Equals(item.Kind, "playlist", StringComparison.OrdinalIgnoreCase)) continue;
+                string key = (item.TargetKey ?? "").Trim();
+                if (!validNames.Contains(key))
+                {
+                    removedTargets.Add(key.Length > 0 ? key : item.DisplayName);
+                    items.RemoveAt(i);
+                }
+            }
+            if (removedTargets.Count > 0)
+            {
+                SaveOutboxUnlocked(items);
+            }
+            removedTargets.Reverse();
+            return removedTargets;
         }
     }
 

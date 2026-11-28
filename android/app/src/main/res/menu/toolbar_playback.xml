@@ -7,11 +7,6 @@
         android:title="@string/lbl_desk_clock"
         app:showAsAction="always" />
     <item
-        android:id="@+id/action_open_equalizer"
-        android:icon="@drawable/ic_config_24"
-        android:title="@string/lbl_equalizer"
-        app:showAsAction="always" />
-    <item
         android:id="@+id/action_song_more"
         android:icon="@drawable/ic_more_24"
         android:title="@string/lbl_more"

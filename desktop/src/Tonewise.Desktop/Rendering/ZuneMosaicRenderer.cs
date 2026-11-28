@@ -76,10 +76,15 @@ public sealed class ZuneMosaicRenderer : IDisposable
 
     private SKShader? _cachedLinearScrimShader;
     private SKShader? _cachedAccentGlowShader;
+    private SKShader? _cachedAmbientShader;
     private int _cachedScrimWidth = -1;
     private int _cachedScrimHeight = -1;
     private bool _cachedScrimDark;
     private (byte R, byte G, byte B) _cachedAccentRgb;
+    private int _cachedAmbientWidth = -1;
+    private int _cachedAmbientHeight = -1;
+    private bool _cachedAmbientDark;
+    private (byte R, byte G, byte B) _cachedAmbientSeedRgb;
 
     public bool HasCovers
     {
@@ -206,6 +211,56 @@ public sealed class ZuneMosaicRenderer : IDisposable
                 _wallState.TriggerManualSwap(snap.Tiles.Count);
             }
         }
+    }
+
+    public void RenderAmbientBackdrop(
+        SKCanvas canvas,
+        int width,
+        int height,
+        bool isDarkTheme,
+        (byte R, byte G, byte B)? coverSeedRgb)
+    {
+        if (width <= 0 || height <= 0 || Volatile.Read(ref _disposed) != 0) return;
+
+        var baseColor = isDarkTheme ? SKColors.Black : SKColors.White;
+        canvas.Clear(baseColor);
+
+        var seed = coverSeedRgb ?? (isDarkTheme ? ((byte)0x8A, (byte)0x6D, (byte)0x3B) : ((byte)0x3B, (byte)0x6E, (byte)0x8C));
+        if (_cachedAmbientShader is null
+            || _cachedAmbientWidth != width
+            || _cachedAmbientHeight != height
+            || _cachedAmbientDark != isDarkTheme
+            || _cachedAmbientSeedRgb != seed)
+        {
+            _cachedAmbientShader?.Dispose();
+            float glowWeight = isDarkTheme ? 0.24f : 0.15f;
+            float midWeight = isDarkTheme ? 0.10f : 0.06f;
+            static SKColor BlendOverBase(SKColor bg, (byte R, byte G, byte B) fg, float weight) =>
+                new(
+                    (byte)Math.Clamp(Math.Round(bg.Red + (fg.R - bg.Red) * weight), 0, 255),
+                    (byte)Math.Clamp(Math.Round(bg.Green + (fg.G - bg.Green) * weight), 0, 255),
+                    (byte)Math.Clamp(Math.Round(bg.Blue + (fg.B - bg.Blue) * weight), 0, 255),
+                    255);
+
+            _cachedAmbientShader = SKShader.CreateRadialGradient(
+                new SKPoint(width * 0.42f, height * 0.46f),
+                Math.Max(width, height) * 0.68f,
+                [
+                    BlendOverBase(baseColor, seed, glowWeight),
+                    BlendOverBase(baseColor, seed, midWeight),
+                    baseColor,
+                ],
+                [0f, 0.55f, 1f],
+                SKShaderTileMode.Clamp);
+            _cachedAmbientWidth = width;
+            _cachedAmbientHeight = height;
+            _cachedAmbientDark = isDarkTheme;
+            _cachedAmbientSeedRgb = seed;
+        }
+
+        _accentGlowPaint.Shader = _cachedAmbientShader;
+        canvas.DrawRect(0, 0, width, height, _accentGlowPaint);
+        _accentGlowPaint.Shader = _cachedAccentGlowShader;
     }
 
     public void Render(SKCanvas canvas, int width, int height, bool isDarkTheme, (byte R, byte G, byte B) accentRgb)
@@ -425,6 +480,8 @@ public sealed class ZuneMosaicRenderer : IDisposable
         _cachedLinearScrimShader = null;
         _cachedAccentGlowShader?.Dispose();
         _cachedAccentGlowShader = null;
+        _cachedAmbientShader?.Dispose();
+        _cachedAmbientShader = null;
         _tilePaint.Dispose();
         _cellBorderPaint.Dispose();
         _scrimPaint.Dispose();

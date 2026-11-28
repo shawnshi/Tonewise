@@ -11,6 +11,7 @@ using Microsoft.Data.Sqlite;
 using Tonewise.Interop;
 using Tonewise.SyncHost;
 using Tonewise.SyncHost.Curation;
+using Tonewise.SyncHost.Playlists;
 using Tonewise.SyncHost.Usb;
 using Xunit;
 
@@ -192,6 +193,93 @@ public sealed class UsbSyncTests
             SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
         }
+    }
+
+    [Fact]
+    public void OutboxStore_RemoveAndPruneMissingPlaylists_RestoresOutboxAuthoritative()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tw_pl_prune_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string dbPath = CreateEmptyManifestDb(tempRoot);
+            string uid = new string('e', 64);
+            string relPath = "Artists/Tester/01_Seed.wav";
+            string wavPath = Path.Combine(tempRoot, "Artists", "Tester", "01_Seed.wav");
+            WriteMinimalWav(wavPath);
+            InsertManifestTrack(dbPath, uid, relPath, wavPath);
+
+            string playlistsDir = PlaylistStore.GetPlaylistsDirectory(tempRoot);
+            Directory.CreateDirectory(playlistsDir);
+            File.WriteAllText(
+                Path.Combine(playlistsDir, "KeepMix.m3u8"),
+                "#EXTM3U\nArtists/Tester/01_Seed.wav\n",
+                Encoding.UTF8);
+
+            var store = new SyncOutboxAndPairingStore(tempRoot);
+            store.SetSyncPolicy(new SyncPolicyConfig(MirrorPruneEnabled: true, PruneScope: "music_folder_all"));
+            store.EnqueuePlaylists(["KeepMix", "DeletedMix", "GhostMix"], mode: "subscribe");
+
+            var broken = store.ResolveOutbox();
+            Assert.False(broken.SyncPolicy!.OutboxAuthoritative);
+            Assert.Equal(2, broken.SyncPolicy.MissingSourceCount);
+            Assert.Equal(2, store.GetOutboxSummary().MissingSourceCount);
+
+            Assert.Equal(1, store.RemovePlaylistOutboxItemsByName("DeletedMix"));
+            var stillBroken = store.ResolveOutbox();
+            Assert.False(stillBroken.SyncPolicy!.OutboxAuthoritative);
+            Assert.Equal(1, stillBroken.SyncPolicy.MissingSourceCount);
+
+            var pruned = store.PruneMissingPlaylistOutboxItems();
+            Assert.Equal(["GhostMix"], pruned);
+
+            var restored = store.ResolveOutbox();
+            Assert.True(restored.SyncPolicy!.OutboxAuthoritative);
+            Assert.Equal(0, restored.SyncPolicy.MissingSourceCount);
+            Assert.Equal(0, store.GetOutboxSummary().MissingSourceCount);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void UsbAdbBridge_FilterAndBatchDeleteScript_HandlesNfcNfdAndCoverOnlyDirs()
+    {
+        var desiredNfc = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Schubert/M\u00FCllerin/01_Das Wandern.flac",
+        };
+        var candidates = new[]
+        {
+            "Schubert/Mu\u0308llerin/01_Das Wandern.flac", // NFD equivalent of desired track -> MUST NOT delete
+            "Antonio Vivaldi/Old Copy/01 O'Connor.flac",
+        };
+
+        var filtered = UsbAdbBridge.FilterSafeForeignMusicRelPaths(candidates, desiredNfc);
+        Assert.Single(filtered);
+        Assert.Equal("Antonio Vivaldi/Old Copy/01 O'Connor.flac", filtered[0]);
+
+        string batchDelCmd = UsbAdbBridge.BuildBatchDeleteFilesShellCommand(
+            filtered.Select(r => $"/storage/emulated/0/Music/{r}"));
+        Assert.Contains("'\\''Connor.flac'", batchDelCmd, StringComparison.Ordinal);
+        Assert.Contains("TWDEL", batchDelCmd, StringComparison.Ordinal);
+
+        string batchDirCmd = UsbAdbBridge.BuildBatchPruneEmptyDirsShellCommand(
+            ["/storage/emulated/0/Music/Antonio Vivaldi/Old Copy"]);
+        Assert.Contains("rmdir --", batchDirCmd, StringComparison.Ordinal);
+        Assert.Contains("[Cc][Oo][Vv][Ee][Rr].[Jj][Pp][Gg]", batchDirCmd, StringComparison.Ordinal);
+
+        // Verify SyncPolicyConfig `with` update preserves custom large-prune thresholds
+        var customPolicy = new SyncPolicyConfig(
+            MirrorPruneEnabled: false,
+            PruneScope: "managed_only",
+            LargePruneConfirmThresholdCount: 50,
+            LargePruneConfirmThresholdRatio: 0.45);
+        var updated = customPolicy with { MirrorPruneEnabled = true, PruneScope = "music_folder_all" };
+        Assert.Equal(50, updated.LargePruneConfirmThresholdCount);
+        Assert.Equal(0.45, updated.LargePruneConfirmThresholdRatio, 3);
     }
 
     [Fact]

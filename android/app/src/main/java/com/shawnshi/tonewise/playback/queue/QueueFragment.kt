@@ -296,15 +296,14 @@ class QueueFragment : ViewBindingFragment<FragmentQueueBinding>(), EditClickList
         existing: SessionSlotItem?,
         presetScene: SceneBanner?,
     ) {
-        val outgoingPopulated =
-            SessionSlotStore.isSlotPopulated(slots.firstOrNull { it.slotIndex == activeSlotIndex })
-        if (targetSlotIndex == activeSlotIndex) {
-            if (existing != null && existing.queueTrackUids.isNotEmpty()) {
-                saveCurrentQueueToSlot(targetSlotIndex, activeSceneLabel, showFeedback = true)
-                return
-            }
-        } else if (outgoingPopulated) {
-            // Snapshot only an already-populated outgoing slot before switching away.
+        val outgoingSlot = slots.firstOrNull { it.slotIndex == activeSlotIndex }
+        val shouldSnapshotOutgoing =
+            targetSlotIndex != activeSlotIndex &&
+                outgoingSlot != null &&
+                SessionSlotStore.isSlotPopulated(outgoingSlot) &&
+                activeSceneLabel.equals(outgoingSlot.name, ignoreCase = true)
+        if (shouldSnapshotOutgoing) {
+            // Snapshot only an already-populated outgoing slot whose active scene matches it.
             saveCurrentQueueToSlot(
                 activeSlotIndex,
                 activeSceneLabel,
@@ -413,7 +412,8 @@ private fun QueuePersistentSlotBar(
                     val hasTracks = existing != null && existing.queueTrackUids.isNotEmpty()
                     val label =
                         if (hasTracks) {
-                            "#$slotIdx (${existing.queueTrackUids.size})"
+                            val shortName = existing.name.substringBefore('·').trim()
+                            "#$slotIdx $shortName (${existing.queueTrackUids.size})"
                         } else if (presetScene != null) {
                             "#$slotIdx ${presetScene.title.substringBefore('·').trim()}"
                         } else {

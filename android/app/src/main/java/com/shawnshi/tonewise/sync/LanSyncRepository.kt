@@ -101,6 +101,14 @@ data class SyncProgressState(
     val currentTrackTitle: String = "",
 )
 
+data class PendingLargePruneState(
+    val count: Int,
+    val localAudioCount: Int,
+    val ratio: Double,
+    val baseUrl: String,
+    val transport: SyncTransportMode,
+)
+
 data class SceneBanner(
     val id: String,
     val title: String,
@@ -173,6 +181,7 @@ constructor(
     private var resolveInFlight = false
     private var multicastLock: WifiManager.MulticastLock? = null
     private val syncInFlight = AtomicBoolean(false)
+    private val presetSlotsSeeding = AtomicBoolean(false)
     private val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var activeSyncJob: Job? = null
     @Volatile private var activeCancelToken: LanHttpClient.CancelToken? = null
@@ -199,6 +208,9 @@ constructor(
 
     private val _syncProgress = MutableStateFlow(SyncProgressState())
     val syncProgress: StateFlow<SyncProgressState> = _syncProgress
+
+    private val _pendingLargePrune = MutableStateFlow<PendingLargePruneState?>(null)
+    val pendingLargePrune: StateFlow<PendingLargePruneState?> = _pendingLargePrune
 
     private val tracksCacheLock = Any()
     @Volatile private var cachedTracksKey: TracksCacheKey? = null
@@ -227,7 +239,15 @@ constructor(
         get() = managedSyncStorage.hasWritableMusicSafGrant()
 
     fun requestLibraryRescan() {
-        musicRepository.requestIndex(withCache = true)
+        syncScope.launch {
+            runCatching {
+                val stale = syncDb.syncedTrackDao().getAll().filter { !managedSyncStorage.existsInManagedStorage(it) }
+                for (entity in stale) {
+                    syncDb.syncedTrackDao().deleteByUid(entity.trackUid)
+                }
+            }
+            musicRepository.requestIndex(withCache = true)
+        }
     }
 
     init {
@@ -261,6 +281,9 @@ constructor(
             object : MusicRepository.UpdateListener {
                 override fun onMusicChanges(changes: MusicRepository.Changes) {
                     if (changes.deviceLibrary) {
+                        writeBackScope.launch {
+                            ensurePresetRelaySlotsSeeded()
+                        }
                         if (pendingOutboxPlaylists.isNotEmpty()) {
                             writeBackScope.launch {
                                 reconcilePendingOutboxPlaylists()
@@ -552,6 +575,23 @@ constructor(
 
     fun confirmLargePruneLocally() {
         localLargePruneConfirmedOnce = true
+    }
+
+    fun dismissPendingLargePrune() {
+        _pendingLargePrune.value = null
+        localLargePruneConfirmedOnce = false
+    }
+
+    fun confirmLargePruneAndResync() {
+        val pending = _pendingLargePrune.value
+        localLargePruneConfirmedOnce = true
+        _pendingLargePrune.value = null
+        val targetUrl =
+            pending?.baseUrl?.takeIf { it.isNotBlank() }
+                ?: _pairedHost.value?.baseUrl.orEmpty()
+        if (targetUrl.isNotBlank()) {
+            startSync(targetUrl)
+        }
     }
 
     suspend fun syncWithHost(baseUrl: String) {
@@ -1581,9 +1621,15 @@ constructor(
                         val desiredRelPaths = uniqueOutboxTracks.map { it.targetRelPath }
                         val managedRelPaths = syncDb.syncedTrackDao().getAll().map { it.relativePath }.toSet()
                         val syncCompletedCleanly = failedTrackUids.isEmpty() && !cancelToken.isCancelled
-                        // Never trust remote HTTP prune_confirmed_for_session blindly; require explicit Android-side confirmation.
+                        val effectiveConfirmed =
+                            resolveEffectivePruneConfirmed(
+                                transport = transport,
+                                baseUrl = cleanBase,
+                                localConfirmed = localLargePruneConfirmedOnce,
+                                remoteConfirmed = syncPolicy.pruneConfirmedForSession,
+                            )
                         val effectivePolicy =
-                            syncPolicy.copy(pruneConfirmedForSession = localLargePruneConfirmedOnce)
+                            syncPolicy.copy(pruneConfirmedForSession = effectiveConfirmed)
                         val prunePlan =
                             SyncMirrorPrunePlanner.planPrune(
                                 policy = effectivePolicy,
@@ -1597,6 +1643,7 @@ constructor(
                         when (prunePlan.decision) {
                             PruneDecision.PROCEED -> {
                                 localLargePruneConfirmedOnce = false
+                                _pendingLargePrune.value = null
                                 val playingUris = HashSet<String>()
                                 val playingNormRels = HashSet<String>()
                                 playbackStateManager.currentSong?.let { cur ->
@@ -1641,8 +1688,16 @@ constructor(
                             PruneDecision.REQUIRE_LARGE_PRUNE_CONFIRMATION -> {
                                 pendingLargePruneCount = prunePlan.filesToDelete.size
                                 pendingLargePruneRatio = prunePlan.pruneRatio
+                                _pendingLargePrune.value =
+                                    PendingLargePruneState(
+                                        count = pendingLargePruneCount,
+                                        localAudioCount = localAudioCount,
+                                        ratio = pendingLargePruneRatio,
+                                        baseUrl = cleanBase,
+                                        transport = transport,
+                                    )
                                 pruneStatusNote =
-                                    "拟清理 ${pendingLargePruneCount}/${localAudioCount} 首（超阈值，需在手机端确认后执行）"
+                                    "拟清理 ${pendingLargePruneCount}/${localAudioCount} 首（超阈值，请在电脑端或手机同步面板确认后执行）"
                             }
                             PruneDecision.SKIP_EMPTY_OR_UNAUTHORITATIVE -> {
                                 pruneStatusNote = "同步列表为空或源目录异常，已熔断跳过清理"
@@ -2045,6 +2100,55 @@ constructor(
         val order = WorkShuffleOrder.createWorkAwareOrder(songs, -1, random)
         return order.map { songs[it] }
     }
+
+    suspend fun ensurePresetRelaySlotsSeeded() =
+        withContext(Dispatchers.Default) {
+            val songs = musicRepository.library?.songs
+            if (songs.isNullOrEmpty()) return@withContext
+            if (!presetSlotsSeeding.compareAndSet(false, true)) return@withContext
+            try {
+                sessionSlotStore.ensureLoaded()
+                val presetScenes =
+                    _scenes.value
+                        .filterNot { it.id == "44444444-4444-4444-8444-444444444444" }
+                        .take(5)
+                if (presetScenes.isEmpty()) return@withContext
+                val currentSlots = sessionSlotStore.slots.value
+                for (idx in presetScenes.indices) {
+                    val slotIdx = idx + 1
+                    val existing = currentSlots.firstOrNull { it.slotIndex == slotIdx }
+                    if (SessionSlotStore.isSlotPopulated(existing)) continue
+                    val presetScene =
+                        existing?.sceneId?.let { sid ->
+                            presetScenes.firstOrNull {
+                                it.id.equals(sid, ignoreCase = true) ||
+                                    it.title.startsWith(sid, ignoreCase = true)
+                            }
+                        } ?: presetScenes[idx]
+                    val (_, ordered) =
+                        generateAutoDjPlaylist(
+                            scene = presetScene,
+                            targetCount = AutoDjEngine.DEFAULT_TARGET_COUNT,
+                        )
+                    if (ordered.isEmpty()) continue
+                    val canonicalUids = resolveCanonicalTrackUids(ordered)
+                    sessionSlotStore.saveSlot(
+                        SessionSlotItem(
+                            slotIndex = slotIdx,
+                            name = presetScene.title,
+                            sceneId = presetScene.id,
+                            updatedAtMs = 0L,
+                            queueTrackUids = canonicalUids,
+                            currentIndex = 0,
+                            positionMs = 0L,
+                        ),
+                        activate = false,
+                    )
+                }
+            } finally {
+                presetSlotsSeeding.set(false)
+            }
+        }
 
     fun generateAutoDjPlaylist(
         scene: SceneBanner? = null,
@@ -2971,5 +3075,14 @@ constructor(
 
         fun formatM3u8Entries(entries: List<M3u8Entry>, playlistName: String? = null): String =
             PlaylistM3u8Helper.formatM3u8Entries(entries, playlistName)
+
+        internal fun resolveEffectivePruneConfirmed(
+            transport: SyncTransportMode,
+            baseUrl: String,
+            localConfirmed: Boolean,
+            remoteConfirmed: Boolean,
+        ): Boolean =
+            localConfirmed ||
+                (transport == SyncTransportMode.USB && LanHttpClient.isLoopbackUrl(baseUrl) && remoteConfirmed)
     }
 }

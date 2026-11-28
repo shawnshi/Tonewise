@@ -414,6 +414,30 @@ fn find_work_movement_split(title: &str) -> Option<(String, String)> {
     None
 }
 
+fn strip_movement_suffix_from_work(work: &str) -> Option<(String, String, u32)> {
+    for (idx, ch) in work.char_indices() {
+        let split = if ch == ':' && !is_protected_catalog_colon(work, idx) {
+            Some((work[..idx].trim(), work[idx + 1..].trim()))
+        } else if ch == '：' {
+            Some((work[..idx].trim(), work[idx + ch.len_utf8()..].trim()))
+        } else {
+            None
+        };
+        if let Some((left, right)) = split {
+            if left.is_empty() || right.is_empty() {
+                continue;
+            }
+            let (parsed_num, clean_right) = parse_movement_prefix(right);
+            if let Some(num) = parsed_num
+                && !clean_right.is_empty()
+            {
+                return Some((left.to_string(), clean_right, num));
+            }
+        }
+    }
+    None
+}
+
 pub fn split_work_and_movement(
     raw_title: &str,
     explicit_work: Option<&str>,
@@ -425,26 +449,33 @@ pub fn split_work_and_movement(
     let exp_mvt = explicit_movement.map(str::trim).filter(|s| !s.is_empty());
 
     if let Some(work) = exp_work {
+        let stripped = strip_movement_suffix_from_work(work);
+        let (effective_work, stripped_mvt, stripped_num) = match stripped {
+            Some((w, m, n)) => (w, Some(m), Some(n)),
+            None => (work.to_string(), None, None),
+        };
         let raw_mvt_source = if let Some(mvt) = exp_mvt {
             mvt.to_string()
         } else if let Some((left, right)) = find_work_movement_split(title)
-            && left.eq_ignore_ascii_case(work)
+            && (left.eq_ignore_ascii_case(&effective_work) || left.eq_ignore_ascii_case(work))
         {
             right
+        } else if let Some(mvt) = stripped_mvt {
+            mvt
         } else {
             title.to_string()
         };
 
         let (parsed_num, clean_mvt) = parse_movement_prefix(&raw_mvt_source);
-        let final_mvt = if clean_mvt.eq_ignore_ascii_case(work) {
+        let final_mvt = if clean_mvt.eq_ignore_ascii_case(&effective_work) {
             String::new()
         } else {
             clean_mvt
         };
         return ParsedWorkMovement {
-            work: work.to_string(),
+            work: effective_work,
             movement: final_mvt,
-            movement_number: explicit_mvt_num.or(parsed_num),
+            movement_number: explicit_mvt_num.or(parsed_num).or(stripped_num),
         };
     }
 

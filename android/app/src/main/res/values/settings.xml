@@ -11,6 +11,7 @@
     <string name="set_key_accent" translatable="false">auxio_accent2</string>
     <string name="set_key_dynamic_cover_accent" translatable="false">tonewise_dynamic_cover_accent</string>
     <string name="set_key_playback_vinyl_mode" translatable="false">tonewise_playback_vinyl_mode</string>
+    <string name="set_key_playback_vinyl_style" translatable="false">tonewise_playback_vinyl_style</string>
     <string name="set_key_playback_ambient_backdrop" translatable="false">tonewise_playback_ambient_backdrop</string>
 
     <string name="set_key_reindex" translatable="false">auxio_reindex</string>
@@ -191,4 +192,20 @@
     <integer name="cover_mode_balanced">0xA11D</integer>
     <integer name="cover_mode_high_quality">0xA11E</integer>
     <integer name="cover_mode_as_is">0xA126</integer>
+
+    <string-array name="entries_vinyl_style">
+        <item>@string/set_vinyl_style_classic</item>
+        <item>@string/set_vinyl_style_pearl</item>
+        <item>@string/set_vinyl_style_diffraction</item>
+    </string-array>
+
+    <integer-array name="values_vinyl_style">
+        <item>@integer/vinyl_style_classic</item>
+        <item>@integer/vinyl_style_pearl</item>
+        <item>@integer/vinyl_style_diffraction</item>
+    </integer-array>
+
+    <integer name="vinyl_style_classic">0</integer>
+    <integer name="vinyl_style_pearl">1</integer>
+    <integer name="vinyl_style_diffraction">2</integer>
 </resources>

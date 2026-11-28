@@ -283,6 +283,26 @@ public static class ClassicalMetadataEngine
         return null;
     }
 
+    private static (string Work, string Movement, int Number)? StripMovementSuffixFromWork(string work)
+    {
+        for (int i = 0; i < work.Length; i++)
+        {
+            char ch = work[i];
+            if ((ch == ':' && !IsProtectedCatalogColon(work, i)) || ch == '：')
+            {
+                string left = work[..i].Trim();
+                string right = work[(i + 1)..].Trim();
+                if (left.Length == 0 || right.Length == 0) continue;
+                var (parsedNum, cleanRight) = ParseMovementPrefix(right);
+                if (parsedNum is int num && !string.IsNullOrEmpty(cleanRight))
+                {
+                    return (left, cleanRight, num);
+                }
+            }
+        }
+        return null;
+    }
+
     public static ParsedWorkMovement SplitWorkAndMovement(
         string? rawTitle,
         string? explicitWork = null,
@@ -295,6 +315,11 @@ public static class ClassicalMetadataEngine
 
         if (expWork is not null)
         {
+            var stripped = StripMovementSuffixFromWork(expWork);
+            string effectiveWork = stripped is { } s ? s.Work : expWork;
+            string? strippedMvt = stripped?.Movement;
+            int? strippedNum = stripped?.Number;
+
             string rawMvtSource;
             if (expMvt is not null)
             {
@@ -302,9 +327,14 @@ public static class ClassicalMetadataEngine
             }
             else if (FindWorkMovementSplit(title) is var split
                      && split is not null
-                     && string.Equals(split.Value.Work, expWork, StringComparison.OrdinalIgnoreCase))
+                     && (string.Equals(split.Value.Work, effectiveWork, StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(split.Value.Work, expWork, StringComparison.OrdinalIgnoreCase)))
             {
                 rawMvtSource = split.Value.Movement;
+            }
+            else if (strippedMvt is not null)
+            {
+                rawMvtSource = strippedMvt;
             }
             else
             {
@@ -312,8 +342,8 @@ public static class ClassicalMetadataEngine
             }
 
             var (parsedNum, cleanMvt) = ParseMovementPrefix(rawMvtSource);
-            string finalMvt = string.Equals(cleanMvt, expWork, StringComparison.OrdinalIgnoreCase) ? "" : cleanMvt;
-            return new ParsedWorkMovement(expWork, finalMvt, explicitMovementNumber ?? parsedNum);
+            string finalMvt = string.Equals(cleanMvt, effectiveWork, StringComparison.OrdinalIgnoreCase) ? "" : cleanMvt;
+            return new ParsedWorkMovement(effectiveWork, finalMvt, explicitMovementNumber ?? parsedNum ?? strippedNum);
         }
 
         if (FindWorkMovementSplit(title) is { } found)

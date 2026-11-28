@@ -1425,9 +1425,9 @@ public sealed partial class MainViewModel
             NowPlayingLine1 = "选择任意曲目开启沉浸画廊";
             NowPlayingLine2 = "TONEWISE GALLERY";
             NowPlayingLine3 = "";
-            NowPlayingLine1FontSize = 24.0;
+            NowPlayingLine1FontSize = 34.0;
             NowPlayingLine1MaxLines = 1;
-            NowPlayingLine2FontSize = 15.0;
+            NowPlayingLine2FontSize = 18.0;
             NowPlayingLine3Visible = false;
             return;
         }
@@ -1451,9 +1451,9 @@ public sealed partial class MainViewModel
             NowPlayingLine3 = formatted.Line3Tiers.Count > 0
                 ? SelectBestClassicalCreditTier(formatted.Line3Tiers, maxCreditWidthPx)
                 : track.Album;
-            NowPlayingLine1FontSize = 21.0;
+            NowPlayingLine1FontSize = 27.0;
             NowPlayingLine1MaxLines = 2;
-            NowPlayingLine2FontSize = 16.0;
+            NowPlayingLine2FontSize = 17.0;
             NowPlayingLine3Visible = !string.IsNullOrWhiteSpace(NowPlayingLine3);
         }
         else
@@ -1468,9 +1468,9 @@ public sealed partial class MainViewModel
             NowPlayingLine1 = line1;
             NowPlayingLine2 = line2;
             NowPlayingLine3 = line3;
-            NowPlayingLine1FontSize = 24.0;
+            NowPlayingLine1FontSize = 34.0;
             NowPlayingLine1MaxLines = 1;
-            NowPlayingLine2FontSize = 15.0;
+            NowPlayingLine2FontSize = 18.0;
             NowPlayingLine3Visible = !string.IsNullOrWhiteSpace(line3);
         }
     }

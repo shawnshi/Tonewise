@@ -40,4 +40,11 @@
         app:summary="@string/set_playback_ambient_backdrop_desc"
         app:title="@string/set_playback_ambient_backdrop" />
 
+    <com.shawnshi.tonewise.settings.ui.IntListPreference
+        app:defaultValue="@integer/vinyl_style_classic"
+        app:entries="@array/entries_vinyl_style"
+        app:entryValues="@array/values_vinyl_style"
+        app:key="@string/set_key_playback_vinyl_style"
+        app:title="@string/set_playback_vinyl_style" />
+
 </PreferenceScreen>

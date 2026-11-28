@@ -593,6 +593,7 @@ public sealed partial class MainViewModel
 
         if (items.Count == 0)
         {
+            OutboxMissingSourceCount = 0;
             LanOutboxSummaryText = "发送队列为空（可在曲目表、歌单或流派/艺人卡片右键「发送到手机」）";
             return;
         }
@@ -604,11 +605,24 @@ public sealed partial class MainViewModel
                 var summary = store.GetOutboxSummary();
                 string mbText = $"{summary.TotalBytes / (1024.0 * 1024.0):F1} MB";
                 string dupText = summary.DuplicateTrackCount > 0 ? $"（已去重 {summary.DuplicateTrackCount} 首）" : "";
-                string text = $"待同步：{summary.ItemCount} 项 · 解析后共 {summary.TrackCount:N0} 首曲目{dupText} · {mbText}";
+                string missingText = summary.MissingSourceCount > 0
+                    ? $" · ⚠ {summary.MissingSourceCount} 处失效源（已暂停镜像清理，请移除失效订阅项）"
+                    : "";
+                string text = $"待同步：{summary.ItemCount} 项 · 解析后共 {summary.TrackCount:N0} 首曲目{dupText} · {mbText}{missingText}";
+                int missingCount = summary.MissingSourceCount;
                 if (_uiContext is not null)
-                    _uiContext.Post(_ => LanOutboxSummaryText = text, null);
+                {
+                    _uiContext.Post(_ =>
+                    {
+                        OutboxMissingSourceCount = missingCount;
+                        LanOutboxSummaryText = text;
+                    }, null);
+                }
                 else
+                {
+                    OutboxMissingSourceCount = missingCount;
                     LanOutboxSummaryText = text;
+                }
             }
             catch
             {
@@ -767,14 +781,38 @@ public sealed partial class MainViewModel
         Notify($"已将「{group.Title}」加入手机同步队列（{modeBadge} · 队列共 {summary.TrackCount} 首 · {summary.TotalBytes / (1024.0 * 1024.0):F1} MB）", "success");
     }
 
-    private SyncPolicyConfig BuildCurrentSyncPolicyConfig() =>
-        new(
-            MirrorPruneEnabled: IsMirrorPruneEnabled,
-            PruneScope: string.Equals(MirrorPruneScope, "managed_only", StringComparison.OrdinalIgnoreCase)
+    private SyncPolicyConfig BuildCurrentSyncPolicyConfig()
+    {
+        var existing = (_syncStore ?? EnsureSyncStore())?.GetSyncPolicy() ?? new SyncPolicyConfig();
+        return existing with
+        {
+            MirrorPruneEnabled = IsMirrorPruneEnabled,
+            PruneScope = string.Equals(MirrorPruneScope, "managed_only", StringComparison.OrdinalIgnoreCase)
                 ? "managed_only"
                 : "music_folder_all",
-            TargetRoot: "Music",
-            AllowAdbForeignDeleteFallback: AllowAdbForeignDeleteFallback);
+            TargetRoot = "Music",
+            AllowAdbForeignDeleteFallback = AllowAdbForeignDeleteFallback,
+        };
+    }
+
+    [RelayCommand]
+    private void PruneStaleOutboxPlaylists()
+    {
+        var store = EnsureSyncStore();
+        if (store is null) return;
+        var removed = store.PruneMissingPlaylistOutboxItems();
+        RefreshLanSyncUiState();
+        if (removed.Count > 0)
+        {
+            string sample = string.Join("、", removed.Take(3));
+            string more = removed.Count > 3 ? " 等" : "";
+            Notify($"已移除 {removed.Count} 个失效歌单订阅（{sample}{more}），镜像清理已恢复。", "success");
+        }
+        else
+        {
+            Notify("未发现已删除的歌单订阅；失效源可能为曲库中缺失的物理音频文件，请先重新扫描曲库。", "warning");
+        }
+    }
 
     private void ApplySyncPolicyToStore()
     {
@@ -895,6 +933,8 @@ public sealed partial class MainViewModel
 
     partial void OnMirrorPruneScopeChanged(string value)
     {
+        OnPropertyChanged(nameof(IsMirrorPruneScopeAllMusic));
+        OnPropertyChanged(nameof(MirrorPruneScopeDescription));
         if (_usbCoordinator is not null)
         {
             _usbCoordinator.PruneScope = value;

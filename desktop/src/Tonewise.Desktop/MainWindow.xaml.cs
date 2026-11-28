@@ -85,8 +85,12 @@ public sealed partial class MainWindow : Window
     private double _lastWaveformProgress = -1.0;
 
     private readonly ZuneMosaicRenderer _mosaicRenderer = new();
+    private readonly VinylTurntableRenderer _vinylRenderer = new();
     private readonly DispatcherTimer _mosaicAnimTimer;
     private long _lastMosaicTickTimestamp;
+    private bool _isVinylRenderingSubscribed;
+    private long _lastVinylTickTimestamp;
+    private (byte R, byte G, byte B)? _latestRawCoverSeedRgb;
     private readonly DispatcherTimer _nowPlayingIdleTimer;
     private DateTime _lastNowPlayingActivityUtc = DateTime.UtcNow;
     private bool _isNowPlayingChromeFaded;
@@ -294,6 +298,20 @@ public sealed partial class MainWindow : Window
             {
                 _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
             }
+            else if (args.PropertyName is nameof(MainViewModel.NowPlayingStageMode)
+                or nameof(MainViewModel.VinylFinishStyle)
+                or nameof(MainViewModel.VinylUseAmbientBackdrop)
+                or nameof(MainViewModel.IsNowPlayingQueueOpen))
+            {
+                SyncNowPlayingVinylHostSize();
+                if (ViewModel.IsNowPlayingVinylMode && _latestRawCoverSeedRgb is null && !string.IsNullOrWhiteSpace(ViewModel.CurrentTrack?.CoverArtPath))
+                {
+                    _ = ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
+                }
+                NowPlayingMosaicCanvas?.Invalidate();
+                NowPlayingVinylCanvas?.Invalidate();
+                UpdateMainWindowTimers();
+            }
             else if (args.PropertyName == nameof(MainViewModel.InspectedTrack))
             {
                 UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
@@ -363,6 +381,8 @@ public sealed partial class MainWindow : Window
                 UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
                 UpdateCoverArtImage(NowPlayingCoverImage, ViewModel.CurrentTrack?.CoverArtPath, decodeWidth: 360);
                 UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
+                _vinylRenderer.UpdateCoverAsync(ViewModel.CurrentTrack?.CoverArtPath, () =>
+                    DispatcherQueue?.TryEnqueue(() => NowPlayingVinylCanvas?.Invalidate()));
                 RefreshQueuePlayingHighlights();
                 await ApplyDynamicAccentFromCoverAsync(ViewModel.CurrentTrack?.CoverArtPath);
                 await UpdateSmtcMetadataAsync(ViewModel.CurrentTrack);
@@ -372,6 +392,7 @@ public sealed partial class MainWindow : Window
                 if (ViewModel.IsNowPlayingViewVisible)
                 {
                     NowPlayingMosaicCanvas?.Invalidate();
+                    NowPlayingVinylCanvas?.Invalidate();
                 }
             }
             catch (Exception ex)
@@ -424,6 +445,8 @@ public sealed partial class MainWindow : Window
             UpdateCoverArtImage(TransportCoverImage, ViewModel.CurrentTrack?.CoverArtPath);
             UpdateCoverArtImage(NowPlayingCoverImage, ViewModel.CurrentTrack?.CoverArtPath, decodeWidth: 360);
             UpdateCoverArtImage(InspectedCoverImage, ViewModel.InspectedTrack?.CoverArtPath);
+            _vinylRenderer.UpdateCoverAsync(ViewModel.CurrentTrack?.CoverArtPath, () =>
+                DispatcherQueue?.TryEnqueue(() => NowPlayingVinylCanvas?.Invalidate()));
             SyncInlineInspectorTargets(ViewModel.InspectedTrack is null ? [] : [ViewModel.InspectedTrack]);
             _ = LoadPlayingBookletForTrackAsync(ViewModel.CurrentTrack);
             _ = LoadBookletForTrackAsync(ViewModel.InspectedTrack);
@@ -431,6 +454,7 @@ public sealed partial class MainWindow : Window
             if (ViewModel.IsNowPlayingViewVisible)
             {
                 RefreshNowPlayingMosaic();
+                NowPlayingVinylCanvas?.Invalidate();
             }
             else
             {
@@ -524,7 +548,13 @@ public sealed partial class MainWindow : Window
             _dynamicAccentCts = null;
             _mosaicAnimTimer.Stop();
             _nowPlayingIdleTimer.Stop();
+            if (_isVinylRenderingSubscribed)
+            {
+                CompositionTarget.Rendering -= OnVinylCompositionRendering;
+                _isVinylRenderingSubscribed = false;
+            }
             _mosaicRenderer.Dispose();
+            _vinylRenderer.Dispose();
             _progressTimer.Stop();
             _searchDebounceTimer.Stop();
             _notificationTimer.Stop();
@@ -569,6 +599,10 @@ public sealed partial class MainWindow : Window
         if (_windowPlacementRestored && (args.DidPositionChange || args.DidSizeChange))
         {
             PersistMainWindowPlacement();
+        }
+        if (args.DidSizeChange && ViewModel.IsNowPlayingVinylMode)
+        {
+            SyncNowPlayingVinylHostSize();
         }
         bool minimized = (sender.Presenter as Microsoft.UI.Windowing.OverlappedPresenter)?.State
             == Microsoft.UI.Windowing.OverlappedPresenterState.Minimized;
@@ -809,7 +843,8 @@ public sealed partial class MainWindow : Window
         }
 
         bool activeNowPlaying = activePlaying && ViewModel.IsNowPlayingViewVisible;
-        bool animateMosaic = activeNowPlaying && ZuneMotionHelper.IsMotionEnabled() && !_accessibilitySettings.HighContrast;
+        bool useAmbientVinylBg = ViewModel.IsNowPlayingVinylMode && ViewModel.VinylUseAmbientBackdrop;
+        bool animateMosaic = activeNowPlaying && !useAmbientVinylBg && ZuneMotionHelper.IsMotionEnabled() && !_accessibilitySettings.HighContrast;
         if (animateMosaic)
         {
             if (!_mosaicAnimTimer.IsEnabled)
@@ -831,6 +866,8 @@ public sealed partial class MainWindow : Window
         {
             if (_nowPlayingIdleTimer.IsEnabled) _nowPlayingIdleTimer.Stop();
         }
+
+        SyncVinylRenderLoop();
     }
 
     private void TrySetObsidianBackdrop()
@@ -923,85 +960,6 @@ public sealed partial class MainWindow : Window
         SyncSubSelectorBarItems();
         RefreshDynamicAccentControls();
         NowPlayingMosaicCanvas?.Invalidate();
-    }
-
-    private async Task ApplyDynamicAccentFromCoverAsync(string? coverArtPath)
-    {
-        var prev = _dynamicAccentCts;
-        var cts = new CancellationTokenSource();
-        _dynamicAccentCts = cts;
-        CancellationToken token = cts.Token;
-        if (prev is not null)
-        {
-            try { prev.Cancel(); } catch (ObjectDisposedException) { }
-            prev.Dispose();
-        }
-
-        bool isDark = ResolveEffectiveIsDarkTheme();
-        (byte R, byte G, byte B) targetRgb = isDark
-            ? ZuneColorMath.DefaultDarkAccentRgb
-            : ZuneColorMath.DefaultLightAccentRgb;
-
-        if (ViewModel.EnableDynamicCoverAccent && !string.IsNullOrWhiteSpace(coverArtPath))
-        {
-            try
-            {
-                var sampled = await Task.Run(() => ExtractClampedCoverAccent(coverArtPath, isDark), token);
-                if (token.IsCancellationRequested || !ReferenceEquals(_dynamicAccentCts, cts))
-                {
-                    return;
-                }
-                if (sampled.HasValue)
-                {
-                    targetRgb = sampled.Value;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (ObjectDisposedException)
-            {
-                return;
-            }
-            catch
-            {
-                // Keep default Zune magenta fallback
-            }
-        }
-
-        if (token.IsCancellationRequested || !ReferenceEquals(_dynamicAccentCts, cts)) return;
-        ApplyResolvedAccentRgb(targetRgb, isDark);
-    }
-
-    private static (byte R, byte G, byte B)? ExtractClampedCoverAccent(string coverArtPath, bool isDark)
-    {
-        if (!File.Exists(coverArtPath)) return null;
-        using var raw = SKBitmap.Decode(coverArtPath);
-        if (raw is null || raw.Width <= 0 || raw.Height <= 0) return null;
-
-        const int sampleDim = 24;
-        using var small = new SKBitmap(sampleDim, sampleDim, SKColorType.Bgra8888, SKAlphaType.Premul);
-        using (var canvas = new SKCanvas(small))
-        {
-            canvas.DrawBitmap(raw, new SKRect(0, 0, raw.Width, raw.Height), new SKRect(0, 0, sampleDim, sampleDim));
-        }
-
-        var pixels = new (byte R, byte G, byte B)[sampleDim * sampleDim];
-        int k = 0;
-        for (int y = 0; y < sampleDim; y++)
-        {
-            for (int x = 0; x < sampleDim; x++)
-            {
-                var px = small.GetPixel(x, y);
-                pixels[k++] = (px.Red, px.Green, px.Blue);
-            }
-        }
-
-        var dominant = ZuneColorMath.SelectDominantVibrantRgb(pixels);
-        return dominant is { } rgb
-            ? ZuneColorMath.ClampAccentForTheme(rgb.R, rgb.G, rgb.B, isDark)
-            : null;
     }
 
     private void ApplyResolvedAccentRgb((byte R, byte G, byte B) rgb, bool isDark)
@@ -1108,7 +1066,11 @@ public sealed partial class MainWindow : Window
 
         if (primaryNavId == "now_playing")
         {
+            SyncNowPlayingVinylHostSize();
             RefreshNowPlayingMosaic();
+            _vinylRenderer.UpdateCoverAsync(ViewModel.CurrentTrack?.CoverArtPath, () =>
+                DispatcherQueue?.TryEnqueue(() => NowPlayingVinylCanvas?.Invalidate()));
+            NowPlayingVinylCanvas?.Invalidate();
         }
         RestoreNowPlayingChrome();
         UpdateMainWindowTimers();

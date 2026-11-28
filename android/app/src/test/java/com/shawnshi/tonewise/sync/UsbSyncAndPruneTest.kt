@@ -509,4 +509,66 @@ class UsbSyncAndPruneTest {
             }
         }
     }
+
+    @Test
+    fun managedSyncStorage_isSafAutoRenamedDuplicate_detectsNumericSuffixesOnly() {
+        assertTrue(ManagedSyncStorage.isSafAutoRenamedDuplicate("Antonio Vivaldi", "Antonio Vivaldi (1)"))
+        assertTrue(ManagedSyncStorage.isSafAutoRenamedDuplicate("Max Richter, Daniel Hope", "Max Richter, Daniel Hope (2)"))
+        assertFalse(ManagedSyncStorage.isSafAutoRenamedDuplicate("Antonio Vivaldi", "Antonio Vivaldi"))
+        assertFalse(ManagedSyncStorage.isSafAutoRenamedDuplicate("Antonio Vivaldi", "Antonio Vivaldi (Live)"))
+        assertFalse(ManagedSyncStorage.isSafAutoRenamedDuplicate("Symphony No. 1", "Symphony No. 1 (Remastered)"))
+    }
+
+    @Test
+    fun syncMirrorPrunePlanner_normalizesUnicodeNfcNfdIdentically() {
+        val localNfd = LocalMusicAudioFile("Schubert/Mu\u0308llerin/01_Das Wandern.flac", "content://1", 100L)
+        val desiredNfc = listOf("Schubert/M\u00FCllerin/01_Das Wandern.flac")
+        val policy =
+            SyncPolicyDto(
+                mirrorPruneEnabled = true,
+                pruneScope = "music_folder_all",
+                targetRoot = "Music",
+                outboxAuthoritative = true,
+                missingSourceCount = 0,
+            )
+
+        val plan =
+            SyncMirrorPrunePlanner.planPrune(
+                policy = policy,
+                desiredTargetRelPaths = desiredNfc,
+                localMusicFiles = listOf(localNfd),
+                managedRelPaths = emptySet(),
+                syncCompletedCleanly = true,
+            )
+        assertEquals(PruneDecision.PROCEED, plan.decision)
+        assertTrue(plan.filesToDelete.isEmpty())
+    }
+
+    @Test
+    fun lanSyncRepository_resolveEffectivePruneConfirmed_trustsUsbLoopbackOnlyAndRequiresLocalForLan() {
+        assertTrue(
+            LanSyncRepository.resolveEffectivePruneConfirmed(
+                transport = SyncTransportMode.USB,
+                baseUrl = "http://127.0.0.1:45820",
+                localConfirmed = false,
+                remoteConfirmed = true,
+            )
+        )
+        assertFalse(
+            LanSyncRepository.resolveEffectivePruneConfirmed(
+                transport = SyncTransportMode.LAN,
+                baseUrl = "http://192.168.1.100:45820",
+                localConfirmed = false,
+                remoteConfirmed = true,
+            )
+        )
+        assertTrue(
+            LanSyncRepository.resolveEffectivePruneConfirmed(
+                transport = SyncTransportMode.LAN,
+                baseUrl = "http://192.168.1.100:45820",
+                localConfirmed = true,
+                remoteConfirmed = false,
+            )
+        )
+    }
 }

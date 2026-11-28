@@ -76,6 +76,7 @@ constructor(
 ) {
     private val resolver = context.contentResolver
     private val safCache = SafPathCache()
+    private val safDirLock = Any()
     private val uriInspectCache = ConcurrentHashMap<String, ExistingManagedFile>()
     @Volatile private var legacyMediaStoreTonewiseAbsent: Boolean? = null
     @Volatile private var legacyFileTonewiseAbsent: Boolean? = null
@@ -180,6 +181,7 @@ constructor(
                 val uri = Uri.parse(file.documentUri)
                 if (uri.authority != MediaStore.AUTHORITY && file.documentUri.contains("/tree/")) {
                     deleted = runCatching { DocumentsContract.deleteDocument(resolver, uri) }.getOrDefault(false)
+                    if (!deleted) blocked = true
                 } else {
                     try {
                         val rows = resolver.delete(uri, null, null)
@@ -1519,37 +1521,65 @@ constructor(
         return current
     }
 
+    private fun querySafDisplayName(docUri: Uri): String? =
+        runCatching {
+            resolver.query(
+                docUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val idx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                if (idx >= 0) cursor.getString(idx) else null
+            }
+        }.getOrNull()
+
     private fun ensureSafChildDirectory(
         rootUri: Uri,
         parentDocId: String,
         name: String,
-    ): String {
-        val existing = findSafChild(rootUri, parentDocId, name)
-        if (existing != null && existing.isDirectory) {
-            return existing.docId
-        }
-        val parentUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, parentDocId)
-        val created =
-            DocumentsContract.createDocument(
-                resolver,
-                parentUri,
-                DocumentsContract.Document.MIME_TYPE_DIR,
+    ): String =
+        synchronized(safDirLock) {
+            findSafChild(rootUri, parentDocId, name, forceRefresh = false)
+                ?.takeIf { it.isDirectory }
+                ?.let { return@synchronized it.docId }
+
+            findSafChild(rootUri, parentDocId, name, forceRefresh = true)
+                ?.takeIf { it.isDirectory }
+                ?.let { return@synchronized it.docId }
+
+            val parentUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, parentDocId)
+            val created =
+                DocumentsContract.createDocument(
+                    resolver,
+                    parentUri,
+                    DocumentsContract.Document.MIME_TYPE_DIR,
+                    name,
+                ) ?: throw IOException("无法创建 SAF 目录: $name")
+            val createdId = DocumentsContract.getDocumentId(created)
+            val actualName = querySafDisplayName(created)
+            if (isSafAutoRenamedDuplicate(name, actualName)) {
+                runCatching { DocumentsContract.deleteDocument(resolver, created) }
+                findSafChild(rootUri, parentDocId, name, forceRefresh = true)
+                    ?.takeIf { it.isDirectory }
+                    ?.let { return@synchronized it.docId }
+                throw IOException("SAF 目录创建发生重名冲突($actualName): $name")
+            }
+            safCache.putEntry(
+                rootUri.toString(),
+                parentDocId,
                 name,
-            ) ?: throw IOException("无法创建 SAF 目录: $name")
-        val createdId = DocumentsContract.getDocumentId(created)
-        safCache.putEntry(
-            rootUri.toString(),
-            parentDocId,
-            name,
-            SafChildInfo(
-                docId = createdId,
-                isDirectory = true,
-                size = 0L,
-                lastModifiedMs = System.currentTimeMillis(),
-            ),
-        )
-        return createdId
-    }
+                SafChildInfo(
+                    docId = createdId,
+                    isDirectory = true,
+                    size = 0L,
+                    lastModifiedMs = System.currentTimeMillis(),
+                ),
+            )
+            createdId
+        }
 
     private fun resolveAudioMimeType(fileName: String): String {
         val dot = fileName.lastIndexOf('.')
@@ -1640,6 +1670,15 @@ constructor(
                     append(parentDirs.joinToString("/")).append('/')
                 }
             }
+
+        internal fun isSafAutoRenamedDuplicate(requestedName: String, actualDisplayName: String?): Boolean {
+            val req = requestedName.trim()
+            val actual = actualDisplayName?.trim().orEmpty()
+            if (req.isEmpty() || actual.isEmpty() || actual.equals(req, ignoreCase = true)) return false
+            if (!actual.startsWith(req, ignoreCase = true)) return false
+            val suffix = actual.substring(req.length)
+            return Regex("^ \\(\\d+\\)$").matches(suffix)
+        }
 
         internal fun selectPreferredMusicSafIndex(lastPathSegments: List<String?>): Int {
             if (lastPathSegments.isEmpty()) return -1

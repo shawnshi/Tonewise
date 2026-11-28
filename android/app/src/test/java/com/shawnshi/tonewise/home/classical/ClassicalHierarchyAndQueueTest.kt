@@ -9,6 +9,7 @@ import android.net.Uri
 import com.shawnshi.tonewise.home.collection.CollectionPivot
 import com.shawnshi.tonewise.music.ClassicalWork
 import com.shawnshi.tonewise.music.WorkRecording
+import com.shawnshi.tonewise.music.buildClassicalWorkIndex
 import com.shawnshi.tonewise.playback.state.ClassicalSessionShuffleLock
 import java.util.UUID
 import org.junit.Assert.assertEquals
@@ -135,7 +136,228 @@ class ClassicalHierarchyAndQueueTest {
         assertTrue(CollectionPivot.DEFAULT_PIVOTS.contains(CollectionPivot.CONDUCTORS))
     }
 
-    private class FakeAlbum(title: String) : Album {
+    @Test
+    fun buildClassicalWorkIndex_mergesSameWorkAcrossDistinctMovementMbids() {
+        val albRostropovich = FakeAlbum("Rostropovich!")
+        val albAlternate = FakeAlbum("Vivaldi Cello Concertos (2004)")
+        val workTitle = "Cello Concerto in G major, RV 413"
+
+        val m1 =
+            FakeSong(
+                idSeed = "rv413_1",
+                album = albRostropovich,
+                title = "Konzert für Violoncello und Streicher G-dur, RV 413: 1. Allegro",
+                workName = workTitle,
+                movementName = null,
+                movementNumber = null,
+                durationMs = 210_000L,
+                composers = listOf("Antonio Vivaldi"),
+                conductors = listOf("Paul Sacher"),
+                track = 10,
+                disc = Disc(3, null),
+                musicBrainzWorkId = "85ba7816-8093-3771-92bb-7138ca2c370c",
+            )
+        val m2 =
+            FakeSong(
+                idSeed = "rv413_2",
+                album = albRostropovich,
+                title = "Konzert für Violoncello und Streicher G-dur, RV 413: 2. Adagio",
+                workName = workTitle,
+                movementName = null,
+                movementNumber = null,
+                durationMs = 195_000L,
+                composers = listOf("Antonio Vivaldi"),
+                conductors = listOf("Paul Sacher"),
+                track = 11,
+                disc = Disc(3, null),
+                musicBrainzWorkId = "86f556d9-7448-36a9-9764-334bb96e8990",
+            )
+        val m3 =
+            FakeSong(
+                idSeed = "rv413_3",
+                album = albRostropovich,
+                title = "Konzert für Violoncello und Streicher G-dur, RV 413: 3. Allegro",
+                workName = workTitle,
+                movementName = null,
+                movementNumber = null,
+                durationMs = 180_000L,
+                composers = listOf("Antonio Vivaldi"),
+                conductors = listOf("Paul Sacher"),
+                track = 12,
+                disc = Disc(3, null),
+                musicBrainzWorkId = "a0b92596-1ac3-397f-8582-c8268646f49a",
+            )
+        val altRec =
+            FakeSong(
+                idSeed = "rv413_alt",
+                album = albAlternate,
+                title = "Cello Concerto in G major, RV 413: I. Allegro",
+                workName = workTitle,
+                movementName = null,
+                movementNumber = 1,
+                durationMs = 200_000L,
+                composers = listOf("Antonio Vivaldi"),
+                conductors = listOf("Andrea Marcon"),
+                track = 1,
+                disc = Disc(1, null),
+                musicBrainzWorkId = null,
+            )
+
+        val (byUid, works) = buildClassicalWorkIndex(listOf(m3, m1, altRec, m2))
+        assertEquals(1, works.size)
+        val rv413 = works.single()
+        assertEquals("antonio vivaldi::cello concerto in g major, rv 413", rv413.key)
+        assertEquals("Antonio Vivaldi", rv413.composerName)
+        assertEquals(2, rv413.recordings.size)
+        val rostropovichRec = rv413.recordings.first { it.album == albRostropovich }
+        assertEquals(listOf(10, 11, 12), rostropovichRec.movements.map { it.track })
+        assertEquals(rv413, byUid[m1.uid])
+        assertEquals(rv413, byUid[m2.uid])
+        assertEquals(rv413, byUid[m3.uid])
+        assertEquals(rv413, byUid[altRec.uid])
+    }
+
+    @Test
+    fun buildClassicalWorkIndex_and_groupByComposer_mergeComposerCaseAndAliasVariants() {
+        val alb1 = FakeAlbum("Vivaldi Concertos A")
+        val alb2 = FakeAlbum("Vivaldi Concertos B")
+        val s1 =
+            FakeSong(
+                idSeed = "viv_alias_1",
+                album = alb1,
+                title = "Cello Concerto in G major, RV 413: I. Allegro",
+                workName = "Cello Concerto in G major, RV 413",
+                movementName = "Allegro",
+                movementNumber = 1,
+                durationMs = 200_000L,
+                composers = listOf("Vivaldi"),
+            )
+        val s2 =
+            FakeSong(
+                idSeed = "viv_alias_2",
+                album = alb2,
+                title = "Cello Concerto in G major, RV 413: II. Adagio",
+                workName = "Cello Concerto in G major, RV 413",
+                movementName = "Adagio",
+                movementNumber = 2,
+                durationMs = 190_000L,
+                composers = listOf("ANTONIO VIVALDI"),
+            )
+        val s3 =
+            FakeSong(
+                idSeed = "viv_alias_3",
+                album = alb2,
+                title = "Cello Concerto in G major, RV 413: III. Allegro",
+                workName = "Cello Concerto in G major, RV 413",
+                movementName = "Allegro",
+                movementNumber = 3,
+                durationMs = 185_000L,
+                composers = listOf("Antonio Vivaldi"),
+            )
+
+        val (_, works) = buildClassicalWorkIndex(listOf(s1, s2, s3))
+        assertEquals(1, works.size)
+        assertEquals("Antonio Vivaldi", works.single().composerName)
+
+        val groups =
+            ClassicalHierarchyLogic.groupByComposer(
+                listOf(
+                    ClassicalWork("k1", "Work A", "vivaldi", emptyList()),
+                    ClassicalWork("k2", "Work B", "ANTONIO VIVALDI", emptyList()),
+                    ClassicalWork("k3", "Work C", "Antonio Vivaldi", emptyList()),
+                )
+            )
+        assertEquals(1, groups.size)
+        assertEquals("Antonio Vivaldi", groups.single().composerName)
+        assertEquals(3, groups.single().workCount)
+    }
+
+    @Test
+    fun buildClassicalWorkIndex_prefersTrackArtistOverAlbumArtistWhenComposerMissing() {
+        val variousAlbum = FakeAlbum("DG Baroque Compilation", artists = listOf(FakeArtist("Various Artists")))
+        val s =
+            FakeSong(
+                idSeed = "missing_comp_1",
+                album = variousAlbum,
+                title = "Cello Concerto in G major, RV 413: I. Allegro",
+                workName = "Cello Concerto in G major, RV 413",
+                movementName = "Allegro",
+                movementNumber = 1,
+                durationMs = 200_000L,
+                composers = emptyList(),
+                artists = listOf(FakeArtist("Antonio Vivaldi")),
+            )
+
+        val (_, works) = buildClassicalWorkIndex(listOf(s))
+        assertEquals(1, works.size)
+        assertEquals("Antonio Vivaldi", works.single().composerName)
+        assertEquals("antonio vivaldi::cello concerto in g major, rv 413", works.single().key)
+    }
+
+    @Test
+    fun buildClassicalWorkIndex_stripsMovementSuffixFromDirtyWorkTags() {
+        val alb = FakeAlbum("Rostropovich!")
+        val m1 =
+            FakeSong(
+                idSeed = "dirty_work_1",
+                album = alb,
+                title = "Konzert für Violoncello und Streicher G-dur, RV 413: 1. Allegro",
+                workName = "Concerto for Cello in G major, RV 413: I. Allegro",
+                movementName = null,
+                movementNumber = null,
+                durationMs = 210_000L,
+                composers = listOf("Antonio Vivaldi"),
+                track = 10,
+            )
+        val m2 =
+            FakeSong(
+                idSeed = "dirty_work_2",
+                album = alb,
+                title = "Konzert für Violoncello und Streicher G-dur, RV 413: 2. Adagio",
+                workName = "Concerto for Cello in G major, RV 413: II. Largo",
+                movementName = null,
+                movementNumber = null,
+                durationMs = 195_000L,
+                composers = listOf("Antonio Vivaldi"),
+                track = 11,
+            )
+        val m3 =
+            FakeSong(
+                idSeed = "dirty_work_3",
+                album = alb,
+                title = "Konzert für Violoncello und Streicher G-dur, RV 413: 3. Allegro",
+                workName = "Concerto for Cello in G major, RV 413: III. Allegro",
+                movementName = null,
+                movementNumber = null,
+                durationMs = 180_000L,
+                composers = listOf("Antonio Vivaldi"),
+                track = 12,
+            )
+
+        val (_, works) = buildClassicalWorkIndex(listOf(m3, m1, m2))
+        assertEquals(1, works.size)
+        val work = works.single()
+        assertEquals("Concerto for Cello in G major, RV 413", work.workTitle)
+        assertEquals(1, work.recordings.size)
+        assertEquals(listOf(10, 11, 12), work.recordings.single().movements.map { it.track })
+    }
+
+    private class FakeArtist(name: String) : Artist {
+        override val uid: Music.UID =
+            requireNotNull(Music.UID.fromString("uar${UUID.nameUUIDFromBytes(name.toByteArray())}"))
+        override val name: Name = Naming.simple().name(name, null)
+        override val songs: Collection<Song> = emptyList()
+        override val explicitAlbums: Collection<Album> = emptyList()
+        override val implicitAlbums: Collection<Album> = emptyList()
+        override val durationMs: Long? = null
+        override val covers: CoverCollection = CoverCollection.from(emptyList())
+        override val genres: List<Genre> = emptyList()
+    }
+
+    private class FakeAlbum(
+        title: String,
+        override val artists: List<Artist> = emptyList(),
+    ) : Album {
         override val uid: Music.UID =
             requireNotNull(Music.UID.fromString("uaa${UUID.nameUUIDFromBytes(title.toByteArray())}"))
         override val name: Name = Naming.simple().name(title, null)
@@ -145,7 +367,6 @@ class ClassicalHierarchyAndQueueTest {
         override val covers: CoverCollection = CoverCollection.from(emptyList())
         override val durationMs: Long = 0L
         override val addedMs: Long = 0L
-        override val artists: List<Artist> = emptyList()
     }
 
     private class FakeSong(
@@ -159,12 +380,14 @@ class ClassicalHierarchyAndQueueTest {
         override val composers: List<String> = emptyList(),
         override val conductors: List<String> = emptyList(),
         year: Int? = null,
+        override val track: Int? = movementNumber,
+        override val disc: Disc? = null,
+        override val artists: List<Artist> = emptyList(),
+        override val musicBrainzWorkId: String? = null,
     ) : Song {
         override val uid: Music.UID =
             requireNotNull(Music.UID.fromString("uas${UUID.nameUUIDFromBytes(idSeed.toByteArray())}"))
         override val name: Name.Known = Naming.simple().name(title, null)
-        override val track: Int? = movementNumber
-        override val disc: Disc? = null
         override val date: Date? = year?.let(Date::from)
         override val uri: Uri get() = error("unused")
         override val path: Path get() = error("unused")
@@ -176,7 +399,6 @@ class ClassicalHierarchyAndQueueTest {
         override val modifiedMs: Long = 0L
         override val addedMs: Long = 0L
         override val cover: Cover? = null
-        override val artists: List<Artist> = emptyList()
         override val genres: List<Genre> = emptyList()
     }
 }

@@ -30,6 +30,7 @@ import android.text.TextUtils
 import android.view.LayoutInflater
 import android.view.MenuItem
 import android.view.View
+import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.Toolbar
@@ -72,6 +73,7 @@ import com.shawnshi.tonewise.playback.sleep.SleepTimerMode
 import com.shawnshi.tonewise.playback.sleep.SleepTimerState
 import com.shawnshi.tonewise.playback.state.RepeatMode
 import com.shawnshi.tonewise.playback.ui.StyledSeekBar
+import com.shawnshi.tonewise.playback.ui.VinylStyle
 import com.shawnshi.tonewise.playback.ui.clock.DeskClockDialog
 import com.shawnshi.tonewise.playback.ui.stepper.Direction
 import com.shawnshi.tonewise.playback.ui.stepper.StepperOverlay
@@ -237,12 +239,20 @@ class PlaybackPanelFragment :
             onSwipeNext = { playbackModel.next() }
             onSwipePrev = { playbackModel.prev() }
             onDoubleTapSeek = ::seek
+            onLongPress = { cycleVinylStyle() }
         }
-        binding.playbackStageToggle.setOnClickListener {
-            uiSettings.playbackVinylMode = !uiSettings.playbackVinylMode
-            applyStageVisualMode()
+        binding.playbackStageToggle.apply {
+            setOnClickListener {
+                uiSettings.playbackVinylMode = !uiSettings.playbackVinylMode
+                applyStageVisualMode()
+            }
+            setOnLongClickListener {
+                cycleVinylStyle()
+                true
+            }
         }
         applyStageVisualMode()
+        applyVinylStyle()
 
         // Set up actions
         // TODO: Add better playback button accessibility
@@ -346,6 +356,10 @@ class PlaybackPanelFragment :
 
     override fun onRoundModeChanged() {}
 
+    override fun onVinylStyleChanged() {
+        applyVinylStyle()
+    }
+
     override fun onPlaybackBackdropChanged() {
         applyBackdropStyle()
     }
@@ -354,12 +368,6 @@ class PlaybackPanelFragment :
         if (item.itemId == R.id.action_desk_clock) {
             if (parentFragmentManager.findFragmentByTag(DeskClockDialog.TAG) == null) {
                 DeskClockDialog.newInstance().show(parentFragmentManager, DeskClockDialog.TAG)
-            }
-            return true
-        }
-        if (item.itemId == R.id.action_open_equalizer) {
-            if (parentFragmentManager.findFragmentByTag(DspControlDialog.TAG) == null) {
-                DspControlDialog.newInstance().show(parentFragmentManager, DspControlDialog.TAG)
             }
             return true
         }
@@ -560,6 +568,40 @@ class PlaybackPanelFragment :
         b.playbackStageToggle.alpha = if (vinylMode) 1.0f else 0.85f
     }
 
+    private fun applyVinylStyle() {
+        val b = binding ?: return
+        val style = uiSettings.playbackVinylStyle
+        b.playbackVinylView.setVinylStyle(style)
+        b.playbackVinylView.setCoverSeedColor(latestCoverSeedArgb)
+        if (style == VinylStyle.COVER_PEARL && latestCoverSeedArgb == null) {
+            playbackModel.song.value?.let(::updateDynamicCoverAccent)
+        }
+    }
+
+    private fun cycleVinylStyle() {
+        val next = uiSettings.playbackVinylStyle.next()
+        uiSettings.playbackVinylStyle = next
+        if (!uiSettings.playbackVinylMode) {
+            uiSettings.playbackVinylMode = true
+            applyStageVisualMode()
+        }
+        applyVinylStyle()
+        val label = getString(vinylStyleLabelRes(next))
+        Toast.makeText(
+                requireContext().applicationContext,
+                getString(R.string.fmt_vinyl_style_switched, label),
+                Toast.LENGTH_SHORT,
+            )
+            .show()
+    }
+
+    private fun vinylStyleLabelRes(style: VinylStyle): Int =
+        when (style) {
+            VinylStyle.CLASSIC_BLACK -> R.string.set_vinyl_style_classic
+            VinylStyle.COVER_PEARL -> R.string.set_vinyl_style_pearl
+            VinylStyle.GROOVE_DIFFRACTION -> R.string.set_vinyl_style_diffraction
+        }
+
     private fun applyBackdropStyle() {
         val b = binding ?: return
         b.playbackMosaicBackdrop.setAmbientBackdrop(
@@ -592,13 +634,18 @@ class PlaybackPanelFragment :
         val cover = song.cover
         if (cover == null) {
             latestCoverSeedArgb = null
+            binding?.playbackVinylView?.setCoverSeedColor(null)
             applyBackdropStyle()
             if (!uiSettings.enableDynamicCoverAccent) {
                 dynamicAccentController.clear()
             }
             return
         }
-        if (!uiSettings.enableDynamicCoverAccent && !uiSettings.useAmbientPlaybackBackdrop) {
+        if (
+            !uiSettings.enableDynamicCoverAccent &&
+                !uiSettings.useAmbientPlaybackBackdrop &&
+                uiSettings.playbackVinylStyle != VinylStyle.COVER_PEARL
+        ) {
             return
         }
         val appContext = requireContext().applicationContext
@@ -625,12 +672,14 @@ class PlaybackPanelFragment :
                 if (!isAdded) return@launch
                 if (pixels != null) {
                     latestCoverSeedArgb = ZuneColorMath.selectVibrantSeed(pixels)
+                    binding?.playbackVinylView?.setCoverSeedColor(latestCoverSeedArgb)
                     applyBackdropStyle()
                     if (uiSettings.enableDynamicCoverAccent) {
                         dynamicAccentController.updateFromPixels(pixels, dark)
                     }
                 } else {
                     latestCoverSeedArgb = null
+                    binding?.playbackVinylView?.setCoverSeedColor(null)
                     applyBackdropStyle()
                     dynamicAccentController.clear()
                 }

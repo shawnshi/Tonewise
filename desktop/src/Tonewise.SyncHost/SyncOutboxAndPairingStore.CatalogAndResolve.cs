@@ -273,7 +273,12 @@ public sealed partial class SyncOutboxAndPairingStore
     public OutboxSummary GetOutboxSummary(string? deviceId = null)
     {
         var resolved = ResolveOutbox(deviceId);
-        return new OutboxSummary(resolved.Items.Count, resolved.Tracks.Count, resolved.TotalBytes, resolved.DuplicateTrackCount);
+        return new OutboxSummary(
+            resolved.Items.Count,
+            resolved.Tracks.Count,
+            resolved.TotalBytes,
+            resolved.DuplicateTrackCount,
+            resolved.SyncPolicy?.MissingSourceCount ?? 0);
     }
 
     public ResolvedOutboxPayload ResolveOutbox(

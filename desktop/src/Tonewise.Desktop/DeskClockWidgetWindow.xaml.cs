@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
@@ -9,6 +10,8 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using SkiaSharp;
 using SkiaSharp.Views.Windows;
 using Tonewise.Desktop.Models;
+using Tonewise.Desktop.Motion;
+using Tonewise.Desktop.Rendering;
 using Tonewise.Desktop.ViewModels;
 using Tonewise.SyncHost.Workbench;
 using Windows.Graphics;
@@ -35,6 +38,12 @@ public sealed partial class DeskClockWidgetWindow : Window
     private DateTime _lastInteractionUtc = DateTime.UtcNow;
     private long _lastRenderedSecond = -1;
     private string? _loadedCoverPath;
+    private readonly VinylTurntableRenderer _oledVinylRenderer = new();
+    private bool _isOledVinylRenderingSubscribed;
+    private long _lastOledVinylTickTimestamp;
+    private (byte R, byte G, byte B)? _oledCoverSeedRgb;
+    private CancellationTokenSource? _oledSeedCts;
+    private readonly Windows.UI.ViewManagement.AccessibilitySettings _accessibilitySettings = new();
 
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hwnd);
@@ -108,6 +117,15 @@ public sealed partial class DeskClockWidgetWindow : Window
             _clockTimer.Stop();
             _waveTimer.Stop();
             _burnInTimer.Stop();
+            if (_isOledVinylRenderingSubscribed)
+            {
+                CompositionTarget.Rendering -= OnOledVinylCompositionRendering;
+                _isOledVinylRenderingSubscribed = false;
+            }
+            _oledSeedCts?.Cancel();
+            _oledSeedCts?.Dispose();
+            _oledSeedCts = null;
+            _oledVinylRenderer.Dispose();
             SizeChanged -= OnWindowSizeChanged;
             ViewModel.TrackChanged -= OnViewModelTrackChanged;
             ViewModel.WaveformUpdated -= OnViewModelWaveformUpdated;
@@ -135,12 +153,18 @@ public sealed partial class DeskClockWidgetWindow : Window
         if (e.PropertyName is nameof(MainViewModel.IsPlaying)
             or nameof(MainViewModel.IsShuffleEnabled)
             or nameof(MainViewModel.RepeatMode)
-            or nameof(MainViewModel.CurrentTrackLoved))
+            or nameof(MainViewModel.CurrentTrackLoved)
+            or nameof(MainViewModel.NowPlayingStageMode)
+            or nameof(MainViewModel.VinylFinishStyle))
         {
             SyncTransportControlAppearance();
-            if (e.PropertyName == nameof(MainViewModel.IsPlaying))
+            SyncOledVinylStageVisibility();
+            if (e.PropertyName is nameof(MainViewModel.IsPlaying)
+                or nameof(MainViewModel.NowPlayingStageMode)
+                or nameof(MainViewModel.VinylFinishStyle))
             {
                 UpdateTimerActivity();
+                OledVinylCanvas.Invalidate();
             }
         }
         else if (e.PropertyName is nameof(MainViewModel.CurrentTrack)
@@ -160,6 +184,8 @@ public sealed partial class DeskClockWidgetWindow : Window
         LoveButton.Foreground = ViewModel.CurrentTrackLoved ? LovedHeartBrush : MutedInkBrush;
         PinToggleButton.Foreground = _alwaysOnTop ? ActiveAccentBrush : MutedInkBrush;
         PinToggleButton.Content = _alwaysOnTop ? "置顶 ✓" : "置顶";
+        VinylToggleButton.Foreground = ViewModel.IsNowPlayingVinylMode ? ActiveAccentBrush : MutedInkBrush;
+        VinylToggleButton.Content = ViewModel.IsNowPlayingVinylMode ? "黑胶 ✓" : "黑胶";
     }
 
     private void SyncTrackPresentation(TrackItem? track)
@@ -216,10 +242,15 @@ public sealed partial class DeskClockWidgetWindow : Window
         if (string.Equals(_loadedCoverPath, coverPath, StringComparison.Ordinal)) return;
         _loadedCoverPath = coverPath;
 
+        _oledVinylRenderer.UpdateCoverAsync(coverPath, () =>
+            DispatcherQueue?.TryEnqueue(() => OledVinylCanvas?.Invalidate()));
+        _ = UpdateOledCoverSeedAsync(coverPath);
+
         if (string.IsNullOrWhiteSpace(coverPath) || !File.Exists(coverPath))
         {
             CoverArtImage.Source = null;
             CoverArtBorder.Visibility = Visibility.Collapsed;
+            SyncOledVinylStageVisibility();
             return;
         }
 
@@ -232,6 +263,39 @@ public sealed partial class DeskClockWidgetWindow : Window
         {
             CoverArtImage.Source = null;
             CoverArtBorder.Visibility = Visibility.Collapsed;
+        }
+        SyncOledVinylStageVisibility();
+    }
+
+    private async Task UpdateOledCoverSeedAsync(string? coverPath)
+    {
+        _oledSeedCts?.Cancel();
+        _oledSeedCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _oledSeedCts = cts;
+        var token = cts.Token;
+
+        if (string.IsNullOrWhiteSpace(coverPath) || !File.Exists(coverPath))
+        {
+            _oledCoverSeedRgb = null;
+            OledVinylCanvas?.Invalidate();
+            return;
+        }
+
+        try
+        {
+            var seed = await Task.Run(() =>
+                MainWindow.ExtractCoverSeedAndClampedAccent(coverPath, isDark: true).RawSeed, token);
+
+            if (!token.IsCancellationRequested && ReferenceEquals(_oledSeedCts, cts))
+            {
+                _oledCoverSeedRgb = seed;
+                OledVinylCanvas?.Invalidate();
+            }
+        }
+        catch
+        {
+            // Keep neutral fallback
         }
     }
 
@@ -253,6 +317,11 @@ public sealed partial class DeskClockWidgetWindow : Window
             : Math.Clamp(h * 0.26, 48.0, 84.0);
         CoverArtBorder.Width = coverSize;
         CoverArtBorder.Height = coverSize;
+
+        double vinylSize = Math.Clamp(Math.Min(h * 0.44, w * 0.28), 200.0, 380.0);
+        OledVinylCanvas.Width = vinylSize;
+        OledVinylCanvas.Height = vinylSize;
+        SyncOledVinylStageVisibility();
 
         TitleTextBlock.FontSize = _isFullscreenWallClock ? 22.0 : 14.0;
         SubtitleTextBlock.FontSize = _isFullscreenWallClock ? 15.0 : 11.0;
@@ -277,6 +346,11 @@ public sealed partial class DeskClockWidgetWindow : Window
             _clockTimer.Stop();
             _waveTimer.Stop();
             _burnInTimer.Stop();
+            if (_isOledVinylRenderingSubscribed)
+            {
+                CompositionTarget.Rendering -= OnOledVinylCompositionRendering;
+                _isOledVinylRenderingSubscribed = false;
+            }
             if (_keepAwakeActive)
             {
                 try { _ = SetThreadExecutionState(ES_CONTINUOUS); } catch { }
@@ -305,7 +379,71 @@ public sealed partial class DeskClockWidgetWindow : Window
         {
             _waveTimer.Stop();
         }
+        SyncOledVinylRenderLoop();
         UpdateKeepAwakeState();
+    }
+
+    private bool IsOledVinylActive =>
+        _isFullscreenWallClock && ViewModel.IsNowPlayingVinylMode && !_accessibilitySettings.HighContrast;
+
+    private void SyncOledVinylStageVisibility()
+    {
+        if (OledVinylCanvas is null || CoverArtBorder is null) return;
+        bool showVinyl = IsOledVinylActive;
+        OledVinylCanvas.Visibility = showVinyl ? Visibility.Visible : Visibility.Collapsed;
+        if (showVinyl)
+        {
+            CoverArtBorder.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            bool hasCover = !string.IsNullOrWhiteSpace(_loadedCoverPath) && CoverArtImage.Source is not null;
+            CoverArtBorder.Visibility = hasCover ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    private void SyncOledVinylRenderLoop()
+    {
+        bool motionEnabled = ZuneMotionHelper.IsMotionEnabled();
+        bool shouldRun = _isWindowVisibleAndNotMinimized
+            && IsOledVinylActive
+            && _oledVinylRenderer.NeedsAnimation(ViewModel.IsPlaying, motionEnabled);
+
+        if (shouldRun)
+        {
+            if (!_isOledVinylRenderingSubscribed)
+            {
+                _lastOledVinylTickTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                CompositionTarget.Rendering += OnOledVinylCompositionRendering;
+                _isOledVinylRenderingSubscribed = true;
+            }
+        }
+        else if (_isOledVinylRenderingSubscribed)
+        {
+            CompositionTarget.Rendering -= OnOledVinylCompositionRendering;
+            _isOledVinylRenderingSubscribed = false;
+        }
+    }
+
+    private void OnOledVinylCompositionRendering(object? sender, object e)
+    {
+        bool motionEnabled = ZuneMotionHelper.IsMotionEnabled();
+        if (!_isWindowVisibleAndNotMinimized || !IsOledVinylActive)
+        {
+            SyncOledVinylRenderLoop();
+            return;
+        }
+
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        long prev = _lastOledVinylTickTimestamp;
+        _lastOledVinylTickTimestamp = now;
+        double dt = prev > 0 ? (double)(now - prev) / System.Diagnostics.Stopwatch.Frequency : 0.016;
+        bool keepGoing = _oledVinylRenderer.AdvanceFrame(dt, ViewModel.IsPlaying, motionEnabled);
+        OledVinylCanvas?.Invalidate();
+        if (!keepGoing)
+        {
+            SyncOledVinylRenderLoop();
+        }
     }
 
     private void UpdateKeepAwakeState()
@@ -492,6 +630,55 @@ public sealed partial class DeskClockWidgetWindow : Window
             ToggleFullscreenMode();
             e.Handled = true;
         }
+        else if (e.Key == VirtualKey.V)
+        {
+            bool shift = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & Windows.UI.Core.CoreVirtualKeyStates.Down) == Windows.UI.Core.CoreVirtualKeyStates.Down;
+            if (shift)
+            {
+                ViewModel.CycleVinylFinishStyleCommand.Execute(null);
+            }
+            else
+            {
+                ViewModel.ToggleNowPlayingStageModeCommand.Execute(null);
+            }
+            e.Handled = true;
+        }
+    }
+
+    private void OnToggleVinylModeClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ToggleNowPlayingStageModeCommand.Execute(null);
+    }
+
+    private void OnOledVinylTapped(object sender, TappedRoutedEventArgs e)
+    {
+        RestoreFullscreenChrome();
+        ViewModel.TogglePlayPauseCommand.Execute(null);
+        SyncOledVinylRenderLoop();
+        e.Handled = true;
+    }
+
+    private void OnPaintOledVinyl(object? sender, SKPaintSurfaceEventArgs e)
+    {
+        float scale = 1f;
+        try
+        {
+            if (OledRootGrid?.XamlRoot is { RasterizationScale: > 0 } xr)
+            {
+                scale = (float)xr.RasterizationScale;
+            }
+        }
+        catch { }
+        _oledVinylRenderer.Render(
+            e.Surface.Canvas,
+            e.Info.Width,
+            e.Info.Height,
+            scale,
+            VinylTurntableRenderer.VinylLayoutMode.FullTurntable,
+            ViewModel.ResolvedVinylStyle,
+            _oledCoverSeedRgb,
+            isDarkTheme: true,
+            isHighContrast: _accessibilitySettings.HighContrast);
     }
 
     private void OnToggleAlwaysOnTopClick(object sender, RoutedEventArgs e)
@@ -526,6 +713,8 @@ public sealed partial class DeskClockWidgetWindow : Window
             FullscreenToggleButton.Content = "全屏挂钟";
             RestoreFullscreenChrome();
         }
+        SyncOledVinylStageVisibility();
+        SyncOledVinylRenderLoop();
         UpdateKeepAwakeState();
     }
 

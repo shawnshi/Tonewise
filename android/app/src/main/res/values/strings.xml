@@ -725,6 +725,11 @@
     <string name="set_playback_ambient_backdrop">Ambient cover backdrop</string>
     <string name="set_playback_ambient_backdrop_desc">Use soft cover-colored glow behind Now Playing instead of album mosaic</string>
     <string name="desc_toggle_vinyl_mode">Switch between vinyl turntable and cover sleeve</string>
+    <string name="set_playback_vinyl_style">Vinyl disc finish</string>
+    <string name="set_vinyl_style_classic">Classic Matte Black</string>
+    <string name="set_vinyl_style_pearl">Cover Pearl</string>
+    <string name="set_vinyl_style_diffraction">Groove Diffraction</string>
+    <string name="fmt_vinyl_style_switched">Vinyl: %1$s</string>
     <string name="lbl_classical_all_forms">all</string>
     <string name="lbl_classical_form_symphonies">symphonies</string>
     <string name="lbl_classical_form_concertos">concertos</string>

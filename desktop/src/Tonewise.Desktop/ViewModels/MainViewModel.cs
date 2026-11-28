@@ -514,6 +514,33 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private string _pendingLargePruneMessage = "";
 
     [ObservableProperty]
+    private int _outboxMissingSourceCount;
+
+    public bool HasOutboxMissingSources => OutboxMissingSourceCount > 0;
+
+    public bool IsMirrorPruneScopeAllMusic
+    {
+        get => !string.Equals(MirrorPruneScope, "managed_only", StringComparison.OrdinalIgnoreCase);
+        set
+        {
+            string next = value ? "music_folder_all" : "managed_only";
+            if (!string.Equals(MirrorPruneScope, next, StringComparison.OrdinalIgnoreCase))
+            {
+                MirrorPruneScope = next;
+            }
+        }
+    }
+
+    public string MirrorPruneScopeDescription => IsMirrorPruneScopeAllMusic
+        ? "范围：整个手机 Music 目录（未在同步列表的曲目都会被清理）"
+        : "范围：仅 Tonewise 托管同步记录（保留手机原有外部曲目）";
+
+    partial void OnOutboxMissingSourceCountChanged(int value)
+    {
+        OnPropertyChanged(nameof(HasOutboxMissingSources));
+    }
+
+    [ObservableProperty]
     private bool _hasSelectedEntityGroup;
 
     [ObservableProperty]
@@ -592,13 +619,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private string _nowPlayingLine3 = "";
 
     [ObservableProperty]
-    private double _nowPlayingLine1FontSize = 24.0;
+    private double _nowPlayingLine1FontSize = 34.0;
 
     [ObservableProperty]
     private int _nowPlayingLine1MaxLines = 1;
 
     [ObservableProperty]
-    private double _nowPlayingLine2FontSize = 15.0;
+    private double _nowPlayingLine2FontSize = 18.0;
 
     [ObservableProperty]
     private bool _nowPlayingLine3Visible;
@@ -667,6 +694,42 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _enableDynamicCoverAccent;
+
+    /// <summary>"gallery" | "vinyl".</summary>
+    [ObservableProperty]
+    private string _nowPlayingStageMode = DesktopVinylStyleCodec.StageGallery;
+
+    /// <summary>"classic" | "pearl" | "diffraction".</summary>
+    [ObservableProperty]
+    private string _vinylFinishStyle = "classic";
+
+    [ObservableProperty]
+    private bool _vinylUseAmbientBackdrop = true;
+
+    public bool IsNowPlayingVinylMode =>
+        string.Equals(NowPlayingStageMode, DesktopVinylStyleCodec.StageVinyl, StringComparison.Ordinal);
+
+    public bool IsNowPlayingGalleryMode => !IsNowPlayingVinylMode;
+
+    public bool IsNowPlayingVinylHalfEjected => IsNowPlayingVinylMode && IsNowPlayingQueueOpen;
+
+    public bool IsNowPlayingVinylFullTurntable => IsNowPlayingVinylMode && !IsNowPlayingQueueOpen;
+
+    public string NowPlayingStageModeLabel => IsNowPlayingVinylMode ? "唱片舞台" : "封套画廊";
+
+    public string NowPlayingStageToggleLabel => IsNowPlayingVinylMode ? "切回封套" : "唱片模式";
+
+    public DesktopVinylStyle ResolvedVinylStyle => DesktopVinylStyleCodec.ParseStyle(VinylFinishStyle);
+
+    public string VinylFinishDisplayLabel => DesktopVinylStyleCodec.DisplayName(ResolvedVinylStyle);
+
+    public string VinylFinishButtonLabel => $"材质：{VinylFinishDisplayLabel}";
+
+    public bool IsVinylClassicSelected => ResolvedVinylStyle == DesktopVinylStyle.ClassicBlack;
+
+    public bool IsVinylPearlSelected => ResolvedVinylStyle == DesktopVinylStyle.CoverPearl;
+
+    public bool IsVinylDiffractionSelected => ResolvedVinylStyle == DesktopVinylStyle.GrooveDiffraction;
 
     [ObservableProperty]
     private bool _isMuted;
@@ -817,7 +880,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public bool IsClassicalComposersMode => !ShowClassicalEnsembles;
 
     [ObservableProperty]
-    private bool _isNowPlayingQueueOpen = true;
+    private bool _isNowPlayingQueueOpen;
 
     [ObservableProperty]
     private bool _isNowPlayingUpNextTab = true;
@@ -1174,6 +1237,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             IsInspectorOpen = saved.IsInspectorOpen;
             AppTheme = saved.AppTheme is "light" or "system" ? saved.AppTheme : "dark";
             EnableDynamicCoverAccent = saved.EnableDynamicCoverAccent;
+            NowPlayingStageMode = DesktopVinylStyleCodec.NormalizeStageMode(saved.NowPlayingStageMode);
+            VinylFinishStyle = DesktopVinylStyleCodec.ToWireKey(DesktopVinylStyleCodec.ParseStyle(saved.VinylFinishStyle));
+            VinylUseAmbientBackdrop = saved.VinylUseAmbientBackdrop;
             IsShuffleEnabled = saved.IsShuffleEnabled;
             RepeatMode = saved.RepeatMode is "one" or "off" ? saved.RepeatMode : "all";
             EnableAutoWatchLibrary = saved.EnableAutoWatchLibrary;
@@ -1343,7 +1409,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             MainWindowY: _mainWindowY,
             MainWindowWidth: _mainWindowWidth,
             MainWindowHeight: _mainWindowHeight,
-            MainWindowMaximized: _mainWindowMaximized);
+            MainWindowMaximized: _mainWindowMaximized,
+            NowPlayingStageMode: NowPlayingStageMode,
+            VinylFinishStyle: VinylFinishStyle,
+            VinylUseAmbientBackdrop: VinylUseAmbientBackdrop);
 
         try
         {
@@ -1821,6 +1890,78 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     partial void OnAppThemeChanged(string value) => SaveUserSettings();
     partial void OnEnableDynamicCoverAccentChanged(bool value) => SaveUserSettings();
+
+    partial void OnNowPlayingStageModeChanged(string value)
+    {
+        string normalized = DesktopVinylStyleCodec.NormalizeStageMode(value);
+        if (!string.Equals(value, normalized, StringComparison.Ordinal))
+        {
+            _nowPlayingStageMode = normalized;
+        }
+        OnPropertyChanged(nameof(IsNowPlayingVinylMode));
+        OnPropertyChanged(nameof(IsNowPlayingGalleryMode));
+        OnPropertyChanged(nameof(IsNowPlayingVinylHalfEjected));
+        OnPropertyChanged(nameof(IsNowPlayingVinylFullTurntable));
+        OnPropertyChanged(nameof(NowPlayingStageModeLabel));
+        OnPropertyChanged(nameof(NowPlayingStageToggleLabel));
+        SaveUserSettings();
+    }
+
+    partial void OnVinylFinishStyleChanged(string value)
+    {
+        string normalized = DesktopVinylStyleCodec.ToWireKey(DesktopVinylStyleCodec.ParseStyle(value));
+        if (!string.Equals(value, normalized, StringComparison.Ordinal))
+        {
+            _vinylFinishStyle = normalized;
+        }
+        OnPropertyChanged(nameof(ResolvedVinylStyle));
+        OnPropertyChanged(nameof(VinylFinishDisplayLabel));
+        OnPropertyChanged(nameof(VinylFinishButtonLabel));
+        OnPropertyChanged(nameof(IsVinylClassicSelected));
+        OnPropertyChanged(nameof(IsVinylPearlSelected));
+        OnPropertyChanged(nameof(IsVinylDiffractionSelected));
+        SaveUserSettings();
+    }
+
+    partial void OnVinylUseAmbientBackdropChanged(bool value) => SaveUserSettings();
+
+    partial void OnIsNowPlayingQueueOpenChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsNowPlayingVinylHalfEjected));
+        OnPropertyChanged(nameof(IsNowPlayingVinylFullTurntable));
+    }
+
+    [RelayCommand]
+    public void ToggleNowPlayingStageMode()
+    {
+        NowPlayingStageMode = IsNowPlayingVinylMode
+            ? DesktopVinylStyleCodec.StageGallery
+            : DesktopVinylStyleCodec.StageVinyl;
+    }
+
+    [RelayCommand]
+    public void CycleVinylFinishStyle()
+    {
+        var next = DesktopVinylStyleCodec.Next(ResolvedVinylStyle);
+        VinylFinishStyle = DesktopVinylStyleCodec.ToWireKey(next);
+        if (!IsNowPlayingVinylMode)
+        {
+            NowPlayingStageMode = DesktopVinylStyleCodec.StageVinyl;
+        }
+        Notify($"黑胶材质：{VinylFinishDisplayLabel}", "info");
+    }
+
+    [RelayCommand]
+    public void SetVinylFinishStyle(string? style)
+    {
+        var parsed = DesktopVinylStyleCodec.ParseStyle(style);
+        VinylFinishStyle = DesktopVinylStyleCodec.ToWireKey(parsed);
+        if (!IsNowPlayingVinylMode)
+        {
+            NowPlayingStageMode = DesktopVinylStyleCodec.StageVinyl;
+        }
+        Notify($"黑胶材质：{VinylFinishDisplayLabel}", "info");
+    }
 
     partial void OnStatusMessageChanged(string value)
     {

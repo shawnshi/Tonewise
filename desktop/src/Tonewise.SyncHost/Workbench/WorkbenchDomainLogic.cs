@@ -1085,7 +1085,10 @@ public sealed record DesktopUserSettings(
     int? MainWindowY = null,
     int? MainWindowWidth = null,
     int? MainWindowHeight = null,
-    bool MainWindowMaximized = false
+    bool MainWindowMaximized = false,
+    string NowPlayingStageMode = "gallery",
+    string VinylFinishStyle = "classic",
+    bool VinylUseAmbientBackdrop = true
 );
 
 public static class DesktopSettingsStore

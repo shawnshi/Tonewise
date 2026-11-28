@@ -24,21 +24,21 @@
 
 ### 2. 古典与专辑一等公民索引
 
-* **多维度古典元数据建模**：深度解析 `WORK`、`MOVEMENTNAME`、`MOVEMENTNUMBER`、`MUSICBRAINZ_WORKID` 与作曲家 / 指挥字段，支持罗马数字乐章序号（`I–XCIX`）与复合西文 / 中文姓氏规整；支持“作曲家 → 作品 → 录音版本”三级联动检索，并在播放与洗牌时自动按作品整部展开、按指挥维度隔离合辑同作品录音。
+* **多维度古典元数据建模**：深度解析 `WORK`、`MOVEMENTNAME`、`MOVEMENTNUMBER`、`MUSICBRAINZ_WORKID` 与作曲家 / 指挥字段，支持罗马数字乐章序号（`I–XCIX`）与复合西文 / 中文姓氏规整；双端统一采用 `normalizedComposer::rawWork` 作品聚合主键策略（避免乐章级 `MUSICBRAINZ_WORKID` 导致同作品在移动端拆裂），并在 Rust / C# / Kotlin 三栈实现一致的脏 `WORK` 乐章后缀剥离（`protocol/fixtures/classical_golden.json` 黄金用例校验）；支持“作曲家 → 作品 → 录音版本”三级联动检索，并在播放与洗牌时自动按作品整部展开、按指挥维度隔离合辑同作品录音。
 * **版本对比与数码画册**：支持同一作品多个演绎版本之间一键比对与按比例进度切曲；内置基于原生 `PdfRenderer` 的专辑 `booklet.pdf` 阅读器（Android 支持 `1×–4×` 缩放平移与 Warm Paper 底色，桌面端解耦正在播放与编辑态 Booklet）。
 * **安全原子标签策展**：桌面端审校台基于 Rust `lofty` 实现原地事务写回（保留纯音频 `audio_frame_blake3` 不变、规避 ID3v1 30 字节截断异常，并支持自动将 FLAC 非标准前置 `ID3v2` 标签回填至 `VorbisComments` 后原子剥离修复），共享多语种艺人 / 作曲家 / 流派规整词典与 ICU 汉字拼音映射表；跨端统一支持多值标签解析、增量自愈重扫与重复音频指纹跳过缓存。
 
 ### 3. 双端 Zune / Metro 界面体系（`v1.0.13`）
 
-* **Windows 11 桌面端**：基于 WinUI 3 无边框壳层构建纯黑 `#000000` / 纯白 `#FFFFFF` 双场高对比工作台（支持启动首帧持久化主题预载、DWM 标题栏同步与暗色高对比强调色 `#FF5C9E`），顶部设 **`quickplay · collection · now playing · studio`** 四大枢纽与 9 维馆藏子视图（`playlists · scenes · genres · albums · tracks · artists · classical · conductors · folder`，退役独立 `composers` 子页并在两段式 `classical` 枢纽内提供 `composers | ensembles` 双向切换、时期分桶 `O(1)` 切换与统一面包屑导航），集成后台预物化毫秒级 `quickplay` 切换、三行自适应古典 / 流行播放舞台、两段式 `Composer → Work → Recording → Movement` 树、`up next | booklet | recordings` 可收起队列面板、进度条悬停时间戳气泡、Wi-Fi / USB 独立进度条、SMTC 古典元数据时间线与纯黑 OLED 壁挂钟。
+* **Windows 11 桌面端**：基于 WinUI 3 无边框壳层构建纯黑 `#000000` / 纯白 `#FFFFFF` 双场高对比工作台（支持启动首帧持久化主题预载、DWM 标题栏同步与暗色高对比强调色 `#FF5C9E`），顶部设 **`quickplay · collection · now playing · studio`** 四大枢纽与 9 维馆藏子视图（`playlists · scenes · genres · albums · tracks · artists · classical · conductors · folder`，退役独立 `composers` 子页并在两段式 `classical` 枢纽内提供 `composers | ensembles` 双向切换、时期分桶 `O(1)` 切换与统一面包屑导航），集成后台预物化毫秒级 `quickplay` 切换、三行自适应古典 / 流行播放舞台、两段式 `Composer → Work → Recording → Movement` 树、`up next | booklet | recordings` 默认收起的可展开队列面板、黑胶唱盘 / 半抽出封套双态播放舞台（支持`经典纯黑 / 封面同色 / 透明彩胶`三质感切换与可交互唱针 / 唱片控制）与重排后的 `Now Playing` 底部状态胶囊、进度条悬停时间戳气泡、Wi-Fi / USB 独立进度条、SMTC 古典元数据时间线与 Windows 11 壳层应用身份自注册（`AUMID` + 开始菜单快捷方式，修复系统媒体卡片 `Unknown app`），以及 `F11` 纯黑 OLED 黑胶壁挂钟。
 * **Android 移动端**：
   * **双端 L1/L2 归一与冷启瞬显**：顶部 **`quickplay · collection · autodj`** 三大枢纽；`quickplay` 启用 `sync_kv` 快照首帧直出与启动预热，内置 5 槽位预设场景接力条（`Relay Slots`，点击未填充槽位按预设场景生成并起播，长按手动覆盖）；`autodj` 集成内联五维 Focus 漏斗与实时预览队列；`collection` 收敛为 **`albums · tracks · artists · genres · classical · conductors · playlists`** 七维常驻二级视图（`classical` 保留两段式结构并支持整部 / 单乐章顺序连播锁定），搜索页支持古典 `Composers` / `Conductors` 与 `workName` 检索维度。
-  * **Option B 播放控制台与同步抽屉**：支持黑胶唱盘与封套一键切换及三行自适应固定高度信息区；底部采用单排工具胶囊栏（`Booklet · DSP · Queue (N)` + `BIT_PERFECT` / `SHUFFLE LOCK` / 多版本徽标，移除底部重复 `Queue` 句柄）与垂直 `>48dp` 的 `0.25×` 精细进度拖拽气泡；精简 `Sync & Last.fm` 抽屉（移除上方队列槽位，修复 Last.fm `POST` 表单授权 / 格式校验并支持自动继承已配对 PC 端的 Last.fm 会话）。
+  * **Option B 播放控制台与同步抽屉**：支持三质感黑胶唱盘（`经典纯黑 / 封面同色 / 透明彩胶`，支持界面设置与播放顶栏快捷切换）与封套一键切换及三行自适应固定高度信息区；默认收起播放队列抽屉，底部采用单排工具胶囊栏（`Booklet · DSP · Queue (N)` + `BIT_PERFECT` / `SHUFFLE LOCK` / 多版本徽标，移除底部重复 `Queue` 句柄）与垂直 `>48dp` 的 `0.25×` 精细进度拖拽气泡；精简 `Sync & Last.fm` 抽屉（移除上方队列槽位，修复 Last.fm `POST` 表单授权 / 格式校验并支持自动继承已配对 PC 端的 Last.fm 会话），并提供大批量镜像清理应用内确认交互。
 
 ### 4. 无云双端同步（LAN Sync v2 & USB ADB）
 
 * **双通道近场发现与直推**：通过 `_tonewise._tcp` mDNS + 6 位配对码建立安全连接，支持局域网 `Range` 断点传输与插线 USB ADB 自动直推隧道。
-* **职责明确的双向账本**：PC→手机执行单向防污染歌单与音频镜像（内置五道清理熔断保护）；手机⇄PC 双向同步播放次数 / Last.fm 账本、LWW 五维标签与评分、Auto-EQ 规则及 5 槽位场景接力，并内置跨语种拼音 / 繁简 / 日文新字体 / 别名歌单精准匹配引擎。
+* **职责明确的双向账本**：PC→手机执行单向防污染歌单与音频镜像，内置五道清理熔断保护与双端对齐护栏（SAF 目录并发锁与 `(1)` 自动重命名副本拦截、跨平台 Unicode `NFC/NFD` 路径归一、大批量清理双端确认与 USB 本机直连信任路径、ADB 批量分块清理与仅含封面残留空目录回收、桌面端同步范围 / ADB 回退显式开关，以及失效歌单订阅自动清理与`清理失效订阅`快捷操作）；手机⇄PC 双向同步播放次数 / Last.fm 账本、LWW 五维标签与评分、Auto-EQ 规则及 5 槽位场景接力，并内置跨语种拼音 / 繁简 / 日文新字体 / 别名歌单精准匹配引擎。
 
 ---
 
@@ -62,8 +62,8 @@
 
 | 平台 | 安装包 / 发行归档 | 版本与运行环境 | 文件大小 | SHA-256 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v1.0.13`（`versionCode 113`） | `16,948,583` bytes（~16.16 MiB） | `e2cbb16948795dcd4f78202b19ee85e974063ce98f70f87a6bc18f66871db9d8` |
-| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | `v1.0.13` · WinUI 3（`net9.0-windows10.0.26100.0`） | `49,795,650` bytes（~47.49 MiB） | `d468bfb0651f360cf6e91629b26f80b34a9a79f44ef4f2ccf775439d4324a8cd` |
+| **Android** | [releases/tonewise-android-release.apk](releases/tonewise-android-release.apk) | `com.shawnshi.tonewise` · `v1.0.13`（`versionCode 113`） | `16,950,399` bytes（~16.17 MiB） | `fa19ab7c2413546ac7bb5a8e68a27daf8843d609c3b275680e85ada28bf09857` |
+| **Windows x64** | [releases/tonewise-windows-x64-release.zip](releases/tonewise-windows-x64-release.zip) | `v1.0.13` · WinUI 3（`net9.0-windows10.0.26100.0`） | `49,612,869` bytes（~47.31 MiB） | `37d875a0229b19efce82ebf029cc0354b50d82190f46ad28815a8603111ef226` |
 
 * **Android 签名与升级说明**：已通过 R8 优化、`zipalign` 4 字节对齐与 `apksigner` 校验（覆盖 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64`）；当前仓库发行包使用调试签名密钥封装以保持本地覆盖升级一致，正式构建可通过 `TONEWISE_RELEASE_*` 环境变量与 `-PrequireReleaseSigning` 启用独立发布签名。
 * **Windows x64 运行说明**：解压 `tonewise-windows-x64-release.zip` 后运行 `Tonewise.Desktop.exe`（需安装 .NET 9 Desktop Runtime；Windows App SDK 1.7、Rust `tonewise_core.dll` 与 `tonewise-cli.exe` 已自包含打包；USB 自动同步支持自动探测 `adb.exe`）。
@@ -72,7 +72,7 @@
 
 ## 界面预览
 
-> 以下预览图展示 Zune / Metro 视觉基线与桌面 / 移动核心布局；`v1.0.13` 已完成双端 L1/L2 信息架构归一（桌面 9 维馆藏与 `composers | ensembles` 古典枢纽、Android 5 槽位预设场景接力）、Android Option B 播放控制台与 10 段频响 DSP、Windows 音量双保险与 Skia 频响画布，以及 Last.fm 授权与同步修复。
+> 以下预览图展示 Zune / Metro 视觉基线与桌面 / 移动核心布局；`v1.0.13` 已完成双端 L1/L2 信息架构归一、双端三质感彩胶唱盘与 `Now Playing` / OLED 黑胶时钟重排、古典作品双端归并一致、Windows 11 SMTC 身份修复，以及镜像清理双端护栏与 Last.fm 同步升级。
 
 ### Android 移动端
 

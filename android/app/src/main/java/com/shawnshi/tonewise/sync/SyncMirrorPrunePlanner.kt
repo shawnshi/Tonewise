@@ -18,6 +18,9 @@
 
 package com.shawnshi.tonewise.sync
 
+import java.text.Normalizer
+import java.util.Locale
+
 enum class PruneDecision {
     PROCEED,
     SKIP_DISABLED,
@@ -34,8 +37,12 @@ data class PrunePlan(
 )
 
 object SyncMirrorPrunePlanner {
-    fun normalizeRelPath(raw: String): String =
-        LanSyncV2Client.sanitizeRelativePathSegments(raw).joinToString("/").lowercase()
+    fun normalizeRelPath(raw: String): String {
+        val nfc = Normalizer.normalize(raw, Normalizer.Form.NFC)
+        return LanSyncV2Client.sanitizeRelativePathSegments(nfc)
+            .joinToString("/")
+            .lowercase(Locale.ROOT)
+    }
 
     fun planPrune(
         policy: SyncPolicyDto?,

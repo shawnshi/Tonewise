@@ -113,6 +113,7 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                 val pairedHost by lanSyncRepository.pairedHost.collectAsStateWithLifecycle()
                 val syncStatus by lanSyncRepository.syncStatus.collectAsStateWithLifecycle()
                 val syncProgress by lanSyncRepository.syncProgress.collectAsStateWithLifecycle()
+                val pendingLargePrune by lanSyncRepository.pendingLargePrune.collectAsStateWithLifecycle()
                 val lastFmState by lastFmRepository.state.collectAsStateWithLifecycle()
                 val activeAccent by dynamicAccentController.activeAccentArgb.collectAsStateWithLifecycle()
 
@@ -125,12 +126,15 @@ class ScenesAndSyncDialog : BackportBottomSheetDialogFragment() {
                         pairedHost = pairedHost,
                         syncStatus = syncStatus,
                         syncProgress = syncProgress,
+                        pendingLargePrune = pendingLargePrune,
                         hasWritableMusicSafGrant = lanSyncRepository.hasWritableMusicSafGrant,
                         lastFmState = lastFmState,
                         onPairHost = { url, code -> lanSyncRepository.pairWithHost(url, code) },
                         onUnpairHost = { lanSyncRepository.unpairHost() },
                         onSyncUrl = { url -> lanSyncRepository.startSync(url) },
                         onCancelSync = { lanSyncRepository.cancelSync() },
+                        onConfirmLargePrune = { lanSyncRepository.confirmLargePruneAndResync() },
+                        onDismissLargePrune = { lanSyncRepository.dismissPendingLargePrune() },
                         onUpdateLastFmPreferences = { apiEnabled, broadcastEnabled ->
                             lastFmRepository.updateScrobblePreferences(apiEnabled, broadcastEnabled)
                         },
@@ -217,12 +221,15 @@ private fun SyncHubSheet(
     pairedHost: PairedHostInfo?,
     syncStatus: String,
     syncProgress: SyncProgressState,
+    pendingLargePrune: PendingLargePruneState?,
     hasWritableMusicSafGrant: Boolean,
     lastFmState: LastFmState,
     onPairHost: suspend (String, String) -> Boolean,
     onUnpairHost: () -> Unit,
     onSyncUrl: (String) -> Unit,
     onCancelSync: () -> Unit,
+    onConfirmLargePrune: () -> Unit,
+    onDismissLargePrune: () -> Unit,
     onUpdateLastFmPreferences: (Boolean, Boolean) -> Unit,
     onSaveLastFm: (Boolean, Boolean, String, String, String, String) -> Unit,
     onAuthLastFm: suspend (String, String, String, String) -> Boolean,
@@ -680,6 +687,33 @@ private fun SyncHubSheet(
                 ) {
                     TextButton(onClick = onCancelSync) {
                         Text("取消同步")
+                    }
+                }
+            }
+
+            if (pendingLargePrune != null && !syncProgress.isRunning) {
+                ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        val pct = (pendingLargePrune.ratio * 100.0).toInt().coerceIn(0, 100)
+                        Text(
+                            text = "安全保护：手机 Music 目录拟清理 ${pendingLargePrune.count} / ${pendingLargePrune.localAudioCount} 首（占比 $pct%），请确认是否执行删除。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Button(onClick = onConfirmLargePrune) {
+                                Text("确认执行删除")
+                            }
+                            TextButton(onClick = onDismissLargePrune) {
+                                Text("本次跳过")
+                            }
+                        }
                     }
                 }
             }

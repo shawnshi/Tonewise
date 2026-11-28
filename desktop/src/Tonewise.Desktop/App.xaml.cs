@@ -1,18 +1,24 @@
 using System.Text;
 using Microsoft.UI.Xaml;
+using Tonewise.Desktop.Services;
 
 namespace Tonewise.Desktop;
 
 public partial class App : Application
 {
+    internal const string AppUserModelId = "ShawnShi.Tonewise.Desktop";
     private static readonly object CrashLogLock = new();
     private const long MaxCrashLogBytes = 512 * 1024;
     private Window? _window;
+
+    internal static void RegisterProcessAppUserModelId() =>
+        ShellAppIdentityRegistrar.Register(AppUserModelId, "Tonewise");
 
     internal static string InitialAppTheme { get; private set; } = "dark";
 
     public App()
     {
+        RegisterProcessAppUserModelId();
         try
         {
             var saved = Tonewise.SyncHost.Workbench.DesktopSettingsStore.Load();

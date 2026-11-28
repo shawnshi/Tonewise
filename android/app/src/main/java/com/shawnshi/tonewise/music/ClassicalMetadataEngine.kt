@@ -337,6 +337,28 @@ object ClassicalMetadataEngine {
         return null
     }
 
+    private data class StrippedWorkSuffix(
+        val work: String,
+        val movement: String,
+        val movementNumber: Int,
+    )
+
+    private fun stripMovementSuffixFromWork(work: String): StrippedWorkSuffix? {
+        for (i in work.indices) {
+            val ch = work[i]
+            if ((ch == ':' && !isProtectedCatalogColon(work, i)) || ch == '：') {
+                val left = work.substring(0, i).trim()
+                val right = work.substring(i + 1).trim()
+                if (left.isEmpty() || right.isEmpty()) continue
+                val (parsedNum, cleanRight) = parseMovementPrefix(right)
+                if (parsedNum != null && cleanRight.isNotEmpty()) {
+                    return StrippedWorkSuffix(left, cleanRight, parsedNum)
+                }
+            }
+        }
+        return null
+    }
+
     fun splitWorkAndMovement(
         rawTitle: String?,
         explicitWork: String? = null,
@@ -348,15 +370,20 @@ object ClassicalMetadataEngine {
         val expMvt = explicitMovement?.trim()?.takeIf { it.isNotEmpty() }
 
         if (expWork != null) {
+            val stripped = stripMovementSuffixFromWork(expWork)
+            val effectiveWork = stripped?.work ?: expWork
             val foundSplit = findWorkMovementSplit(title)
             val rawMvtSource = when {
                 expMvt != null -> expMvt
-                foundSplit != null && foundSplit.first.equals(expWork, ignoreCase = true) -> foundSplit.second
+                foundSplit != null &&
+                    (foundSplit.first.equals(effectiveWork, ignoreCase = true) ||
+                        foundSplit.first.equals(expWork, ignoreCase = true)) -> foundSplit.second
+                stripped != null -> stripped.movement
                 else -> title
             }
             val (parsedNum, cleanMvt) = parseMovementPrefix(rawMvtSource)
-            val finalMvt = if (cleanMvt.equals(expWork, ignoreCase = true)) "" else cleanMvt
-            return ParsedWorkMovement(expWork, finalMvt, explicitMovementNumber ?: parsedNum)
+            val finalMvt = if (cleanMvt.equals(effectiveWork, ignoreCase = true)) "" else cleanMvt
+            return ParsedWorkMovement(effectiveWork, finalMvt, explicitMovementNumber ?: parsedNum ?: stripped?.movementNumber)
         }
 
         val found = findWorkMovementSplit(title)

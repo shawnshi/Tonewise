@@ -38,6 +38,7 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
 
     private CancellationTokenSource? _monitorCts;
     private Task? _monitorTask;
+    private CancellationTokenSource? _fallbackCts;
     private SyncHostServer? _subscribedHost;
     private UsbCoordinatorState _state;
     private bool _disposed;
@@ -377,11 +378,14 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
 
             AttachHostEvents(host);
 
-            host.Store.SetSyncPolicy(new SyncPolicyConfig(
-                MirrorPruneEnabled: MirrorPruneEnabled,
-                PruneScope: PruneScope,
-                TargetRoot: "Music",
-                AllowAdbForeignDeleteFallback: AllowAdbForeignDeleteFallback));
+            var existingPolicy = host.Store.GetSyncPolicy();
+            host.Store.SetSyncPolicy(existingPolicy with
+            {
+                MirrorPruneEnabled = MirrorPruneEnabled,
+                PruneScope = PruneScope,
+                TargetRoot = "Music",
+                AllowAdbForeignDeleteFallback = AllowAdbForeignDeleteFallback,
+            });
 
             if (MirrorPruneEnabled)
             {
@@ -469,6 +473,10 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
     public void RequestCancelActiveSync()
     {
         _getActiveSyncHost()?.RequestCancelActiveSync();
+        lock (_gate)
+        {
+            try { _fallbackCts?.Cancel(); } catch { }
+        }
         UpdateState(s => s with
         {
             ProgressDetail = "已请求取消同步（等待手机当前分片结束）...",
@@ -678,8 +686,18 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
     private async Task RunAdbForeignFallbackAsync(SyncSessionProgressReport report)
     {
         await _fallbackLock.WaitAsync().ConfigureAwait(false);
+        CancellationTokenSource? localCts = null;
         try
         {
+            CancellationToken fallbackCt;
+            lock (_gate)
+            {
+                try { _fallbackCts?.Dispose(); } catch { }
+                localCts = new CancellationTokenSource();
+                _fallbackCts = localCts;
+                fallbackCt = localCts.Token;
+            }
+
             string? serial;
             string? pkg = null;
             lock (_gate)
@@ -705,23 +723,32 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
                 return;
             }
 
-            var desiredSet = outbox.Tracks
-                .Select(t => t.TargetRelPath.Replace('\\', '/').Trim().TrimStart('/'))
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var desiredSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var t in outbox.Tracks)
+            {
+                if (UsbAdbBridge.TryNormalizeSafeAudioRelPath(t.TargetRelPath, out string normTarget))
+                {
+                    desiredSet.Add(normTarget);
+                }
+            }
 
             var safePaths = UsbAdbBridge.FilterSafeForeignMusicRelPaths(report.BlockedForeignPaths, desiredSet);
             if (safePaths.Count == 0)
                 return;
 
-            int adbDeleted = await _adb.DeleteForeignMusicFilesAsync(serial, safePaths, CancellationToken.None).ConfigureAwait(false);
+            UpdateState(s => s with
+            {
+                ProgressDetail = $"{s.ProgressDetail} · 正在通过 USB 补删未授权旧曲（{safePaths.Count} 首）...",
+            });
+
+            int adbDeleted = await _adb.DeleteForeignMusicFilesAsync(serial, safePaths, fallbackCt).ConfigureAwait(false);
             if (adbDeleted > 0)
             {
-                pkg ??= await _adb.DetectTonewisePackageAsync(serial, CancellationToken.None).ConfigureAwait(false);
+                pkg ??= await _adb.DetectTonewisePackageAsync(serial, fallbackCt).ConfigureAwait(false);
                 if (!string.IsNullOrWhiteSpace(pkg))
                 {
                     string rescanNonce = host.IssueUsbSyncNonce(serial, allowAutoPair: false);
-                    await _adb.TriggerPhoneLibraryRescanAsync(serial, pkg, rescanNonce, CancellationToken.None).ConfigureAwait(false);
+                    await _adb.TriggerPhoneLibraryRescanAsync(serial, pkg, rescanNonce, fallbackCt).ConfigureAwait(false);
                 }
 
                 UpdateState(s => s with
@@ -730,12 +757,27 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
                 });
             }
         }
+        catch (OperationCanceledException)
+        {
+            UpdateState(s => s with
+            {
+                ProgressDetail = $"{s.ProgressDetail}（USB 补删已取消）",
+            });
+        }
         catch
         {
             // Non-fatal fallback deletion guard
         }
         finally
         {
+            lock (_gate)
+            {
+                if (ReferenceEquals(_fallbackCts, localCts))
+                {
+                    _fallbackCts = null;
+                }
+            }
+            try { localCts?.Dispose(); } catch { }
             _fallbackLock.Release();
         }
     }
@@ -789,6 +831,9 @@ public sealed class UsbAutoSyncCoordinator : IAsyncDisposable
         {
             if (_disposed) return;
             _disposed = true;
+            try { _fallbackCts?.Cancel(); } catch { }
+            try { _fallbackCts?.Dispose(); } catch { }
+            _fallbackCts = null;
             if (_subscribedHost is not null)
             {
                 _subscribedHost.SyncSessionProgressChanged -= OnHostSyncSessionProgressChanged;

@@ -216,7 +216,7 @@ public static class ZuneColorMath
             (byte)Math.Clamp(Math.Round(bucketB[bestBucket] / bestScore), 0, 255));
     }
 
-    private static (double H, double S, double L) RgbToHsl(byte rByte, byte gByte, byte bByte)
+    public static (double H, double S, double L) RgbToHsl(byte rByte, byte gByte, byte bByte)
     {
         double r = rByte / 255.0;
         double g = gByte / 255.0;
@@ -236,7 +236,7 @@ public static class ZuneColorMath
         return (h, s, l);
     }
 
-    private static (byte R, byte G, byte B) HslToRgb(double h, double s, double l)
+    public static (byte R, byte G, byte B) HslToRgb(double h, double s, double l)
     {
         if (s <= 1e-6)
         {

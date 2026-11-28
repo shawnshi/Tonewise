@@ -850,6 +850,13 @@ class ZuneMobileUiUpgradeTest {
         assertTrue(queueBehaviorSrc.contains("skipCollapsed = true"))
         assertTrue(queueBehaviorSrc.contains("peekHeight = 0"))
 
+        val mainFragmentSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/MainFragment.kt")
+                .readText(Charsets.UTF_8)
+        assertTrue(mainFragmentSrc.contains("binding.queueSheet.isInvisible = false"))
+        assertTrue(mainFragmentSrc.contains("addBottomSheetCallback("))
+        assertTrue(mainFragmentSrc.contains("postInvalidateOnAnimation()"))
+
         val syncDialogSrc =
             File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/sync/ScenesAndSyncDialog.kt")
                 .readText(Charsets.UTF_8)
@@ -861,6 +868,21 @@ class ZuneMobileUiUpgradeTest {
                 .readText(Charsets.UTF_8)
         assertTrue(quickplaySrc.contains("presetScenes"))
         assertTrue(quickplaySrc.contains("generateAutoDjPlaylist"))
+        assertTrue(quickplaySrc.contains("ensurePresetRelaySlotsSeeded()"))
+
+        val lanSyncSrc =
+            File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/sync/LanSyncRepository.kt")
+                .readText(Charsets.UTF_8)
+        assertTrue(lanSyncSrc.contains("fun ensurePresetRelaySlotsSeeded()"))
+
+        val playbackMenuXml =
+            File(repoRoot, "android/app/src/main/res/menu/toolbar_playback.xml")
+                .readText(Charsets.UTF_8)
+        val playbackPanelXml =
+            File(repoRoot, "android/app/src/main/res/layout/fragment_playback_panel.xml")
+                .readText(Charsets.UTF_8)
+        assertFalse(playbackMenuXml.contains("action_open_equalizer"))
+        assertTrue(playbackPanelXml.contains("playback_action_dsp"))
 
         val lastFmSrc =
             File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/sync/LastFmRepository.kt")
@@ -885,5 +907,77 @@ class ZuneMobileUiUpgradeTest {
                 "fedcba9876543210fedcba9876543210",
             )
         )
+    }
+
+    @Test
+    fun vinylMaterialStyles_pearlColorMath_diffractionBounds_andSettingsWiringHold() {
+        // Style cycling & fallback behavior
+        assertEquals(com.shawnshi.tonewise.playback.ui.VinylStyle.CLASSIC_BLACK, com.shawnshi.tonewise.playback.ui.VinylStyle.fromIntCode(0))
+        assertEquals(com.shawnshi.tonewise.playback.ui.VinylStyle.COVER_PEARL, com.shawnshi.tonewise.playback.ui.VinylStyle.fromIntCode(1))
+        assertEquals(com.shawnshi.tonewise.playback.ui.VinylStyle.GROOVE_DIFFRACTION, com.shawnshi.tonewise.playback.ui.VinylStyle.fromIntCode(2))
+        assertEquals(com.shawnshi.tonewise.playback.ui.VinylStyle.CLASSIC_BLACK, com.shawnshi.tonewise.playback.ui.VinylStyle.fromIntCode(-1))
+        assertEquals(com.shawnshi.tonewise.playback.ui.VinylStyle.CLASSIC_BLACK, com.shawnshi.tonewise.playback.ui.VinylStyle.fromIntCode(99))
+        assertEquals(com.shawnshi.tonewise.playback.ui.VinylStyle.COVER_PEARL, com.shawnshi.tonewise.playback.ui.VinylStyle.CLASSIC_BLACK.next())
+        assertEquals(com.shawnshi.tonewise.playback.ui.VinylStyle.GROOVE_DIFFRACTION, com.shawnshi.tonewise.playback.ui.VinylStyle.COVER_PEARL.next())
+        assertEquals(com.shawnshi.tonewise.playback.ui.VinylStyle.CLASSIC_BLACK, com.shawnshi.tonewise.playback.ui.VinylStyle.GROOVE_DIFFRACTION.next())
+
+        // Saturated neon seeds must clamp to soft low-saturation nacre; light mode rim darker than body
+        val neonSeeds = intArrayOf(0xFFFF00FF.toInt(), 0xFF00FF00.toInt(), 0xFFFF1A00.toInt())
+        for (seed in neonSeeds) {
+            for (dark in listOf(false, true)) {
+                val p = com.shawnshi.tonewise.playback.ui.VinylMaterialMath.derivePearlPalette(seed, dark)
+                assertEquals(4, p.bodyStops.size)
+                for (stop in p.bodyStops) {
+                    val s = ZuneColorMath.rgbToHsl(stop)[1]
+                    assertTrue("Pearl stop saturation $s must stay <= 0.43", s <= 0.43f)
+                }
+                if (!dark) {
+                    assertTrue(
+                        "Light surface outer rim must be darker than inner pearl",
+                        ZuneColorMath.relativeLuminance(p.outerRimArgb) < ZuneColorMath.relativeLuminance(p.bodyStops[0]),
+                    )
+                }
+            }
+        }
+
+        // Null / monochrome seeds produce warm champagne pearl rather than flat gray
+        for (mono in listOf(null, 0xFF808080.toInt())) {
+            val p = com.shawnshi.tonewise.playback.ui.VinylMaterialMath.derivePearlPalette(mono, isDarkSurface = false)
+            val hsl = ZuneColorMath.rgbToHsl(p.bodyStops[1])
+            assertTrue("Fallback hue ${hsl[0]} should stay warm (20..55)", hsl[0] in 20f..55f)
+            assertTrue("Fallback sat ${hsl[1]} should stay pearlescent (0.10..0.35)", hsl[1] in 0.10f..0.35f)
+        }
+
+        // Diffraction spectrum strictly confined to dual narrow lobes with restrained alpha
+        val stops = com.shawnshi.tonewise.playback.ui.VinylMaterialMath.diffractionSpectrumStops()
+        val positions = com.shawnshi.tonewise.playback.ui.VinylMaterialMath.diffractionSpectrumPositions()
+        assertEquals(stops.size, positions.size)
+        for (i in 1 until positions.size) {
+            assertTrue("Diffraction positions must be monotonic", positions[i] >= positions[i - 1])
+        }
+        assertEquals(0f, positions.first(), 1e-6f)
+        assertEquals(1f, positions.last(), 1e-6f)
+        for (stop in stops) {
+            val alpha = (stop ushr 24) and 0xFF
+            assertTrue("Diffraction alpha $alpha must remain <= 96", alpha <= 96)
+        }
+
+        val repoRoot = findRepoRoot()
+        val uiSettingsSrc = File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/ui/UISettings.kt").readText(Charsets.UTF_8)
+        assertTrue(uiSettingsSrc.contains("var playbackVinylStyle: VinylStyle"))
+        assertTrue(uiSettingsSrc.contains("fun onVinylStyleChanged()"))
+
+        val prefUiXml = File(repoRoot, "android/app/src/main/res/xml/preferences_ui.xml").readText(Charsets.UTF_8)
+        assertTrue(prefUiXml.contains("set_key_playback_vinyl_style"))
+
+        val turntableSrc = File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/playback/ui/VinylTurntableView.kt").readText(Charsets.UTF_8)
+        assertTrue(turntableSrc.contains("VinylStyle.COVER_PEARL"))
+        assertTrue(turntableSrc.contains("VinylStyle.GROOVE_DIFFRACTION"))
+        assertTrue(turntableSrc.contains("fun setCoverSeedColor("))
+        assertTrue(turntableSrc.contains("var onLongPress:"))
+
+        val panelSrc = File(repoRoot, "android/app/src/main/java/com/shawnshi/tonewise/playback/PlaybackPanelFragment.kt").readText(Charsets.UTF_8)
+        assertTrue(panelSrc.contains("onLongPress = { cycleVinylStyle() }"))
+        assertTrue(panelSrc.contains("uiSettings.playbackVinylStyle != VinylStyle.COVER_PEARL"))
     }
 }

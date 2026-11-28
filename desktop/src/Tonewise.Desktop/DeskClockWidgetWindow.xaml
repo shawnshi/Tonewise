@@ -37,6 +37,7 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <Border x:Name="WidgetTitleDragBar" Grid.Column="0" Background="Transparent" VerticalAlignment="Stretch">
                         <TextBlock
@@ -48,8 +49,20 @@
                             VerticalAlignment="Center" />
                     </Border>
                     <Button
-                        x:Name="SleepTimerButton"
+                        x:Name="VinylToggleButton"
                         Grid.Column="1"
+                        Content="黑胶"
+                        MinHeight="28"
+                        Padding="8,4"
+                        FontSize="12"
+                        Background="#0D0D0D"
+                        Foreground="#A3A3A3"
+                        Click="OnToggleVinylModeClick"
+                        AutomationProperties.Name="切换全屏挂钟黑胶唱片模式"
+                        ToolTipService.ToolTip="切换全屏挂钟黑胶唱片模式 (V · Shift+V 换材质)" />
+                    <Button
+                        x:Name="SleepTimerButton"
+                        Grid.Column="2"
                         MinHeight="28"
                         Padding="8,4"
                         FontSize="12"
@@ -78,7 +91,7 @@
                     </Button>
                     <Button
                         x:Name="PinToggleButton"
-                        Grid.Column="2"
+                        Grid.Column="3"
                         Content="置顶"
                         MinHeight="28"
                         Padding="8,4"
@@ -89,7 +102,7 @@
                         AutomationProperties.Name="切换窗口置顶" />
                     <Button
                         x:Name="FullscreenToggleButton"
-                        Grid.Column="3"
+                        Grid.Column="4"
                         Content="全屏挂钟"
                         MinHeight="28"
                         Padding="8,4"
@@ -101,7 +114,7 @@
                         ToolTipService.ToolTip="切换全屏挂钟模式 (F11 / Esc)" />
                     <Button
                         x:Name="PipToggleButton"
-                        Grid.Column="4"
+                        Grid.Column="5"
                         Content="PiP 画中画"
                         MinHeight="28"
                         Padding="8,4"
@@ -111,7 +124,7 @@
                         Click="OnTogglePipModeClick"
                         AutomationProperties.Name="切换 CompactOverlay 置顶画中画模式" />
                     <Button
-                        Grid.Column="5"
+                        Grid.Column="6"
                         Content="×"
                         MinWidth="28"
                         MinHeight="28"
@@ -168,6 +181,16 @@
                             VerticalAlignment="Center">
                         <Image x:Name="CoverArtImage" Stretch="UniformToFill" />
                     </Border>
+
+                    <skia:SKXamlCanvas
+                        x:Name="OledVinylCanvas"
+                        Grid.Column="1"
+                        Width="260"
+                        Height="260"
+                        Visibility="Collapsed"
+                        VerticalAlignment="Center"
+                        Tapped="OnOledVinylTapped"
+                        PaintSurface="OnPaintOledVinyl" />
 
                     <StackPanel Grid.Column="2" Spacing="3" VerticalAlignment="Center">
                         <TextBlock x:Name="EyebrowTextBlock"

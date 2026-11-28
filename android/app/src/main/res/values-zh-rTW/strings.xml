@@ -571,6 +571,11 @@
     <string name="set_playback_ambient_backdrop">氛圍封面光暈背景</string>
     <string name="set_playback_ambient_backdrop_desc">播放頁背景使用當前封面氛圍光暈替代馬賽克牆</string>
     <string name="desc_toggle_vinyl_mode">切換黑膠唱盤與專輯封套</string>
+    <string name="set_playback_vinyl_style">黑膠唱盤材質</string>
+    <string name="set_vinyl_style_classic">經典霧面黑膠</string>
+    <string name="set_vinyl_style_pearl">封面珠光彩膠</string>
+    <string name="set_vinyl_style_diffraction">溝槽微繞射黑膠</string>
+    <string name="fmt_vinyl_style_switched">黑膠材質：%1$s</string>
     <string name="lbl_classical_all_forms">全部體裁</string>
     <string name="lbl_classical_form_symphonies">交響曲</string>
     <string name="lbl_classical_form_concertos">協奏曲</string>

@@ -218,6 +218,11 @@ public sealed partial class MainViewModel
 
         string deletedName = actual.Name;
         PlaylistStore.DeletePlaylist(actual.FilePath);
+        var syncStore = EnsureSyncStore();
+        if (syncStore is not null && syncStore.RemovePlaylistOutboxItemsByName(deletedName) > 0)
+        {
+            RefreshLanSyncUiState();
+        }
         BumpLibraryDataVersion();
         RefreshPlaylists();
 

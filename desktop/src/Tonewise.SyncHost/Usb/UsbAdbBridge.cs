@@ -408,38 +408,82 @@ public sealed class UsbAdbBridge : IUsbAdbRunner
         int deletedCount = 0;
         var touchedSubDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (string relPath in safeRelPaths)
+        foreach (string[] chunk in safeRelPaths.Chunk(80))
         {
             ct.ThrowIfCancellationRequested();
-            string remoteFile = $"/storage/emulated/0/Music/{relPath}";
-            string shellCmd = $"if [ -f {PosixSingleQuote(remoteFile)} ]; then rm -f -- {PosixSingleQuote(remoteFile)} && echo TWDEL; fi";
-            var res = await RunAdbCommandAsync(adb, ["-s", serial, "shell", shellCmd], TimeSpan.FromSeconds(8), ct).ConfigureAwait(false);
-            if (res.ExitCode == 0 && res.StdOut.Contains("TWDEL", StringComparison.Ordinal))
+            var remoteToRel = new Dictionary<string, string>(chunk.Length, StringComparer.Ordinal);
+            var remoteFiles = new List<string>(chunk.Length);
+            foreach (string relPath in chunk)
             {
+                string remoteFile = $"/storage/emulated/0/Music/{relPath}";
+                remoteToRel[remoteFile] = relPath;
+                remoteFiles.Add(remoteFile);
+            }
+
+            string shellCmd = BuildBatchDeleteFilesShellCommand(remoteFiles);
+            var res = await RunAdbCommandAsync(adb, ["-s", serial, "shell", shellCmd], TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+            foreach (string line in res.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!line.StartsWith("TWDEL\t", StringComparison.Ordinal)) continue;
+                string deletedRemote = line["TWDEL\t".Length..];
                 deletedCount++;
-                CollectParentSubDirs(relPath, touchedSubDirs);
+                if (remoteToRel.TryGetValue(deletedRemote, out string? rel))
+                {
+                    CollectParentSubDirs(rel, touchedSubDirs);
+                }
             }
         }
 
         if (touchedSubDirs.Count > 0)
         {
-            // Prune empty subdirectories deepest-first, never touching /storage/emulated/0/Music itself
-            foreach (string subDir in touchedSubDirs.OrderByDescending(s => s.Count(c => c == '/')).ThenByDescending(s => s.Length))
+            // Prune empty (or cover-only) subdirectories deepest-first, never touching /storage/emulated/0/Music itself
+            var orderedDirs = touchedSubDirs
+                .OrderByDescending(s => s.Count(c => c == '/'))
+                .ThenByDescending(s => s.Length)
+                .Select(subDir => $"/storage/emulated/0/Music/{subDir}");
+
+            foreach (string[] dirChunk in orderedDirs.Chunk(60))
             {
                 ct.ThrowIfCancellationRequested();
-                string remoteDir = $"/storage/emulated/0/Music/{subDir}";
-                string rmdirCmd = $"rmdir -- {PosixSingleQuote(remoteDir)} 2>/dev/null || true";
-                await RunAdbCommandAsync(adb, ["-s", serial, "shell", rmdirCmd], TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+                string rmdirCmd = BuildBatchPruneEmptyDirsShellCommand(dirChunk);
+                await RunAdbCommandAsync(adb, ["-s", serial, "shell", rmdirCmd], TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
             }
         }
 
         return deletedCount;
     }
 
+    public static string BuildBatchDeleteFilesShellCommand(IEnumerable<string> remoteFilePaths)
+    {
+        var quoted = string.Join(' ', remoteFilePaths.Select(PosixSingleQuote));
+        if (quoted.Length == 0) return "true";
+        return $"for f in {quoted}; do if [ -f \"$f\" ]; then rm -f -- \"$f\" && printf 'TWDEL\\t%s\\n' \"$f\"; fi; done";
+    }
+
+    public static string BuildBatchPruneEmptyDirsShellCommand(IEnumerable<string> remoteDirPaths)
+    {
+        var quoted = string.Join(' ', remoteDirPaths.Select(PosixSingleQuote));
+        if (quoted.Length == 0) return "true";
+        return $"for d in {quoted}; do if [ -d \"$d\" ]; then has_other=0; for c in \"$d\"/* \"$d\"/.*; do [ -e \"$c\" ] || continue; bn=\"${{c##*/}}\"; case \"$bn\" in .|..) continue ;; [Cc][Oo][Vv][Ee][Rr].[Jj][Pp][Gg]|[Cc][Oo][Vv][Ee][Rr].[Jj][Pp][Ee][Gg]|[Cc][Oo][Vv][Ee][Rr].[Pp][Nn][Gg]|[Ff][Oo][Ll][Dd][Ee][Rr].[Jj][Pp][Gg]|[Ff][Oo][Ll][Dd][Ee][Rr].[Pp][Nn][Gg]|[Ff][Rr][Oo][Nn][Tt].[Jj][Pp][Gg]|[Ff][Rr][Oo][Nn][Tt].[Pp][Nn][Gg]) [ -d \"$c\" ] && {{ has_other=1; break; }} ;; *) has_other=1; break ;; esac; done; if [ \"$has_other\" -eq 0 ]; then for c in \"$d\"/*; do [ -f \"$c\" ] && rm -f -- \"$c\"; done; rmdir -- \"$d\" 2>/dev/null || true; fi; fi; done";
+    }
+
     public static IReadOnlyList<string> FilterSafeForeignMusicRelPaths(
         IEnumerable<string> rawPaths,
         ISet<string> desiredNormRelPaths)
     {
+        var normalizedDesired = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string desired in desiredNormRelPaths)
+        {
+            if (TryNormalizeSafeAudioRelPath(desired, out string normDesired))
+            {
+                normalizedDesired.Add(normDesired);
+            }
+            else if (!string.IsNullOrWhiteSpace(desired))
+            {
+                normalizedDesired.Add(desired.Trim().Replace('\\', '/').Normalize(NormalizationForm.FormC));
+            }
+        }
+
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<string>();
 
@@ -447,7 +491,7 @@ public sealed class UsbAdbBridge : IUsbAdbRunner
         {
             if (!TryNormalizeSafeAudioRelPath(raw, out string norm))
                 continue;
-            if (desiredNormRelPaths.Contains(norm))
+            if (normalizedDesired.Contains(norm))
                 continue;
             if (seen.Add(norm))
             {
@@ -461,7 +505,7 @@ public sealed class UsbAdbBridge : IUsbAdbRunner
     {
         normalized = "";
         if (string.IsNullOrWhiteSpace(raw)) return false;
-        string trimmed = raw.Trim();
+        string trimmed = raw.Trim().Normalize(NormalizationForm.FormC);
         foreach (char c in trimmed)
         {
             if (c < 0x20) return false;
